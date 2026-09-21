@@ -382,10 +382,14 @@ void FrameDecoder::evaluatePositions(double normalized,
 }
 
 Frame FrameDecoder::evaluate(double normalized, bool includeSh) const {
+  Frame result;
+  evaluateInto(normalized, includeSh, &result);
+  return result;
+}
+
+void FrameDecoder::evaluateInto(double normalized, bool includeSh, Frame *out) const {
   if (!std::isfinite(normalized) || normalized < 0 || normalized >= 1)
     throw Error("time must be in [0,1)");
-  Frame result;
-  auto *out = &result;
   const Block *shared = &blocks.front();
   std::vector<const Block *> groups;
   for (size_t i = 1; i < blocks.size(); ++i)
@@ -419,7 +423,7 @@ Frame FrameDecoder::evaluate(double normalized, bool includeSh) const {
   out->opacity.resize(int(total));
   out->colorDc.resize(int(total * 3));
   out->active.resize(int(total));
-  out->shRest.clear();
+
   // A capture written at a lower SH degree carries fewer coefficients: three at
   // degree 1, eight at degree 2, fifteen at degree 3. The planes it stores hold
   // three coefficients each, so degree 2 has one spare slot that is not a whole
@@ -440,7 +444,9 @@ Frame FrameDecoder::evaluate(double normalized, bool includeSh) const {
       shPlanes == 5 ? 15 : shPlanes == 3 ? 8 : shPlanes * 3;
   out->shCoefficients = int(includeSh ? shCoefficients : 0);
   if (includeSh && shCoefficients)
-    out->shRest.resize(int(total * shCoefficients * 3));
+    out->shRest.resize(size_t(total * shCoefficients * 3));
+  else
+    out->shRest.clear();
 
   float scaleLut[256];
   {
@@ -648,7 +654,7 @@ Frame FrameDecoder::evaluate(double normalized, bool includeSh) const {
     written += n;
   }
 
-  return result;
+
 }
 
 const char *FrameDecoder::Block::array(const char *name) const {

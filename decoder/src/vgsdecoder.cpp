@@ -663,7 +663,7 @@ const Frame &Capture::setTime(double seconds, bool includeSphericalHarmonics) {
   constexpr double justUnderOne = 1.0 - 1e-9;
   s.normalizedTime = std::min(std::max(normalized, 0.0), justUnderOne);
   try {
-    s.decoded = s.evaluator->evaluate(s.normalizedTime, includeSphericalHarmonics);
+    s.evaluator->evaluateInto(s.normalizedTime, includeSphericalHarmonics, &s.decoded);
   } catch (const std::exception &e) {
     throw Error(e.what());
   }

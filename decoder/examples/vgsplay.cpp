@@ -247,7 +247,7 @@ void row(const char *label, const Result &r, double captureFps) {
   // Against the capture's own rate, because decoding faster than it was shot buys
   // nothing: what a host wants to know is how much of a frame it gets to keep.
   const double margin = captureFps > 0 ? perSecond / captureFps : 0;
-  std::printf("  %-18s %9.2f %9.2f %9.2f %10.0f %8.1fx  %8.2f\n", label, r.median, prepare,
+  std::printf("  %-20s %9.2f %9.2f %9.2f %10.0f %8.1fx  %8.2f\n", label, r.median, prepare,
               total, perSecond, margin, r.chunkWorst);
 }
 
@@ -294,32 +294,52 @@ int main(int argc, char **argv) {
       const char *label;
       bool packed, includeSh;
       Cores cores;
-      bool blankBefore;
+      const char *before; // a line to print first, or nothing
     };
+
+    // The width goes in the label rather than being left to the legend: a row saying
+    // "own" alone does not say how many of anything, and these four are the rows a reader
+    // compares against the ones above.
+    char own[32], hosted[32];
+    std::snprintf(own, sizeof own, "own x%u", width);
+    std::snprintf(hosted, sizeof hosted, "pool x%u", width);
+    // Spherical harmonics are what a capture normally carries, so rows say nothing when
+    // they are included and NoSH when they are not. Marking the exception rather than the
+    // rule keeps the labels short enough to line up.
+    char evaluatedOwn[48], evaluatedPool[48], packedOwn[48], packedPool[48];
+    std::snprintf(evaluatedOwn, sizeof evaluatedOwn, "evaluated, %s", own);
+    std::snprintf(evaluatedPool, sizeof evaluatedPool, "evaluated, %s", hosted);
+    std::snprintf(packedOwn, sizeof packedOwn, "packed, %s", own);
+    std::snprintf(packedPool, sizeof packedPool, "packed, %s", hosted);
+
+    char heading[128];
+    std::snprintf(heading, sizeof heading,
+                  "\n  the same, decompressing %u pages of a chunk at once\n", width);
+
     const Run runs[] = {
-        {"evaluated", false, false, Cores::One, false},
-        {"evaluated +SH", false, true, Cores::One, false},
-        {"packed", true, false, Cores::One, false},
-        {"packed +SH", true, true, Cores::One, false},
-        {"evaluated, own", false, false, Cores::Library, true},
-        {"evaluated, pool", false, false, Cores::Host, false},
-        {"packed, own", true, false, Cores::Library, false},
-        {"packed, pool", true, false, Cores::Host, false},
+        {"evaluated", false, true, Cores::One, nullptr},
+        {"evaluated NoSH", false, false, Cores::One, nullptr},
+        {"packed", true, true, Cores::One, nullptr},
+        {"packed NoSH", true, false, Cores::One, nullptr},
+        {evaluatedOwn, false, true, Cores::Library, heading},
+        {evaluatedPool, false, true, Cores::Host, nullptr},
+        {packedOwn, true, true, Cores::Library, nullptr},
+        {packedPool, true, true, Cores::Host, nullptr},
     };
     const size_t runCount = sizeof runs / sizeof runs[0];
 
-    std::printf("  %-18s %9s %9s %9s %10s %9s  %8s\n", "", "evaluate", "prepare", "total",
+    std::printf("  %-20s %9s %9s %9s %10s %9s  %8s\n", "", "evaluate", "prepare", "total",
                 "frames/s", "margin", "worst");
-    std::printf("  %-18s %9s %9s %9s %10s %9s  %8s\n", "", "ms", "ms", "ms", "decoded", "",
+    std::printf("  %-20s %9s %9s %9s %10s %9s  %8s\n", "", "ms", "ms", "ms", "decoded", "",
                 "ms");
-    std::printf("  -----------------------------------------------------------------------------\n");
+    std::printf("  -------------------------------------------------------------------------------\n");
 
     std::vector<Result> results;
     results.reserve(runCount);
     for (size_t i = 0; i < runCount; ++i) {
       const Run &run = runs[i];
-      if (run.blankBefore)
-        std::printf("\n");
+      if (run.before)
+        std::printf("%s", run.before);
 
       // Progress goes to the error stream and the table to the output stream, so the two
       // never interleave: a terminal overwrites the progress line in place, and a
@@ -346,7 +366,8 @@ int main(int argc, char **argv) {
                 "                float arrays of every splat, ready to use\n");
     std::printf("    packed      the library decompresses the chunk and stops\n"
                 "                your shader evaluates it, and that is not measured here\n");
-    std::printf("    +SH         spherical harmonics included as well as base colour\n");
+    std::printf("    NoSH        spherical harmonics left out. Rows without this mark\n"
+                "                evaluate them, which is what a capture normally carries\n");
     std::printf("\n    The last four decompress the pages of a chunk %u at a time rather\n"
                 "    than one after another, on a machine reporting %u cores. Pages are\n"
                 "    independent, so that is the part which divides; evaluating a frame\n"

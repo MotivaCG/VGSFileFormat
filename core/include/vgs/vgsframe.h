@@ -26,6 +26,11 @@ public:
   // default is the 30 Hz timebase every MINT import uses.
   explicit FrameDecoder(const DecodedChunk &, double secondsPerTick = 1.0 / 30.0);
   Frame evaluate(double normalizedTime, bool includeSh = true) const;
+  // The same, into a frame the caller keeps. A frame of a quarter of a million splats is
+  // tens of megabytes of arrays, and returning one by value allocates and zero-fills all
+  // of them every call, only to overwrite them immediately. Handing the same frame back
+  // reuses the buffers: resizing to a size a vector already has does nothing.
+  void evaluateInto(double normalizedTime, bool includeSh, Frame *) const;
   // Positions alone, as [splat][xyz]. A renderer that evaluates everything else on the
   // GPU still needs these on the CPU when it sorts splats by depth there, and reading
   // them back from the GPU costs tens of milliseconds on a phone.

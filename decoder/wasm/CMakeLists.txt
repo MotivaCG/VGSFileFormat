@@ -31,6 +31,11 @@ target_include_directories(vgsdecoder_wasm
 # translation units deep, and nothing inlines across them without it.
 set_target_properties(vgsdecoder_wasm PROPERTIES POSITION_INDEPENDENT_CODE OFF)
 vgs_apply_cache_defaults(vgsdecoder_wasm)
+# No -msimd128. It was measured: decompression did not move outside the noise and the
+# module grew by a quarter, because the compiler cannot vectorise what dominates here.
+# An entropy decoder is serial by construction - each symbol depends on the state the
+# previous one left - so the gain would have to come from the format carrying several
+# independent streams to decode in step, not from a compiler flag.
 target_compile_options(vgsdecoder_wasm PRIVATE -O3 -flto -fwasm-exceptions)
 
 set(VGS_WASM_EXPORTS
