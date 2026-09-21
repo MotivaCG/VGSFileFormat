@@ -1,0 +1,24 @@
+# The decoder samples, built against an installed VGSDecoder.
+#
+# This is the copy that ships inside the install, so it is also the shortest proof that
+# the install is self-contained: nothing here refers to the format's sources.
+#
+#   cmake -S . -B build -DCMAKE_PREFIX_PATH=<the INSTALL directory>
+#   cmake --build build --config Release
+#
+# When this file sits in share/vgsdecoder/examples of an install, the package is found
+# without CMAKE_PREFIX_PATH: the default below walks back up to the install root.
+
+cmake_minimum_required(VERSION 3.16)
+project(VGSDecoderExamples LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+find_package(VGSDecoder REQUIRED
+             PATHS "${CMAKE_CURRENT_SOURCE_DIR}/../../.." NO_DEFAULT_PATH)
+
+foreach(sample vgsinfo vgsplay vgsdump vgsexport)
+  add_executable(${sample} ${sample}.cpp)
+  target_link_libraries(${sample} PRIVATE VGS::Decoder)
+endforeach()

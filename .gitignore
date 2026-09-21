@@ -1,0 +1,46 @@
+# Build trees. Each toolchain gets its own, and each installs into INSTALL inside itself.
+build*/
+
+# Compiler and linker output anywhere else, which is what a stray build in the source tree
+# leaves behind.
+*.obj
+*.o
+*.a
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.idb
+*.exe
+*.dll
+*.so
+*.dylib
+*.wasm
+
+# Assembled packages. Routine runs of the packaging script produce these constantly and
+# they are rebuilt from source, so they are not worth committing.
+#
+# A package actually handed to somebody is worth committing, because that is the one thing
+# source cannot reconstruct: a rebuild is functionally equivalent but not byte for byte,
+# and from a later commit or a different toolset not even that. Add it deliberately when
+# it happens:
+#
+#   git add -f dist/vgsdecoder-2.0.0
+#
+# Note that dist/vgsencoder-* carries the signing key inside the library. That is no new
+# exposure - the key is in core/crypto/vgskeys.h as source - but it is one more reason
+# this repository stays private.
+dist/
+
+# Editors and tools
+.vs/
+.vscode/
+.idea/
+*.user
+CMakeUserPresets.json
+
+# Captures and their by-products, far too large for a repository
+*.mint
+*.vgs
+*.pgs
+*.ply
