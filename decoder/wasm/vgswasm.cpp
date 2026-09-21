@@ -514,7 +514,7 @@ EMSCRIPTEN_KEEPALIVE void vgs_release_cache() {
 
 namespace {
 constexpr int LayoutHeader = 4;
-constexpr int GroupStride = 8;
+constexpr int GroupStride = 14;
 constexpr int BufferStride = 10;
 std::vector<double> layout;
 double instant[4] = {};
@@ -567,6 +567,8 @@ EMSCRIPTEN_KEEPALIVE const double *vgs_chunk_layout(int chunkIndex) {
       layout[at + 5] = group.positionMax;
       layout[at + 6] = group.trajectoryMin;
       layout[at + 7] = group.trajectoryMax;
+      for (size_t k = 0; k < 6; ++k)
+        layout[at + 8 + k] = double(group.counts[k]);
     }
     for (size_t i = 0; i < data.bufferCount; ++i, at += BufferStride) {
       const vgsdec::Buffer &buffer = data.buffers[i];

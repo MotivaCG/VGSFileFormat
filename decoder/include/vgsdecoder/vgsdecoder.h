@@ -263,6 +263,15 @@ struct Buffer {
 struct GroupData {
   uint32_t type = 0, flags = 0;
   uint64_t splats = 0, intervals = 0;
+  /**
+   * How many entries each of the chunk's shared tables holds, in order: static
+   * spherical harmonics, temporal spherical harmonics, base colour, opacity, rotation,
+   * position. Only the first group, the one holding the tables, fills these in.
+   *
+   * A shader needs them to size the textures it uploads the tables into and to index
+   * them, which is why they are here rather than left to be inferred from buffer sizes.
+   */
+  uint64_t counts[6] = {};
   double positionMin = 0, positionMax = 0, trajectoryMin = 0, trajectoryMax = 0;
 };
 
@@ -566,6 +575,7 @@ public:
 
 private:
   Capture();
+  size_t selectChunk(double seconds, bool includeSphericalHarmonics);
   bool hasEntry(uint32_t type) const;
   uint32_t extraFormat(uint32_t type) const;
   uint64_t extraOffset(uint32_t type) const;

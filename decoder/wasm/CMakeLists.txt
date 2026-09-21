@@ -55,10 +55,20 @@ string(REPLACE ";" "" VGS_WASM_EXPORTS "${VGS_WASM_EXPORTS}")
 # size, and it buys a module that loads from anywhere without the server having been told
 # what application/wasm is - which has bitten this project before, and which a customer
 # dropping the viewer on their own hosting cannot be asked to get right.
+# Web and worker only, by default. The node branch of Emscripten's glue imports node's
+# own modules, and every web bundler follows that import and warns about it on every
+# build - in a module a web project is meant to drop in and forget. Turn VGS_WASM_NODE on
+# to run this module under node instead.
+option(VGS_WASM_NODE "Also build the WebAssembly decoder for node" OFF)
+set(VGS_WASM_ENVIRONMENT "web,worker")
+if(VGS_WASM_NODE)
+  set(VGS_WASM_ENVIRONMENT "web,worker,node")
+endif()
+
 target_link_options(vgsdecoder_wasm PRIVATE
     -O3 -flto -fwasm-exceptions
     -sMODULARIZE=1 -sEXPORT_ES6=1 -sEXPORT_NAME=createVgsDecoder -sSINGLE_FILE=1
-    -sENVIRONMENT=web,worker,node
+    -sENVIRONMENT=${VGS_WASM_ENVIRONMENT}
     -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=33554432 -sMAXIMUM_MEMORY=2147483648
     -sEXPORTED_FUNCTIONS=${VGS_WASM_EXPORTS}
     -sEXPORTED_RUNTIME_METHODS=UTF8ToString,HEAPU8,HEAPF32,HEAPF64)

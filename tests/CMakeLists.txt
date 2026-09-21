@@ -77,3 +77,13 @@ add_test(NAME plain_encode
 add_test(NAME plain_info COMMAND vgsinfo ${CMAKE_CURRENT_BINARY_DIR}/roundtrip.pgs)
 set_tests_properties(plain_encode PROPERTIES FIXTURES_SETUP plain)
 set_tests_properties(plain_info PROPERTIES FIXTURES_REQUIRED plain)
+
+# The web read-ahead's byte bookkeeping, which decides whether a capture is downloaded
+# once or twice and is the kind of thing only a test can keep honest. It needs no
+# capture, no WebAssembly and no browser, so it runs wherever node does and is simply
+# skipped where it does not.
+find_program(VGS_NODE NAMES node node.exe)
+if(VGS_NODE)
+  add_test(NAME web_readahead
+           COMMAND ${VGS_NODE} ${CMAKE_CURRENT_SOURCE_DIR}/spans.mjs)
+endif()

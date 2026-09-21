@@ -230,6 +230,8 @@ struct Capture::State {
       out.flags = group.flags;
       out.splats = group.splats;
       out.intervals = group.intervals;
+      for (size_t k = 0; k < 6; ++k)
+        out.counts[k] = group.counts[k];
       out.positionMin = group.positionMin;
       out.positionMax = group.positionMax;
       out.trajectoryMin = group.trajectoryMin;
@@ -601,7 +603,16 @@ size_t Capture::chunkAt(double seconds) const {
   return chunks.size();
 }
 
-const Frame &Capture::setTime(double seconds, bool includeSphericalHarmonics) {
+/**
+ * Everything setTime does except the evaluation: choose the chunk, decode it if it is
+ * not held, point the evaluator at it and work out where in it this instant falls.
+ *
+ * It is separate because positions alone are a real request - it is what a renderer
+ * that evaluates on the GPU still needs on the CPU, once per frame, to sort by depth -
+ * and routing that through setTime evaluated every other attribute first and then threw
+ * the answer away.
+ */
+size_t Capture::selectChunk(double seconds, bool includeSphericalHarmonics) {
   State &s = *state;
   if (s.chunks.empty())
     throw Error("VGS capture has no chunks");
@@ -662,12 +673,18 @@ const Frame &Capture::setTime(double seconds, bool includeSphericalHarmonics) {
   // arrives every time.
   constexpr double justUnderOne = 1.0 - 1e-9;
   s.normalizedTime = std::min(std::max(normalized, 0.0), justUnderOne);
+  return index;
+}
+
+const Frame &Capture::setTime(double seconds, bool includeSphericalHarmonics) {
+  State &s = *state;
+  const size_t index = selectChunk(seconds, includeSphericalHarmonics);
   try {
     s.evaluator->evaluateInto(s.normalizedTime, includeSphericalHarmonics, &s.decoded);
   } catch (const std::exception &e) {
     throw Error(e.what());
   }
-  s.publish(index, clamped);
+  s.publish(index, s.requestedTime);
   return s.view;
 }
 
@@ -812,8 +829,10 @@ double Capture::preparedFraction() const {
 const float *Capture::positionsAt(double seconds, uint64_t *splatCount) {
   State &s = *state;
   // Shares the chunk cache with setTime, and asks for the base layer only: positions do
-  // not need the colour detail, and decoding it would be most of the work.
-  setTime(seconds, false);
+  // not need the colour detail, and decoding it would be most of the work. It stops
+  // short of evaluating the frame, which is the point - a sorter wants three floats per
+  // splat, not eleven.
+  selectChunk(seconds, false);
   s.evaluator->evaluatePositions(s.normalizedTime, &s.positions);
   if (splatCount)
     *splatCount = s.positions.size() / 3;

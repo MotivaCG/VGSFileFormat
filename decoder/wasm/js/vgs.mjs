@@ -61,7 +61,7 @@ export const Output = { floats: 0, packed: 1 };
 
 // The layout array written by vgs_chunk_layout, whose shape is described in vgswasm.cpp.
 const LAYOUT_HEADER = 4;
-const GROUP_STRIDE = 8;
+const GROUP_STRIDE = 14;
 const BUFFER_STRIDE = 10;
 
 /** What a sound track is. The container stores it as delivered and never transcodes. */
@@ -394,9 +394,13 @@ export class VgsCapture {
     if (index < 0) return false;
     if (m._vgs_is_chunk_cached(index) === 1) return true;
 
-    // Only the first step reads the range; after that the decoder holds its own copy, so
-    // the window is free to move on.
-    if (m._vgs_prepared_fraction() === 0) await this.prefetch(seconds);
+    // The decoder copies the range on the first step and works from its own copy after
+    // that, so this only fetches once per chunk - prefetch returns immediately when the
+    // chunk is already primed or decoded. It is not conditional on nothing being in
+    // progress: preparation of a *different* chunk is exactly when this chunk's bytes
+    // are not the ones the decoder is holding, and skipping the fetch there asks it to
+    // read a range nobody supplied.
+    await this.prefetch(seconds);
 
     const done = m._vgs_prepare(index, budgetMilliseconds, sphericalHarmonics ? 1 : 0);
     if (done < 0) this.#fail();
@@ -457,6 +461,9 @@ export class VgsCapture {
         type: g[0], flags: g[1], splats: g[2], intervals: g[3],
         positionMin: g[4], positionMax: g[5],
         trajectoryMin: g[6], trajectoryMax: g[7],
+        // Entries in each of the chunk's shared tables: static SH, temporal SH, base
+        // colour, opacity, rotation, position. Only the table group fills these in.
+        counts: Array.from(g.subarray(8, 14)),
       });
     }
 

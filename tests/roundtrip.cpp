@@ -10,6 +10,7 @@
 
 #include <cstdio>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -138,6 +139,20 @@ int main(int argc, char **argv) {
     const float *positions = capture.positionsAt(capture.duration() / 2, &count);
     check(count == first && positions && positions[0] == x,
           "positions alone agree with the full frame");
+
+    // And they must not need a setTime to have happened first. positionsAt exists for a
+    // renderer that evaluates everything else on the GPU and only sorts on the CPU: it
+    // asks for nothing but positions, at an instant nothing else was asked about.
+    const double elsewhere = capture.duration() / 4;
+    uint64_t aloneCount = 0;
+    const float *alone = capture.positionsAt(elsewhere, &aloneCount);
+    std::vector<float> keep(alone, alone + aloneCount * 3);
+    const vgsdec::Frame &whole = capture.setTime(elsewhere);
+    bool samePositions = aloneCount == whole.splatCount;
+    for (uint64_t i = 0; samePositions && i < aloneCount * 3; ++i)
+      if (keep[size_t(i)] != whole.positions[i])
+        samePositions = false;
+    check(samePositions, "positions alone match the full frame at an untouched instant");
 
     // Times outside the capture are clamped rather than refused or wrapped.
     check(capture.setTime(-5).seconds == 0.0, "a negative time clamps to the start");
