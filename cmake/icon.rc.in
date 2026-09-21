@@ -1,0 +1,4 @@
+// The icon Windows shows for the tools, compiled into each executable.
+// Generated from cmake/icon.rc.in so the path to the image is absolute and the resource
+// compiler finds it whatever directory it is invoked from.
+1 ICON "@VGS_ICON_PATH@"

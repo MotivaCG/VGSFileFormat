@@ -1,6 +1,14 @@
-# VGS decoder
+<div align="center">
 
-Reads 4D Gaussian splat captures: `.vgs` and `.pgs`, the VFGS container.
+<img src="logo.png" alt="The4DScanner" width="130">
+
+### VGS Decoder
+
+**Reads 4D Gaussian splat captures: `.vgs` and `.pgs`**
+
+</div>
+
+---
 
 By Víctor M. Feliz, The4DScanner | ScanMeNow. Free to use, including commercially; see
 [LICENSE.md](LICENSE.md).

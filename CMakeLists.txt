@@ -104,6 +104,18 @@ function(vgs_apply_settings target)
   endif()
 endfunction()
 
+# The tools carry the product's icon on Windows. A console program with the default icon
+# looks like something somebody left behind; this costs one generated resource file.
+if(WIN32 AND EXISTS "${CMAKE_SOURCE_DIR}/logo.ico")
+  set(VGS_ICON_PATH "${CMAKE_SOURCE_DIR}/logo.ico")
+  file(TO_NATIVE_PATH "${VGS_ICON_PATH}" VGS_ICON_PATH)
+  string(REPLACE "\\" "\\\\" VGS_ICON_PATH "${VGS_ICON_PATH}")
+  configure_file(${CMAKE_SOURCE_DIR}/cmake/icon.rc.in ${CMAKE_BINARY_DIR}/vgsicon.rc @ONLY)
+  set(VGS_ICON ${CMAKE_BINARY_DIR}/vgsicon.rc)
+else()
+  set(VGS_ICON "")
+endif()
+
 add_subdirectory(core)
 # The encoder is native only. A WebAssembly build is a reader in a browser, and building
 # the authoring library there would mean compiling the private key for a target whose

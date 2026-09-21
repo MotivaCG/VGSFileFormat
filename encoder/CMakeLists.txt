@@ -52,7 +52,7 @@ endif()
 set(VGS_ENCODER_LINK ${VGS_ENCODER_LINK} PARENT_SCOPE)
 
 if(VGS_BUILD_TOOLS)
-  add_executable(vgsencode tools/vgsencode.cpp)
+  add_executable(vgsencode tools/vgsencode.cpp ${VGS_ICON})
   target_link_libraries(vgsencode PRIVATE ${VGS_ENCODER_LINK})
   vgs_apply_settings(vgsencode)
   install(TARGETS vgsencode RUNTIME DESTINATION ${VGS_ENCODER_PREFIX}/${CMAKE_INSTALL_BINDIR} COMPONENT encoder)

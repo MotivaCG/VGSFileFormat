@@ -61,7 +61,7 @@ set(VGS_DECODER_LINK ${VGS_DECODER_LINK} PARENT_SCOPE)
 
 if(VGS_BUILD_TOOLS)
   foreach(sample vgsinfo vgsplay vgsdump vgsexport)
-    add_executable(${sample} examples/${sample}.cpp)
+    add_executable(${sample} examples/${sample}.cpp ${VGS_ICON})
     target_link_libraries(${sample} PRIVATE ${VGS_DECODER_LINK})
     vgs_apply_settings(${sample})
     install(TARGETS ${sample} RUNTIME DESTINATION ${VGS_DECODER_PREFIX}/${CMAKE_INSTALL_BINDIR} COMPONENT decoder)
@@ -74,6 +74,13 @@ endif()
 install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/LICENSE.md
         DESTINATION ${VGS_DECODER_PREFIX}
         COMPONENT decoder)
+# The readme shows the mark, so it goes too rather than leaving a broken image.
+if(EXISTS "${CMAKE_SOURCE_DIR}/docs/logo.png")
+  install(FILES ${CMAKE_SOURCE_DIR}/docs/logo.png
+          DESTINATION ${VGS_DECODER_PREFIX}
+          COMPONENT decoder)
+endif()
+
 install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/DISTRIBUTION.md
         DESTINATION ${VGS_DECODER_PREFIX}
         RENAME README.md

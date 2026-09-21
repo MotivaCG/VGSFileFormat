@@ -1,7 +1,17 @@
-# VGSFileFormat
+<div align="center">
 
-The VFGS container - `.vgs` and `.pgs` - in one place: the format, the encoder that writes
-it, the decoder that reads it, and the tools that exercise both.
+<img src="docs/logo.png" alt="The4DScanner" width="150">
+
+## VGSFileFormat
+
+**The VGS container: `.vgs` and `.pgs`**
+
+</div>
+
+---
+
+The format, the encoder that writes it, the decoder that reads it, and the tools that
+exercise both.
 
 A capture is a 4D Gaussian splat recording: a timeline of frames, each a few hundred
 thousand splats, stored so that a player can fetch and decode one chunk of time at a
@@ -19,6 +29,8 @@ build them.
     decoder/     libvgsdecoder  + vgsinfo, vgsplay, vgsdump, vgsexport, WebAssembly
     tests/       the conformance and separation tests
     cmake/       package files for find_package
+    logo.png     the mark, full size; docs/logo.png is a copy for documents
+    logo.ico     the same as a Windows icon, compiled into the tools
 
 `core/` builds nothing on its own. It hands the other two a list of sources each, and the
 lists are not the same:
@@ -243,7 +255,7 @@ including the JavaScript one, on purpose.
 | `vgsdump capture.vgs 1.5 frame.ply` | one instant as a Gaussian splat `.ply` |
 | `vgsexport capture.vgs out/` | the whole capture as a numbered `.ply` sequence |
 
-`vgsexport` is the bridge to everything that does not read VFGS - the 3DGS tools, the DCC
+`vgsexport` is the bridge to everything that does not read VGS - the 3DGS tools, the DCC
 importers, the training code all read per-frame `.ply`. Expect it to be large: a capture is
 a few hundred megabytes precisely because it does not store frames independently.
 
