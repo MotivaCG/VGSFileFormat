@@ -19,6 +19,9 @@
 // Measured: reading the capture, getting a chunk ready, evaluating a frame, and for the
 // packed rows the copy an upload begins with. Not measured: the driver's transfer, the
 // shader that does the evaluation, and the draw call.
+//
+// The last two rows are the other half a packed renderer may need: a sorter on the CPU.
+// See sortOnCpu() below for what that is, when you need it, and how to build one.
 
 #include "vgsdecoder/vgsdecoder.h"
 
@@ -180,8 +183,9 @@ Result play(vgsdec::Capture &capture, bool packed, bool includeSh, double fps,
       chunkIndex = at.chunkIndex;
       // The chunk has to be there. prepare() below keeps it that way; when it has not
       // finished, this frame pays for the rest, exactly as the evaluated path does.
-      while (!capture.isChunkCached(chunkIndex))
-        capture.prepare(chunkIndex, 1000, includeSh);
+      const vgsdec::Detail detail = includeSh ? vgsdec::Detail::Full : vgsdec::Detail::Base;
+      while (!capture.isChunkCached(chunkIndex, detail))
+        capture.prepare(chunkIndex, 1000, detail);
 
       const vgsdec::ChunkData &data = capture.chunkData(chunkIndex);
       if (chunkIndex != lastChunk) {
@@ -215,6 +219,99 @@ Result play(vgsdec::Capture &capture, bool packed, bool includeSh, double fps,
     const size_t next = capture.chunkAt(t + 1.0);
     if (next < capture.chunkCount())
       capture.prepare(next, budget, includeSh);
+    result.prepareMillis += millisSince(preparing);
+  }
+
+  std::sort(frames.begin(), frames.end());
+  std::sort(chunkFrames.begin(), chunkFrames.end());
+  result.median = percentile(frames, 0.5);
+  result.p99 = percentile(frames, 0.99);
+  result.chunkMedian = percentile(chunkFrames, 0.5);
+  result.chunkWorst = chunkFrames.empty() ? 0 : chunkFrames.back();
+  result.chunkFrames = chunkFrames.size();
+  return result;
+}
+
+/**
+ * A sorter on the CPU for a renderer that evaluates on the GPU.
+ *
+ * What it is for. Gaussian splats are drawn back to front, so every frame they have to
+ * be sorted by depth, and sorting needs each splat's position at that instant. A packed
+ * renderer computes positions in its shader, on the GPU; if it can also sort there - a
+ * compute shader, WebGPU, Vulkan, D3D12, Metal - the positions never have to leave it,
+ * and none of this applies. If it cannot - WebGL2 has no compute shaders, nor do some
+ * mobile and embedded pipelines - the sort runs on the CPU, and the CPU needs the
+ * positions every frame. Reading them back from the GPU stalls the pipeline and costs
+ * tens of milliseconds a frame on a phone; decoding them here is the alternative, and
+ * this is what it costs.
+ *
+ * How it is built, and how to build it anywhere else:
+ *
+ *   - A second Capture, separate from the one that feeds the renderer. The renderer's
+ *     is in Output::Packed and holds what the shader uploads; this one is in
+ *     Output::Floats, because positionsAt evaluates on the CPU. One Capture cannot be
+ *     both, and each belongs to one thread, so give this one a thread of its own - the
+ *     two then decode on two cores and neither waits for the other. Both can read the
+ *     same bytes: openMemory on one buffer, or a Source that shares a download.
+ *
+ *   - Prepare it with Detail::Positions. positionsAt reads nothing but the position
+ *     attributes, which are about a third of decoding the base layer; asking for more
+ *     decodes the rest only to throw it away. That is the difference between the two
+ *     rows this prints.
+ *
+ *   - Once a frame, on its thread:
+ *
+ *         const float *p = sorter.positionsAt(t, &count);  // 3 floats per splat
+ *         sort indices by depth along the camera's view, using p
+ *         publish the order together with the frame t it belongs to
+ *         sorter.prepare(sorter.chunkAt(t + 1.0), budgetMs, vgsdec::Detail::Positions);
+ *
+ *     The order must be drawn with the geometry of the same t: splat identities change
+ *     at chunk boundaries, so an order computed for one chunk draws the next one wrong.
+ *     Publish the two together and let the renderer swap them in one step.
+ *
+ *   - Keep its cache small: a chunk either side (the default) is enough, and each chunk
+ *     it holds at Detail::Positions is well under half of a full one.
+ *
+ * What the rows measure is this thread's work alone: positionsAt per frame and its share
+ * of preparing the next chunk. The sort itself is yours and is not in them.
+ */
+Result sortOnCpu(const char *path, vgsdec::Detail detail, double fps, double budget) {
+  vgsdec::Capture sorter = vgsdec::Capture::openFile(path);
+  sorter.setOutput(vgsdec::Output::Floats);
+  Result result;
+  std::vector<double> frames, chunkFrames;
+  size_t lastChunk = size_t(-1);
+  bool first = true;
+
+  for (double t = 0; t <= sorter.duration(); t += 1.0 / fps) {
+    const auto before = Clock::now();
+    // A chunk not prepared in time is decoded here, at the level asked for, and that
+    // frame pays for it: which is what the worst column catches.
+    const size_t chunkIndex = sorter.chunkAt(t);
+    if (chunkIndex < sorter.chunkCount())
+      while (!sorter.isChunkCached(chunkIndex, detail))
+        sorter.prepare(chunkIndex, 1000, detail);
+    uint64_t count = 0;
+    sorter.positionsAt(t, &count);
+    result.splats += count;
+
+    const double took = millisSince(before);
+    if (first) {
+      result.firstFrame = took;
+      first = false;
+    } else if (chunkIndex != lastChunk) {
+      chunkFrames.push_back(took);
+    } else {
+      frames.push_back(took);
+    }
+    lastChunk = chunkIndex;
+    ++result.frames;
+
+    const auto preparing = Clock::now();
+    const size_t next = sorter.chunkAt(t + 1.0);
+    if (next < sorter.chunkCount())
+      sorter.prepare(next, budget, detail);
     result.prepareMillis += millisSince(preparing);
   }
 
@@ -295,7 +392,12 @@ int main(int argc, char **argv) {
       bool packed, includeSh;
       Cores cores;
       const char *before; // a line to print first, or nothing
+      // Set for the sorter rows, which play a second capture of their own at this
+      // detail level instead of the one above; see sortOnCpu().
+      const vgsdec::Detail *sorter = nullptr;
     };
+    const vgsdec::Detail positionsOnly = vgsdec::Detail::Positions;
+    const vgsdec::Detail baseLayer = vgsdec::Detail::Base;
 
     // The width goes in the label rather than being left to the legend: a row saying
     // "own" alone does not say how many of anything, and these four are the rows a reader
@@ -325,6 +427,10 @@ int main(int argc, char **argv) {
         {evaluatedPool, false, true, Cores::Host, nullptr},
         {packedOwn, true, true, Cores::Library, nullptr},
         {packedPool, true, true, Cores::Host, nullptr},
+        {"sorter, positions", false, false, Cores::One,
+         "\n  a CPU sorter beside a packed renderer: positions only, on a capture of its own\n",
+         &positionsOnly},
+        {"sorter, base", false, false, Cores::One, nullptr, &baseLayer},
     };
     const size_t runCount = sizeof runs / sizeof runs[0];
 
@@ -348,8 +454,10 @@ int main(int argc, char **argv) {
                    run.label, capture.duration());
       std::fflush(stderr);
 
-      results.push_back(play(capture, run.packed, run.includeSh, fps, budget, run.cores,
-                             run.cores == Cores::One ? 1 : width, &pool));
+      results.push_back(run.sorter
+                            ? sortOnCpu(argv[1], *run.sorter, fps, budget)
+                            : play(capture, run.packed, run.includeSh, fps, budget, run.cores,
+                                   run.cores == Cores::One ? 1 : width, &pool));
 
       std::fprintf(stderr, "%*s\r", 62, "");
       std::fflush(stderr);
@@ -368,12 +476,12 @@ int main(int argc, char **argv) {
                 "                your shader evaluates it, and that is not measured here\n");
     std::printf("    NoSH        spherical harmonics left out. Rows without this mark\n"
                 "                evaluate them, which is what a capture normally carries\n");
-    std::printf("\n    The last four decompress the pages of a chunk %u at a time rather\n"
+    std::printf("\n    The x%u rows decompress the pages of a chunk %u at a time rather\n"
                 "    than one after another, on a machine reporting %u cores. Pages are\n"
                 "    independent, so that is the part which divides; evaluating a frame\n"
                 "    does not, and stays on the calling thread - which is why the evaluate\n"
                 "    column barely moves while prepare halves.\n",
-                width, cores);
+                width, width, cores);
     std::printf("\n    own         the decoder makes %u threads of its own for each batch\n"
                 "                and joins them at the end of it. One call and nothing\n"
                 "                else to arrange\n", width);
@@ -382,13 +490,18 @@ int main(int argc, char **argv) {
                 "                the application already runs on\n", width);
     std::printf("\n    The two cost the same, as the rows show. What differs is who owns\n"
                 "    the threads, and that decides which of them you want.\n");
+    std::printf("\n    sorter      a renderer that cannot sort on the GPU (WebGL2: no compute)\n"
+                "                needs positions on the CPU every frame. A second capture on\n"
+                "                its own thread gives them: positions uses Detail::Positions,\n"
+                "                base the whole base layer, as it did before Detail existed.\n"
+                "                The sort is not included. vgsplay.cpp says how to build one.\n");
 
     std::printf("\n  choosing\n");
-    std::printf("    A few characters on a machine with cores to spare is what these last\n"
-                "    four rows are for: nothing else is using those cores, so spending\n"
+    std::printf("    A few characters on a machine with cores to spare is what the x%u\n"
+                "    rows are for: nothing else is using those cores, so spending\n"
                 "    them on one capture is free speed, and %u-way took prepare from\n"
                 "    %.2f ms to %.2f.\n",
-                width, results[2].prepareMillis / double(results[2].frames ? results[2].frames : 1),
+                width, width, results[2].prepareMillis / double(results[2].frames ? results[2].frames : 1),
                 results[6].prepareMillis / double(results[6].frames ? results[6].frames : 1));
     std::printf("\n    A crowd is the opposite case. Captures are already independent of\n"
                 "    each other, so give each one its own Capture on its own thread and\n"

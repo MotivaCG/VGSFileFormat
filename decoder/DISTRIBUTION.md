@@ -27,8 +27,8 @@ This package reads captures. It cannot write one.
     include/vgsdecoder/vgsdecoder.h     the C++ API
     include/vgsdecoder/vgsdecoder_c.h   the same thing in C
     lib/                                the library, and CMake package files
-    bin/                                vgsinfo, vgsplay, vgsdump, vgsexport
-    share/vgsdecoder/examples/          the source of those four, with a CMakeLists.txt
+    bin/                                vgsinfo, vgsplay, vgsdump, vgsexport, vgspagecost
+    share/vgsdecoder/examples/          the source of those five, with a CMakeLists.txt
 
 ## C++
 
@@ -133,6 +133,7 @@ documents itself there. It is present only if this package was assembled with it
 | `vgsplay capture.vgs` | walks the whole timeline and reports what decoding it cost |
 | `vgsdump capture.vgs 1.5 frame.ply` | one instant as a Gaussian splat `.ply` |
 | `vgsexport capture.vgs out/` | the whole capture as a numbered `.ply` sequence |
+| `vgspagecost capture.vgs` | where the bytes and decoding time go, per attribute and per detail level, and what a CPU-sorting player spends |
 
 `vgsexport` is the bridge to everything that does not read VFGS: the 3DGS tools, the DCC
 importers and the training code all read per-frame `.ply`. Expect it to be large - a

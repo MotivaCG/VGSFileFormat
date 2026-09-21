@@ -9,6 +9,7 @@
 #include "vgsencoder/vgsencoder.h"
 
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -153,6 +154,75 @@ int main(int argc, char **argv) {
       if (keep[size_t(i)] != whole.positions[i])
         samePositions = false;
     check(samePositions, "positions alone match the full frame at an untouched instant");
+
+    // Detail::Positions: a chunk decoded for positions alone must answer positionsAt
+    // exactly as a fully decoded one does, hold less, and not pass for more than it is.
+    // Checked on every chunk and at both ends of each, on a capture of its own so no
+    // entry left behind by the checks above can answer instead.
+    {
+      vgsdec::Capture lean = vgsdec::Capture::openFile(argv[2]);
+      vgsdec::Capture reference = vgsdec::Capture::openFile(argv[2]);
+      bool identical = true, smaller = true, notMore = true, upgrades = true;
+      for (size_t c = 0; c < lean.chunkCount(); ++c) {
+        const vgsdec::ChunkInfo &info = lean.chunk(c);
+        lean.releaseCache();
+        while (!lean.prepare(c, 1000, vgsdec::Detail::Positions)) {
+        }
+        if (!lean.isChunkCached(c, vgsdec::Detail::Positions) ||
+            lean.isChunkCached(c, vgsdec::Detail::Base))
+          notMore = false;
+        const uint64_t leanBytes = lean.cachedBytes();
+        for (double t : {info.startSeconds, (info.startSeconds + info.endSeconds) / 2,
+                         info.endSeconds - 1e-6}) {
+          uint64_t n = 0, m = 0;
+          const float *p = lean.positionsAt(t, &n);
+          std::vector<float> got(p, p + n * 3);
+          const float *q = reference.positionsAt(t, &m);
+          const vgsdec::Frame &full = reference.setTime(t);
+          if (n != m || n != full.splatCount ||
+              std::memcmp(got.data(), q, size_t(n) * 12) != 0 ||
+              std::memcmp(got.data(), full.positions, size_t(n) * 12) != 0)
+            identical = false;
+        }
+        // positionsAt must not have widened what was decoded.
+        if (lean.isChunkCached(c, vgsdec::Detail::Base))
+          notMore = false;
+        // setTime on it decodes the rest and then holds the whole chunk.
+        if (lean.setTime(info.startSeconds).splatCount == 0 ||
+            !lean.isChunkCached(c, vgsdec::Detail::Full))
+          upgrades = false;
+        if (!(lean.cachedBytes() > leanBytes))
+          smaller = false;
+      }
+      check(identical, "positions from a positions-only chunk are bit-identical to a full decode");
+      check(notMore, "a positions-only chunk does not report itself as more");
+      check(smaller, "a positions-only chunk holds less than a full one");
+      check(upgrades, "setTime on a positions-only chunk decodes the rest");
+
+      // The earlier spelling of prepare still means what it did.
+      lean.releaseCache();
+      while (!lean.prepare(0, 1000, false)) {
+      }
+      check(lean.isChunkCached(0, vgsdec::Detail::Base) &&
+                !lean.isChunkCached(0, vgsdec::Detail::Full),
+            "prepare(..., false) is still the base layer");
+
+      // pages(): the directory, undecoded. The position pages are the base layer's
+      // position_ attributes, and nothing else is.
+      const std::vector<vgsdec::PageInfo> pages = lean.pages(0);
+      bool consistent = !pages.empty(), anyPosition = false;
+      uint64_t stored = 0;
+      for (const vgsdec::PageInfo &page : pages) {
+        stored += page.storedSize;
+        const bool named = page.attribute.rfind("position_", 0) == 0;
+        if (page.usedByPositions != (named && page.layer == 0) || page.rows == 0 ||
+            page.attribute.empty())
+          consistent = false;
+        anyPosition |= page.usedByPositions;
+      }
+      check(consistent && anyPosition, "pages() lists the directory and marks the position pages");
+      check(stored <= lean.chunk(0).size, "the pages fit inside their chunk");
+    }
 
     // Times outside the capture are clamped rather than refused or wrapped.
     check(capture.setTime(-5).seconds == 0.0, "a negative time clamps to the start");

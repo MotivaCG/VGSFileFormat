@@ -288,6 +288,46 @@ struct ChunkData {
   uint64_t totalBytes = 0;
 };
 
+/**
+ * How much of a chunk to decode. Each level holds everything the one before it does.
+ *
+ * `Positions` is the position attributes alone: what positionsAt reads, and nothing
+ * else. It is for a renderer that evaluates everything on the GPU but sorts splats by
+ * depth on the CPU - WebGL, where there are no compute shaders to sort with - and so
+ * needs positions on the CPU every frame and nothing more. On the captures measured it is
+ * about a third of decoding the base layer. A chunk prepared this way serves positionsAt;
+ * setTime on it decodes the chunk again, fully.
+ *
+ * `Base` is everything a frame needs at base colour. `Full` adds the spherical harmonic
+ * layers, which setTime(seconds, true) asks for.
+ *
+ * `examples/vgspagecost.cpp` measures what each level costs on a given capture.
+ */
+enum class Detail {
+  Positions,
+  Base,
+  Full
+};
+
+/**
+ * One page of a chunk as its directory describes it, before anything is decoded: which
+ * attribute it holds and what it costs to store and to decode. For tools that want to
+ * know where a capture's bytes and time go; playing a capture never needs it.
+ */
+struct PageInfo {
+  /** The format's name for the attribute, as FORMAT.md spells it. */
+  std::string attribute;
+  uint32_t attributeId = 0;
+  uint32_t group = 0;
+  /** 0 base, 1 static spherical harmonics, 2 temporal. */
+  uint32_t layer = 0;
+  uint64_t firstRow = 0, rows = 0;
+  /** Bytes in the file, and bytes once decompressed. */
+  uint64_t storedSize = 0, decodedSize = 0;
+  /** Whether Detail::Positions decodes this page. */
+  bool usedByPositions = false;
+};
+
 /** Where a time falls between a chunk's samples: everything a frame needs in Packed mode. */
 struct Instant {
   size_t chunkIndex = 0;
@@ -464,7 +504,8 @@ public:
 
   /**
    * Positions alone for the instant at `seconds`, as 3 floats per splat, decoding no more
-   * than it takes to produce them. A renderer that evaluates everything else on the GPU
+   * than it takes to produce them: Detail::Positions, unless the chunk is already held
+   * with more, in which case that is used as it is. A renderer that evaluates everything else on the GPU
    * still needs these on the CPU when it sorts splats by depth there, and reading them
    * back from the GPU costs tens of milliseconds a frame on a phone.
    *
@@ -499,11 +540,20 @@ public:
    *
    * @param chunkIndex from chunkAt()
    * @param budgetMilliseconds how long this call may spend
-   * @param includeSphericalHarmonics must match what setTime will ask for, or the work is
-   *   done again
+   * @param detail how much of the chunk: Full or Base for what setTime will ask for, and
+   *   Positions for a caller that only ever calls positionsAt. Asking for less than a
+   *   later call needs means that call decodes the chunk again.
    */
-  bool prepare(size_t chunkIndex, double budgetMilliseconds,
-               bool includeSphericalHarmonics = true);
+  bool prepare(size_t chunkIndex, double budgetMilliseconds, Detail detail = Detail::Full);
+
+  /**
+   * The earlier spelling: true is Detail::Full, false Detail::Base. Kept so code written
+   * against it still compiles and behaves as it did.
+   */
+  bool prepare(size_t chunkIndex, double budgetMilliseconds, bool includeSphericalHarmonics) {
+    return prepare(chunkIndex, budgetMilliseconds,
+                   includeSphericalHarmonics ? Detail::Full : Detail::Base);
+  }
 
   /** How far the chunk being prepared has got, 0 to 1. */
   double preparedFraction() const;
@@ -523,8 +573,21 @@ public:
   void setCachePolicy(const CachePolicy &);
   const CachePolicy &cachePolicy() const;
 
-  /** Whether a chunk is decoded right now, so a player knows what it would cost. */
+  /**
+   * The pages of a chunk, from its directory, in the order they are stored. Reads the
+   * chunk's bytes to get at the directory - through the Source when streaming - but
+   * decodes none of them. Nothing here changes what is cached.
+   */
+  std::vector<PageInfo> pages(size_t chunkIndex) const;
+
+  /** Whether a chunk is decoded right now, at any level, so a player knows what it would cost. */
   bool isChunkCached(size_t index) const;
+  /**
+   * Whether it is held with at least `detail`: what decides whether a call that needs that
+   * much will decode. A chunk prepared for positions is cached, but setTime on it is not
+   * free, and a streaming reader has to supply its bytes again.
+   */
+  bool isChunkCached(size_t index, Detail detail) const;
   size_t cachedChunkCount() const;
   /** Roughly how much the decoded chunks are holding. */
   uint64_t cachedBytes() const;
@@ -575,7 +638,7 @@ public:
 
 private:
   Capture();
-  size_t selectChunk(double seconds, bool includeSphericalHarmonics);
+  size_t selectChunk(double seconds, uint32_t mask);
   bool hasEntry(uint32_t type) const;
   uint32_t extraFormat(uint32_t type) const;
   uint64_t extraOffset(uint32_t type) const;

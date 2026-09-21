@@ -60,7 +60,7 @@ endif()
 set(VGS_DECODER_LINK ${VGS_DECODER_LINK} PARENT_SCOPE)
 
 if(VGS_BUILD_TOOLS)
-  foreach(sample vgsinfo vgsplay vgsdump vgsexport)
+  foreach(sample vgsinfo vgsplay vgsdump vgsexport vgspagecost)
     add_executable(${sample} examples/${sample}.cpp ${VGS_ICON})
     target_link_libraries(${sample} PRIVATE ${VGS_DECODER_LINK})
     vgs_apply_settings(${sample})
@@ -94,6 +94,7 @@ install(FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/examples/vgsplay.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/examples/vgsdump.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/examples/vgsexport.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/examples/vgspagecost.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/examples/plywriter.h
     DESTINATION ${VGS_DECODER_PREFIX}/${CMAKE_INSTALL_DATADIR}/vgsdecoder/examples
         COMPONENT decoder)

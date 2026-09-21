@@ -388,6 +388,8 @@ Frame FrameDecoder::evaluate(double normalized, bool includeSh) const {
 }
 
 void FrameDecoder::evaluateInto(double normalized, bool includeSh, Frame *out) const {
+  if (held == Contents::Positions)
+    throw Error("this chunk was decoded for positions only");
   if (!std::isfinite(normalized) || normalized < 0 || normalized >= 1)
     throw Error("time must be in [0,1)");
   const Block *shared = &blocks.front();
@@ -663,8 +665,19 @@ const char *FrameDecoder::Block::array(const char *name) const {
     throw Error(std::string("missing attribute: ") + name);
   return reinterpret_cast<const char *>(it->second.data());
 }
-FrameDecoder::FrameDecoder(const DecodedChunk &chunk, double tick)
-    : secondsPerTick(tick) {
+bool FrameDecoder::usedByPositions(uint32_t attribute) {
+  // By name, because that is how evaluatePositions looks its arrays up: every array it
+  // reads is one of the format's position_ attributes, and it reads nothing else.
+  const char *name = attributeName(attribute);
+  return name && std::strncmp(name, "position_", 9) == 0;
+}
+
+FrameDecoder::FrameDecoder(const DecodedChunk &chunk, double tick, Contents contents)
+    : secondsPerTick(tick), held(contents) {
+  // Positions only: every check below that is about another attribute is skipped, and
+  // the position ones stay exactly as strict, since those arrays are still indexed by
+  // pointer arithmetic.
+  const bool positionsOnly = contents == Contents::Positions;
   if (chunk.groups.size() < 2)
     throw Error("no splat groups");
   for (const auto &g : chunk.groups) {
@@ -721,7 +734,9 @@ FrameDecoder::FrameDecoder(const DecodedChunk &chunk, double tick)
       throw Error("incomplete attribute");
   // Validate all shapes and dictionary indices before any pointer-based
   // evaluation.
-  auto require = [](const Block &b, const char *name, uint64_t bytes) {
+  auto require = [positionsOnly](const Block &b, const char *name, uint64_t bytes) {
+    if (positionsOnly && std::strncmp(name, "position_", 9) != 0)
+      return;
     auto it = b.arrays.find(name);
     if (it == b.arrays.end() || it->second.size() != bytes)
       throw Error(std::string("invalid attribute shape: ") + name);
@@ -774,8 +789,10 @@ FrameDecoder::FrameDecoder(const DecodedChunk &chunk, double tick)
     require(b, "sh0_base_indices", n * 3);
     require(b, "sh0_rq_indices", n * 8);
     require(b, "opacity_rq_indices", n * 8);
-    checkRq(b, "sh0_rq_indices", shared.sh0Entries / 5);
-    checkRq(b, "opacity_rq_indices", shared.opacityEntries / 5);
+    if (!positionsOnly) {
+      checkRq(b, "sh0_rq_indices", shared.sh0Entries / 5);
+      checkRq(b, "opacity_rq_indices", shared.opacityEntries / 5);
+    }
     if (b.positionPerSample)
       require(b, "position_samples", n * samples * 8);
     else {
@@ -788,7 +805,9 @@ FrameDecoder::FrameDecoder(const DecodedChunk &chunk, double tick)
         if ((readU32(p + i * 4) & 65535) >= shared.positionEntries)
           throw Error("position index out of range");
     }
-    if (b.rotationPerSample)
+    if (positionsOnly) {
+      // Rotations are not held; nothing below reads them.
+    } else if (b.rotationPerSample)
       require(b, "rotation_samples", n * samples * 4);
     else {
       rotation = true;

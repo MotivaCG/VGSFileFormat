@@ -121,10 +121,35 @@ CachePolicy defaultCachePolicy() {
   return policy;
 }
 
-// Reading only the base layer is most of the saving when a caller does not want colour
-// detail, so the two cases are the two masks the container defines.
-constexpr uint32_t AllLayers = 7;
-constexpr uint32_t BaseLayer = 1;
+// What a cached chunk holds, as a mask. The low three bits are the container's own
+// layers: each one set means every page of that layer. PositionPages is narrower than a
+// layer - the base layer's position attributes alone, which is what positionsAt reads -
+// and every mask that includes the base layer includes it too.
+//
+// Built that way, the levels nest: Positions is inside Base, which is inside Full, and a
+// cache entry that holds more than a request needs answers it, with the same containment
+// test for all three.
+constexpr uint32_t PositionPages = 8;
+constexpr uint32_t PositionsMask = PositionPages;
+constexpr uint32_t BaseMask = 1 | PositionPages;
+constexpr uint32_t FullMask = 7 | PositionPages;
+
+uint32_t maskFor(Detail detail) {
+  switch (detail) {
+  case Detail::Positions: return PositionsMask;
+  case Detail::Base: return BaseMask;
+  case Detail::Full: return FullMask;
+  }
+  throw Error("unknown VGS detail level");
+}
+
+/** Whether a page belongs to what a mask holds. */
+bool wanted(const vgs::Page &page, uint32_t mask) {
+  if (mask & (1u << page.layer))
+    return true;
+  return page.layer == 0 && (mask & PositionPages) &&
+         vgs::FrameDecoder::usedByPositions(page.attribute);
+}
 
 } // namespace
 
@@ -381,7 +406,11 @@ struct Capture::State {
     entry.mask = mask;
     entry.bytes = held;
     if (output == Output::Floats) {
-      entry.evaluator.reset(new vgs::FrameDecoder(decoded, secondsPerTick()));
+      // Without the whole base layer the evaluator can only answer positionsAt; asking it
+      // for more is refused inside it rather than read past the arrays it does not have.
+      const auto contents = (mask & 1) ? vgs::FrameDecoder::Contents::Frame
+                                       : vgs::FrameDecoder::Contents::Positions;
+      entry.evaluator.reset(new vgs::FrameDecoder(decoded, secondsPerTick(), contents));
     } else {
       entry.packed = std::move(decoded);
     }
@@ -612,7 +641,7 @@ size_t Capture::chunkAt(double seconds) const {
  * and routing that through setTime evaluated every other attribute first and then threw
  * the answer away.
  */
-size_t Capture::selectChunk(double seconds, bool includeSphericalHarmonics) {
+size_t Capture::selectChunk(double seconds, uint32_t mask) {
   State &s = *state;
   if (s.chunks.empty())
     throw Error("VGS capture has no chunks");
@@ -629,9 +658,8 @@ size_t Capture::selectChunk(double seconds, bool includeSphericalHarmonics) {
   if (index >= s.chunks.size())
     throw Error("VGS no chunk at time");
 
-  const uint32_t mask = includeSphericalHarmonics ? AllLayers : BaseLayer;
   // The mask is what this call needs, not what the cache must hold exactly: a chunk
-  // already decoded with more layers than asked for is used as it is.
+  // already decoded with more than asked for is used as it is.
   if (!s.find(index, mask)) {
     const ChunkInfo &info = s.chunks[index];
     std::vector<uint8_t> scratch;
@@ -649,7 +677,8 @@ size_t Capture::selectChunk(double seconds, bool includeSphericalHarmonics) {
       // decodeChunk checks the chunk's directory against the digest in the signed table,
       // so this is where the signature reaches the frames a player is about to draw.
       s.store(index, mask,
-              vgs::decodeChunk(s.header, index, bytes, size_t(info.size), mask));
+              vgs::decodeChunk(s.header, index, bytes, size_t(info.size), 7,
+                               [mask](const vgs::Page &page) { return wanted(page, mask); }));
     } catch (const std::exception &e) {
       s.evaluator = nullptr;
       throw Error(e.what());
@@ -678,7 +707,7 @@ size_t Capture::selectChunk(double seconds, bool includeSphericalHarmonics) {
 
 const Frame &Capture::setTime(double seconds, bool includeSphericalHarmonics) {
   State &s = *state;
-  const size_t index = selectChunk(seconds, includeSphericalHarmonics);
+  const size_t index = selectChunk(seconds, includeSphericalHarmonics ? FullMask : BaseMask);
   try {
     s.evaluator->evaluateInto(s.normalizedTime, includeSphericalHarmonics, &s.decoded);
   } catch (const std::exception &e) {
@@ -688,13 +717,12 @@ const Frame &Capture::setTime(double seconds, bool includeSphericalHarmonics) {
   return s.view;
 }
 
-bool Capture::prepare(size_t chunkIndex, double budgetMilliseconds,
-                      bool includeSphericalHarmonics) {
+bool Capture::prepare(size_t chunkIndex, double budgetMilliseconds, Detail detail) {
   State &s = *state;
   if (chunkIndex >= s.chunks.size())
     throw Error("VGS chunk index out of range");
 
-  const uint32_t mask = includeSphericalHarmonics ? AllLayers : BaseLayer;
+  const uint32_t mask = maskFor(detail);
   if (s.find(chunkIndex, mask))
     return true;
 
@@ -733,7 +761,7 @@ bool Capture::prepare(size_t chunkIndex, double budgetMilliseconds,
       batch.clear();
       while (s.pending.nextPage < s.pending.totalPages && batch.size() < width) {
         const vgs::Page &page = s.pending.directory.pages[s.pending.nextPage++];
-        if (mask & (1u << page.layer))
+        if (wanted(page, mask))
           batch.push_back(&page);
       }
       if (batch.empty())
@@ -828,11 +856,11 @@ double Capture::preparedFraction() const {
 
 const float *Capture::positionsAt(double seconds, uint64_t *splatCount) {
   State &s = *state;
-  // Shares the chunk cache with setTime, and asks for the base layer only: positions do
-  // not need the colour detail, and decoding it would be most of the work. It stops
-  // short of evaluating the frame, which is the point - a sorter wants three floats per
-  // splat, not eleven.
-  selectChunk(seconds, false);
+  // Shares the chunk cache with setTime, and asks for the position pages only: the rest
+  // of the base layer is two thirds of its decoding and none of it is read here. A chunk
+  // already held with more is used as it is. It stops short of evaluating the frame too,
+  // which is the point - a sorter wants three floats per splat, not eleven.
+  selectChunk(seconds, PositionsMask);
   s.evaluator->evaluatePositions(s.normalizedTime, &s.positions);
   if (splatCount)
     *splatCount = s.positions.size() / 3;
@@ -844,6 +872,48 @@ const Frame &Capture::frame() const { return state->view; }
 
 void Capture::setCachePolicy(const CachePolicy &policy) { state->policy = policy; }
 const CachePolicy &Capture::cachePolicy() const { return state->policy; }
+
+std::vector<PageInfo> Capture::pages(size_t chunkIndex) const {
+  const State &s = *state;
+  if (chunkIndex >= s.chunks.size())
+    throw Error("VGS chunk index out of range");
+  const ChunkInfo &info = s.chunks[chunkIndex];
+  std::vector<uint8_t> scratch;
+  const uint8_t *bytes = s.bytesAt(info.offset, info.size, scratch);
+  vgs::ChunkDirectory directory;
+  try {
+    // The same authenticated read the decoder does, so what this reports is what the
+    // signed table vouches for.
+    directory = vgs::readChunkDirectory(s.header, chunkIndex, bytes, size_t(info.size));
+  } catch (const std::exception &e) {
+    throw Error(e.what());
+  }
+  std::vector<PageInfo> out;
+  out.reserve(directory.pages.size());
+  for (const vgs::Page &page : directory.pages) {
+    PageInfo p;
+    const char *name = vgs::attributeName(page.attribute);
+    p.attribute = name ? name : "";
+    p.attributeId = page.attribute;
+    p.group = page.group;
+    p.layer = page.layer;
+    p.firstRow = page.firstRow;
+    p.rows = page.spec.rows;
+    p.storedSize = page.size;
+    p.decodedSize = page.decodedSize;
+    p.usedByPositions = wanted(page, PositionsMask);
+    out.push_back(std::move(p));
+  }
+  return out;
+}
+
+bool Capture::isChunkCached(size_t index, Detail detail) const {
+  const uint32_t mask = maskFor(detail);
+  for (const auto &entry : state->cache)
+    if (entry.index == index && (entry.mask & mask) == mask)
+      return true;
+  return false;
+}
 
 bool Capture::isChunkCached(size_t index) const {
   for (const auto &entry : state->cache)

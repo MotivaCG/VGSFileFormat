@@ -18,7 +18,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(VGSDecoder REQUIRED
              PATHS "${CMAKE_CURRENT_SOURCE_DIR}/../../.." NO_DEFAULT_PATH)
 
-foreach(sample vgsinfo vgsplay vgsdump vgsexport)
+foreach(sample vgsinfo vgsplay vgsdump vgsexport vgspagecost)
   add_executable(${sample} ${sample}.cpp)
   target_link_libraries(${sample} PRIVATE VGS::Decoder)
 endforeach()

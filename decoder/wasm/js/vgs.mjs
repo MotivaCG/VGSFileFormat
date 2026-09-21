@@ -59,6 +59,16 @@ const Attribute = {
  */
 export const Output = { floats: 0, packed: 1 };
 
+/**
+ * How much of a chunk to decode; each level holds everything the one before it does.
+ *
+ * `positions` is the position attributes alone, which is all `positionsAt` reads: for a
+ * renderer that evaluates on the GPU but sorts on the CPU - WebGL, which has no compute
+ * shaders to sort with. It is about a third of decoding `base`. `base` is a frame at base
+ * colour, `full` adds the spherical harmonic layers.
+ */
+export const Detail = Object.freeze({ positions: 0, base: 1, full: 2 });
+
 // The layout array written by vgs_chunk_layout, whose shape is described in vgswasm.cpp.
 const LAYOUT_HEADER = 4;
 const GROUP_STRIDE = 14;
@@ -287,7 +297,7 @@ export class VgsCapture {
    */
   async setTime(seconds, { sphericalHarmonics = true, copy = false } = {}) {
     this.#check();
-    await this.prefetch(seconds);
+    await this.prefetch(seconds, { detail: sphericalHarmonics ? Detail.full : Detail.base });
 
     const m = this.#module;
     const splatCount = m._vgs_set_time(seconds, sphericalHarmonics ? 1 : 0);
@@ -329,7 +339,7 @@ export class VgsCapture {
    */
   async positionsAt(seconds, { copy = false } = {}) {
     this.#check();
-    await this.prefetch(seconds);
+    await this.prefetch(seconds, { detail: Detail.positions });
 
     const m = this.#module;
     const count = m._vgs_positions_at(seconds);
@@ -346,14 +356,21 @@ export class VgsCapture {
    * Nothing is fetched when the decoder already holds that chunk decoded, so a player can
    * call this freely - running it over the next few seconds each frame costs a lookup, not
    * a download.
+   *
+   * @param {number} seconds
+   * @param {object} [options]
+   * @param {number} [options.detail=Detail.full] what the call after this will need. A
+   *   chunk held with less still has to be read again, and is fetched.
    */
-  async prefetch(seconds) {
+  async prefetch(seconds, { detail = Detail.full } = {}) {
     this.#check();
     const m = this.#module;
     const index = m._vgs_chunk_at(seconds);
     if (index < 0) throw new VgsError('no chunk at that time');
-    // Already decoded, or already sitting in the decoder's input buffer.
-    if (m._vgs_is_chunk_cached(index) === 1 || this.#primed === index) return;
+    // Already decoded with enough, or already sitting in the decoder's input buffer.
+    const held = m._vgs_is_chunk_held(index, detail);
+    if (held < 0) this.#fail();
+    if (held === 1 || this.#primed === index) return;
 
     const chunk = this.#chunks[index];
     const bytes = await this.#source.read(chunk.offset, chunk.size);
@@ -383,16 +400,22 @@ export class VgsCapture {
    * @param {number} seconds a time slightly ahead of where playback is
    * @param {number} [budgetMilliseconds=4] how long this call may spend decoding
    * @param {object} [options]
-   * @param {boolean} [options.sphericalHarmonics=true] must match what setTime will ask
-   *   for, or the work is done twice
+   * @param {number} [options.detail=Detail.full] how much of the chunk: `full` or `base`
+   *   for what setTime will ask for, `positions` for a caller that only calls positionsAt.
+   *   Asking for less than a later call needs means that call decodes it again.
+   * @param {boolean} [options.sphericalHarmonics] the earlier spelling, still honoured
+   *   when `detail` is not given: false is `base`, true `full`.
    * @returns {Promise<boolean>}
    */
-  async prepare(seconds, budgetMilliseconds = 4, { sphericalHarmonics = true } = {}) {
+  async prepare(seconds, budgetMilliseconds = 4, { detail, sphericalHarmonics } = {}) {
     this.#check();
     const m = this.#module;
     const index = m._vgs_chunk_at(seconds);
     if (index < 0) return false;
-    if (m._vgs_is_chunk_cached(index) === 1) return true;
+    detail ??= sphericalHarmonics === false ? Detail.base : Detail.full;
+    const held = m._vgs_is_chunk_held(index, detail);
+    if (held < 0) this.#fail();
+    if (held === 1) return true;
 
     // The decoder copies the range on the first step and works from its own copy after
     // that, so this only fetches once per chunk - prefetch returns immediately when the
@@ -400,9 +423,9 @@ export class VgsCapture {
     // progress: preparation of a *different* chunk is exactly when this chunk's bytes
     // are not the ones the decoder is holding, and skipping the fetch there asks it to
     // read a range nobody supplied.
-    await this.prefetch(seconds);
+    await this.prefetch(seconds, { detail });
 
-    const done = m._vgs_prepare(index, budgetMilliseconds, sphericalHarmonics ? 1 : 0);
+    const done = m._vgs_prepare(index, budgetMilliseconds, detail);
     if (done < 0) this.#fail();
     return done === 1;
   }
@@ -534,9 +557,15 @@ export class VgsCapture {
     if (this.#source instanceof BufferedSource) this.#source.onProgress = fn;
   }
 
-  /** Whether a chunk is decoded right now, so a player knows what a seek would cost. */
-  isChunkCached(index) {
-    return this.#module._vgs_is_chunk_cached(index) === 1;
+  /**
+   * Whether a chunk is decoded right now, so a player knows what a seek would cost. With
+   * `detail`, whether it is held with at least that much; without, at any level.
+   */
+  isChunkCached(index, detail) {
+    if (detail === undefined) return this.#module._vgs_is_chunk_cached(index) === 1;
+    const held = this.#module._vgs_is_chunk_held(index, detail);
+    if (held < 0) this.#fail();
+    return held === 1;
   }
 
   get cachedChunkCount() { return this.#module._vgs_cached_chunk_count(); }

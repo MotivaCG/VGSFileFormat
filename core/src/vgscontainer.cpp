@@ -346,14 +346,15 @@ Bytes decodePage(const Header &h, const Page &p, const uint8_t *data,
   return mgs::decodeAttribute(p.spec, int(pol.model), data, size);
 }
 DecodedChunk decodeChunk(const Header &h, size_t index, const uint8_t *data,
-                         size_t size, uint32_t mask) {
+                         size_t size, uint32_t mask,
+                         const std::function<bool(const Page &)> &keep) {
   if (index >= h.chunks.size() || size != h.chunks[index].size || mask > 7)
     throw Error("invalid VGS chunk input");
   auto d = readChunkDirectory(h, index, data, size);
   DecodedChunk out;
   out.groups = std::move(d.groups);
   for (const auto &p : d.pages)
-    if (mask & (1u << p.layer))
+    if ((mask & (1u << p.layer)) && (!keep || keep(p)))
       out.pages.push_back(
           {p, decodePage(h, p, data + p.offset, size_t(p.size))});
   return out;

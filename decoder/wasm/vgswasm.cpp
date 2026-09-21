@@ -375,13 +375,19 @@ EMSCRIPTEN_KEEPALIVE int vgs_set_time(double seconds, int includeSh) {
  * primed before the first call; it is copied in then, so the caller is free to prime
  * something else afterwards.
  */
-EMSCRIPTEN_KEEPALIVE int vgs_prepare(int chunkIndex, double budgetMilliseconds,
-                                     int includeSh) {
+// Detail levels as numbers, in vgsdec::Detail's order: 0 positions, 1 base, 2 full.
+static vgsdec::Detail toDetail(int detail) {
+  if (detail < 0 || detail > 2)
+    throw vgsdec::Error("unknown VGS detail level");
+  return static_cast<vgsdec::Detail>(detail);
+}
+
+EMSCRIPTEN_KEEPALIVE int vgs_prepare(int chunkIndex, double budgetMilliseconds, int detail) {
   try {
     if (!capture || chunkIndex < 0)
       throw vgsdec::Error("no capture open");
     error.clear();
-    return capture->prepare(size_t(chunkIndex), budgetMilliseconds, includeSh != 0) ? 1 : 0;
+    return capture->prepare(size_t(chunkIndex), budgetMilliseconds, toDetail(detail)) ? 1 : 0;
   } catch (const std::exception &e) {
     return fail(e);
   }
@@ -476,6 +482,15 @@ EMSCRIPTEN_KEEPALIVE void vgs_set_cache_policy(int behind, int ahead, double max
 /** 1 when this chunk is decoded right now, so the caller knows not to fetch it again. */
 EMSCRIPTEN_KEEPALIVE int vgs_is_chunk_cached(int index) {
   return capture && index >= 0 && capture->isChunkCached(size_t(index)) ? 1 : 0;
+}
+
+/** 1 when this chunk is held with at least that detail level, so nothing needs fetching. */
+EMSCRIPTEN_KEEPALIVE int vgs_is_chunk_held(int index, int detail) {
+  try {
+    return capture && index >= 0 && capture->isChunkCached(size_t(index), toDetail(detail)) ? 1 : 0;
+  } catch (const std::exception &e) {
+    return fail(e);
+  }
 }
 
 EMSCRIPTEN_KEEPALIVE int vgs_cached_chunk_count() {

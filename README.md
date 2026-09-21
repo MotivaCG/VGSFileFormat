@@ -26,7 +26,7 @@ build them.
 
     core/        the codec: container, entropy coding, frame evaluation, crypto
     encoder/     libvgsencoder  + vgsencode                   writes captures
-    decoder/     libvgsdecoder  + vgsinfo, vgsplay, vgsdump, vgsexport, WebAssembly
+    decoder/     libvgsdecoder  + vgsinfo, vgsplay, vgsdump, vgsexport, vgspagecost, WebAssembly
     tests/       the conformance and separation tests
     cmake/       package files for find_package
     logo.png     the mark, full size; docs/logo.png is a copy for documents
@@ -145,7 +145,7 @@ machine it runs on.
 ## What an install gives you
 
     INSTALL/
-      bin/      vgsencode, vgsinfo, vgsplay, vgsdump, vgsexport
+      bin/      vgsencode, vgsinfo, vgsplay, vgsdump, vgsexport, vgspagecost
       include/  vgsencoder/vgsencoder.h, vgsencoder_c.h
                 vgsdecoder/vgsdecoder.h, vgsdecoder_c.h
       lib/      vgsencoder.lib, vgsdecoder.lib     (.a on Linux)
@@ -254,12 +254,26 @@ including the JavaScript one, on purpose.
 | `vgsplay capture.vgs` | walks the whole timeline and reports what decoding it cost |
 | `vgsdump capture.vgs 1.5 frame.ply` | one instant as a Gaussian splat `.ply` |
 | `vgsexport capture.vgs out/` | the whole capture as a numbered `.ply` sequence |
+| `vgspagecost capture.vgs` | where the bytes and decoding time go, per attribute and per detail level, and what a CPU-sorting player spends |
 
 `vgsexport` is the bridge to everything that does not read VGS - the 3DGS tools, the DCC
 importers, the training code all read per-frame `.ply`. Expect it to be large: a capture is
 a few hundred megabytes precisely because it does not store frames independently.
 
 Run `ctest --test-dir build_win64 -C Release` for the test suite.
+
+## Decoding less: `Detail`
+
+`prepare(chunk, budget, Detail)` says how much of a chunk to decode: `Positions`, `Base` or
+`Full`, each holding everything the one before it does. `Positions` is for a renderer that
+evaluates on the GPU but sorts on the CPU - WebGL, with no compute shaders to sort with -
+and so needs positions every frame and nothing else; `positionsAt` asks for it on its own.
+On `boxing_despill.vgs` it decodes a chunk in about a third of the time the base layer
+takes, and the decoded chunk holds 10 MB rather than 25. `vgspagecost` measures it on any
+capture, and prints what a CPU-sorting player then spends per second of playback.
+
+The earlier `prepare(chunk, budget, bool)` still compiles and means what it did (true is
+`Full`, false `Base`), and so does the JavaScript `{ sphericalHarmonics }` option.
 
 ## Third-party code
 

@@ -4,6 +4,7 @@
 #include "mgscodec.h"
 #include "vgscrypto.h"
 #include <array>
+#include <functional>
 #include <string>
 
 namespace vgs {
@@ -257,8 +258,12 @@ ChunkDirectory readChunkDirectory(const Header &, size_t chunk,
                                   const uint8_t *data, size_t size);
 Bytes decodePage(const Header &, const Page &, const uint8_t *payload,
                  size_t size);
+// `keep`, when given, narrows the layers further to the pages it accepts: a reader that
+// needs a few attributes of a layer - positions alone, for a sorter - decodes those and
+// skips the rest of the layer rather than decompressing it only to throw it away.
 DecodedChunk decodeChunk(const Header &, size_t chunk, const uint8_t *data,
-                         size_t size, uint32_t layerMask = 7);
+                         size_t size, uint32_t layerMask = 7,
+                         const std::function<bool(const Page &)> &keep = {});
 void verifyMint(const uint8_t *vgs, size_t vgsSize, const uint8_t *mint,
                 size_t mintSize);
 uint32_t crc32(const uint8_t *, size_t);

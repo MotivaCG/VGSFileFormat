@@ -63,8 +63,19 @@ that grows the module's memory detaches them outright, so pass `{ copy: true }` 
 anything you hold across an `await`.
 
 `positionsAt(seconds)` gives positions alone, for a renderer that evaluates the rest on
-the GPU but sorts splats by depth on the CPU. It shares the decoded chunk with `setTime`,
-so asking for both at one instant decodes once.
+the GPU but sorts splats by depth on the CPU - WebGL, which has no compute shaders to sort
+with. On its own it decodes only the position attributes, about a third of a chunk's base
+layer; after a `setTime` on the same chunk it uses what that decoded. Keep one capture for
+positions and prepare it at that level, so its chunks never decode more:
+
+```js
+import { Detail } from './vgs.mjs';
+await sorterCapture.prepare(next, 2, { detail: Detail.positions });
+const positions = await sorterCapture.positionsAt(now);
+```
+
+`Detail` is `positions`, `base` or `full`, each holding everything the one before does.
+`prepare`'s older `{ sphericalHarmonics: false }` still means `base`.
 
 ## Payloads
 

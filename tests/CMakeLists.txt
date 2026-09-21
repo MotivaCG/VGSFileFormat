@@ -26,7 +26,8 @@ add_test(NAME keyleak_decoder
          COMMAND vgs_keyleak --absent
                  $<TARGET_FILE:vgsdecoder>
                  $<TARGET_FILE:vgsinfo>
-                 $<TARGET_FILE:vgsplay>)
+                 $<TARGET_FILE:vgsplay>
+                 $<TARGET_FILE:vgspagecost>)
 add_test(NAME keyleak_encoder
          COMMAND vgs_keyleak --present
                  $<TARGET_FILE:vgsencoder>
@@ -67,7 +68,10 @@ add_test(NAME tool_info COMMAND vgsinfo ${fixture})
 # a test: the packed path is not touched by anything else in this suite.
 add_test(NAME tool_play COMMAND vgsplay ${fixture})
 add_test(NAME tool_dump COMMAND vgsdump ${fixture} 0.5 ${CMAKE_CURRENT_BINARY_DIR}/frame.ply)
-set_tests_properties(tool_info tool_play tool_dump PROPERTIES FIXTURES_REQUIRED capture)
+# vgspagecost walks every chunk at every detail level, which makes it the one run in
+# this suite that goes through Detail::Positions via prepare() on a whole capture.
+add_test(NAME tool_pagecost COMMAND vgspagecost ${fixture} --rounds 1)
+set_tests_properties(tool_info tool_play tool_dump tool_pagecost PROPERTIES FIXTURES_REQUIRED capture)
 
 # A .pgs of the same source must decode to the same thing: the two extensions are one
 # container and a reader is not allowed to need to know which it has.

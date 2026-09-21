@@ -22,9 +22,23 @@ struct Frame {
 // vgs::Error on invalid data.
 class FrameDecoder {
 public:
+  // What the decoded chunk handed in holds, and so what can be asked of it.
+  //
+  // `Frame` is the whole of a frame: every base attribute, and the SH layers if they
+  // were decoded. `Positions` is the position attributes alone (see usedByPositions),
+  // which is all evaluatePositions reads and about a third of the base layer's decoding;
+  // a chunk built that way can only answer evaluatePositions, and evaluate throws.
+  enum class Contents { Frame, Positions };
+
+  // The attributes evaluatePositions reads. A caller that decodes pages itself and only
+  // wants positions keeps these and skips the rest of the base layer.
+  static bool usedByPositions(uint32_t attribute);
+
   // secondsPerTick comes from the header (timeNumerator / timeDenominator); the
   // default is the 30 Hz timebase every MINT import uses.
-  explicit FrameDecoder(const DecodedChunk &, double secondsPerTick = 1.0 / 30.0);
+  explicit FrameDecoder(const DecodedChunk &, double secondsPerTick = 1.0 / 30.0,
+                        Contents = Contents::Frame);
+  Contents contents() const { return held; }
   Frame evaluate(double normalizedTime, bool includeSh = true) const;
   // The same, into a frame the caller keeps. A frame of a quarter of a million splats is
   // tens of megabytes of arrays, and returning one by value allocates and zero-fills all
@@ -53,6 +67,7 @@ private:
   };
   std::vector<Block> blocks;
   double secondsPerTick = 1.0 / 30.0;
+  Contents held = Contents::Frame;
   void buildBasis(const Block &, uint64_t, float, bool, bool,
                   SharedBasis *) const;
   void decodeGroupColor(const Block &, const Block &, const SharedBasis &,
