@@ -38,6 +38,12 @@ _entries = {}   # PointCloud.session_uid -> _Entry
 _errors = {}    # PointCloud.session_uid -> (path, message), shown in the panel
 _suspended = 0
 
+# Set from render_init to render_complete or render_cancel. bpy.app.is_job_running says
+# the same for a render started from the interface, but not for one run from the command
+# line - `blender -b file.blend -a`, how farms render - and the render pipeline changes
+# the frame itself, which would otherwise decode it for the viewport.
+_rendering = False
+
 
 def preferences():
     addon = bpy.context.preferences.addons.get(__package__)
@@ -85,7 +91,7 @@ def reload(pointcloud):
     _errors.pop(uid, None)
 
 
-def _player_for(pointcloud, include_sh):
+def _player_for(pointcloud, include_sh, density):
     uid = pointcloud.session_uid
     path = capture_path(pointcloud)
     entry = _entries.get(uid)
@@ -112,7 +118,29 @@ def _player_for(pointcloud, include_sh):
         _entries[uid] = entry
 
     entry.player.set_include_sh(include_sh)
+    entry.player.set_density(density)
+    last = last_frame(entry.player.info)
+    if pointcloud.vgs.last_frame != last and not pointcloud.library:
+        pointcloud.vgs.last_frame = last
     return entry.player
+
+
+def last_frame(info):
+    """The index of a capture's last frame: 0 is the first."""
+    return int(round(info.duration * info.frame_rate)) if info.frame_rate > 0 else 0
+
+
+# The viewport density slider runs from 0.01 to 1 and the fraction of splats drawn from
+# 0.01 to 1 too, but not in step: the slider is mapped onto [cbrt(0.01), 1] and cubed.
+# Thinning only pays off from about a quarter of the splats down, and a linear slider put
+# all of that in its last stretch; cubed, the lower half of the slider covers it.
+_SLIDER_LOW = 0.01
+_CUBE_LOW = _SLIDER_LOW ** (1.0 / 3.0)
+
+
+def splat_fraction(slider):
+    t = (slider - _SLIDER_LOW) / (1.0 - _SLIDER_LOW)
+    return (_CUBE_LOW + max(0.0, min(1.0, t)) * (1.0 - _CUBE_LOW)) ** 3
 
 
 def scene_fps(scene):
@@ -120,12 +148,15 @@ def scene_fps(scene):
 
 
 def capture_seconds(pointcloud, info, scene, frame):
-    """The capture's time at a scene frame, after start frame, speed and looping."""
+    """The capture's time at a scene frame, after phase, speed and looping.
+
+    The scene's first frame shows the capture at its phase, and from there it runs at its
+    speed, backwards when that is negative.
+    """
     settings = pointcloud.vgs
     duration = info.duration
-    elapsed = (frame - settings.frame_start) / scene_fps(scene) * settings.speed
-    # Backwards starts from the end, so that the start frame shows where playback begins.
-    seconds = duration + elapsed if settings.speed < 0 else elapsed
+    elapsed = (frame - scene.frame_start) / scene_fps(scene) * settings.speed
+    seconds = settings.phase * duration + elapsed
     if duration > 0:
         if settings.loop_mode == 'LOOP':
             # One frame interval past the last instant, so the loop does not show the last
@@ -223,15 +254,18 @@ def write_frame(pointcloud, frame):
     pointcloud.update_tag()
 
 
-def update_scene(scene, playing=None):
+def update_scene(scene, playing=None, rendering=None):
     """Shows every capture in `scene` at the scene's current frame.
 
     `playing` overrides asking the screens, for the moment playback stops: the screens may
     not say so yet, and that frame is the one that should get its harmonics back.
+    `rendering` overrides asking whether a render job runs, for the render handlers, which
+    run at its edges.
     """
     if scene is None:
         return
-    rendering = bpy.app.is_job_running('RENDER')
+    if rendering is None:
+        rendering = _rendering or bpy.app.is_job_running('RENDER')
     if rendering:
         playing = False
     elif playing is None:
@@ -250,7 +284,9 @@ def update_scene(scene, playing=None):
         # come back.
         settings = pointcloud.vgs
         include_sh = settings.use_sh and not (playing and settings.no_sh_while_playing)
-        player = _player_for(pointcloud, include_sh)
+        # Renders draw every splat whatever the viewport is set to.
+        density = 1.0 if rendering else splat_fraction(settings.viewport_density)
+        player = _player_for(pointcloud, include_sh, density)
         if player is None:
             continue
         info = player.info
@@ -308,6 +344,28 @@ def _on_playback_stop(scene, depsgraph=None):
     update_scene(scene, playing=False)
 
 
+# Renders draw every splat and every harmonic whatever the viewport is set to. The
+# viewport shares the same data, so it gets its own settings back once the whole job is
+# over, not after every frame of an animation.
+@persistent
+def _on_render_init(scene, depsgraph=None):
+    global _rendering
+    _rendering = True
+
+
+@persistent
+def _on_render_pre(scene, depsgraph=None):
+    # A still render may not change the frame, so this is what brings the full splats in.
+    update_scene(scene, rendering=True)
+
+
+@persistent
+def _on_render_end(scene, depsgraph=None):
+    global _rendering
+    _rendering = False
+    update_scene(scene, rendering=False)
+
+
 @persistent
 def _on_load_pre(*_args):
     close_all()
@@ -345,6 +403,10 @@ def _on_save_post(*_args):
 _handlers = (
     (bpy.app.handlers.frame_change_pre, _on_frame_change),
     (bpy.app.handlers.animation_playback_post, _on_playback_stop),
+    (bpy.app.handlers.render_init, _on_render_init),
+    (bpy.app.handlers.render_pre, _on_render_pre),
+    (bpy.app.handlers.render_complete, _on_render_end),
+    (bpy.app.handlers.render_cancel, _on_render_end),
     (bpy.app.handlers.load_pre, _on_load_pre),
     (bpy.app.handlers.load_post, _on_load_post),
     (bpy.app.handlers.undo_post, _on_undo),

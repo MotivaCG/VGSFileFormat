@@ -21,6 +21,16 @@ def _refresh(self, context):
     playback.refresh(context)
 
 
+def _get_start_frame(self):
+    return int(round(self.phase * self.last_frame))
+
+
+def _set_start_frame(self, value):
+    # Only the phase is stored, so the two fields can never disagree.
+    if self.last_frame > 0:
+        self.phase = min(max(value / self.last_frame, 0.0), 1.0)
+
+
 def _path_changed(self, context):
     from . import playback
     playback.reload(self.id_data)
@@ -48,17 +58,49 @@ class VGSCaptureSettings(PropertyGroup):
         default=True,
         update=_refresh,
     )
-    frame_start: IntProperty(
-        name="Start Frame",
-        description="Scene frame at which the capture's first instant is shown",
-        default=1,
+    viewport_density: FloatProperty(
+        name="Viewport Density",
+        description=(
+            "How many splats the viewport draws, for a lighter scene: 1 draws all of them, "
+            "0.01 one in a hundred, and the fraction falls faster than the slider as it goes "
+            "down. Renders always draw every splat. The splats kept are raised in opacity so "
+            "a thinned capture stays solid"),
+        default=1.0,
+        min=0.01,
+        max=1.0,
+        subtype='FACTOR',
         update=_refresh,
     )
+    phase: FloatProperty(
+        name="Phase",
+        description=(
+            "Where in the capture the scene's first frame falls: 0 its first instant, 1 its "
+            "last. The same thing as Start Frame, as a fraction"),
+        default=0.0,
+        min=0.0,
+        max=1.0,
+        subtype='FACTOR',
+        precision=3,
+        update=_refresh,
+    )
+    start_frame: IntProperty(
+        name="Start Frame",
+        description=(
+            "The capture's frame shown on the scene's first frame, counting from 0. The same "
+            "thing as Phase, in frames"),
+        min=0,
+        get=_get_start_frame,
+        # No update of its own: setting it sets Phase, whose update refreshes.
+        set=_set_start_frame,
+    )
+    # The capture's last frame, for turning Phase into Start Frame. Kept here rather than
+    # asked of the capture so the field works before the file is opened.
+    last_frame: IntProperty(options={'HIDDEN'}, default=0)
     speed: FloatProperty(
         name="Speed",
         description=(
-            "Capture seconds played per scene second. Negative plays it backwards, starting "
-            "from its last instant"),
+            "Capture seconds played per scene second. Negative plays it backwards from its "
+            "phase"),
         default=1.0,
         soft_min=-4.0,
         soft_max=4.0,

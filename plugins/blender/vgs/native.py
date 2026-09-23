@@ -13,7 +13,7 @@ import sys
 
 import numpy as np
 
-API_VERSION = 1
+API_VERSION = 2
 
 _c_float_p = ctypes.POINTER(ctypes.c_float)
 
@@ -106,6 +106,8 @@ def library():
     lib.vgsb_release.argtypes = [ctypes.c_void_p]
     lib.vgsb_set_include_sh.restype = None
     lib.vgsb_set_include_sh.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    lib.vgsb_set_density.restype = None
+    lib.vgsb_set_density.argtypes = [ctypes.c_void_p, ctypes.c_float]
 
     _library = lib
     return lib
@@ -213,3 +215,7 @@ class Player:
 
     def set_include_sh(self, include_sh):
         self._lib.vgsb_set_include_sh(self._handle, int(include_sh))
+
+    def set_density(self, density):
+        """The fraction of splats frames carry, 0.01 to 1. See vgsblender.h."""
+        self._lib.vgsb_set_density(self._handle, float(density))

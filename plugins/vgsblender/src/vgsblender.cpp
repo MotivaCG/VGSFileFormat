@@ -177,6 +177,24 @@ int coefficientsForDegree(uint32_t degree) {
 
 bool sameTime(double a, double b) { return std::fabs(a - b) < SameTime; }
 
+/** The least density accepted: below it a capture is a scattering of dots. */
+constexpr float SmallestDensity = 0.01f;
+
+/**
+ * Whether a record stays at a given density. A hash of the index rather than every n-th
+ * record, because records are stored in an order that means something - by term count,
+ * by group - and taking every n-th would thin some parts of the capture more than others.
+ */
+bool keeps(size_t record, uint64_t threshold) {
+  uint32_t x = uint32_t(record) * 0x9E3779B1u;
+  x ^= x >> 16;
+  x *= 0x85EBCA6Bu;
+  x ^= x >> 13;
+  x *= 0xC2B2AE35u;
+  x ^= x >> 16;
+  return x < threshold;
+}
+
 /**
  * Two lanes, one for the even chunks and one for the odd ones, each a Capture of its own
  * on a thread of its own.
@@ -218,6 +236,7 @@ struct vgsb_player {
   std::vector<Slot> slots;
   std::vector<double> wanted;
   bool includeSh = true;
+  float density = 1.0f;
   uint64_t generation = 1;
   std::string failure;
   bool quit = false;
@@ -276,13 +295,24 @@ int pickVictim(const vgsb_player &player) {
  * Runs on a lane without the lock: the slot is marked Filling, so nothing else reads
  * or writes it meanwhile.
  */
-void decodeInto(vgsdec::Capture &capture, Slot &slot, double seconds, bool includeSh) {
+void decodeInto(vgsdec::Capture &capture, Slot &slot, double seconds, bool includeSh,
+                float density) {
   const vgsdec::Frame &frame = capture.setTime(seconds, includeSh);
   const size_t total = size_t(frame.splatCount);
 
+  // Thinning is one more test in the loop that already drops dead records, and everything
+  // after it - the copy into the host, its packing, the upload, the sort, the drawing -
+  // then has that much less to do.
+  const bool thinned = density < 1.0f;
+  const uint64_t threshold = uint64_t(double(density) * 4294967296.0);
+  const float exponent = thinned ? 1.0f / density : 1.0f;
+  const auto wanted = [&](size_t i) {
+    return (!frame.active || frame.active[i]) && (!thinned || keeps(i, threshold));
+  };
+
   size_t live = 0;
   for (size_t i = 0; i < total; ++i)
-    live += (!frame.active || frame.active[i]) ? 1 : 0;
+    live += wanted(i) ? 1 : 0;
 
   const int coefficients =
       (includeSh && frame.sphericalHarmonics) ? frame.shCoefficients : 0;
@@ -294,7 +324,7 @@ void decodeInto(vgsdec::Capture &capture, Slot &slot, double seconds, bool inclu
 
   size_t j = 0;
   for (size_t i = 0; i < total; ++i) {
-    if (frame.active && !frame.active[i])
+    if (!wanted(i))
       continue;
 
     for (int c = 0; c < 3; ++c)
@@ -319,7 +349,10 @@ void decodeInto(vgsdec::Capture &capture, Slot &slot, double seconds, bool inclu
 
     for (int c = 0; c < 3; ++c)
       slot.radiance[j * 4 + c] = (frame.colors[i * 3 + c] - 0.5f) / C0;
-    slot.radiance[j * 4 + 3] = frame.opacities[i];
+    // What a thinned-out neighbour would have covered, the ones that stay cover instead.
+    const float opacity = frame.opacities[i];
+    slot.radiance[j * 4 + 3] =
+        thinned ? 1.0f - std::pow(std::max(0.0f, 1.0f - opacity), exponent) : opacity;
 
     // Per splat per coefficient in, one plane per coefficient out.
     for (int k = 0; k < coefficients; ++k)
@@ -391,12 +424,13 @@ void run(vgsb_player &player, size_t lane) {
         slot.seconds = target;
         slot.generation = player.generation;
         const bool includeSh = player.includeSh;
+        const float density = player.density;
         const uint64_t generation = player.generation;
 
         lock.unlock();
         std::string error;
         try {
-          decodeInto(capture, slot, target, includeSh);
+          decodeInto(capture, slot, target, includeSh, density);
         } catch (const std::exception &e) {
           error = e.what();
         }
@@ -627,6 +661,22 @@ void vgsb_set_include_sh(vgsb_player *player, int includeSh) {
     if ((includeSh != 0) == player->includeSh)
       return;
     player->includeSh = includeSh != 0;
+    ++player->generation;
+  }
+  player->workChanged.notify_all();
+}
+
+void vgsb_set_density(vgsb_player *player, float density) {
+  if (!player)
+    return;
+  if (!(density >= SmallestDensity))
+    density = SmallestDensity;
+  density = std::min(density, 1.0f);
+  {
+    std::lock_guard<std::mutex> lock(player->mutex);
+    if (density == player->density)
+      return;
+    player->density = density;
     ++player->generation;
   }
   player->workChanged.notify_all();

@@ -60,7 +60,7 @@ extern "C" {
 
 /* Bumped whenever a struct below or a signature changes, so a stale add-on refuses to load
  * a newer library rather than read its structs wrongly. */
-#define VGSB_API_VERSION 1
+#define VGSB_API_VERSION 2
 
 typedef struct vgsb_player vgsb_player;
 
@@ -128,6 +128,19 @@ VGSB_API void vgsb_release(vgsb_player *);
 
 /* Whether frames carry spherical harmonics. Changing it discards what is decoded ahead. */
 VGSB_API void vgsb_set_include_sh(vgsb_player *, int include_sh);
+
+/*
+ * The fraction of splats frames carry, from 0.01 to 1, for a lighter viewport. 1, the
+ * default, is every splat.
+ *
+ * Which splats stay is decided by a hash of each record's index, so the choice holds
+ * still from frame to frame within a chunk rather than shimmering; it changes at chunk
+ * boundaries, where the records themselves change. The ones that stay have their opacity
+ * raised to 1 - (1 - opacity)^(1 / density), which keeps the total opacity where splats
+ * overlap about what it was, so a thinned capture does not turn translucent. Changing it
+ * discards what is decoded ahead.
+ */
+VGSB_API void vgsb_set_density(vgsb_player *, float density);
 
 #ifdef __cplusplus
 }

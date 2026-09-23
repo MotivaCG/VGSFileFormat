@@ -13,12 +13,16 @@ Blender 5.3 or later, Windows x64.
   the old library.
 - **Import:** *File > Import > VGS (.vgs, .pgs)*, or drop one or more captures on the 3D
   viewport. Each becomes a point cloud of type Gaussian Splat. Import options: harmonics,
-  start frame, loop mode, up axis (Y Up by default: +90° about X, which is how captures
+  loop mode, up axis (Y Up by default: +90° about X, which is how captures
   are written), fit the scene's range and frame rate to the first capture.
 - **Per capture**, in *Properties > Data > VGS*, under the logo (`vgs/logo.png`: a
   256-pixel copy of the project's `logo.png` with its white background made transparent,
-  for Blender's dark interface): capture path, start frame, speed
-  (negative plays backwards from the last instant), loop (No Loop, Loop, Ping-Pong),
+  for Blender's dark interface): capture path, phase and start frame (the same setting
+  twice: where in the capture the scene's first frame falls, as a fraction and as a
+  capture frame counted from 0), speed
+  (negative plays backwards from the phase), loop (No Loop, Loop, Ping-Pong),
+  viewport density (0.01 to 1, falling faster than the slider: 0.5 draws about a fifth
+  of the splats in the viewport; renders draw them all),
   spherical harmonics, *Harmonics: Off While Playing* (on by default), *Fit Scene*,
   *Reload*.
 - **Preferences** (*Add-ons > VGS*): frames decoded ahead per capture, decoder threads
@@ -37,6 +41,7 @@ after fixing the path.
 | Harmonics: Off While Playing | on | A third of the data to copy per frame; harmonics come back when paused, scrubbed or rendered. |
 | Keep splats out of `.blend` | on | A frame is tens of megabytes and is decoded again on load. |
 | Frames decoded ahead | 4 | About 240 bytes per splat per frame with harmonics. |
+| Viewport Density | 1 | Full quality unless asked; worth lowering with several captures (see ../README.md). |
 
 Renaming a property of `VGSCaptureSettings` orphans what older `.blend` files stored under
 the old name: `loop` became `loop_mode` when it grew a third option, and captures
@@ -75,6 +80,9 @@ Test capture: `D:\Trabajos\ScanMeNow\SMNWebviewer\Playcanvas\dist\data\boxing_de
 - **As installed:** with `BLENDER_USER_RESOURCES` pointing at an empty folder,
   `blender --command extension install-file -r user_default --enable vgs-<version>.zip`,
   then a script that imports through the real package (`bl_ext.user_default.vgs`).
+- **Renders draw every splat:** at viewport density 0.25, a still render and a two-frame
+  animation render from the command line (`bpy.ops.render.render` in the background) both
+  drew all of them, and the viewport went back to 0.25 afterwards.
 - **The package itself:** `blender --command extension validate vgs-<version>.zip`.
 - **With the interface:** a script that queues steps with `bpy.app.timers` (import, play,
   stop) and saves `bpy.ops.screen.screenshot_area` images. It is the only way to see what

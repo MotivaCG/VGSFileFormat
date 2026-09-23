@@ -62,9 +62,23 @@ from named attributes — `position`, `rotation`, `scale`, `radiance:base`,
   frame is set by hand and when rendering (per capture: *Harmonics: Off While Playing*, on
   by default). When a frame arrives without them the `radiance:sh_*` attributes are
   removed, so what plays is base colour, never stale harmonics from another frame.
-- Each capture has a start frame, a speed and a loop mode (No Loop, Loop, Ping-Pong). A
-  negative speed plays it backwards from its last instant; decoding ahead follows the
+- Each capture has a phase, a speed and a loop mode (No Loop, Loop, Ping-Pong). The
+  phase is where in the capture the scene's first frame falls, shown twice in the panel:
+  as a fraction (*Phase*) and in the capture's frames (*Start Frame*). Only the fraction is
+  stored and the frame is computed from it, so the two cannot disagree. A negative speed
+  plays backwards from there; decoding ahead follows the
   instants playback will ask for, so backwards and ping-pong are as smooth as forwards.
+- **Viewport Density** (per capture, 0.01 to 1) draws a fraction of the splats in the
+  viewport, paused or playing; renders always draw all of them. The slider is mapped onto
+  [cbrt(0.01), 1] and cubed, so it runs 1 to 0.01 like the fraction but falls faster (0.5
+  draws about a fifth): the measurements below show the gain arriving from a quarter
+  down, and a linear slider left all of it in the last stretch. The library picks which
+  by a hash of each record's index, stable within a chunk, and raises the opacity of the
+  ones it keeps to 1 - (1 - opacity)^(1 / density) so a thinned capture stays solid.
+  Thinning is one more test in a loop that already runs, so it never costs more than it
+  saves. Renders are recognised from `render_init` to `render_complete`/`render_cancel`
+  rather than by `bpy.app.is_job_running`, which is false for a command-line render and
+  would have let the render pipeline's own frame change thin the frame again.
 - Several captures play side by side, each with its own lanes. The add-on schedules all
   of them before waiting for any, so they decode at once.
 - By default the decoded splats are kept out of saved `.blend` files; the capture is a
@@ -78,6 +92,26 @@ Measured in Blender 5.3 with `boxing_despill.vgs` (about 240k splats, harmonics 
 | 1 | 3.7 ms | 6.5 ms | 1 of 426 |
 | 2 | 8.4 ms | 12.1 ms | 1 of 426 |
 | 4 | 17.1 ms | 29.0 ms | 2 of 426 |
+
+With the interface, EEVEE's Rendered view, harmonics off while playing, 1600×1000 window,
+playing as fast as it can (120 fps cap) — what *Viewport Density* buys:
+
+Densities here are the fraction drawn, not the slider (slider 0.74 is 0.50, 0.53 is 0.25).
+
+| captures | density | fps | frame | add-on's share | splats drawn |
+|---|---|---|---|---|---|
+| 1 | 1.00 | 99 | 9.8 ms | 2.3 ms | 235k |
+| 1 | 0.50 | 116 | 8.4 ms | 1.6 ms | 120k |
+| 1 | 0.25 | 120 (cap) | 8.3 ms | 0.9 ms | 61k |
+| 4 | 1.00 | 29 | 32.8 ms | 10.2 ms | 767k |
+| 4 | 0.50 | 35 | 28.5 ms | 7.3 ms | 396k |
+| 4 | 0.25 | 58 | 16.9 ms | 4.2 ms | 206k |
+
+One capture does not need it on this machine. With several it matters, but half the
+splats is not half the time: the opacity the kept splats are given makes each one's
+footprint on screen larger, so the pixels drawn fall more slowly than the splats (a
+likely explanation, not a measured one). At 0.5 the difference is hard to see; at 0.25 a
+capture looks brushier but stays solid.
 
 Paused, a frame with harmonics takes about 10 ms per capture. The viewport's own drawing
 — uploading and sorting the splats on the GPU — comes on top and is not in these

@@ -6,7 +6,7 @@ import math
 import os
 
 import bpy
-from bpy.props import BoolProperty, CollectionProperty, EnumProperty, IntProperty, StringProperty
+from bpy.props import BoolProperty, CollectionProperty, EnumProperty, StringProperty
 from bpy.types import FileHandler, Operator, OperatorFileListElement
 from bpy_extras.io_utils import ImportHelper
 
@@ -22,7 +22,7 @@ _UP_AXIS_ROTATION = {
 
 
 def fit_scene(scene, pointcloud, info, set_fps):
-    """Frame range, and optionally frame rate, to play `info` once from its start frame."""
+    """Frame range, and optionally frame rate, to play `info` once from the scene's start."""
     settings = pointcloud.vgs
     if set_fps and info.frame_rate > 0:
         fps = max(1, round(info.frame_rate))
@@ -30,8 +30,7 @@ def fit_scene(scene, pointcloud, info, set_fps):
         scene.render.fps_base = fps / info.frame_rate
     speed = abs(settings.speed) or 1.0
     frames = int(round(info.duration * playback.scene_fps(scene) / speed))
-    scene.frame_start = settings.frame_start
-    scene.frame_end = settings.frame_start + max(frames, 0)
+    scene.frame_end = scene.frame_start + max(frames, 0)
 
 
 class VGS_OT_import(Operator, ImportHelper):
@@ -49,11 +48,6 @@ class VGS_OT_import(Operator, ImportHelper):
         name="Spherical Harmonics",
         description="Decode view-dependent colour. Off decodes faster and uses less memory",
         default=True,
-    )
-    frame_start: IntProperty(
-        name="Start Frame",
-        description="Scene frame at which each capture's first instant is shown",
-        default=1,
     )
     loop_mode: EnumProperty(
         name="Loop",
@@ -78,8 +72,6 @@ class VGS_OT_import(Operator, ImportHelper):
     )
 
     def invoke(self, context, event):
-        if not self.properties.is_property_set("frame_start"):
-            self.frame_start = context.scene.frame_start
         return self.invoke_popup(context)
 
     def _paths(self):
@@ -106,7 +98,7 @@ class VGS_OT_import(Operator, ImportHelper):
                 settings = pointcloud.vgs
                 settings.filepath = path
                 settings.use_sh = self.use_sh
-                settings.frame_start = self.frame_start
+                settings.last_frame = playback.last_frame(info)
                 settings.loop_mode = self.loop_mode
 
                 obj = bpy.data.objects.new(name, pointcloud)
@@ -136,7 +128,6 @@ class VGS_OT_import(Operator, ImportHelper):
         layout.use_property_split = True
         layout.use_property_decorate = False
         layout.prop(self, "use_sh")
-        layout.prop(self, "frame_start")
         layout.prop(self, "loop_mode")
         layout.prop(self, "up_axis")
         layout.prop(self, "fit_scene")

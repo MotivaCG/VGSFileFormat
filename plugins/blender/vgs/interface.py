@@ -51,9 +51,12 @@ class DATA_PT_vgs_capture(Panel):
             return
 
         col = layout.column()
-        col.prop(settings, "frame_start")
+        sub = col.column(align=True)
+        sub.prop(settings, "phase")
+        sub.prop(settings, "start_frame")
         col.prop(settings, "speed")
         col.prop(settings, "loop_mode")
+        col.prop(settings, "viewport_density")
         # A heading on the left and short checkbox labels, as Blender's own panels do: long
         # labels in a split layout are cut off in a narrow editor.
         col = layout.column(heading="Harmonics")
