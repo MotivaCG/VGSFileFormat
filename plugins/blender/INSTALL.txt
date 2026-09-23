@@ -1,0 +1,20 @@
+VGS 4D Gaussian Splatting Player for Blender - installation
+===========================================================
+
+Plays VGS 4D Gaussian splat captures (.vgs, .pgs) in Blender.
+Windows 64-bit, Blender 5.3 or later.
+
+File: vgs-<version>.zip  (do not unzip it)
+
+1. Open Blender.
+2. Edit > Preferences > Get Extensions.
+3. Click the arrow menu at the top right and choose "Install from Disk...".
+4. Select vgs-<version>.zip and click "Install from Disk".
+   (Dragging the zip onto Blender's window does the same.)
+5. Make sure "VGS 4D Gaussian Splatting Player" is enabled in the list.
+
+Use it: File > Import > VGS (.vgs, .pgs), or drag a .vgs file onto the 3D viewport.
+The controls of each capture are in Properties > Data > VGS.
+
+To update: install the new zip the same way; restart Blender afterwards.
+To remove: Edit > Preferences > Get Extensions, find it, and choose Uninstall.

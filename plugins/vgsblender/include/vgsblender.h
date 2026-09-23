@@ -39,12 +39,18 @@
  * lanes. Every function is safe to call from any one thread at a time per player; the
  * add-on calls them all from Blender's main thread, or from the render thread while
  * rendering.
+ *
+ * The Houdini plugin compiles this same player into its SOP, with VGSBLENDER_STATIC
+ * defined, and reshapes each frame into Houdini's GSplat attributes as it copies it.
  */
 
 #include <stddef.h>
 #include <stdint.h>
 
-#if defined(_WIN32)
+#if defined(VGSBLENDER_STATIC)
+/* Compiled into another module, as the Houdini plugin does: nothing to export. */
+#  define VGSB_API
+#elif defined(_WIN32)
 #  ifdef VGSBLENDER_BUILD
 #    define VGSB_API __declspec(dllexport)
 #  else

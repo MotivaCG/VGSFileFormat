@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- File > Import > VGS Capture: one VGS Capture object per file chosen. -->
+<mainMenu>
+  <menuBar>
+    <subMenu id="file_menu">
+      <subMenu id="import_files">
+        <scriptItem id="vgs.import_capture">
+          <label>VGS Capture (.vgs, .pgs)...</label>
+          <insertAfter>h.import_gltf</insertAfter>
+          <scriptCode><![CDATA[
+import os
+import re
+
+import hou
+
+chosen = hou.ui.selectFile(
+    title="Import VGS Capture",
+    pattern="*.vgs *.pgs",
+    chooser_mode=hou.fileChooserMode.Read,
+    multiple_select=True)
+paths = [p.strip() for p in chosen.split(";") if p.strip()]
+
+created = []
+with hou.undos.group("Import VGS Capture"):
+    for path in paths:
+        stem = os.path.splitext(os.path.basename(hou.text.expandString(path)))[0]
+        name = re.sub(r"[^A-Za-z0-9_]", "_", stem) or "capture"
+        if name[0].isdigit():
+            name = "_" + name
+        node = hou.node("/obj").createNode("vgs_capture", name)
+        node.parm("file").set(path)
+        node.moveToGoodPosition()
+        created.append(node)
+    # As Blender's import does: the scene takes the first capture's rate and length.
+    if created:
+        created[0].parm("fitscene").pressButton()
+        for i, node in enumerate(created):
+            node.setSelected(True, clear_all_selected=(i == 0))
+]]></scriptCode>
+        </scriptItem>
+      </subMenu>
+    </subMenu>
+  </menuBar>
+</mainMenu>

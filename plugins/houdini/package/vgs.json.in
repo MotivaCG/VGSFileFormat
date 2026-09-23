@@ -1,0 +1,7 @@
+{
+    "enable": "houdini_version >= '@houdini_version@' and houdini_version < '@houdini_next@'",
+    "env": [
+        { "VGS_HOUDINI": "$HOUDINI_PACKAGE_PATH/vgs" }
+    ],
+    "path": "$VGS_HOUDINI"
+}

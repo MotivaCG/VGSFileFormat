@@ -1,0 +1,20 @@
+#type:     node
+#context:  sop
+#internal: vgs_capture
+#icon:     SOP/vgs_capture
+
+= VGS Capture =
+
+"""Plays a VGS 4D Gaussian splat capture (.vgs, .pgs) as Houdini GSplats."""
+
+Outputs the splats of a capture at the current time as points with the attributes
+[Bake GSplats|Node:sop/bakegsplat] makes - `Cd`, `orient`, `scale`, `GS_Alpha`, and with
+harmonics `GS_SPH_R`, `GS_SPH_G`, `GS_SPH_B` and `restorient` - so they draw in the
+viewport and render in Karma XPU through Solaris. A detail attribute `vgs_seconds` holds the
+capture time shown.
+
+Inside a [VGS Capture object|Node:obj/vgs_capture], which File > Import creates, its
+parameters follow the object's. On its own, in any SOP network or a SOP Create LOP, it is
+driven by its own parameters.
+
+The parameters are those of the [VGS Capture object|Node:obj/vgs_capture].

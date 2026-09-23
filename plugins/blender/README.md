@@ -16,8 +16,8 @@ Blender 5.3 or later, Windows x64.
   loop mode, up axis (Y Up by default: +90° about X, which is how captures
   are written), fit the scene's range and frame rate to the first capture.
 - **Per capture**, in *Properties > Data > VGS*, under the logo (`vgs/logo.png`: a
-  256-pixel copy of the project's `logo.png` with its white background made transparent,
-  for Blender's dark interface): capture path, phase and start frame (the same setting
+  256-pixel copy of the project's `logo_trans.png`, cropped to the mark, transparent for
+  Blender's dark interface): capture path, phase and start frame (the same setting
   twice: where in the capture the scene's first frame falls, as a fraction and as a
   capture frame counted from 0), speed
   (negative plays backwards from the phase), loop (No Loop, Loop, Ping-Pong),

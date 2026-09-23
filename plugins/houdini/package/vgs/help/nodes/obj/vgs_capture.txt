@@ -1,0 +1,110 @@
+#type:     node
+#context:  obj
+#internal: vgs_capture
+#icon:     OBJ/vgs_capture
+
+= VGS Capture =
+
+"""Plays a VGS 4D Gaussian splat capture (.vgs, .pgs) as Houdini GSplats."""
+
+File > Import > VGS Capture creates one of these per file chosen. It is a geometry object
+with the capture's controls on it; the [VGS Capture SOP|Node:sop/vgs_capture] inside does
+the decoding, and its parameters follow the object's.
+
+The splats are Houdini GSplats, the attributes [Bake GSplats|Node:sop/bakegsplat] makes,
+so they draw in the viewport and render in Karma XPU through Solaris.
+
+Captures decode on threads of their own, ahead of the playhead, so playback runs as fast
+as the viewport can draw.
+
+@parameters
+
+Capture:
+    #id: file
+
+    The `.vgs` or `.pgs` capture to play.
+
+Reload:
+    #id: reload
+
+    Reopen the capture, for when the file has changed on disk.
+
+Phase:
+    #id: phase
+
+    Where in the capture the scene's first frame falls: 0 its first instant, 1 its last.
+
+Start Frame:
+    #id: startframe
+
+    The same as __Phase__, in the capture's frames counting from 0. Changing one changes
+    the other; only the phase is kept.
+
+Speed:
+    #id: speed
+
+    Playback speed. Negative plays the capture backwards from its phase.
+
+Loop:
+    #id: loopmode
+
+    What happens past either end of the capture.
+
+    No Loop:
+        Hold the first or last frame.
+    Loop:
+        Start over.
+    Ping-Pong:
+        Turn around and play the other way.
+
+Viewport Density:
+    #id: density
+
+    How many splats the viewport draws, for lighter playback. 1 is all of them. The field is
+    eased: its lower half covers the range where thinning pays off, down to 1 splat in 100
+    at 0.01. The splats that stay are made more opaque so the capture does not turn
+    translucent. Renders always draw every splat.
+
+Up Axis:
+    #id: upaxis
+
+    Which axis of the capture points up. Captures are written Y up, as Houdini is.
+
+Harmonics:
+    #id: usesh
+
+    Decode the spherical harmonics: view-dependent colour.
+
+Off While Playing:
+    #id: noshplaying
+
+    Leave the harmonics out while the playbar plays, for faster playback. They come back
+    when it stops, and renders always have them.
+
+Linearize Color:
+    #id: linearize
+
+    Convert the capture's sRGB colour to scene linear, as Bake GSplats does.
+
+Cast Shadows in Karma:
+    #id: castshadows
+
+    Let the splats cast shadows in Karma. Off by default, as Bake GSplats leaves it.
+
+Fit Scene:
+    #id: fitscene
+
+    Set the scene's frame rate to the capture's, and its frame range to play it once at
+    this speed.
+
+== Environment ==
+
+`VGS_SLOTS`:
+    Decoded frames held ahead of the playhead per capture, 2 to 64. Default 4.
+
+`VGS_THREADS`:
+    Cores a chunk decode may use, 0 for half of them. Default 0.
+
+`VGS_PLAYBACK_WAIT_MS`:
+    How long playback waits for a frame that is not ready before showing the previous one
+    again. Default 250.

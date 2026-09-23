@@ -1,0 +1,45 @@
+VGS 4D Gaussian Splatting Player for Houdini - installation
+===========================================================
+
+Plays VGS 4D Gaussian splat captures (.vgs, .pgs) in Houdini.
+Windows 64-bit, Houdini 22.0.
+
+File: vgs-houdini-<version>-h22.0.zip
+
+The plugin is built for one Houdini version; this one loads in Houdini 22.0 only.
+It works with every Houdini licence, Apprentice included.
+
+1. Close Houdini.
+2. Find your Houdini preferences folder:
+     Windows:  Documents\houdini22.0
+   (In Houdini, Windows > Python Shell, type  hou.getenv("HOUDINI_USER_PREF_DIR")
+   to see it.)
+3. Inside it, open the "packages" folder, creating it if it does not exist.
+4. Unzip vgs-houdini-<version>-h22.0.zip into "packages". It should look like this:
+
+     houdini22.0\
+       packages\
+         vgs.json
+         vgs\
+           dso\vgs_houdini.dll
+           config\Icons\...
+           help\...
+           MainMenuCommon.xml
+
+5. Start Houdini.
+
+Use it: File > Import > VGS Capture (.vgs, .pgs). It creates a VGS Capture object
+per file; its controls are at the top of the object's parameters. In any SOP
+network, or in a SOP Create LOP, Tab > Import > VGS Capture adds the SOP on its
+own. The splats render in the viewport and, through Solaris, in Karma XPU.
+
+To check it loaded: in the Python Shell, hou.getenv("VGS_HOUDINI") shows the
+plugin's folder. If it shows nothing, vgs.json is not directly inside "packages".
+
+To update: close Houdini, and unzip the new version over the old one.
+To remove: close Houdini, and delete vgs.json and the vgs folder from "packages".
+
+Optional settings, as environment variables (for example in houdini.env):
+  VGS_SLOTS              decoded frames kept ready per capture, 2-64 (default 4)
+  VGS_THREADS            cores used to decode, 0 for half of them (default 0)
+  VGS_PLAYBACK_WAIT_MS   how long playback waits for a late frame (default 250)

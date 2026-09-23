@@ -52,4 +52,4 @@ add_dependencies(vgs_blender_addon vgsblender)
 # Beside INSTALL/decoder and INSTALL/encoder, as its own component:
 #
 #   cmake --install build_win64 --config Release --component blender --prefix D:/ship
-install(FILES ${zip} DESTINATION blender COMPONENT blender)
+install(FILES ${zip} ${CMAKE_CURRENT_SOURCE_DIR}/INSTALL.txt DESTINATION blender COMPONENT blender)

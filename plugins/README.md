@@ -6,7 +6,13 @@ vgsblender/     the native library: the decoder, and the threads that play ahead
   src/vgsblender.cpp
 blender/        the Blender add-on, and the build step that packages it
   vgs/                    the add-on itself (Python)
+  INSTALL.txt             how a user installs it, in English; installed beside the zip
   README.md               using it, how it was tested, known behaviour, what is left
+houdini/        the Houdini plugin: an HDK object and SOP with the same player inside
+  src/                    the C++ (HDK)
+  package/                the Houdini package around it: menu entry, help, icon
+  INSTALL.txt             how a user installs it, in English; installed beside the zip
+  README.md               using it, what it writes, how it was tested, what is left
 ```
 
 Built with everything else (`VGS_BUILD_PLUGINS`, on by default, native builds only):
@@ -22,6 +28,17 @@ from Disk*, or drag it onto Blender's window. `cmake --install` copies it to
 `INSTALL/blender`, beside `INSTALL/decoder` and `INSTALL/encoder`; `--component blender`
 installs it alone. The unpacked `vgs/` folder beside the zip is the same thing for
 development.
+
+The Houdini plugin is built when CMake finds a Houdini to build against - `VGS_HOUDINI_ROOT`,
+`HFS`, or the newest in the default install folder - and skipped otherwise:
+
+```
+cmake -S . -B build_win64 -DVGS_HOUDINI_ROOT="C:/Program Files/Side Effects Software/Houdini 22.0.429"
+```
+
+Its result is `build_win64/plugins/houdini/Release/vgs-houdini-<version>-h<houdini>.zip`,
+unzipped into the user's Houdini `packages` folder; `cmake --install` copies it to
+`INSTALL/houdini` (`--component houdini`). `houdini/README.md` says more.
 
 ## Two licences, one line between them
 
@@ -39,6 +56,10 @@ The library compiles the decoder's source list itself rather than linking libvgs
 so that it can use the static C runtime and load on a machine without the Visual C++
 redistributable. It is therefore its own artefact, and `keyleak_blender` checks it for
 the signing key like the other decoder builds.
+
+The Houdini plugin has no such line to keep: an HDK plugin is not bound by the GPL, and
+it is closed like the decoder. It compiles the same player (`vgsblender.cpp`, with
+`VGSBLENDER_STATIC`) into its DSO, so `keyleak_houdini` checks that too.
 
 ## How playback works
 

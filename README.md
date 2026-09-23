@@ -29,8 +29,10 @@ build them.
     decoder/     libvgsdecoder  + vgsinfo, vgsplay, vgsdump, vgsexport, vgspagecost, WebAssembly
     tests/       the conformance and separation tests
     cmake/       package files for find_package
-    logo.png     the mark, full size; docs/logo.png is a copy for documents
-    logo.ico     the same as a Windows icon, compiled into the tools
+    logo.png     the mark, full size, on white; docs/logo.png is a copy for documents
+    logo_trans.png  the same on a transparent background: the source of every icon
+    logo.svg     the same as vector art, transparent
+    logo.ico     the mark as a Windows icon, 16 to 256 pixels, compiled into the tools
 
 `core/` builds nothing on its own. It hands the other two a list of sources each, and the
 lists are not the same:
@@ -157,6 +159,8 @@ machine it runs on.
         include/    vgsencoder/vgsencoder.h, vgsencoder_c.h
         lib/        vgsencoder.lib, cmake/VGSEncoder
       blender/    vgs-<version>.zip, the Blender add-on (plugins/README.md)
+      houdini/    vgs-houdini-<version>-h<houdini>.zip, the Houdini plugin, when built
+                  against a Houdini (plugins/houdini/README.md)
 
 The codec's own headers are not installed. A consumer sees the encoder and decoder APIs
 and nothing else, so none of the container's internals end up in somebody else's build.

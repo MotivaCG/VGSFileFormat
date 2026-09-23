@@ -38,6 +38,11 @@ if(TARGET vgsblender)
   add_test(NAME keyleak_blender
            COMMAND vgs_keyleak --absent $<TARGET_FILE:vgsblender>)
 endif()
+# So does the Houdini plugin, built when a Houdini installation was found.
+if(TARGET vgs_houdini)
+  add_test(NAME keyleak_houdini
+           COMMAND vgs_keyleak --absent $<TARGET_FILE:vgs_houdini>)
+endif()
 
 # ---- with a capture ---------------------------------------------------------------------
 
