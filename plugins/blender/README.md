@@ -15,9 +15,11 @@ Blender 5.3 or later, Windows x64.
   viewport. Each becomes a point cloud of type Gaussian Splat. Import options: harmonics,
   start frame, loop mode, up axis (Y Up by default: +90° about X, which is how captures
   are written), fit the scene's range and frame rate to the first capture.
-- **Per capture**, in *Properties > Data > VGS*: capture path, start frame, speed
+- **Per capture**, in *Properties > Data > VGS*, under the logo (`vgs/logo.png`: a
+  256-pixel copy of the project's `logo.png` with its white background made transparent,
+  for Blender's dark interface): capture path, start frame, speed
   (negative plays backwards from the last instant), loop (No Loop, Loop, Ping-Pong),
-  spherical harmonics, *No Harmonics While Playing* (on by default), *Fit Scene*,
+  spherical harmonics, *Harmonics: Off While Playing* (on by default), *Fit Scene*,
   *Reload*.
 - **Preferences** (*Add-ons > VGS*): frames decoded ahead per capture, decoder threads
   (0 is half the cores), how long playback waits for a late frame, and whether decoded
@@ -32,7 +34,7 @@ after fixing the path.
 |---|---|---|
 | Up axis on import | Y Up | Captures are Y up. Rotating the object is exact and free; converting the data would mean rotating quaternions and harmonics too. |
 | Loop | Loop | Captures are short takes; holding the last frame surprised people. |
-| No Harmonics While Playing | on | A third of the data to copy per frame; harmonics come back when paused, scrubbed or rendered. |
+| Harmonics: Off While Playing | on | A third of the data to copy per frame; harmonics come back when paused, scrubbed or rendered. |
 | Keep splats out of `.blend` | on | A frame is tens of megabytes and is decoded again on load. |
 | Frames decoded ahead | 4 | About 240 bytes per splat per frame with harmonics. |
 
@@ -51,7 +53,7 @@ an existing one.
   Blender's own PLY importer on the same frame exactly (exported with `vgsexport`), so the
   attributes are right. The report came from the user's own session after reinstalling
   without a restart; the stale DLL is the first suspect, the startup file's EEVEE settings
-  the second. If it comes back: toggle *Spherical Harmonics* off while paused, and try
+  the second. If it comes back: untick *Harmonics: Enabled* while paused, and try
   *File > New > General* with Blender freshly started.
 - EEVEE quantises every harmonic coefficient to 8 bits against one range shared by all
   splats and coefficients. A capture with a few extreme coefficients would lose precision
@@ -79,7 +81,9 @@ Test capture: `D:\Trabajos\ScanMeNow\SMNWebviewer\Playcanvas\dist\data\boxing_de
   EEVEE draws.
 - **The decoder's parallel evaluation** was checked bit for bit: every array of 60
   instants, with and without harmonics, hashed with 1, 2, 8 and 16 threads, against the
-  single-threaded decoder from before the change. All identical.
+  single-threaded decoder from before the change. All identical. The WebAssembly build was
+  checked the same way under node (built with `-DVGS_WASM_NODE=ON`): `positionsAt` and
+  `setTime` from the previous commit's module and the new one, 133 instants, identical.
 
 ## Left to do
 

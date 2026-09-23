@@ -145,13 +145,18 @@ machine it runs on.
 ## What an install gives you
 
     INSTALL/
-      bin/      vgsencode, vgsinfo, vgsplay, vgsdump, vgsexport, vgspagecost
-      include/  vgsencoder/vgsencoder.h, vgsencoder_c.h
-                vgsdecoder/vgsdecoder.h, vgsdecoder_c.h
-      lib/      vgsencoder.lib, vgsdecoder.lib     (.a on Linux)
-                cmake/VGSEncoder, cmake/VGSDecoder
-      share/    vgsdecoder/examples: the source of the four samples, with a
-                CMakeLists.txt that builds them against this very install
+      decoder/    the half that ships
+        bin/        vgsinfo, vgsplay, vgsdump, vgsexport, vgspagecost
+        include/    vgsdecoder/vgsdecoder.h, vgsdecoder_c.h
+        lib/        vgsdecoder.lib (.a on Linux), cmake/VGSDecoder
+        examples/   the source of the five tools, with a CMakeLists.txt that builds
+                    them against this very install
+        LICENSE.md, README.md
+      encoder/
+        bin/        vgsencode
+        include/    vgsencoder/vgsencoder.h, vgsencoder_c.h
+        lib/        vgsencoder.lib, cmake/VGSEncoder
+      blender/    vgs-<version>.zip, the Blender add-on (plugins/README.md)
 
 The codec's own headers are not installed. A consumer sees the encoder and decoder APIs
 and nothing else, so none of the container's internals end up in somebody else's build.
@@ -159,7 +164,7 @@ and nothing else, so none of the container's internals end up in somebody else's
 Each library comes with a package file, so a consuming project needs three lines:
 
 ```cmake
-find_package(VGSDecoder REQUIRED PATHS ../VGSFileFormat/build_win64/INSTALL)
+find_package(VGSDecoder REQUIRED PATHS ../VGSFileFormat/build_win64/INSTALL/decoder)
 add_executable(player main.cpp)
 target_link_libraries(player PRIVATE VGS::Decoder)
 ```
@@ -168,7 +173,7 @@ The samples' source ships too, so a consumer gets working code for every part of
 and can build it on the spot:
 
 ```bash
-cd INSTALL/share/vgsdecoder/examples
+cd INSTALL/decoder/examples
 cmake -S . -B build && cmake --build build --config Release
 ```
 

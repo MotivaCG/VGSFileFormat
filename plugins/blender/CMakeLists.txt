@@ -24,7 +24,8 @@ set(addon_files
     playback.py
     properties.py
     operators.py
-    interface.py)
+    interface.py
+    logo.png)
 set(addon_sources "")
 foreach(file ${addon_files})
   list(APPEND addon_sources ${addon_dir}/${file})

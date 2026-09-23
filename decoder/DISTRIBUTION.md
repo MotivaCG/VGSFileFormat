@@ -28,7 +28,7 @@ This package reads captures. It cannot write one.
     include/vgsdecoder/vgsdecoder_c.h   the same thing in C
     lib/                                the library, and CMake package files
     bin/                                vgsinfo, vgsplay, vgsdump, vgsexport, vgspagecost
-    share/vgsdecoder/examples/          the source of those five, with a CMakeLists.txt
+    examples/                           the source of those five, with a CMakeLists.txt
 
 ## C++
 
@@ -106,11 +106,11 @@ find_package(VGSDecoder REQUIRED PATHS <this directory>)
 target_link_libraries(player PRIVATE VGS::Decoder)
 ```
 
-The samples in `share/vgsdecoder/examples` build on their own against this install and are
+The samples in `examples` build on their own against this install and are
 the quickest way to check that everything is in place:
 
 ```bash
-cd share/vgsdecoder/examples
+cd examples
 cmake -S . -B build && cmake --build build --config Release
 ```
 

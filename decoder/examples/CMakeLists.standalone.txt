@@ -6,8 +6,10 @@
 #   cmake -S . -B build -DCMAKE_PREFIX_PATH=<the INSTALL directory>
 #   cmake --build build --config Release
 #
-# When this file sits in share/vgsdecoder/examples of an install, the package is found
-# without CMAKE_PREFIX_PATH: the default below walks back up to the install root.
+# When this file sits in the examples folder of an install, the package is found without
+# CMAKE_PREFIX_PATH: the hint below is the install root, one level up. A CMAKE_PREFIX_PATH
+# given on the command line is searched first, so the same file also builds against an
+# install somewhere else.
 
 cmake_minimum_required(VERSION 3.16)
 project(VGSDecoderExamples LANGUAGES CXX)
@@ -15,8 +17,7 @@ project(VGSDecoderExamples LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_package(VGSDecoder REQUIRED
-             PATHS "${CMAKE_CURRENT_SOURCE_DIR}/../../.." NO_DEFAULT_PATH)
+find_package(VGSDecoder REQUIRED HINTS "${CMAKE_CURRENT_SOURCE_DIR}/..")
 
 foreach(sample vgsinfo vgsplay vgsdump vgsexport vgspagecost)
   add_executable(${sample} ${sample}.cpp)

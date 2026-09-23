@@ -2,11 +2,25 @@
 
 """The capture panel in the point cloud's data properties, and File > Import."""
 
+import os
+
 import bpy
+import bpy.utils.previews
 from bpy.types import Panel
 
 from . import playback
 from .operators import VGS_OT_fit_scene, VGS_OT_import, VGS_OT_reload
+
+
+# The logo, loaded once as a preview icon: the only way a panel can show an image.
+_previews = None
+
+# How large it is drawn, in multiples of an icon's height: about five lines of the panel.
+_LOGO_SCALE = 5.0
+
+
+def _logo_icon():
+    return _previews["logo"].icon_id if _previews is not None else 0
 
 
 class DATA_PT_vgs_capture(Panel):
@@ -26,6 +40,12 @@ class DATA_PT_vgs_capture(Panel):
         pointcloud = context.pointcloud
         settings = pointcloud.vgs
 
+        icon = _logo_icon()
+        if icon:
+            row = layout.row()
+            row.alignment = 'CENTER'
+            row.template_icon(icon_value=icon, scale=_LOGO_SCALE)
+
         layout.prop(settings, "filepath")
         if not settings.filepath:
             return
@@ -34,10 +54,13 @@ class DATA_PT_vgs_capture(Panel):
         col.prop(settings, "frame_start")
         col.prop(settings, "speed")
         col.prop(settings, "loop_mode")
-        col.prop(settings, "use_sh")
+        # A heading on the left and short checkbox labels, as Blender's own panels do: long
+        # labels in a split layout are cut off in a narrow editor.
+        col = layout.column(heading="Harmonics")
+        col.prop(settings, "use_sh", text="Enabled")
         sub = col.column()
         sub.active = settings.use_sh
-        sub.prop(settings, "no_sh_while_playing")
+        sub.prop(settings, "no_sh_while_playing", text="Off While Playing")
 
         row = layout.row(align=True)
         row.operator(VGS_OT_fit_scene.bl_idname, icon='TIME')
@@ -76,10 +99,17 @@ def _menu_import(self, context):
 
 
 def register():
+    global _previews
+    _previews = bpy.utils.previews.new()
+    _previews.load("logo", os.path.join(os.path.dirname(__file__), "logo.png"), 'IMAGE')
     bpy.utils.register_class(DATA_PT_vgs_capture)
     bpy.types.TOPBAR_MT_file_import.append(_menu_import)
 
 
 def unregister():
+    global _previews
     bpy.types.TOPBAR_MT_file_import.remove(_menu_import)
     bpy.utils.unregister_class(DATA_PT_vgs_capture)
+    if _previews is not None:
+        bpy.utils.previews.remove(_previews)
+        _previews = None

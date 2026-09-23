@@ -96,10 +96,10 @@ install(FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/examples/vgsexport.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/examples/vgspagecost.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/examples/plywriter.h
-    DESTINATION ${VGS_DECODER_PREFIX}/${CMAKE_INSTALL_DATADIR}/vgsdecoder/examples
+    DESTINATION ${VGS_DECODER_PREFIX}/examples
         COMPONENT decoder)
 install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/examples/CMakeLists.standalone.txt
-        DESTINATION ${VGS_DECODER_PREFIX}/${CMAKE_INSTALL_DATADIR}/vgsdecoder/examples
+        DESTINATION ${VGS_DECODER_PREFIX}/examples
         RENAME CMakeLists.txt
         COMPONENT decoder)
 

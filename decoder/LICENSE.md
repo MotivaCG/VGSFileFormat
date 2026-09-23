@@ -22,7 +22,7 @@ an accompanying dynamic library, or included in an installer or other distributi
 package;
 
 c) use, modify and incorporate the example source supplied in
-`share/vgsdecoder/examples` into your own work without restriction.
+`examples` into your own work without restriction.
 
 ## 2. Restrictions
 

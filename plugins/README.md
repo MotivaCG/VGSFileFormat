@@ -59,7 +59,7 @@ from named attributes — `position`, `rotation`, `scale`, `radiance:base`,
   plane per coefficient. Blender quantises attributes against their range over every
   point, and a dead record with a zero scale would ruin it for all the others.
 - **Harmonics are off while the timeline plays** and come back when it stops, when a
-  frame is set by hand and when rendering (per capture: *No Harmonics While Playing*, on
+  frame is set by hand and when rendering (per capture: *Harmonics: Off While Playing*, on
   by default). When a frame arrives without them the `radiance:sh_*` attributes are
   removed, so what plays is base colour, never stale harmonics from another frame.
 - Each capture has a start frame, a speed and a loop mode (No Loop, Loop, Ping-Pong). A
