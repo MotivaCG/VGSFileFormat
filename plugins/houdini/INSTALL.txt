@@ -31,7 +31,9 @@ It works with every Houdini licence, Apprentice included.
 Use it: File > Import > VGS Capture (.vgs, .pgs). It creates a VGS Capture object
 per file; its controls are at the top of the object's parameters. In any SOP
 network, or in a SOP Create LOP, Tab > Import > VGS Capture adds the SOP on its
-own. The splats render in the viewport and, through Solaris, in Karma XPU.
+own. The splats render in the viewport and, through Solaris, in Karma XPU: bring
+the object into /stage with a Scene Import or a SOP Import. Mantra (the Render
+Region in /obj) does not render Gaussian splats.
 
 To check it loaded: in the Python Shell, hou.getenv("VGS_HOUDINI") shows the
 plugin's folder. If it shows nothing, vgs.json is not directly inside "packages".

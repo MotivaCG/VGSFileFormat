@@ -59,6 +59,18 @@ infos were read off that node's output, not guessed.
 Houdini takes it from there: the viewport draws GSplats natively, and SOP Import turns it
 into a `ParticleField3DGaussianSplat` for Solaris and Karma, harmonics included.
 
+**Scene Import.** The Scene Import LOP skips object types it has no translator for, and a
+VGS Capture object is a type of its own. The package carries one,
+`husdplugins/objtranslators/vgs_capture.py`, which translates it exactly as a `geo`
+object: with whatever translators are registered for `geo` when the import runs (Houdini's,
+Karma's, a studio's). They are looked up then rather than copied when the plugin loads,
+because plugin folders are not ordered against each other and this one may be read before
+Houdini's own.
+
+**What renders them.** Karma XPU, through Solaris. Mantra, which is what the Render
+Region in /obj starts, does not know GSplats and draws the points as blobs; Storm and
+Karma CPU show a coloured point cloud. This is Houdini's, not the plugin's.
+
 ## Playback and renders
 
 The same rules as Blender, with Houdini's hooks:
@@ -104,6 +116,9 @@ With Houdini 22.0.429, Apprentice licence, and the test capture `boxing_despill.
   rendering the SOP at the frame shown writes all 207,729, and the viewport is back to
   13,997 afterwards; a `usd_rop` in /stage writes a `ParticleField3DGaussianSplat` of
   207,729 with harmonics; a Karma LOP render recooks the SOP at its start and end;
+- in hython, a Scene Import LOP with objects `*` (all, or geometry only) brings the object
+  in as `/boxing/points_0`, a `ParticleField3DGaussianSplat` with every splat and its
+  harmonics, and no warning;
 - `keyleak_houdini` checks the DSO for the signing key.
 
 Not tested automatically, to be looked at by hand: playback frame rate and harmonics off

@@ -12,7 +12,9 @@ with the capture's controls on it; the [VGS Capture SOP|Node:sop/vgs_capture] in
 the decoding, and its parameters follow the object's.
 
 The splats are Houdini GSplats, the attributes [Bake GSplats|Node:sop/bakegsplat] makes,
-so they draw in the viewport and render in Karma XPU through Solaris.
+so they draw in the viewport and render in Karma XPU through Solaris: bring the object in
+with a [Scene Import|Node:lop/sceneimport] or a [SOP Import|Node:lop/sopimport]. Mantra,
+which the Render Region in /obj uses, does not render GSplats.
 
 Captures decode on threads of their own, ahead of the playhead, so playback runs as fast
 as the viewport can draw.
