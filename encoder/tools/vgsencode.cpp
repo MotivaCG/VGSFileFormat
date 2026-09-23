@@ -22,6 +22,7 @@ int usage() {
                "  --sh <0..3>            highest spherical harmonic degree to keep\n"
                "  --page-rows <n>        rows per page (1024..1048576)\n"
                "  --start-tick <n>       where the capture starts on an external timeline\n"
+               "  --playback <mode>      how players run it: once, loop or pingpong (default loop)\n"
                "\n"
                "  --id <s>               catalogue identifier   (default: input name)\n"
                "  --title <s>            title                  (default: input name)\n"
@@ -118,6 +119,19 @@ int main(int argc, char **argv) {
     } else if (flag == "--start-tick") {
       value(&v);
       encoder.setStartTick(uint64_t(std::atoll(v)));
+    } else if (flag == "--playback") {
+      value(&v);
+      const std::string mode = v;
+      if (mode == "once")
+        encoder.setPlaybackMode(vgsenc::PlaybackMode::Once);
+      else if (mode == "loop")
+        encoder.setPlaybackMode(vgsenc::PlaybackMode::Loop);
+      else if (mode == "pingpong" || mode == "ping-pong")
+        encoder.setPlaybackMode(vgsenc::PlaybackMode::PingPong);
+      else {
+        std::fprintf(stderr, "--playback is once, loop or pingpong, not %s\n", v);
+        return 2;
+      }
     } else if (flag == "--id") {
       value(&v);
       encoder.setId(v);

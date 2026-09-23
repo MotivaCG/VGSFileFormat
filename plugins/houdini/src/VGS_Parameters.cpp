@@ -238,6 +238,7 @@ PRM_Name castShadowsName(parm::CastShadows, "Cast Shadows in Karma");
 PRM_Name fitSceneName(parm::FitScene, "Fit Scene");
 
 PRM_Name loopModeItems[] = {
+    PRM_Name("capture", "From Capture"),
     PRM_Name("none", "No Loop"),
     PRM_Name("loop", "Loop"),
     PRM_Name("pingpong", "Ping-Pong"),
@@ -254,7 +255,7 @@ PRM_Name upAxisItems[] = {
 PRM_ChoiceList upAxisMenu(PRM_CHOICELIST_SINGLE, upAxisItems);
 
 PRM_Default speedDefault(1.0);
-PRM_Default loopModeDefault{fpreal(LoopMode::Loop)};
+PRM_Default loopModeDefault{fpreal(LoopFromCapture)};
 PRM_Default densityDefault(1.0);
 
 PRM_Range phaseRange(PRM_RANGE_RESTRICTED, 0.0, PRM_RANGE_RESTRICTED, 1.0);
@@ -289,7 +290,8 @@ PRM_Template captureTemplates[] = {
                  "Playback speed. Negative plays it backwards from its phase."),
     PRM_Template(PRM_ORD, 1, &loopModeName, &loopModeDefault, &loopModeMenu, nullptr, nullptr,
                  nullptr, 1,
-                 "What happens past either end: hold there, start over, or turn around."),
+                 "What happens past either end: hold there, start over, or turn around. From "
+                 "Capture does what the capture's author chose."),
     PRM_Template(PRM_FLT_J, 1, &densityName, &densityDefault, nullptr, &densityRange, nullptr,
                  nullptr, 1,
                  "How many splats the viewport draws, for lighter playback. Renders always "

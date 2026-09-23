@@ -108,7 +108,7 @@ public:
    * implement this. A chunk is tens of megabytes and the decoder reads each one whole, so
    * answering here rather than through read() is one fewer copy of all of it per chunk.
    */
-  virtual const uint8_t *map(uint64_t offset, size_t size) { return nullptr; }
+  virtual const uint8_t *map(uint64_t /*offset*/, size_t /*size*/) { return nullptr; }
 };
 
 /** What the capture says about itself. All strings are UTF-8. */
@@ -303,6 +303,13 @@ struct ChunkData {
  *
  * `examples/vgspagecost.cpp` measures what each level costs on a given capture.
  */
+/**
+ * How the capture's author means it to be played: once, holding the last frame at the
+ * end; over and over; or there and back. A player starts the capture this way unless its
+ * user chooses otherwise.
+ */
+enum class PlaybackMode { Once = 0, Loop = 1, PingPong = 2 };
+
 enum class Detail {
   Positions,
   Base,
@@ -408,6 +415,8 @@ public:
   double frameRate() const;
   /** Where this capture starts on an external timeline, in seconds. */
   double startSeconds() const;
+  /** How the capture is meant to be played: see PlaybackMode. */
+  PlaybackMode playbackMode() const;
   uint32_t shDegree() const;
   uint64_t maxSplatsPerFrame() const;
   uint64_t fileSize() const;

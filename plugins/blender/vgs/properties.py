@@ -10,6 +10,7 @@ from bpy.types import AddonPreferences, PropertyGroup
 
 # What happens past either end of the capture. Shared with the import operator.
 LOOP_MODES = (
+    ('CAPTURE', "From Capture", "As the capture's author set it: once, loop or ping-pong"),
     ('NONE', "No Loop", "Hold the last instant once the capture has played"),
     ('LOOP', "Loop", "Start over from the other end"),
     ('PING_PONG', "Ping-Pong", "Play back the other way, and so on"),
@@ -110,7 +111,7 @@ class VGSCaptureSettings(PropertyGroup):
         name="Loop",
         description="What plays once the capture reaches its end",
         items=LOOP_MODES,
-        default='LOOP',
+        default='CAPTURE',
         update=_refresh,
     )
 

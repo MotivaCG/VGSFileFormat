@@ -129,6 +129,10 @@ void Encoder::setSphericalHarmonicDegree(uint32_t degree) {
 
 void Encoder::setStartTick(uint64_t tick) { state->options.startTick = tick; }
 
+void Encoder::setPlaybackMode(PlaybackMode mode) {
+  state->options.playbackMode = vgs::PlaybackMode(uint32_t(mode));
+}
+
 void Encoder::setPageRows(uint32_t rows) { state->options.pageRows = rows; }
 
 void Encoder::setId(std::string v) { state->options.metadata.id = std::move(v); }

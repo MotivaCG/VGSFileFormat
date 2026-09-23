@@ -533,6 +533,7 @@ vgsb_player *vgsb_open(const char *path, int includeSh, int slots, int threads) 
     info.max_splats = capture.maxSplatsPerFrame();
     info.sh_degree = capture.shDegree();
     info.sh_coefficients = coefficientsForDegree(info.sh_degree);
+    info.playback_mode = int32_t(capture.playbackMode());
     info.title = player->title.c_str();
     info.author = player->author.c_str();
     info.project = player->project.c_str();

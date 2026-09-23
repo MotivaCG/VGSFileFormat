@@ -66,7 +66,7 @@ extern "C" {
 
 /* Bumped whenever a struct below or a signature changes, so a stale add-on refuses to load
  * a newer library rather than read its structs wrongly. */
-#define VGSB_API_VERSION 2
+#define VGSB_API_VERSION 3
 
 typedef struct vgsb_player vgsb_player;
 
@@ -82,6 +82,7 @@ typedef struct vgsb_info {
   uint64_t max_splats;
   uint32_t sh_degree;
   int32_t sh_coefficients; /* 0, 3, 8 or 15: what a frame carries with harmonics on */
+  int32_t playback_mode;   /* how its author means it to play: 0 once, 1 loop, 2 ping-pong */
   const char *title, *author, *project, *take, *studio, *copyright, *id, *uuid;
 } vgsb_info;
 

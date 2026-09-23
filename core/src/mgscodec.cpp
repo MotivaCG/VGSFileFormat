@@ -425,8 +425,10 @@ void decodeLoop(Reader& r, Out* out, size_t N, const Tables& t, CtxOf ctxOf)
 template <class Out>
 void checkOutput(const Tables& t)
 {
-    if (sizeof(Out) == 1 && t.A > 256)
-        throw Error("symbol alphabet too large for its column");
+    if constexpr (sizeof(Out) == 1) {
+        if (t.A > 256)
+            throw Error("symbol alphabet too large for its column");
+    }
 }
 
 template <class Out>

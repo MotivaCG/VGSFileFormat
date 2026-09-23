@@ -53,7 +53,7 @@ class VGS_OT_import(Operator, ImportHelper):
         name="Loop",
         description="What plays once the capture reaches its end",
         items=LOOP_MODES,
-        default='LOOP',
+        default='CAPTURE',
     )
     up_axis: EnumProperty(
         name="Up Axis",

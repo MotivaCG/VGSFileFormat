@@ -275,7 +275,8 @@ enum Number {
   NumberSignatureAlgorithm,
   NumberSignedBytes,
   NumberVersion,
-  NumberIsPlain
+  NumberIsPlain,
+  NumberPlaybackMode
 };
 
 EMSCRIPTEN_KEEPALIVE double vgs_number(int which) {
@@ -296,6 +297,7 @@ EMSCRIPTEN_KEEPALIVE double vgs_number(int which) {
   case NumberSignedBytes: return double(capture->signature().signedBytes);
   case NumberVersion: return capture->version();
   case NumberIsPlain: return capture->isPlain() ? 1 : 0;
+  case NumberPlaybackMode: return double(int(capture->playbackMode()));
   default: return 0;
   }
 }

@@ -390,7 +390,7 @@ struct Capture::State {
    * turns it into whatever the current mode delivers: an evaluator, or a description of
    * the buffers to upload.
    */
-  void store(size_t index, uint32_t mask, vgs::DecodedChunk decoded) {
+  void store(size_t index, uint32_t mask, vgs::DecodedChunk chunk) {
     for (size_t i = 0; i < cache.size(); ++i)
       if (cache[i].index == index) {
         cache.erase(cache.begin() + static_cast<std::ptrdiff_t>(i));
@@ -398,7 +398,7 @@ struct Capture::State {
       }
 
     uint64_t held = 0;
-    for (const auto &page : decoded.pages)
+    for (const auto &page : chunk.pages)
       held += page.bytes.size();
 
     Cached entry;
@@ -410,9 +410,9 @@ struct Capture::State {
       // for more is refused inside it rather than read past the arrays it does not have.
       const auto contents = (mask & 1) ? vgs::FrameDecoder::Contents::Frame
                                        : vgs::FrameDecoder::Contents::Positions;
-      entry.evaluator.reset(new vgs::FrameDecoder(decoded, secondsPerTick(), contents));
+      entry.evaluator.reset(new vgs::FrameDecoder(chunk, secondsPerTick(), contents));
     } else {
-      entry.packed = std::move(decoded);
+      entry.packed = std::move(chunk);
     }
     cache.push_back(std::move(entry));
     // Described after the move, so the buffers point at the pages where they now live.
@@ -605,6 +605,10 @@ double Capture::frameRate() const {
 
 double Capture::startSeconds() const {
   return double(state->header.startTick) * state->secondsPerTick();
+}
+
+PlaybackMode Capture::playbackMode() const {
+  return PlaybackMode(uint32_t(state->header.playbackMode));
 }
 
 uint32_t Capture::shDegree() const { return state->header.shDegree; }

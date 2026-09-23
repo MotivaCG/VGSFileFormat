@@ -52,8 +52,11 @@ less than degree 3, and it is a third of the shader's work in the viewer as well
 
 ## Import profile and current limits
 
-Version 1 accepts the observed 30 Hz, SH degree 3 format-6 profile. Chunks have 1..255
-intervals, one dictionary group followed by splat groups. Unknown nonzero header fields,
+Version 1 accepts the observed SH degree 3 format-6 profile, at whatever frame rate the
+source was captured: the timebase is taken from the source, each chunk's duration over
+its interval count, and written as the exact fraction that gives it back (1/30, 1/25,
+1001/30000). Every chunk must agree on it. Chunks have 1..255 intervals, one dictionary
+group followed by splat groups. Unknown nonzero header fields,
 nonempty auxiliary top-level records, unknown blocks, missing supported attributes and
 unsupported sampling/SH layouts fail explicitly. The source order and rank grouping are
 retained. Bounds are measured, not copied: the encoder decodes each chunk it has just written and takes the extent of its live splats over the chunk's own sample grid, which is exact because positions move linearly between samples.
@@ -191,7 +194,7 @@ derivation: it is neither random nor the SHA-1 name-based scheme of version 5.
 The two JSON metadata extras stay as they were, for whatever a project wants to carry
 that these fields do not describe.
 
-### Fixed header: 176 bytes
+### Fixed header: 184 bytes
 
 | Offset | Type | Field |
 |---:|---|---|
@@ -218,8 +221,10 @@ that these fields do not describe.
 | 156 | u64 | startTick: where this capture begins on its own timeline |
 | 164 | u32 | metadataSize |
 | 168 | u64 | createdMillis: when the file was written, milliseconds since the Unix epoch, UTC |
+| 176 | u32 | playbackMode: 0 once, 1 loop, 2 ping-pong (see below) |
+| 180 | u32 | reserved = 0 |
 
-`headerSize = 176 + 24 * policyCount + 16 * layerCount + 40 * extraCount + 80 * chunkCount`,
+`headerSize = 184 + 24 * policyCount + 16 * layerCount + 40 * extraCount + 80 * chunkCount`,
 and `signedSize = headerSize + metadataSize`. The header block holds the policies, then
 the layer table, then the extras table, then the chunk index, then the metadata.
 
@@ -231,6 +236,13 @@ path nobody would exercise.
 capture's own statement rather than a filesystem timestamp that copying, uploading or
 re-downloading would destroy. UTC, so it means the same thing wherever it is read, and an
 input to the derived identifier, which is what separates two exports of one take.
+
+**How it plays.** `playbackMode` is how the capture's author means it to run: `0` plays
+it once and holds the last frame, `1` loops it, `2` plays it there and back. Encoders
+write `1` unless told otherwise. It is a default, not a rule: every player starts a
+capture this way, and may still let its user choose another. Inside the signed region,
+so it stays what the author set. A reader refuses any other value, and a non-zero
+reserved field.
 
 **Timebase.** A tick lasts `timeNumerator / timeDenominator` seconds, so 24, 25, 30, 50,
 60 and 30000/1001 are all expressible; readers accept 1 to 1000 ticks per second. Frames

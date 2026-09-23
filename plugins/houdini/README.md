@@ -30,7 +30,7 @@ The controls, and what they correspond to in Blender:
 | Capture, Reload    | Capture path, Reload   |                                               |
 | Phase, Start Frame | Phase, Start Frame     | kept in step; only the phase decides          |
 | Speed              | Speed                  | negative plays backwards from the phase       |
-| Loop               | Loop                   | No Loop / Loop / Ping-Pong, Loop by default   |
+| Loop               | Loop                   | From Capture (default) / No Loop / Loop / Ping-Pong |
 | Viewport Density   | Viewport Density       | same eased field; renders always full         |
 | Up Axis            | import's Up Axis       | Y Up is no turn here: Houdini is Y up         |
 | Harmonics, Off While Playing | Harmonics    | both on by default                            |

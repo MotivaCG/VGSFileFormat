@@ -57,6 +57,8 @@ int main(int argc, char **argv) {
   encoder.addTag("test");
   encoder.addTag("round-trip");
   encoder.setMetadataJson("{\"kind\":\"test\"}");
+  // Not the default, so the test tells a written mode from one the reader made up.
+  encoder.setPlaybackMode(vgsenc::PlaybackMode::PingPong);
 
   if (!encoder.write(argv[2])) {
     std::fprintf(stderr, "encode failed: %s\n", encoder.lastError().c_str());
@@ -77,6 +79,8 @@ int main(int argc, char **argv) {
     check(capture.createdMillis() > 0, "the capture records when it was written");
     equals(capture.signature().keyId, uint32_t(1), "it is signed with the authoring key");
     check(!capture.isPlain(), "a .vgs reports itself as compressed");
+    check(capture.playbackMode() == vgsdec::PlaybackMode::PingPong,
+          "the playback mode survives");
 
     check(capture.duration() > 0, "the timeline has a duration");
     check(capture.chunkCount() > 0, "the timeline has chunks");

@@ -147,6 +147,18 @@ def scene_fps(scene):
     return scene.render.fps / scene.render.fps_base
 
 
+# The capture's own playback mode, 0 once, 1 loop, 2 ping-pong, as the loop modes here.
+_CAPTURE_MODES = ('NONE', 'LOOP', 'PING_PONG')
+
+
+def loop_mode(settings, info):
+    """The loop mode in effect: the one chosen, or the capture's own for 'From Capture'."""
+    if settings.loop_mode != 'CAPTURE':
+        return settings.loop_mode
+    mode = info.playback_mode
+    return _CAPTURE_MODES[mode] if 0 <= mode < len(_CAPTURE_MODES) else 'LOOP'
+
+
 def capture_seconds(pointcloud, info, scene, frame):
     """The capture's time at a scene frame, after phase, speed and looping.
 
@@ -157,14 +169,15 @@ def capture_seconds(pointcloud, info, scene, frame):
     duration = info.duration
     elapsed = (frame - scene.frame_start) / scene_fps(scene) * settings.speed
     seconds = settings.phase * duration + elapsed
+    mode = loop_mode(settings, info)
     if duration > 0:
-        if settings.loop_mode == 'LOOP':
+        if mode == 'LOOP':
             # One frame interval past the last instant, so the loop does not show the last
             # and the first frame back to back as if they were one. Python's modulo is
             # never negative, which is what makes this work backwards too.
             period = duration + (1.0 / info.frame_rate if info.frame_rate > 0 else 0.0)
             seconds %= period
-        elif settings.loop_mode == 'PING_PONG':
+        elif mode == 'PING_PONG':
             # There and back in twice the duration: each end is shown once per turn.
             seconds %= 2.0 * duration
             if seconds > duration:

@@ -94,6 +94,8 @@ int main(int argc, char **argv) {
                 capture.duration(),
                 static_cast<unsigned long long>(capture.frameCount()),
                 capture.frameRate(), capture.chunkCount());
+    const char *modes[] = {"once", "loop", "ping-pong"};
+    std::printf("%-18s %s\n", "playback", modes[int(capture.playbackMode())]);
     std::printf("%-18s %llu bytes, up to %llu splats per frame\n", "size",
                 static_cast<unsigned long long>(capture.fileSize()),
                 static_cast<unsigned long long>(capture.maxSplatsPerFrame()));

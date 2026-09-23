@@ -70,6 +70,11 @@ VGS_ENCODER_API void vgs_encoder_set_start_tick(vgs_encoder *handle, uint64_t ti
   self(handle)->encoder.setStartTick(tick);
 }
 
+VGS_ENCODER_API void vgs_encoder_set_playback_mode(vgs_encoder *handle, int mode) {
+  if (mode >= 0 && mode <= 2)
+    self(handle)->encoder.setPlaybackMode(vgsenc::PlaybackMode(mode));
+}
+
 VGS_ENCODER_API void vgs_encoder_set_page_rows(vgs_encoder *handle, uint32_t rows) {
   self(handle)->encoder.setPageRows(rows);
 }

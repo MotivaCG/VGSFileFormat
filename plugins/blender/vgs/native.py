@@ -13,7 +13,7 @@ import sys
 
 import numpy as np
 
-API_VERSION = 2
+API_VERSION = 3
 
 _c_float_p = ctypes.POINTER(ctypes.c_float)
 
@@ -32,6 +32,7 @@ class _Info(ctypes.Structure):
         ("max_splats", ctypes.c_uint64),
         ("sh_degree", ctypes.c_uint32),
         ("sh_coefficients", ctypes.c_int32),
+        ("playback_mode", ctypes.c_int32),
         ("title", ctypes.c_char_p),
         ("author", ctypes.c_char_p),
         ("project", ctypes.c_char_p),
@@ -134,6 +135,7 @@ class Info:
         self.max_splats = raw.max_splats
         self.sh_degree = raw.sh_degree
         self.sh_coefficients = raw.sh_coefficients
+        self.playback_mode = raw.playback_mode
         self.title = _text(raw.title)
         self.author = _text(raw.author)
         self.project = _text(raw.project)

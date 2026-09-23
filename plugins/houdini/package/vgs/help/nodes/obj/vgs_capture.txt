@@ -50,6 +50,10 @@ Loop:
 
     What happens past either end of the capture.
 
+    From Capture:
+        What the capture's author chose when it was written: once, loop or ping-pong.
+        The default.
+
     No Loop:
         Hold the first or last frame.
     Loop:

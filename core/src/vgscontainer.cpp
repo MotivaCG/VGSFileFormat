@@ -140,6 +140,8 @@ Header readHeader(const uint8_t *data, size_t size) {
   h.startTick = r.u64();
   const uint32_t metadataBytes = r.u32();
   h.createdMillis = r.u64();
+  const uint32_t playbackMode = r.u32();
+  const uint32_t reserved = r.u32();
   // Before anything is checked for sense, the structure is checked for provenance: an
   // edited header must answer "invalid 4dgs capture" whether or not the edit also broke
   // an invariant, and a reader has no business explaining which field looked wrong in a
@@ -157,8 +159,10 @@ Header readHeader(const uint8_t *data, size_t size) {
       rate < 1 || rate > 1000 || h.shDegree > 3 || h.shBasis != 1 ||
       h.coordinates != 1 || !h.frameCount || h.frameCount != h.durationTicks ||
       h.maxSplatsPerFrame > h.maxChunkSplatRecords || h.pageRows < 1024 ||
-      h.pageRows > 1048576 || h.startTick > UINT64_MAX - h.durationTicks)
+      h.pageRows > 1048576 || h.startTick > UINT64_MAX - h.durationTicks ||
+      playbackMode > MaxPlaybackMode || reserved)
     throw Error("unsupported or malformed VGS header");
+  h.playbackMode = PlaybackMode(playbackMode);
   for (int i = 0; i < 3; ++i)
     if (h.bounds[i] > h.bounds[i + 3])
       throw Error("invalid VGS bounds");

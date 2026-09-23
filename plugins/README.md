@@ -83,7 +83,7 @@ from named attributes — `position`, `rotation`, `scale`, `radiance:base`,
   frame is set by hand and when rendering (per capture: *Harmonics: Off While Playing*, on
   by default). When a frame arrives without them the `radiance:sh_*` attributes are
   removed, so what plays is base colour, never stale harmonics from another frame.
-- Each capture has a phase, a speed and a loop mode (No Loop, Loop, Ping-Pong). The
+- Each capture has a phase, a speed and a loop mode (From Capture, the playback mode the capture carries, or No Loop, Loop, Ping-Pong to override it). The
   phase is where in the capture the scene's first frame falls, shown twice in the panel:
   as a fraction (*Phase*) and in the capture's frames (*Start Frame*). Only the fraction is
   stored and the frame is computed from it, so the two cannot disagree. A negative speed

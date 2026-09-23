@@ -469,7 +469,11 @@ OP_ERROR SOP_VGSCapture::cookMySop(OP_Context &context) {
   Timeline line;
   line.phase = evalFloat(parm::Phase, 0, now);
   line.speed = evalFloat(parm::Speed, 0, now);
-  line.loop = LoopMode(std::clamp(int(evalInt(parm::LoopMode, 0, now)), 0, 2));
+  // The menu's first entry defers to the capture; the others are its modes, one along.
+  const int menu = std::clamp(int(evalInt(parm::LoopMode, 0, now)), 0, 3);
+  line.loop = menu == LoopFromCapture
+                  ? LoopMode(std::clamp(int(info.playback_mode), 0, 2))
+                  : LoopMode(menu - 1);
 
   const double seconds = captureSeconds(info, line, now);
   const size_t lookahead =
@@ -528,6 +532,9 @@ void SOP_VGSCapture::getNodeSpecificInfoText(OP_Context &context, OP_NodeInfoPar
                       lastFrameOf(info.duration, info.frame_rate) + 1, info.frame_rate);
   parms.appendSprintf("Splats: up to %llu\n", (unsigned long long)info.max_splats);
   parms.appendSprintf("Spherical harmonics: degree %u\n", info.sh_degree);
+  const char *modes[] = {"once", "loop", "ping-pong"};
+  if (info.playback_mode >= 0 && info.playback_mode <= 2)
+    parms.appendSprintf("Plays: %s\n", modes[info.playback_mode]);
   if (shownSeconds >= 0)
     parms.appendSprintf("Showing: %.3f s, %lld splats\n", shownSeconds, (long long)shownSplats);
 }

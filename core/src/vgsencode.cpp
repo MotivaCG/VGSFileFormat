@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <map>
@@ -137,6 +138,7 @@ std::array<uint8_t, 16> deriveUuid(const Header &h) {
     w.digest(c.directoryDigest);
   }
   w.u64(h.createdMillis);
+  w.u32(uint32_t(h.playbackMode));
   const Digest d = digest(w.b.data(), w.b.size());
   std::array<uint8_t, 16> uuid{};
   std::copy(d.begin(), d.end(), uuid.begin());
@@ -181,6 +183,8 @@ W headerBytes(const Header &h) {
   w.u64(h.startTick);
   w.u32(uint32_t(h.signedSize - h.headerSize));
   w.u64(h.createdMillis);
+  w.u32(uint32_t(h.playbackMode));
+  w.u32(0);
   for (const auto &p : h.policies) {
     w.u32(p.attribute);
     w.u32(p.codec);
@@ -255,6 +259,35 @@ const uint32_t SharedSlots[] = {8,   112, 128, 168, 184, 208,
                                 232, 248, 264, 304, 320};
 const uint32_t GroupSlots[] = {56,  136, 200, 216, 232, 248, 264, 280,
                                296, 312, 328, 344, 360, 376, 392};
+// The container's timebase for a source whose frames last `interval` seconds, as the
+// exact fraction a reader turns back into that interval: 1/25 for 25 Hz, 1/30 for 30,
+// 1001/30000 for 29.97. The smallest numerator that makes the denominator a whole
+// number wins, NTSC's 1001 tried first so 29.97 is not approximated by something odd.
+void setTimebase(Header &h, double interval) {
+  if (!(interval > 0))
+    throw Error("invalid source frame interval");
+  const double rate = 1.0 / interval;
+  if (rate < 1 || rate > 1000)
+    throw Error("source frame rate outside 1 to 1000 Hz");
+  const auto fits = [&](uint32_t numerator) {
+    const double denominator = std::round(rate * numerator);
+    if (denominator < 1 || denominator > double(UINT32_MAX))
+      return false;
+    const double back = double(numerator) / denominator;
+    if (std::abs(back - interval) > 1e-6 * interval)
+      return false;
+    h.timeNumerator = numerator;
+    h.timeDenominator = uint32_t(denominator);
+    return true;
+  };
+  if (fits(1) || fits(1001))
+    return;
+  for (uint32_t numerator = 2; numerator <= 1000; ++numerator)
+    if (fits(numerator))
+      return;
+  throw Error("source frame rate is not a fraction the container can hold");
+}
+
 Source importMint(const uint8_t *data, size_t size, uint32_t shDegree = 3) {
   if (shDegree > 3)
     throw Error("SH degree out of range");
@@ -297,6 +330,8 @@ Source importMint(const uint8_t *data, size_t size, uint32_t shDegree = 3) {
     throw Error("source index missing");
   Source src;
   src.header.shDegree = shDegree;
+  // The source's frame interval, taken from its first chunk: duration / intervals.
+  double sourceInterval = 0;
   auto nc = u64(index);
   if (!nc || nc > size / 24)
     throw Error("invalid source chunk count");
@@ -462,8 +497,26 @@ Source importMint(const uint8_t *data, size_t size, uint32_t shDegree = 3) {
     }
     if (dictionaries != 1 || !c.entry.intervals || c.groups.front().type != 0)
       throw Error("unsupported source chunk composition");
-    if (std::abs(duration - double(c.entry.intervals) / 30.0) > 1e-8)
-      throw Error("source timebase is not 30 Hz");
+    // Every chunk has to keep the same frame interval: the container has one timebase.
+    const double interval = duration / double(c.entry.intervals);
+    if (!(interval > 0))
+      throw Error("invalid source chunk duration");
+    if (!sourceInterval)
+      sourceInterval = interval;
+    else if (std::abs(interval - sourceInterval) > 1e-6 * sourceInterval) {
+      // Said in the terms of whoever picked the file: chunks counted from one, rates
+      // and times as a person writes them.
+      char what[256];
+      std::snprintf(what, sizeof what,
+                    "the source changes frame rate: chunk %llu of %llu runs at %g Hz "
+                    "(%llu frames in %g s), the ones before at %g Hz; a capture has to "
+                    "keep one frame rate",
+                    static_cast<unsigned long long>(ci + 1),
+                    static_cast<unsigned long long>(nc), 1.0 / interval,
+                    static_cast<unsigned long long>(c.entry.intervals), duration,
+                    1.0 / sourceInterval);
+      throw Error(what);
+    }
     c.groups[0].intervals = c.entry.intervals;
     // Current import profile is degree 3 and requires both higher-order layers.
     for (uint32_t gi = 0; gi < c.groups.size(); ++gi) {
@@ -498,6 +551,7 @@ Source importMint(const uint8_t *data, size_t size, uint32_t shDegree = 3) {
     src.chunks.push_back(std::move(c));
   }
   src.header.frameCount = src.header.durationTicks;
+  setTimebase(src.header, sourceInterval);
   return src;
 }
 // Split on trajectory boundaries. Entry-major temporal SH pages retain every
@@ -677,6 +731,9 @@ Bytes encodeMint(const uint8_t *mint, size_t size, const EncodeOptions &options,
   }
   h.chunks.resize(src.chunks.size());
   h.startTick = options.startTick;
+  if (uint32_t(options.playbackMode) > MaxPlaybackMode)
+    throw Error("invalid VGS playback mode");
+  h.playbackMode = options.playbackMode;
   h.layers.push_back({0, BaseLayer, 0, 0});
   if (h.shDegree) {
     h.layers.push_back({1, StaticShLayer, 0, 0});

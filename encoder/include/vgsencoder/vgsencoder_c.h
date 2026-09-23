@@ -75,6 +75,14 @@ VGS_ENCODER_API void vgs_encoder_set_input_memory(vgs_encoder *, const uint8_t *
 VGS_ENCODER_API void vgs_encoder_set_coding(vgs_encoder *, int coding);
 VGS_ENCODER_API void vgs_encoder_set_sh_degree(vgs_encoder *, uint32_t degree);
 VGS_ENCODER_API void vgs_encoder_set_start_tick(vgs_encoder *, uint64_t tick);
+/* How players should run the capture by default: once (holding the last frame), in a
+ * loop, or there and back. Loop unless set; other values are ignored. */
+enum vgs_playback_mode_setting {
+  VGS_ENCODE_PLAYBACK_ONCE = 0,
+  VGS_ENCODE_PLAYBACK_LOOP = 1,
+  VGS_ENCODE_PLAYBACK_PING_PONG = 2
+};
+VGS_ENCODER_API void vgs_encoder_set_playback_mode(vgs_encoder *, int mode);
 VGS_ENCODER_API void vgs_encoder_set_page_rows(vgs_encoder *, uint32_t rows);
 
 VGS_ENCODER_API void vgs_encoder_set_id(vgs_encoder *, const char *);

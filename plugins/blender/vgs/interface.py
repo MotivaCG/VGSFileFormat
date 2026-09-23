@@ -95,6 +95,9 @@ class DATA_PT_vgs_capture(Panel):
                 info.duration, info.frame_count, info.frame_rate))
             col.label(text="Splats: up to {:,}".format(info.max_splats))
             col.label(text="Spherical harmonics: degree {:d}".format(info.sh_degree))
+            modes = ("Once", "Loop", "Ping-Pong")
+            if 0 <= info.playback_mode < len(modes):
+                col.label(text="Plays: {}".format(modes[info.playback_mode]))
 
 
 def _menu_import(self, context):

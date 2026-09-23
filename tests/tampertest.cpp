@@ -85,8 +85,8 @@ int main(int argc, char **argv) {
   const std::vector<uint8_t> original = readFile(argv[1]);
   mustAccept("untouched", original);
 
-  // The fixed header is the first 176 bytes: magic, version, sizes, timing, bounds. The
-  // signature block sits at signedSize and the payload after it.
+  // The fixed header is the first 184 bytes: magic, version, sizes, timing, bounds, the
+  // playback mode. The signature block sits at signedSize and the payload after it.
   const uint64_t structural = vgsdec::Capture::structuralSize(original.data(), original.size());
 
   // The first eight bytes answer "what is this", not "is this genuine", and they get
@@ -98,12 +98,13 @@ int main(int argc, char **argv) {
   mustRefuse("a size in the fixed header", original, 24);
   mustRefuse("the timebase", original, 96);
   mustRefuse("a bound", original, 128);
-  mustRefuse("the last byte of the fixed header", original, 175);
+  mustRefuse("the playback mode", original, 176);
+  mustRefuse("the last byte of the fixed header", original, 183);
 
   // Past the fixed header and before the signature: the tables and the metadata, which
   // is where a capture says what it is. Altering a title has to fail as hard as altering
   // a chunk offset.
-  const size_t afterHeader = 176;
+  const size_t afterHeader = 184;
   const size_t beforeSignature = size_t(structural) - 80;
   mustRefuse("the first table byte", original, afterHeader);
   mustRefuse("the middle of the tables", original, (afterHeader + beforeSignature) / 2);

@@ -36,7 +36,10 @@ constexpr const char *CastShadows = "castshadows";
 constexpr const char *FitScene = "fitscene";
 } // namespace parm
 
+/** How a capture runs past its ends: the capture's own playback mode, in the same order. */
 enum class LoopMode { None = 0, Loop = 1, PingPong = 2 };
+/** The Loop menu: From Capture, then the three modes in LoopMode's order. */
+constexpr int LoopFromCapture = 0;
 enum class UpAxis { Y = 0, Z = 1, NegY = 2 };
 
 /** The capture's controls, terminated by an empty template. */

@@ -35,8 +35,8 @@ public:
   // wants positions keeps these and skips the rest of the base layer.
   static bool usedByPositions(uint32_t attribute);
 
-  // secondsPerTick comes from the header (timeNumerator / timeDenominator); the
-  // default is the 30 Hz timebase every MINT import uses.
+  // secondsPerTick comes from the header (timeNumerator / timeDenominator), which the
+  // encoder takes from the source; the default is only a fallback, 30 Hz.
   explicit FrameDecoder(const DecodedChunk &, double secondsPerTick = 1.0 / 30.0,
                         Contents = Contents::Frame);
   Contents contents() const { return held; }

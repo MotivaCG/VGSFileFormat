@@ -41,6 +41,12 @@ enum class Coding { Compressed, Plain };
 /** What an audio track is, since the container stores it as delivered. */
 enum class AudioFormat { Mp3 = 1, Aac = 2, Opus = 3, Wav = 4 };
 
+/**
+ * How a player should run the capture unless its user chooses otherwise: once, holding
+ * the last frame; over and over; or there and back. Loop unless set.
+ */
+enum class PlaybackMode { Once = 0, Loop = 1, PingPong = 2 };
+
 /** What a thumbnail is. */
 enum class ImageFormat { Png = 1, Jpeg = 2, Webp = 3 };
 
@@ -76,6 +82,8 @@ public:
   void setSphericalHarmonicDegree(uint32_t degree);
   /** Where this capture begins on an external timeline, for syncing with other media. */
   void setStartTick(uint64_t);
+  /** How players should run it by default. Loop unless set. */
+  void setPlaybackMode(PlaybackMode);
   /** Rows per page. The default suits every capture seen so far; 1024 to 1048576. */
   void setPageRows(uint32_t);
 

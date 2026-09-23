@@ -20,7 +20,7 @@ Blender 5.3 or later, Windows x64.
   Blender's dark interface): capture path, phase and start frame (the same setting
   twice: where in the capture the scene's first frame falls, as a fraction and as a
   capture frame counted from 0), speed
-  (negative plays backwards from the phase), loop (No Loop, Loop, Ping-Pong),
+  (negative plays backwards from the phase), loop (From Capture, No Loop, Loop, Ping-Pong),
   viewport density (0.01 to 1, falling faster than the slider: 0.5 draws about a fifth
   of the splats in the viewport; renders draw them all),
   spherical harmonics, *Harmonics: Off While Playing* (on by default), *Fit Scene*,
@@ -37,7 +37,7 @@ after fixing the path.
 | Setting | Value | Why |
 |---|---|---|
 | Up axis on import | Y Up | Captures are Y up. Rotating the object is exact and free; converting the data would mean rotating quaternions and harmonics too. |
-| Loop | Loop | Captures are short takes; holding the last frame surprised people. |
+| Loop | From Capture | The capture carries its author's playback mode (once, loop, ping-pong; loop unless set). The other entries override it. |
 | Harmonics: Off While Playing | on | A third of the data to copy per frame; harmonics come back when paused, scrubbed or rendered. |
 | Keep splats out of `.blend` | on | A frame is tens of megabytes and is decoded again on load. |
 | Frames decoded ahead | 4 | About 240 bytes per splat per frame with harmonics. |
