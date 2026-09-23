@@ -709,7 +709,13 @@ const Frame &Capture::setTime(double seconds, bool includeSphericalHarmonics) {
   State &s = *state;
   const size_t index = selectChunk(seconds, includeSphericalHarmonics ? FullMask : BaseMask);
   try {
-    s.evaluator->evaluateInto(s.normalizedTime, includeSphericalHarmonics, &s.decoded);
+    // The same cores that decompress a chunk's pages evaluate the frame, as that many
+    // ranges of splats. With one thread, the default, it all stays on this one.
+    s.evaluator->evaluateInto(
+        s.normalizedTime, includeSphericalHarmonics, &s.decoded, s.threads,
+        [&s](size_t count, const std::function<void(size_t)> &body) {
+          s.runParallel(count, body);
+        });
   } catch (const std::exception &e) {
     throw Error(e.what());
   }

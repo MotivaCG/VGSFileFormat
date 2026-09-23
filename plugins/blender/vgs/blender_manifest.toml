@@ -1,0 +1,20 @@
+schema_version = "1.0.0"
+
+id = "vgs"
+version = "1.0.0"
+name = "VGS (4DGS fileformat)"
+tagline = "Import and play 4D Gaussian splat captures (.vgs, .pgs)"
+maintainer = "Víctor M. Feliz Santiago"
+type = "add-on"
+
+tags = ["Import-Export", "Animation"]
+
+blender_version_min = "5.3.0"
+
+license = ["SPDX:GPL-3.0-or-later"]
+
+# The decoder ships as a native library inside bin/, built for this platform only.
+platforms = ["windows-x64"]
+
+[permissions]
+files = "Reads .vgs and .pgs captures from disk"

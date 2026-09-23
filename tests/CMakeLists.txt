@@ -32,6 +32,12 @@ add_test(NAME keyleak_encoder
          COMMAND vgs_keyleak --present
                  $<TARGET_FILE:vgsencoder>
                  $<TARGET_FILE:vgsencode>)
+# The Blender add-on's library compiles the decoder's sources itself rather than linking
+# the decoder, so it is its own artefact and needs its own check.
+if(TARGET vgsblender)
+  add_test(NAME keyleak_blender
+           COMMAND vgs_keyleak --absent $<TARGET_FILE:vgsblender>)
+endif()
 
 # ---- with a capture ---------------------------------------------------------------------
 

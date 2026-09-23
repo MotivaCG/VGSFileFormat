@@ -1,5 +1,6 @@
 #pragma once
 #include "vgscodec.h"
+#include <functional>
 #include <map>
 #include <string>
 namespace vgs {
@@ -44,7 +45,16 @@ public:
   // tens of megabytes of arrays, and returning one by value allocates and zero-fills all
   // of them every call, only to overwrite them immediately. Handing the same frame back
   // reuses the buffers: resizing to a size a vector already has does nothing.
-  void evaluateInto(double normalizedTime, bool includeSh, Frame *) const;
+  //
+  // `pieces` above 1 splits the splats into that many ranges and hands them to
+  // `parallel`, which runs body(0) .. body(count - 1) however it likes and returns when
+  // all are done. Every splat is computed from shared tables and from nothing another
+  // splat writes, so the frame is the same bit for bit however it is split. With 1, or
+  // without `parallel`, all of it runs on the calling thread.
+  using Parallel =
+      std::function<void(size_t count, const std::function<void(size_t)> &body)>;
+  void evaluateInto(double normalizedTime, bool includeSh, Frame *, size_t pieces = 1,
+                    const Parallel &parallel = {}) const;
   // Positions alone, as [splat][xyz]. A renderer that evaluates everything else on the
   // GPU still needs these on the CPU when it sorts splats by depth there, and reading
   // them back from the GPU costs tens of milliseconds on a phone.
@@ -70,7 +80,5 @@ private:
   Contents held = Contents::Frame;
   void buildBasis(const Block &, uint64_t, float, bool, bool,
                   SharedBasis *) const;
-  void decodeGroupColor(const Block &, const Block &, const SharedBasis &,
-                        std::vector<float> *) const;
 };
 } // namespace vgs

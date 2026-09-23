@@ -72,9 +72,9 @@ capture.prepare(capture.chunkAt(now + 1.0), 8);
 A `Capture` belongs to one thread. Run it on its own and let the renderer draw the last
 frame that was ready rather than wait for the next one.
 
-`setThreadCount` decompresses several pages of a chunk at once, and `setParallelFor` sends
-that work to your own task system instead of letting the decoder make threads. Both are
-off by default. Use them when you have fewer captures than cores; several captures are
+`setThreadCount` decompresses several pages of a chunk at once and evaluates a frame in
+as many ranges of splats, and `setParallelFor` sends that work to your own task system
+instead of letting the decoder make threads. Both are off by default. Use them when you have fewer captures than cores; several captures are
 already parallel on their own, one `Capture` each on its own thread.
 
 ### Letting your shader do the work

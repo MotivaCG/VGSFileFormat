@@ -175,6 +175,54 @@ RankTable buildRanks(const char *boundaryBytes, int boundaryCount,
   return table;
 }
 
+// buildRanks' arithmetic for one splat at a time. Evaluating a frame used to build the
+// whole table for every group on every frame - two arrays the size of the group, filled
+// on one thread, for values that never change within a chunk. This answers the same
+// question from the boundaries alone, so any thread can ask it for any range of splats.
+class RankLookup {
+public:
+  RankLookup() = default;
+  RankLookup(const char *boundaryBytes, int boundaryCount, uint64_t splats)
+      : count(boundaryCount) {
+    if (boundaryCount <= 0 || boundaryCount > kMaxBoundaries)
+      throw Error("invalid rank boundaries");
+    for (int j = 0; j < count; ++j)
+      boundaries[j] = readU32(boundaryBytes + 4 * j);
+    for (int j = 1; j < count; ++j) {
+      starts[j] = boundaries[j - 1];
+      rankStart[j] = rankStart[j - 1] + uint64_t(j) * (boundaries[j - 1] - starts[j - 1]);
+    }
+    // buildRanks throws for a splat that lies past every boundary. If any does, the last
+    // one does, so checking it here is the same check, made once and before any thread
+    // starts.
+    if (splats) {
+      bool past = true;
+      for (int j = 0; j < count; ++j)
+        past = past && boundaries[j] <= splats - 1;
+      if (past)
+        throw Error("invalid rank boundaries");
+    }
+  }
+
+  // The splat's number of terms, 1-based, and the index of its first term.
+  void find(uint64_t id, uint32_t *rank, uint64_t *offset) const {
+    int below = 0;
+    while (below < count && boundaries[below] <= id)
+      ++below;
+    *rank = uint32_t(below + 1);
+    *offset = rankStart[below] + uint64_t(below + 1) * (id - starts[below]);
+  }
+
+private:
+  static constexpr int kMaxBoundaries = 8;
+  int count = 0;
+  uint64_t boundaries[kMaxBoundaries] = {}, starts[kMaxBoundaries] = {},
+           rankStart[kMaxBoundaries] = {};
+};
+
+// Below this many splats a piece is not worth handing to another thread.
+constexpr uint64_t kSplatsPerPiece = 16384;
+
 float clamp01(float v) { return std::clamp(v, 0.0f, 1.0f); }
 constexpr double sphericalHarmonicC0() { return 0.28209479177387814; }
 } // namespace
@@ -269,37 +317,6 @@ void FrameDecoder::buildBasis(const Block &shared, uint64_t frame, float alpha,
   }
 }
 
-void FrameDecoder::decodeGroupColor(const Block &group, const Block &shared,
-                                    const SharedBasis &basis,
-                                    std::vector<float> *colorDc) const {
-  const uint64_t n = group.splats;
-  const uint64_t stride = shared.sh0Entries / 5; // 1024 rows per stage
-  const char *lutBytes = shared.array("sh0_base_lut");
-  const char *baseIndices = group.array("sh0_base_indices");
-  const char *words = group.array("sh0_rq_indices");
-
-  float lut[256];
-  for (int i = 0; i < 256; ++i)
-    lut[i] = readHalf(lutBytes + 2 * i);
-
-  colorDc->resize(int(n * 3));
-  const float c0 = float(sphericalHarmonicC0());
-  for (uint64_t i = 0; i < n; ++i) {
-    const uint8_t *idx = reinterpret_cast<const uint8_t *>(baseIndices + i * 3);
-    float sh0[3] = {lut[idx[0]], lut[idx[1]], lut[idx[2]]};
-
-    const uint64_t word = readU64(words + i * 8);
-    for (int k = 0; k < 5; ++k) {
-      const uint64_t stage = (word >> (12 * k)) & 0xFFFull;
-      const float *row = basis.sh0.data() + (uint64_t(k) * stride + stage) * 3;
-      for (int c = 0; c < 3; ++c)
-        sh0[c] += row[c];
-    }
-    for (int c = 0; c < 3; ++c)
-      (*colorDc)[int(i * 3 + uint64_t(c))] = 0.5f + c0 * sh0[c];
-  }
-}
-
 void FrameDecoder::evaluatePositions(double normalized,
                                      std::vector<float> *out) const {
   if (!std::isfinite(normalized) || normalized < 0 || normalized >= 1)
@@ -357,15 +374,15 @@ void FrameDecoder::evaluatePositions(double normalized,
       }
     } else {
       const char *baseBytes = group.array("position_base");
-      const RankTable ranks =
-          buildRanks(group.array("position_rank_boundaries"), 4, n);
+      const RankLookup ranks(group.array("position_rank_boundaries"), 4, n);
       const char *terms = group.array("position_rq_coefficients");
       for (uint64_t i = 0; i < n; ++i) {
         float p[3];
         unpackPosition(readU64(baseBytes + i * 8), group.positionMin,
                        group.positionMax, p);
-        const uint32_t rank = ranks.rank[int(i)];
-        const uint64_t first = ranks.offset[int(i)];
+        uint32_t rank = 0;
+        uint64_t first = 0;
+        ranks.find(i, &rank, &first);
         for (uint32_t k = 0; k < rank; ++k) {
           const uint32_t packed = readU32(terms + (first + k) * 4);
           const float weight = halfToFloat(uint16_t(packed >> 16));
@@ -387,7 +404,8 @@ Frame FrameDecoder::evaluate(double normalized, bool includeSh) const {
   return result;
 }
 
-void FrameDecoder::evaluateInto(double normalized, bool includeSh, Frame *out) const {
+void FrameDecoder::evaluateInto(double normalized, bool includeSh, Frame *out,
+                                size_t pieces, const Parallel &parallel) const {
   if (held == Contents::Positions)
     throw Error("this chunk was decoded for positions only");
   if (!std::isfinite(normalized) || normalized < 0 || normalized >= 1)
@@ -444,11 +462,17 @@ void FrameDecoder::evaluateInto(double normalized, bool includeSh, Frame *out) c
     shPlanes = 0;
   const uint64_t shCoefficients =
       shPlanes == 5 ? 15 : shPlanes == 3 ? 8 : shPlanes * 3;
+  const bool evaluateSh = includeSh && shCoefficients;
   out->shCoefficients = int(includeSh ? shCoefficients : 0);
-  if (includeSh && shCoefficients)
+  if (evaluateSh)
     out->shRest.resize(size_t(total * shCoefficients * 3));
   else
     out->shRest.clear();
+
+  // ---- what every splat reads, looked up once ------------------------------------
+  //
+  // Everything that can throw happens here, on the calling thread, so that the ranges
+  // below are plain arithmetic whichever thread runs them.
 
   float scaleLut[256];
   {
@@ -457,15 +481,87 @@ void FrameDecoder::evaluateInto(double normalized, bool includeSh, Frame *out) c
       scaleLut[i] = readF32(bytes + 4 * i);
   }
 
-  uint64_t written = 0;
-  for (const Block *group : groups) {
+  float sh0Lut[256];
+  {
+    const char *bytes = shared->array("sh0_base_lut");
+    for (int i = 0; i < 256; ++i)
+      sh0Lut[i] = readHalf(bytes + 2 * i);
+  }
+  const uint64_t sh0Stride = shared->sh0Entries / 5; // 1024 rows per stage
+  const uint64_t opacityStride = shared->opacityEntries / 5;
+  const float c0 = float(sphericalHarmonicC0());
+
+  const char *shStaticBytes = nullptr, *shTemporalFrame = nullptr;
+  const uint64_t ns = shared->shStaticEntries, nt = shared->shTemporalEntries;
+  if (evaluateSh) {
+    shStaticBytes = shared->array("sh_static_codebooks");
+    // The temporal codebook is read at `frame` with no interpolation to the
+    // next sample, unlike every other temporal table. See 6.8.
+    shTemporalFrame = shared->array("sh_temporal_codebooks") +
+                      frame * int64_t(shPlanes) * 3 * nt * 3 * 2;
+  }
+
+  struct GroupPlan {
+    const Block *block = nullptr;
+    uint64_t first = 0; // where its splats start in the frame
+    const char *positions = nullptr, *positionTerms = nullptr;
+    const char *rotations = nullptr, *rotationTerms = nullptr;
+    RankLookup positionRanks, rotationRanks;
+    const uint8_t *scaleIndices = nullptr, *lifetimes = nullptr;
+    const char *opacityWords = nullptr, *sh0Indices = nullptr, *sh0Words = nullptr;
+    const char *shStaticIndices = nullptr, *shTemporalIndices = nullptr;
+  };
+  std::vector<GroupPlan> plans;
+  plans.reserve(groups.size());
+  {
+    uint64_t first = 0;
+    for (const Block *group : groups) {
+      GroupPlan plan;
+      plan.block = group;
+      plan.first = first;
+      const uint64_t n = group->splats;
+      if (group->positionPerSample) {
+        plan.positions = group->array("position_samples");
+      } else {
+        plan.positions = group->array("position_base");
+        plan.positionRanks = RankLookup(group->array("position_rank_boundaries"), 4, n);
+        plan.positionTerms = group->array("position_rq_coefficients");
+      }
+      if (group->rotationPerSample) {
+        plan.rotations = group->array("rotation_samples");
+      } else {
+        plan.rotations = group->array("rotation_base");
+        plan.rotationRanks = RankLookup(group->array("rotation_rank_boundaries"), 5, n);
+        plan.rotationTerms = group->array("rotation_rq_indices");
+      }
+      plan.scaleIndices = reinterpret_cast<const uint8_t *>(group->array("scale_indices"));
+      plan.opacityWords = group->array("opacity_rq_indices");
+      plan.lifetimes = reinterpret_cast<const uint8_t *>(group->array("lifetimes"));
+      plan.sh0Indices = group->array("sh0_base_indices");
+      plan.sh0Words = group->array("sh0_rq_indices");
+      if (evaluateSh) {
+        plan.shStaticIndices = group->array("sh_static_indices");
+        plan.shTemporalIndices = group->array("sh_temporal_indices");
+      }
+      plans.push_back(plan);
+      first += n;
+    }
+  }
+
+  // ---- one range of one group's splats ----------------------------------------------
+  //
+  // Every splat depends on the shared tables above and on nothing another splat writes,
+  // so any split of the frame gives exactly the same result.
+
+  const auto evaluateGroupRange = [&](const GroupPlan &plan, uint64_t begin, uint64_t end) {
+    const Block *group = plan.block;
     const uint64_t n = group->splats;
+    const uint64_t written = plan.first;
 
     // --- positions -------------------------------------------------------
     if (group->positionPerSample) {
-      const char *base = group->array("position_samples");
-      for (uint64_t i = 0; i < n; ++i) {
-        const char *row = base + (i * samples) * 8;
+      for (uint64_t i = begin; i < end; ++i) {
+        const char *row = plan.positions + (i * samples) * 8;
         float a[3], b[3];
         unpackPosition(readU64(row + frame * 8), group->positionMin,
                        group->positionMax, a);
@@ -475,22 +571,19 @@ void FrameDecoder::evaluateInto(double normalized, bool includeSh, Frame *out) c
         // chunk time, not with the fraction inside the interval. It looks
         // like a defect, but it is what the runtime does. See 6.4.
         for (int c = 0; c < 3; ++c)
-          out->position[int((written + i) * 3 + uint64_t(c))] =
+          out->position[size_t((written + i) * 3 + uint64_t(c))] =
               a[c] + (b[c] - a[c]) * r;
       }
     } else {
-      const char *baseBytes = group->array("position_base");
-      const RankTable ranks =
-          buildRanks(group->array("position_rank_boundaries"), 4, n);
-      const char *terms = group->array("position_rq_coefficients");
-      for (uint64_t i = 0; i < n; ++i) {
+      for (uint64_t i = begin; i < end; ++i) {
         float p[3];
-        unpackPosition(readU64(baseBytes + i * 8), group->positionMin,
+        unpackPosition(readU64(plan.positions + i * 8), group->positionMin,
                        group->positionMax, p);
-        const uint32_t rank = ranks.rank[int(i)];
-        const uint64_t first = ranks.offset[int(i)];
+        uint32_t rank = 0;
+        uint64_t first = 0;
+        plan.positionRanks.find(i, &rank, &first);
         for (uint32_t k = 0; k < rank; ++k) {
-          const uint32_t packed = readU32(terms + (first + k) * 4);
+          const uint32_t packed = readU32(plan.positionTerms + (first + k) * 4);
           const uint32_t index = packed & 0xFFFFu;
           // The high half is the weight's raw binary16 bits, not a
           // normalised integer: real weights run well outside [-1,1].
@@ -500,15 +593,14 @@ void FrameDecoder::evaluateInto(double normalized, bool includeSh, Frame *out) c
             p[c] += weight * row[c];
         }
         for (int c = 0; c < 3; ++c)
-          out->position[int((written + i) * 3 + uint64_t(c))] = p[c];
+          out->position[size_t((written + i) * 3 + uint64_t(c))] = p[c];
       }
     }
 
     // --- rotations -------------------------------------------------------
     if (group->rotationPerSample) {
-      const char *base = group->array("rotation_samples");
-      for (uint64_t i = 0; i < n; ++i) {
-        const char *row = base + (i * samples) * 4;
+      for (uint64_t i = begin; i < end; ++i) {
+        const char *row = plan.rotations + (i * samples) * 4;
         float q0[4], q1[4];
         unpackQuaternion(readU32(row + frame * 4), q0);
         unpackQuaternion(readU32(row + (frame + 1) * 4), q1);
@@ -523,22 +615,19 @@ void FrameDecoder::evaluateInto(double normalized, bool includeSh, Frame *out) c
         }
         norm = std::max(std::sqrt(norm), 1e-20f);
         for (int c = 0; c < 4; ++c)
-          out->rotation[int((written + i) * 4 + uint64_t(c))] = q[c] / norm;
+          out->rotation[size_t((written + i) * 4 + uint64_t(c))] = q[c] / norm;
       }
     } else {
-      const char *baseBytes = group->array("rotation_base");
-      const RankTable ranks =
-          buildRanks(group->array("rotation_rank_boundaries"), 5, n);
-      const char *terms = group->array("rotation_rq_indices");
-      for (uint64_t i = 0; i < n; ++i) {
+      for (uint64_t i = begin; i < end; ++i) {
         float base[4];
-        unpackQuaternion(readU32(baseBytes + i * 4), base);
+        unpackQuaternion(readU32(plan.rotations + i * 4), base);
 
         float residual[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-        const uint32_t rank = ranks.rank[int(i)];
-        const uint64_t first = ranks.offset[int(i)];
+        uint32_t rank = 0;
+        uint64_t first = 0;
+        plan.rotationRanks.find(i, &rank, &first);
         for (uint32_t k = 0; k < rank; ++k) {
-          const uint16_t index = readU16(terms + (first + k) * 2);
+          const uint16_t index = readU16(plan.rotationTerms + (first + k) * 2);
           const float *row = basis.rotation.data() + uint64_t(index) * 4;
           for (int c = 0; c < 4; ++c)
             residual[c] += row[c];
@@ -571,92 +660,97 @@ void FrameDecoder::evaluateInto(double normalized, bool includeSh, Frame *out) c
           norm += q[c] * q[c];
         norm = std::max(std::sqrt(norm), 1e-20f);
         for (int c = 0; c < 4; ++c)
-          out->rotation[int((written + i) * 4 + uint64_t(c))] = q[c] / norm;
+          out->rotation[size_t((written + i) * 4 + uint64_t(c))] = q[c] / norm;
       }
     }
 
-    // --- scale, opacity, lifetime, color ---------------------------------
-    {
-      const uint8_t *scaleIdx =
-          reinterpret_cast<const uint8_t *>(group->array("scale_indices"));
-      const char *opacityWords = group->array("opacity_rq_indices");
-      const uint8_t *lifetimes =
-          reinterpret_cast<const uint8_t *>(group->array("lifetimes"));
-      const uint64_t opacityStride = shared->opacityEntries / 5;
+    // --- scale, opacity, lifetime ------------------------------------------
+    for (uint64_t i = begin; i < end; ++i) {
+      for (int c = 0; c < 3; ++c)
+        out->scale[size_t((written + i) * 3 + uint64_t(c))] =
+            scaleLut[plan.scaleIndices[i * 3 + uint64_t(c)]];
 
-      for (uint64_t i = 0; i < n; ++i) {
+      const uint64_t word = readU64(plan.opacityWords + i * 8);
+      float opacity = 0.0f;
+      for (int k = 0; k < 5; ++k) {
+        const uint64_t stage = (word >> (12 * k)) & 0xFFFull;
+        opacity += basis.opacity[size_t(uint64_t(k) * opacityStride + stage)];
+      }
+      out->opacity[size_t(written + i)] = clamp01(opacity);
+
+      const uint8_t begins = plan.lifetimes[i * 2];
+      const uint8_t ends = plan.lifetimes[i * 2 + 1];
+      out->active[size_t(written + i)] =
+          (frame >= begins && frame + 1 <= ends) ? uint8_t(1) : uint8_t(0);
+    }
+
+    // --- colour ------------------------------------------------------------
+    for (uint64_t i = begin; i < end; ++i) {
+      const uint8_t *idx = reinterpret_cast<const uint8_t *>(plan.sh0Indices + i * 3);
+      float sh0[3] = {sh0Lut[idx[0]], sh0Lut[idx[1]], sh0Lut[idx[2]]};
+
+      const uint64_t word = readU64(plan.sh0Words + i * 8);
+      for (int k = 0; k < 5; ++k) {
+        const uint64_t stage = (word >> (12 * k)) & 0xFFFull;
+        const float *row = basis.sh0.data() + (uint64_t(k) * sh0Stride + stage) * 3;
         for (int c = 0; c < 3; ++c)
-          out->scale[int((written + i) * 3 + uint64_t(c))] =
-              scaleLut[scaleIdx[i * 3 + uint64_t(c)]];
-
-        const uint64_t word = readU64(opacityWords + i * 8);
-        float opacity = 0.0f;
-        for (int k = 0; k < 5; ++k) {
-          const uint64_t stage = (word >> (12 * k)) & 0xFFFull;
-          opacity += basis.opacity[int(uint64_t(k) * opacityStride + stage)];
-        }
-        out->opacity[int(written + i)] = clamp01(opacity);
-
-        const uint8_t begin = lifetimes[i * 2];
-        const uint8_t end = lifetimes[i * 2 + 1];
-        out->active[int(written + i)] =
-            (frame >= begin && frame + 1 <= end) ? uint8_t(1) : uint8_t(0);
+          sh0[c] += row[c];
       }
-    }
-
-    {
-      std::vector<float> color;
-      decodeGroupColor(*group, *shared, basis, &color);
-      std::memcpy(out->colorDc.data() + written * 3, color.data(),
-                  size_t(n * 3) * sizeof(float));
+      for (int c = 0; c < 3; ++c)
+        out->colorDc[size_t((written + i) * 3 + uint64_t(c))] = 0.5f + c0 * sh0[c];
     }
 
     // --- higher-order spherical harmonics --------------------------------
-    if (includeSh && shCoefficients) {
-      const char *staticBytes = shared->array("sh_static_codebooks");
-      const char *temporalBytes = shared->array("sh_temporal_codebooks");
-      const char *staticIdx = group->array("sh_static_indices");
-      const char *temporalIdx = group->array("sh_temporal_indices");
-      const uint64_t ns = shared->shStaticEntries;
-      const uint64_t nt = shared->shTemporalEntries;
-      // The temporal codebook is read at `frame` with no interpolation to the
-      // next sample, unlike every other temporal table. See 6.8.
-      const char *temporalFrame =
-          temporalBytes + frame * int64_t(shPlanes) * 3 * nt * 3 * 2;
+    if (evaluateSh) {
       static const int kShift[3] = {20, 10, 0};
-
       for (uint64_t g = 0; g < shPlanes; ++g) {
         // The index arrays are plane-major: all N words of group 0, then
         // all N of group 1, and so on.
-        const char *sPlane = staticIdx + g * n * 4;
-        const char *tPlane = temporalIdx + g * n * 4;
-        for (uint64_t i = 0; i < n; ++i) {
+        const char *sPlane = plan.shStaticIndices + g * n * 4;
+        const char *tPlane = plan.shTemporalIndices + g * n * 4;
+        for (uint64_t i = begin; i < end; ++i) {
           const uint32_t sWord = readU32(sPlane + i * 4);
           const uint32_t tWord = readU32(tPlane + i * 4);
           for (int k = 0; k < 3; ++k) {
             const uint32_t si = (sWord >> kShift[k]) & 0x3FFu;
             const uint32_t ti = (tWord >> kShift[k]) & 0x3FFu;
             const char *sEntry =
-                staticBytes + (((g * 3 + uint64_t(k)) * ns) + si) * 3 * 2;
+                shStaticBytes + (((g * 3 + uint64_t(k)) * ns) + si) * 3 * 2;
             const char *tEntry =
-                temporalFrame + (((g * 3 + uint64_t(k)) * nt) + ti) * 3 * 2;
+                shTemporalFrame + (((g * 3 + uint64_t(k)) * nt) + ti) * 3 * 2;
             const uint64_t coefficient = g * 3 + uint64_t(k);
             if (coefficient >= shCoefficients)
               break;
             for (int c = 0; c < 3; ++c) {
-              out->shRest[int((written + i) * shCoefficients * 3 +
-                              coefficient * 3 + uint64_t(c))] =
+              out->shRest[size_t((written + i) * shCoefficients * 3 +
+                                 coefficient * 3 + uint64_t(c))] =
                   readHalf(sEntry + c * 2) + readHalf(tEntry + c * 2);
             }
           }
         }
       }
     }
+  };
 
-    written += n;
+  // A range of the whole frame, which may cross from one group into the next.
+  const auto evaluateRange = [&](uint64_t begin, uint64_t end) {
+    for (const GroupPlan &plan : plans) {
+      const uint64_t groupEnd = plan.first + plan.block->splats;
+      const uint64_t from = std::max(begin, plan.first), to = std::min(end, groupEnd);
+      if (from < to)
+        evaluateGroupRange(plan, from - plan.first, to - plan.first);
+    }
+  };
+
+  const size_t useful = size_t(std::max<uint64_t>(1, total / kSplatsPerPiece));
+  const size_t split = parallel ? std::min(pieces, useful) : 1;
+  if (split <= 1) {
+    evaluateRange(0, total);
+    return;
   }
-
-
+  parallel(split, [&](size_t piece) {
+    evaluateRange(total * piece / split, total * (piece + 1) / split);
+  });
 }
 
 const char *FrameDecoder::Block::array(const char *name) const {

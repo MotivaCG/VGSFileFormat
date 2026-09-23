@@ -30,6 +30,7 @@ option(VGS_BUILD_TOOLS "Build the command line encoder and the decoder samples" 
 option(VGS_BUILD_TESTS "Build the test programs" ON)
 option(VGS_BUILD_WASM "Build the WebAssembly decoder instead of the native libraries" OFF)
 option(VGS_BUILD_SHARED "Build the libraries as DLLs exporting the C interface only" OFF)
+option(VGS_BUILD_PLUGINS "Build the host integrations in plugins/: the Blender add-on" ON)
 
 # What the decoder keeps decoded while playing, as a starting point. Empty means the
 # built-in default for the target, which differs between a native build and a browser;
@@ -124,6 +125,11 @@ if(NOT VGS_BUILD_WASM)
   add_subdirectory(encoder)
 endif()
 add_subdirectory(decoder)
+
+# Native only, like the encoder: a plugin is loaded into a desktop application.
+if(VGS_BUILD_PLUGINS AND NOT VGS_BUILD_WASM)
+  add_subdirectory(plugins)
+endif()
 
 if(VGS_BUILD_TESTS AND NOT VGS_BUILD_WASM)
   enable_testing()
