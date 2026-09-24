@@ -47,6 +47,13 @@ enum class AudioFormat { Mp3 = 1, Aac = 2, Opus = 3, Wav = 4 };
  */
 enum class PlaybackMode { Once = 0, Loop = 1, PingPong = 2 };
 
+/**
+ * How the performer moved while captured. Reserved: nothing reads it yet, and captures
+ * are written InPlace unless set. A walking capture stays where it was captured, and its
+ * moving speed says how fast a player should carry it along.
+ */
+enum class MotionType { InPlace = 0, Walking = 1 };
+
 /** What a thumbnail is. */
 enum class ImageFormat { Png = 1, Jpeg = 2, Webp = 3 };
 
@@ -84,6 +91,10 @@ public:
   void setStartTick(uint64_t);
   /** How players should run it by default. Loop unless set. */
   void setPlaybackMode(PlaybackMode);
+  /** Reserved: how the performer moved while captured. InPlace unless set. */
+  void setMotionType(MotionType);
+  /** Reserved: how fast a walking capture moves, in its own units per second. 0 unless set. */
+  void setMovingSpeed(float);
   /** Rows per page. The default suits every capture seen so far; 1024 to 1048576. */
   void setPageRows(uint32_t);
 

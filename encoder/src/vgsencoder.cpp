@@ -133,6 +133,12 @@ void Encoder::setPlaybackMode(PlaybackMode mode) {
   state->options.playbackMode = vgs::PlaybackMode(uint32_t(mode));
 }
 
+void Encoder::setMotionType(MotionType type) {
+  state->options.motionType = vgs::MotionType(uint32_t(type));
+}
+
+void Encoder::setMovingSpeed(float speed) { state->options.movingSpeed = speed; }
+
 void Encoder::setPageRows(uint32_t rows) { state->options.pageRows = rows; }
 
 void Encoder::setId(std::string v) { state->options.metadata.id = std::move(v); }

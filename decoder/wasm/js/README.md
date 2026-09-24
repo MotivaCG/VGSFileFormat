@@ -27,6 +27,11 @@ The parsing, the signature check and the decoding all happen inside the module, 
 from the same C++ as the native library. This file fetches bytes and hands them over; it
 does not know the format, so there is no second implementation of it to keep in step.
 
+The header is getters: `duration`, `frameCount`, `frameRate` (the capture's own, not
+always 30), `shDegree`, `bounds`, and `playbackMode`, one of the exported `PlaybackMode`
+values: how the capture's author means it to play. `motionType` and `movingSpeed` are
+reserved for later and read `MotionType.inPlace` and 0 for now.
+
 Anything wrong with a capture throws `VgsError` whose message is exactly
 `invalid 4dgs capture`, the same string the native library uses.
 

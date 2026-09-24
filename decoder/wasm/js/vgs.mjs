@@ -29,7 +29,7 @@ import { BufferedSource, BytesSource, toSource } from './vgssource.mjs';
 /** What a reader says about a capture it cannot vouch for. */
 export const INVALID_CAPTURE = 'invalid 4dgs capture';
 
-const FIXED_HEADER_SIZE = 184;
+const FIXED_HEADER_SIZE = 192;
 
 // Field and attribute numbers, matching the enums in vgswasm.cpp.
 const Field = {
@@ -40,7 +40,7 @@ const Number_ = {
   duration: 0, frameCount: 1, frameRate: 2, startSeconds: 3, shDegree: 4,
   maxSplatsPerFrame: 5, fileSize: 6, createdMillis: 7, chunkCount: 8,
   signatureKeyId: 9, signatureAlgorithm: 10, signedBytes: 11, version: 12, isPlain: 13,
-  playbackMode: 14,
+  playbackMode: 14, motionType: 15, movingSpeed: 16,
 };
 const Chunk = { offset: 0, size: 1, startSeconds: 2, endSeconds: 3, splats: 4 };
 const Attribute = {
@@ -71,6 +71,8 @@ export const Output = { floats: 0, packed: 1 };
 export const Detail = Object.freeze({ positions: 0, base: 1, full: 2 });
 /** How a capture is meant to be played; see VgsCapture.playbackMode. */
 export const PlaybackMode = Object.freeze({ once: 0, loop: 1, pingPong: 2 });
+/** Reserved, not used by any player yet; see VgsCapture.motionType. */
+export const MotionType = Object.freeze({ inPlace: 0, walking: 1 });
 
 // The layout array written by vgs_chunk_layout, whose shape is described in vgswasm.cpp.
 const LAYOUT_HEADER = 4;
@@ -259,6 +261,10 @@ export class VgsCapture {
    * the last frame; loop; or ping-pong. A player starts it this way unless told otherwise.
    */
   get playbackMode() { return this.#module._vgs_number(Number_.playbackMode); }
+  /** Reserved: how the performer moved while captured, one of MotionType. */
+  get motionType() { return this.#module._vgs_number(Number_.motionType); }
+  /** Reserved: how fast a walking capture moves, in its own units per second; 0 in place. */
+  get movingSpeed() { return this.#module._vgs_number(Number_.movingSpeed); }
   get shDegree() { return this.#module._vgs_number(Number_.shDegree); }
   get maxSplatsPerFrame() { return this.#module._vgs_number(Number_.maxSplatsPerFrame); }
   get fileSize() { return this.#module._vgs_number(Number_.fileSize); }

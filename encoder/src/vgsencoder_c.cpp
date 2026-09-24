@@ -75,6 +75,15 @@ VGS_ENCODER_API void vgs_encoder_set_playback_mode(vgs_encoder *handle, int mode
     self(handle)->encoder.setPlaybackMode(vgsenc::PlaybackMode(mode));
 }
 
+VGS_ENCODER_API void vgs_encoder_set_motion_type(vgs_encoder *handle, int type) {
+  if (type >= 0 && type <= 1)
+    self(handle)->encoder.setMotionType(vgsenc::MotionType(type));
+}
+
+VGS_ENCODER_API void vgs_encoder_set_moving_speed(vgs_encoder *handle, float speed) {
+  self(handle)->encoder.setMovingSpeed(speed);
+}
+
 VGS_ENCODER_API void vgs_encoder_set_page_rows(vgs_encoder *handle, uint32_t rows) {
   self(handle)->encoder.setPageRows(rows);
 }

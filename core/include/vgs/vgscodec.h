@@ -16,13 +16,18 @@ constexpr uint32_t Magic = 0x53474656; // VFGS
 // reads a version 1 file: the layout changed where it mattered and the format had not
 // shipped, so there is no fallback path to keep honest.
 constexpr uint32_t Version = 2;
-constexpr uint32_t FixedHeaderSize = 184;
+constexpr uint32_t FixedHeaderSize = 192;
 // How a player runs the capture unless told otherwise, as its author meant it: once and
 // hold the last frame, over and over, or there and back. Carried in the fixed header, so
 // every player starts a capture the same way from the first bytes it reads; a player may
 // still offer to override it.
 enum class PlaybackMode : uint32_t { Once = 0, Loop = 1, PingPong = 2 };
 constexpr uint32_t MaxPlaybackMode = 2;
+// How the performer moved while captured: on the spot, or walking. A walking capture
+// stays where it was captured and movingSpeed says how fast a player should carry it
+// along. More kinds may follow; a reader refuses one it does not know.
+enum class MotionType : uint32_t { InPlace = 0, Walking = 1 };
+constexpr uint32_t MaxMotionType = 1;
 // Signature block: algorithm, key id, length, reserved, then the signature itself. It
 // sits immediately after the signed region, so [0, signedSize) is what was signed and
 // [signedSize, signedSize + SignatureBlockSize) is the proof - no overlap, nothing to
@@ -169,6 +174,10 @@ struct Header {
   // exports of the same take.
   uint64_t createdMillis = 0;
   PlaybackMode playbackMode = PlaybackMode::Loop;
+  MotionType motionType = MotionType::InPlace;
+  // How fast a walking capture moves, in the capture's units per second. 0 for one
+  // that stays in place.
+  float movingSpeed = 0;
   std::array<double, 6> bounds{};
   // shDegree 0..3; 0 means base colour only, with no higher-order SH layers.
   uint32_t shDegree = 3, shBasis = 1, coordinates = 1, pageRows = 65536;
@@ -229,6 +238,8 @@ struct EncodeOptions {
   Signer signer;
   uint64_t startTick = 0;
   PlaybackMode playbackMode = PlaybackMode::Loop;
+  MotionType motionType = MotionType::InPlace;
+  float movingSpeed = 0;
   uint32_t pageRows = 65536;
   // Highest spherical harmonic degree to keep, 0..3. The source carries degree 3;
   // writing less drops whole planes of three coefficients, which is where a third

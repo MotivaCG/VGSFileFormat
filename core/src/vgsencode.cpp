@@ -139,6 +139,8 @@ std::array<uint8_t, 16> deriveUuid(const Header &h) {
   }
   w.u64(h.createdMillis);
   w.u32(uint32_t(h.playbackMode));
+  w.u32(uint32_t(h.motionType));
+  w.f32(h.movingSpeed);
   const Digest d = digest(w.b.data(), w.b.size());
   std::array<uint8_t, 16> uuid{};
   std::copy(d.begin(), d.end(), uuid.begin());
@@ -184,6 +186,8 @@ W headerBytes(const Header &h) {
   w.u32(uint32_t(h.signedSize - h.headerSize));
   w.u64(h.createdMillis);
   w.u32(uint32_t(h.playbackMode));
+  w.u32(uint32_t(h.motionType));
+  w.f32(h.movingSpeed);
   w.u32(0);
   for (const auto &p : h.policies) {
     w.u32(p.attribute);
@@ -734,6 +738,12 @@ Bytes encodeMint(const uint8_t *mint, size_t size, const EncodeOptions &options,
   if (uint32_t(options.playbackMode) > MaxPlaybackMode)
     throw Error("invalid VGS playback mode");
   h.playbackMode = options.playbackMode;
+  if (uint32_t(options.motionType) > MaxMotionType)
+    throw Error("invalid VGS motion type");
+  if (!std::isfinite(options.movingSpeed))
+    throw Error("invalid VGS moving speed");
+  h.motionType = options.motionType;
+  h.movingSpeed = options.movingSpeed;
   h.layers.push_back({0, BaseLayer, 0, 0});
   if (h.shDegree) {
     h.layers.push_back({1, StaticShLayer, 0, 0});

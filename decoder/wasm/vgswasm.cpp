@@ -276,7 +276,9 @@ enum Number {
   NumberSignedBytes,
   NumberVersion,
   NumberIsPlain,
-  NumberPlaybackMode
+  NumberPlaybackMode,
+  NumberMotionType,
+  NumberMovingSpeed
 };
 
 EMSCRIPTEN_KEEPALIVE double vgs_number(int which) {
@@ -298,6 +300,8 @@ EMSCRIPTEN_KEEPALIVE double vgs_number(int which) {
   case NumberVersion: return capture->version();
   case NumberIsPlain: return capture->isPlain() ? 1 : 0;
   case NumberPlaybackMode: return double(int(capture->playbackMode()));
+  case NumberMotionType: return double(int(capture->motionType()));
+  case NumberMovingSpeed: return double(capture->movingSpeed());
   default: return 0;
   }
 }

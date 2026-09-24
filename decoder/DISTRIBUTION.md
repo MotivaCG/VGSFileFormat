@@ -41,11 +41,17 @@ vgsdec::Capture capture = vgsdec::Capture::openFile("boxing.vgs");
 printf("%s by %s, %.2f s\n", capture.metadata().title.c_str(),
        capture.metadata().author.c_str(), capture.duration());
 
-for (double t = 0; t < capture.duration(); t += 1.0 / 30) {
+// Frames at the capture's own rate: 30 for most, but 25 or 29.97 are as valid.
+for (double t = 0; t < capture.duration(); t += 1.0 / capture.frameRate()) {
   const vgsdec::Frame &frame = capture.setTime(t);
   draw(frame.positions, frame.rotations, frame.scales, frame.colors, frame.splatCount);
 }
 ```
+
+Besides its metadata, a capture says how its author means it to play:
+`capture.playbackMode()` is `Once` (hold the last frame), `Loop` or `PingPong`. Start it
+that way unless your user chooses otherwise. `motionType()` and `movingSpeed()` are
+reserved for later and read `InPlace` and 0 for now.
 
 `setTime` gives plain arrays - positions, rotations, scales, opacities, colours, spherical
 harmonics - all indexed the same way, so element `i` of each describes the same splat. The

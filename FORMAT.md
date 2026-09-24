@@ -25,8 +25,11 @@ Recreating a `.mint` byte for byte is what MGS does, which is a different format
   copyright, tags, an identifier and when it was written - before any frame is fetched.
 - An Ed25519 signature over that whole region, so whether a file is genuine is decided
   from about a kilobyte, with none of the payload downloaded.
-- Global spherical harmonic degree, timing, source bounds, the largest number of active
-  splats in any frame and the largest chunk record count.
+- Global spherical harmonic degree, timing at the source's own frame rate, source bounds,
+  the largest number of active splats in any frame and the largest chunk record count.
+- How the capture is meant to play - once, in a loop or there and back - so every player
+  starts it the same way; and, reserved for later, how the performer moved while
+  captured (in place or walking) and how fast.
 - A chunk table: where each span of time is in the file and what it covers, so a player
   can seek without reading anything else.
 - Base colour, static spherical harmonics and temporal spherical harmonics as three
@@ -194,7 +197,7 @@ derivation: it is neither random nor the SHA-1 name-based scheme of version 5.
 The two JSON metadata extras stay as they were, for whatever a project wants to carry
 that these fields do not describe.
 
-### Fixed header: 184 bytes
+### Fixed header: 192 bytes
 
 | Offset | Type | Field |
 |---:|---|---|
@@ -222,9 +225,11 @@ that these fields do not describe.
 | 164 | u32 | metadataSize |
 | 168 | u64 | createdMillis: when the file was written, milliseconds since the Unix epoch, UTC |
 | 176 | u32 | playbackMode: 0 once, 1 loop, 2 ping-pong (see below) |
-| 180 | u32 | reserved = 0 |
+| 180 | u32 | motionType: 0 in place, 1 walking (reserved, see below) |
+| 184 | f32 | movingSpeed: units per second (reserved, see below) |
+| 188 | u32 | reserved = 0 |
 
-`headerSize = 184 + 24 * policyCount + 16 * layerCount + 40 * extraCount + 80 * chunkCount`,
+`headerSize = 192 + 24 * policyCount + 16 * layerCount + 40 * extraCount + 80 * chunkCount`,
 and `signedSize = headerSize + metadataSize`. The header block holds the policies, then
 the layer table, then the extras table, then the chunk index, then the metadata.
 
@@ -243,6 +248,14 @@ write `1` unless told otherwise. It is a default, not a rule: every player start
 capture this way, and may still let its user choose another. Inside the signed region,
 so it stays what the author set. A reader refuses any other value, and a non-zero
 reserved field.
+
+**How the performer moved.** `motionType` and `movingSpeed` are reserved: written and
+checked, not yet read by any player. `motionType` says whether the performer stayed on
+the spot (`0`, the default) or walked (`1`); a walking capture is still stored where it
+was captured, and `movingSpeed`, in the capture's units per second, says how fast a
+player should carry it along. Encoders write `0` and `0.0` unless told otherwise. More
+motion types may follow; a reader refuses one it does not know, and a speed that is not
+a finite number.
 
 **Timebase.** A tick lasts `timeNumerator / timeDenominator` seconds, so 24, 25, 30, 50,
 60 and 30000/1001 are all expressible; readers accept 1 to 1000 ticks per second. Frames
@@ -281,7 +294,9 @@ layer and depends on nothing; later layers have increasing ids and depend on a l
 already declared. Kinds are 0 base, 1 static higher-order SH, 2 temporal higher-order SH,
 and 0x8000 and above for vendors. The table exists so a reader knows what it may skip and
 what a layer needs, instead of three meanings fixed in code.
-Each **extra** is four fields: u32 type, u32 format, u64 absolute offset, u64 size.
+Each **extra** is 40 bytes: u32 type, u32 format, u64 absolute offset, u64 size, then a
+16-byte digest of the extra's bytes. The digest sits in the signed table, so an extra read
+later is checked against the signature without having been fetched to open the file.
 Each **chunk index entry** is: five u64 (startTick, intervals, splats, absolute offset,
 stored size), a 16-byte digest of the chunk's directory, then six f32: a box (minXYZ,
 maxXYZ) holding every live position in the chunk. The box lets a reader cull a chunk, pick a
@@ -290,7 +305,8 @@ box is the union of these. Files written before this was measured carry the posi
 quantization range instead, which is the same on all three axes and several times the size of
 the capture: it contains the positions, so it is safe, but a reader that fits anything to it
 should intersect it with the header box. Chunk time intervals are contiguous. Policies
-come first in the header block, then the extras table, then the chunk index.
+come first in the header block, then the layer table, then the extras table, then the
+chunk index.
 
 ### Extras: metadata, thumbnails and vendor payloads
 
@@ -316,8 +332,9 @@ Types 5..0x7FFF are reserved for future revisions of this specification; a versi
 rejects them rather than guessing. Vendor payloads must be ignorable: a reader that does not
 know a vendor type skips it and still plays the capture. Metadata keys `creator`, `source`,
 `take`, `capturedAt`, `license` and `units` are reserved by this specification; anything
-else belongs under a vendor-prefixed key. Extras carry no checksum: they are not needed to
-reconstruct any frame.
+else belongs under a vendor-prefixed key. Each extra's bytes are checked against the
+digest in its table entry when they are read: none is needed to reconstruct a frame, so
+none is fetched to open the capture, but none comes back unverified either.
 
 ### Chunk directory
 
@@ -387,6 +404,7 @@ encoder.setInputFile("boxing.mint");
 encoder.setCoding(vgsenc::Coding::Compressed);   // Plain writes a .pgs
 encoder.setSphericalHarmonicDegree(2);
 encoder.setAuthor("SMN|The4DSCanner");
+encoder.setPlaybackMode(vgsenc::PlaybackMode::PingPong);   // Loop unless set
 if (!encoder.write("boxing.vgs"))
   fprintf(stderr, "%s\n", encoder.lastError().c_str());
 ```
@@ -399,6 +417,7 @@ metadata and chunk table came from the authoring pipeline unaltered.
 
 vgsdec::Capture capture = vgsdec::Capture::openFile("boxing.vgs");
 const vgsdec::Frame &frame = capture.setTime(1.5);
+// capture.frameRate(), capture.playbackMode() and the rest of the header are getters.
 ```
 
 From the command line:
@@ -406,6 +425,7 @@ From the command line:
 ```sh
 vgsencode capture.mint capture.vgs --sh 2 --author "SMN|The4DSCanner"
 vgsencode capture.mint capture.pgs --plain
+vgsencode capture.mint capture.vgs --playback pingpong   # once, loop (default) or pingpong
 vgsinfo capture.vgs
 vgsexport capture.vgs frames/        # the whole timeline as a .ply sequence
 ```

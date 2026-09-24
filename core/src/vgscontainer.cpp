@@ -7,6 +7,7 @@
 #include "vgsinternal.h"
 #include "vgspublickey.h"
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <map>
@@ -141,6 +142,8 @@ Header readHeader(const uint8_t *data, size_t size) {
   const uint32_t metadataBytes = r.u32();
   h.createdMillis = r.u64();
   const uint32_t playbackMode = r.u32();
+  const uint32_t motionType = r.u32();
+  const float movingSpeed = r.f32();
   const uint32_t reserved = r.u32();
   // Before anything is checked for sense, the structure is checked for provenance: an
   // edited header must answer "invalid 4dgs capture" whether or not the edit also broke
@@ -160,9 +163,12 @@ Header readHeader(const uint8_t *data, size_t size) {
       h.coordinates != 1 || !h.frameCount || h.frameCount != h.durationTicks ||
       h.maxSplatsPerFrame > h.maxChunkSplatRecords || h.pageRows < 1024 ||
       h.pageRows > 1048576 || h.startTick > UINT64_MAX - h.durationTicks ||
-      playbackMode > MaxPlaybackMode || reserved)
+      playbackMode > MaxPlaybackMode || motionType > MaxMotionType ||
+      !std::isfinite(movingSpeed) || reserved)
     throw Error("unsupported or malformed VGS header");
   h.playbackMode = PlaybackMode(playbackMode);
+  h.motionType = MotionType(motionType);
+  h.movingSpeed = movingSpeed;
   for (int i = 0; i < 3; ++i)
     if (h.bounds[i] > h.bounds[i + 3])
       throw Error("invalid VGS bounds");

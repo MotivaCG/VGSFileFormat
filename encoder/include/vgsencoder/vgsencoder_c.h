@@ -83,6 +83,12 @@ enum vgs_playback_mode_setting {
   VGS_ENCODE_PLAYBACK_PING_PONG = 2
 };
 VGS_ENCODER_API void vgs_encoder_set_playback_mode(vgs_encoder *, int mode);
+/* Reserved, not read by anything yet. How the performer moved while captured: in place
+ * (the default) or walking, and how fast a walking capture moves, in its own units per
+ * second (0 by default). Other types are ignored. */
+enum vgs_motion_type_setting { VGS_ENCODE_MOTION_IN_PLACE = 0, VGS_ENCODE_MOTION_WALKING = 1 };
+VGS_ENCODER_API void vgs_encoder_set_motion_type(vgs_encoder *, int type);
+VGS_ENCODER_API void vgs_encoder_set_moving_speed(vgs_encoder *, float speed);
 VGS_ENCODER_API void vgs_encoder_set_page_rows(vgs_encoder *, uint32_t rows);
 
 VGS_ENCODER_API void vgs_encoder_set_id(vgs_encoder *, const char *);

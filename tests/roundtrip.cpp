@@ -59,6 +59,8 @@ int main(int argc, char **argv) {
   encoder.setMetadataJson("{\"kind\":\"test\"}");
   // Not the default, so the test tells a written mode from one the reader made up.
   encoder.setPlaybackMode(vgsenc::PlaybackMode::PingPong);
+  encoder.setMotionType(vgsenc::MotionType::Walking);
+  encoder.setMovingSpeed(1.25f);
 
   if (!encoder.write(argv[2])) {
     std::fprintf(stderr, "encode failed: %s\n", encoder.lastError().c_str());
@@ -81,6 +83,8 @@ int main(int argc, char **argv) {
     check(!capture.isPlain(), "a .vgs reports itself as compressed");
     check(capture.playbackMode() == vgsdec::PlaybackMode::PingPong,
           "the playback mode survives");
+    check(capture.motionType() == vgsdec::MotionType::Walking, "the motion type survives");
+    check(capture.movingSpeed() == 1.25f, "the moving speed survives");
 
     check(capture.duration() > 0, "the timeline has a duration");
     check(capture.chunkCount() > 0, "the timeline has chunks");

@@ -310,6 +310,12 @@ struct ChunkData {
  */
 enum class PlaybackMode { Once = 0, Loop = 1, PingPong = 2 };
 
+/**
+ * Reserved, not used by any player yet: how the performer moved while captured. A walking
+ * capture stays where it was captured; movingSpeed() says how fast to carry it along.
+ */
+enum class MotionType { InPlace = 0, Walking = 1 };
+
 enum class Detail {
   Positions,
   Base,
@@ -417,6 +423,10 @@ public:
   double startSeconds() const;
   /** How the capture is meant to be played: see PlaybackMode. */
   PlaybackMode playbackMode() const;
+  /** Reserved: how the performer moved while captured. See MotionType. */
+  MotionType motionType() const;
+  /** Reserved: how fast a walking capture moves, in its own units per second; 0 in place. */
+  float movingSpeed() const;
   uint32_t shDegree() const;
   uint64_t maxSplatsPerFrame() const;
   uint64_t fileSize() const;

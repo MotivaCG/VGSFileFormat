@@ -182,6 +182,8 @@ VGS_DECODER_API uint64_t vgs_frame_count(const vgs_capture *h) { return self(h)-
 VGS_DECODER_API double vgs_frame_rate(const vgs_capture *h) { return self(h)->capture.frameRate(); }
 VGS_DECODER_API double vgs_start_seconds(const vgs_capture *h) { return self(h)->capture.startSeconds(); }
 VGS_DECODER_API int vgs_playback_mode(const vgs_capture *h) { return int(self(h)->capture.playbackMode()); }
+VGS_DECODER_API int vgs_motion_type(const vgs_capture *h) { return int(self(h)->capture.motionType()); }
+VGS_DECODER_API float vgs_moving_speed(const vgs_capture *h) { return self(h)->capture.movingSpeed(); }
 VGS_DECODER_API uint32_t vgs_sh_degree(const vgs_capture *h) { return self(h)->capture.shDegree(); }
 VGS_DECODER_API uint64_t vgs_max_splats_per_frame(const vgs_capture *h) {
   return self(h)->capture.maxSplatsPerFrame();

@@ -611,6 +611,12 @@ PlaybackMode Capture::playbackMode() const {
   return PlaybackMode(uint32_t(state->header.playbackMode));
 }
 
+MotionType Capture::motionType() const {
+  return MotionType(uint32_t(state->header.motionType));
+}
+
+float Capture::movingSpeed() const { return state->header.movingSpeed; }
+
 uint32_t Capture::shDegree() const { return state->header.shDegree; }
 uint64_t Capture::maxSplatsPerFrame() const { return state->header.maxSplatsPerFrame; }
 const double *Capture::bounds() const { return state->header.bounds.data(); }
