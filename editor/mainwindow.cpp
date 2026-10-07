@@ -42,6 +42,7 @@
 #include <QSignalBlocker>
 #include "rangeslider.h"
 #include <QSpinBox>
+#include <QSlider>
 #include <QStatusBar>
 #include <QStyle>
 #include <QToolButton>
@@ -80,6 +81,33 @@ static QIcon editorButtonIcon(const QString &resource,bool checkedOnly,const QSt
     icon.addPixmap(disabledOn,QIcon::Disabled,QIcon::On); icon.addPixmap(disabledOff,QIcon::Disabled,QIcon::Off);
     cache.insert(key,icon); return icon;
 }
+
+static QIcon timelineClockIcon() {
+    // Qt has no StandardPixmap clock; use its icon theme with a vector fallback.
+    QPixmap fallback(48,48);fallback.fill(Qt::transparent);
+    QPainter painter(&fallback);painter.setRenderHint(QPainter::Antialiasing);painter.setPen(QPen(Qt::white,3,Qt::SolidLine,Qt::RoundCap));
+    painter.drawEllipse(QPointF(24,24),18,18);painter.drawLine(QPointF(24,24),QPointF(24,13));painter.drawLine(QPointF(24,24),QPointF(33,28));painter.end();
+    const auto source=QIcon::fromTheme("clock",QIcon::fromTheme("preferences-system-time",QIcon(fallback)));
+    QIcon result;
+    for (auto mode:{QIcon::Normal,QIcon::Active,QIcon::Selected,QIcon::Disabled}) for (auto state:{QIcon::Off,QIcon::On}) {
+        auto pixmap=source.pixmap(24,24);QPainter tint(&pixmap);tint.setCompositionMode(QPainter::CompositionMode_SourceIn);
+        tint.fillRect(pixmap.rect(),mode==QIcon::Disabled ? QColor("#606060") : state==QIcon::On ? QColor("#eeeeee") : QColor("#888888"));tint.end();result.addPixmap(pixmap,mode,state);
+    }
+    return result;
+}
+
+class CenteredPlaybackLayout final : public QHBoxLayout {
+public:
+    void setGeometry(const QRect &rect) override {
+        QHBoxLayout::setGeometry(rect);
+        if (count()!=5) return;
+        // Keep transport centred in the viewport when both side groups fit.
+        // At smaller widths it stays in the available gap without overlapping.
+        auto *middle=itemAt(2);auto position=middle->geometry();
+        const int first=itemAt(0)->geometry().right()+spacing()+1,last=itemAt(4)->geometry().left()-spacing()-position.width();
+        position.moveLeft(std::clamp(rect.x()+(rect.width()-position.width())/2,first,std::max(first,last)));middle->setGeometry(position);
+    }
+};
 
 MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory) : QMainWindow(parent), presetStore_(presetDirectory), worker_(new CaptureWorker) {
     qRegisterMetaType<FramePtr>(); qRegisterMetaType<CaptureInfo>();
@@ -209,31 +237,36 @@ void MainWindow::buildUi() {
     layout->setContentsMargins(0,0,0,0); layout->setSpacing(0);
     viewport_ = new Viewport; layout->addWidget(viewport_, 1);
     timeline_ = new QWidget; timeline_->setObjectName("timeline");
-    auto *tl = new QVBoxLayout(timeline_); tl->setContentsMargins(18,14,18,14);
-    auto *head = new QHBoxLayout;
-    auto *rangeIcon = new QLabel;
-    rangeIcon->setPixmap(QPixmap(":/icons/range.png").scaled(24,24,Qt::KeepAspectRatio,Qt::SmoothTransformation)); head->addWidget(rangeIcon);
-    auto *heading = new QLabel(tr("TIMELINE")); heading->setObjectName("sectionTitle"); head->addWidget(heading);
-    head->addStretch(); timeLabel_ = new QLabel; head->addWidget(timeLabel_); tl->addLayout(head);
+    auto *tl = new QVBoxLayout(timeline_); tl->setContentsMargins(18,8,18,12);tl->setSpacing(6);
     slider_ = new RangeSlider; slider_->setObjectName("captureRangeSlider");
-    slider_->setToolTip(tr("Drag the upper marker to set In, the lower marker to set Out, or the white playhead to seek. The selected range is exported.")); tl->addWidget(slider_);
-    auto *controls = new QHBoxLayout;
+    slider_->setToolTip(tr("Drag the upper marker to set In, the lower marker to set Out, or the white playhead to seek. The selected range is exported."));
+    auto *controls = new CenteredPlaybackLayout;controls->setSpacing(8);
+    auto *frameControls=new QWidget;frameControls->setObjectName("timelineFrameControls");frameControls->setSizePolicy(QSizePolicy::Maximum,QSizePolicy::Fixed);
+    frameControls->setStyleSheet("QDoubleSpinBox { padding: 3px; min-height: 20px; font-size: 9pt; }");
+    auto *frames=new QHBoxLayout(frameControls);frames->setContentsMargins(0,0,0,0);frames->setSpacing(5);
+    auto field=[&](const QString &name) {auto *spin=new QDoubleSpinBox;spin->setObjectName(name);spin->setKeyboardTracking(false);spin->setCorrectionMode(QAbstractSpinBox::CorrectToNearestValue);spin->setDecimals(0);spin->setRange(0,0);frames->addWidget(spin);return spin;};
+    inFrame_=field("timelineIn");frameSpin_=field("timelineFrame");outFrame_=field("timelineOut");
+    timelineSecondsButton_=new QToolButton;timelineSecondsButton_->setObjectName("timelineSeconds");timelineSecondsButton_->setCheckable(true);timelineSecondsButton_->setChecked(settings_.value("Playback/SecondsDisplay",false).toBool());
+    timelineSecondsButton_->setIcon(timelineClockIcon());timelineSecondsButton_->setIconSize({22,22});timelineSecondsButton_->setFixedSize(30,30);timelineSecondsButton_->setAccessibleName(tr("Timeline units"));
+    timelineSecondsButton_->setStyleSheet("QToolButton:checked {background: #494949; border: 1px solid #888888; border-radius: 3px;}");frames->addWidget(timelineSecondsButton_);
+    controls->addWidget(frameControls);controls->addStretch();
+    auto *playbackControls=new QWidget;playbackControls->setObjectName("timelinePlaybackControls");playbackControls->setSizePolicy(QSizePolicy::Maximum,QSizePolicy::Fixed);
+    auto *transport=new QHBoxLayout(playbackControls);transport->setContentsMargins(0,0,0,0);transport->setSpacing(5);
     auto button = [&](QStyle::StandardPixmap icon, const QString &tip, auto fn) {
-        auto *b = new QPushButton; b->setIcon(transportIcon(style(),icon)); b->setToolTip(tip); b->setFixedWidth(40);
-        controls->addWidget(b); connect(b, &QPushButton::clicked, this, fn); return b;
+        auto *b = new QPushButton; b->setIcon(transportIcon(style(),icon)); b->setToolTip(tip); b->setFixedSize(34,30);
+        transport->addWidget(b); connect(b, &QPushButton::clicked, this, fn); return b;
     };
     button(QStyle::SP_MediaSkipBackward, tr("Go to the playback range start (Ctrl+Home)."), [this] { play(false); setTime(project_.in, true); });
     button(QStyle::SP_MediaSeekBackward, tr("Pause and step back one frame (Left Arrow)."), [this] { play(false); setTime(project_.time-1.0/info_.fps, true); });
     playButton_ = button(QStyle::SP_MediaPlay, tr("Play / pause (Space)"), [this] { play(!playback_.isActive()); });
     button(QStyle::SP_MediaSeekForward, tr("Pause and step forward one frame (Right Arrow)."), [this] { play(false); setTime(project_.time+1.0/info_.fps, true); });
     button(QStyle::SP_MediaSkipForward, tr("Go to the playback range end (Ctrl+End)."), [this] { play(false); setTime(project_.out, true); });
-    controls->addSpacing(12); controls->addWidget(new QLabel(tr("Frame")));
-    frameSpin_ = new QSpinBox; frameSpin_->setMinimumWidth(80); controls->addWidget(frameSpin_);
-    controls->addWidget(new QLabel(tr("In"))); inFrame_ = new QSpinBox; controls->addWidget(inFrame_);
-    controls->addWidget(new QLabel(tr("Out"))); outFrame_ = new QSpinBox; controls->addWidget(outFrame_);
-    controls->addStretch(); controls->addWidget(new QLabel(tr("Speed")));
-    speed_ = new QDoubleSpinBox; speed_->setRange(0.1,4); speed_->setSingleStep(0.25); speed_->setSuffix(" ×"); controls->addWidget(speed_);
-    loop_ = new QCheckBox(tr("Loop")); controls->addWidget(loop_); tl->addLayout(controls);
+    controls->addWidget(playbackControls);controls->addStretch();
+    auto *speedControls=new QWidget;speedControls->setObjectName("timelineSpeedControls");speedControls->setSizePolicy(QSizePolicy::Maximum,QSizePolicy::Fixed);
+    auto *speedLayout=new QHBoxLayout(speedControls);speedLayout->setContentsMargins(0,0,0,0);speedLayout->setSpacing(5);
+    loop_ = new QCheckBox(tr("Loop"));speedLayout->addWidget(loop_);speedLayout->addWidget(new QLabel(tr("Speed")));
+    speed_ = new QDoubleSpinBox; speed_->setRange(0.1,4); speed_->setSingleStep(0.25); speed_->setSuffix(" ×"); speedLayout->addWidget(speed_);
+    controls->addWidget(speedControls);tl->addLayout(controls);tl->addWidget(slider_);
     loop_->setToolTip(tr("Toggle looping within the playback range (L)."));
     modifierPanel_=new ModifierPanel;tl->addWidget(modifierPanel_);
     connect(modifierPanel_,&ModifierPanel::selectionChanged,this,[this] {
@@ -264,14 +297,14 @@ void MainWindow::buildUi() {
     auto *savedPresetRow = new QHBoxLayout;
     presetCombo_ = new QComboBox; presetCombo_->setObjectName("savedPresetCombo"); presetCombo_->setMinimumContentsLength(18);
     presetCombo_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
-    presetCombo_->setToolTip(tr("Choose a saved preset to restore capture and cylinder transforms, display and playback settings."));
+    presetCombo_->setToolTip(tr("Choose a saved preset to restore capture transforms, modifiers and playback settings."));
     savedPresetRow->addWidget(presetCombo_,1);
     presetFolderButton_ = new QToolButton; presetFolderButton_->setIcon(transportIcon(style(),QStyle::SP_DirOpenIcon,Qt::white));
     presetFolderButton_->setFixedSize(34,34); presetFolderButton_->setAccessibleName(tr("Open presets folder"));
     presetFolderButton_->setToolTip(tr("Open the presets folder in the system file manager (Ctrl+Alt+P).")); savedPresetRow->addWidget(presetFolderButton_);
     presetLayout->addLayout(savedPresetRow);
     savePresetButton_ = new QPushButton(tr("Save preset…")); savePresetButton_->setObjectName("saveEditorPreset");
-    savePresetButton_->setToolTip(tr("Save capture/crop transforms, view and playback settings (Ctrl+Shift+P). Metadata templates are stored as separate .presetmetadata files."));
+    savePresetButton_->setToolTip(tr("Save capture transforms, modifiers and playback settings (Ctrl+Shift+P). Viewport display controls stay independent. Metadata templates are stored as separate .presetmetadata files."));
     presetLayout->addWidget(savePresetButton_);
     connect(savePresetButton_,&QPushButton::clicked,this,&MainWindow::savePreset);
     connect(presetFolderButton_,&QToolButton::clicked,this,&MainWindow::openPresetFolder);
@@ -420,8 +453,14 @@ void MainWindow::buildUi() {
     ghostButton_=new QToolButton;ghostButton_->setObjectName("ghostComparison");ghostButton_->setCheckable(true);ghostButton_->setChecked(false);ghostButton_->setIcon(editorButtonIcon(":/icons/ghost.png",true,":/icons/ghost_off.png"));ghostButton_->setIconSize({24,24});ghostButton_->setFixedSize(30,30);ghostButton_->setAccessibleName(tr("Ghost comparison"));
     ghostButton_->setStyleSheet("QToolButton:checked {background: #494949; border: 1px solid #888888; border-radius: 3px;}");
     ghostButton_->setToolTip(tr("Freeze currently visible points as a faint white ghost with a soft outline. Timeline and transform changes leave the copy fixed. Switch off to remove it."));displayLayout->addWidget(ghostButton_,0,Qt::AlignHCenter);
-    connect(ghostButton_,&QToolButton::toggled,this,[this](bool checked) {const bool active=viewport_->setGhost(checked);QSignalBlocker blocker(ghostButton_);ghostButton_->setChecked(active);if (checked && !active) statusBar()->showMessage(tr("No visible points to freeze."),5000);viewport_->setFocus();});
-    connect(viewport_,&Viewport::ghostChanged,this,[this](bool active) {QSignalBlocker blocker(ghostButton_);ghostButton_->setChecked(active);});
+    ghostOpacitySlider_=new QSlider(Qt::Horizontal);ghostOpacitySlider_->setObjectName("ghostOpacity");ghostOpacitySlider_->setRange(0,100);ghostOpacitySlider_->setValue(15);ghostOpacitySlider_->setEnabled(false);
+    ghostOpacitySlider_->setAccessibleName(tr("Ghost opacity"));ghostOpacitySlider_->setToolTip(tr("Adjust the frozen ghost's opacity."));ghostOpacitySlider_->setMinimumHeight(16);
+    ghostOpacitySlider_->setStyleSheet("QSlider::groove:horizontal {height: 4px; background: #3b3b3b; border: 1px solid #626262; border-radius: 2px;}"
+        "QSlider::sub-page:horizontal {background: #aaaaaa; border-radius: 2px;} QSlider::handle:horizontal {width: 9px; margin: -4px 0; background: #eeeeee; border: 1px solid #999999; border-radius: 3px;}"
+        "QSlider::sub-page:horizontal:disabled {background: #555555;} QSlider::handle:horizontal:disabled {background: #606060; border-color: #777777;}");displayLayout->addWidget(ghostOpacitySlider_);
+    connect(ghostOpacitySlider_,&QSlider::valueChanged,this,[this](int value) {viewport_->setGhostOpacity(value/100.0f);});
+    connect(ghostButton_,&QToolButton::toggled,this,[this](bool checked) {const bool active=viewport_->setGhost(checked);QSignalBlocker blocker(ghostButton_);ghostButton_->setChecked(active);ghostOpacitySlider_->setEnabled(active && loaded_ && !loading_);if (checked && !active) statusBar()->showMessage(tr("No visible points to freeze."),5000);viewport_->setFocus();});
+    connect(viewport_,&Viewport::ghostChanged,this,[this](bool active) {QSignalBlocker blocker(ghostButton_);ghostButton_->setChecked(active);ghostOpacitySlider_->setEnabled(active && loaded_ && !loading_);});
     viewport_->setDisplayControls(displayControls_);
     auto *note = new QLabel(tr("Projects save the capture reference, transform and view.")); note->setWordWrap(true); side->addWidget(note);
     auto *toolsScroll = new QScrollArea; toolsScroll->setWidgetResizable(true); toolsScroll->setFrameShape(QFrame::NoFrame);
@@ -452,13 +491,14 @@ void MainWindow::buildUi() {
         if (syncing_ || !loaded_) return; play(false); project_.in=first/info_.fps; project_.out=last/info_.fps;
         setTime(preview/info_.fps,true); syncUi(); dirty();
     });
-    connect(frameSpin_, &QSpinBox::valueChanged, this, [this](int f) { if (!syncing_) { play(false); setTime(f/info_.fps, true); } });
-    connect(inFrame_, &QSpinBox::valueChanged, this, [this](int f) {
-        if (syncing_) return; play(false); project_.in = f/info_.fps; project_.out = std::max(project_.out, project_.in);
+    connect(timelineSecondsButton_,&QToolButton::toggled,this,[this](bool seconds) {if (syncing_) return;settings_.setValue("Playback/SecondsDisplay",seconds);syncUi();});
+    connect(frameSpin_, &QDoubleSpinBox::valueChanged, this, [this](double value) { if (!syncing_) { play(false); setTime(timelineFrame(value)/info_.fps, true);syncUi(); } });
+    connect(inFrame_, &QDoubleSpinBox::valueChanged, this, [this](double value) {
+        if (syncing_) return; play(false); project_.in = timelineFrame(value)/info_.fps; project_.out = std::max(project_.out, project_.in);
         setTime(std::max(project_.time, project_.in), true); syncUi(); dirty();
     });
-    connect(outFrame_, &QSpinBox::valueChanged, this, [this](int f) {
-        if (syncing_) return; play(false); project_.out = f/info_.fps; project_.in = std::min(project_.in, project_.out);
+    connect(outFrame_, &QDoubleSpinBox::valueChanged, this, [this](double value) {
+        if (syncing_) return; play(false); project_.out = timelineFrame(value)/info_.fps; project_.in = std::min(project_.in, project_.out);
         setTime(std::min(project_.time, project_.out), true); syncUi(); dirty();
     });
     connect(loop_, &QCheckBox::toggled, this, [this](bool value) { if (!syncing_) { project_.loop = value; settings_.setValue("Playback/Loop",value); dirty(); } });
@@ -525,6 +565,7 @@ void MainWindow::syncUi() {
     viewport_->setTransform(project_.transformAtFrame(std::round(project_.time*info_.fps)));
     displayControls_->setEnabled(true);
     ghostButton_->setEnabled(loaded_ && !loading_);
+    ghostOpacitySlider_->setEnabled(viewport_->ghostEnabled() && loaded_ && !loading_);
     if (selected) {cropProperties_->setTitle(tr("Crop: %1").arg(selected->name));greenProperties_->setTitle(tr("Remove green: %1").arg(selected->name));greenSaturation_->setValue(selected->green.minimumSaturation*100);greenHue_->setValue(selected->green.hueTolerance);greenLinearRgb_->setChecked(selected->green.linearRgb);}
     tools_->setEnabled(true); timeline_->setEnabled(loaded_ && !loading_);
     for (auto *group : tools_->findChildren<QGroupBox *>(QString(),Qt::FindDirectChildrenOnly))
@@ -542,11 +583,25 @@ void MainWindow::syncUi() {
     for (int g=0; g<3; ++g) for (int a=0; a<3; ++a) transform_[g][a]->setValue(vectors[g][a]);
     const int maximum = std::max(0, info_.frames-1);
     slider_->setFrameRange(0,maximum); slider_->setRangeValues(int(std::round(project_.in*info_.fps)),int(std::round(project_.out*info_.fps)));
-    frameSpin_->setRange(0,maximum); inFrame_->setRange(0,maximum); outFrame_->setRange(0,maximum);
-    inFrame_->setValue(int(std::round(project_.in*info_.fps))); outFrame_->setValue(int(std::round(project_.out*info_.fps)));
-    const int frame = int(std::round(project_.time*info_.fps)); slider_->setPlayheadValue(frame); frameSpin_->setValue(frame);
+    const bool seconds=timelineSecondsButton_->isChecked();const double divisor=seconds ? info_.fps : 1.0;
+    const int decimals=seconds ? std::max(3,int(std::ceil(std::log10(std::max(1.0,info_.fps))))+1) : 0;
+    for (auto *field:{frameSpin_,inFrame_,outFrame_}) {field->setDecimals(decimals);field->setRange(0,maximum/divisor);field->setSingleStep(1.0/divisor);field->setSuffix(seconds ? tr(" s") : QString());}
+    frameSpin_->setPrefix(seconds ? tr("Time ") : tr("Frame "));
+    frameSpin_->setSuffix(seconds ? tr(" of %1 s").arg(info_.duration,0,'f',decimals) : tr(" of %1").arg(info_.frames));
+    inFrame_->setPrefix(tr("In "));outFrame_->setPrefix(tr("Out "));
+    inFrame_->setValue(std::round(project_.in*info_.fps)/divisor);outFrame_->setValue(std::round(project_.out*info_.fps)/divisor);
+    const int frame = int(std::round(project_.time*info_.fps)); slider_->setPlayheadValue(frame); frameSpin_->setValue(frame/divisor);
+    bool timelineWidthChanged=false;
+    for (auto *field:{frameSpin_,inFrame_,outFrame_}) {
+        field->ensurePolished();const int width=field->sizeHint().width();
+        if (field->minimumWidth()!=width) {field->setMinimumWidth(width);timelineWidthChanged=true;}
+    }
+    if (timelineWidthChanged) {frameSpin_->parentWidget()->layout()->activate();timeline_->layout()->invalidate();timeline_->layout()->activate();}
+    frameSpin_->setToolTip(seconds ? tr("Current time of the full capture duration. Entered seconds snap to the nearest valid frame within In/Out.") : tr("Current zero-based frame index of %1 total frames. Seeking stays within In/Out.").arg(info_.frames));
+    inFrame_->setToolTip(tr("First included frame of the playback/export range. Seconds snap to the nearest valid frame."));outFrame_->setToolTip(tr("Last included frame of the playback/export range. Seconds snap to the nearest valid frame."));
+    timelineSecondsButton_->setToolTip(seconds ? tr("Display time in seconds. Click to display frame indices. Entries snap to the nearest valid frame.") : tr("Display frame indices. Click to display time in seconds. Entries snap to the nearest valid frame."));
     modifierPanel_->setTimeline(frame,maximum);
-    timeLabel_->setText(tr("%1 s / %2 s").arg(project_.time,0,'f',3).arg(info_.duration,0,'f',3));
+    viewport_->setPlaybackTime(project_.time,info_.duration);
     speed_->setValue(project_.speed); loop_->setChecked(project_.loop); grid_->setChecked(project_.grid);
     syncTransformButtons();
     transformTarget_->setText(viewport_->cropEditing() || animation ? tr("Transform target: %1").arg(selected ? selected->name : tr("Crop")) : tr("Transform target: Capture reference"));
@@ -619,6 +674,9 @@ void MainWindow::openPath(const QString &path) {
     statusBar()->showMessage(tr("Loading %1…").arg(QFileInfo(asset).fileName()));
     emit openRequested(asset, openingGeneration_, true);
 }
+int MainWindow::timelineFrame(double displayedValue) const {
+    return int(std::clamp(std::round(displayedValue*(timelineSecondsButton_->isChecked() ? info_.fps : 1.0)),0.0,double(std::max(0,info_.frames-1))));
+}
 void MainWindow::setTime(double seconds, bool edited) {
     if (!loaded_ || loading_) return;
     seconds = std::clamp(std::round(seconds*info_.fps)/info_.fps, project_.in, project_.out);
@@ -669,6 +727,10 @@ void MainWindow::receiveFrame(FramePtr frame) {
             viewport_->focusVisible();auto closeCamera=viewport_->camera();closeCamera.distance*=0.55f;viewport_->setCamera(closeCamera);
             if (!viewport_->grabFramebuffer().save(smokeOutput_+".ghost.png") || !grab().save(smokeOutput_+".ghost.ui.png")) {qApp->exit(2);return;}
             viewport_->setTransform(liveTransform);viewport_->setCamera(liveCamera);project_.camera=liveCamera;viewport_->setGhost(false);
+            const bool seconds=timelineSecondsButton_->isChecked();timelineSecondsButton_->setChecked(!seconds);
+            QCoreApplication::sendPostedEvents(nullptr,QEvent::LayoutRequest);
+            if (!grab().save(smokeOutput_+".alternate-time.ui.png")) {qApp->exit(2);return;}
+            timelineSecondsButton_->setChecked(seconds);
             for (int g=0; g<3; ++g) {
                 setTransformMode(TransformMode(g+1));
                 for (int other=0; other<3; ++other) if (modeButtons_[other]->isChecked() != (other==g)) { qApp->exit(2); return; }
@@ -889,7 +951,7 @@ void MainWindow::savePreset() {
 void MainWindow::applyPresetSettings(const Project &settings) {
     play(false); viewport_->setTransformMode(TransformMode::None); viewport_->setCropEditing(false);
     project_.transform = settings.transform; project_.modifiers=settings.modifiers;project_.selectedModifier=settings.selectedModifier; project_.camera = viewport_->camera();
-    project_.pointSize = settings.pointSize; project_.grid = settings.grid; project_.speed = settings.speed; project_.loop = settings.loop;
+    project_.speed = settings.speed; project_.loop = settings.loop;
     for (int g=0; g<3; ++g) { project_.spaces[g] = settings.spaces[g]; viewport_->setCoordinateSpace(TransformMode(g+1),settings.spaces[g]); }
     viewport_->setTransform(project_.transform); viewport_->setCrop(project_.crop());
     syncUi(); dirty(); viewport_->setFocus();

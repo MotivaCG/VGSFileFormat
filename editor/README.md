@@ -17,7 +17,7 @@ scale transforms the entire capture without changing point size.
 - `G` / `R` / `S`: activate Move / Rotate / Scale. Repeat the active mode's key to switch Global/Local. `Esc`: leave all transform modes.
 - `Shift+G`: toggle the world grid and reference axes.
 
-The timeline uses Gracia Converter's range control: drag the upper In marker, lower Out marker, or white playhead. It includes the current frame, in/out fields, playback speed and loop. In and Out are inclusive and define the export range.
+The timeline uses Gracia Converter's range control: drag the upper In marker, lower Out marker, or white playhead. Above it, In/Frame/Out sit on the left, transport buttons are centred and Loop/Speed sit on the right. The frame field reads **Frame X of Y**, with a zero-based index and the full capture frame count. The clock toggle after Out switches all three fields to seconds; typed values snap to the nearest valid frame. In and Out are inclusive and define the export range. Current time / full duration appears below decode statistics in the viewport. The unit preference is remembered without changing the project range.
 The side panel provides position, XYZ Euler orientation in degrees, XYZ scale and
 reset, with each XYZ triplet on one horizontal row. The scene matrix is
 `T * Rz * Ry * Rx * H * S`, where H preserves shear from global scaling.
@@ -61,12 +61,14 @@ The Tools panel offers **Save preset…** (Ctrl+Shift+P), a **Load preset…** d
 and a folder button (Ctrl+Alt+P). Give the preset a name; saving over an existing
 name asks before replacement within that scope. Selecting an entry restores capture and crop
 position, orientation, scale/shear, cylinder dimensions and crop state, reference
-spaces, camera, display and playback settings. The loaded capture path and its
+spaces and playback settings. Viewport camera and display controls are excluded.
+The loaded capture path and its
 current time/range and metadata remain unchanged, so presets work across captures.
 
 Capture Tools presets use `.preset` files with format `vgs-editor-preset`.
 Metadata presets use `.presetmetadata` files with format `vgs-editor-metadata-preset`.
-Both use schema version 3 and record `scope` and `appliesTo`. They may have identical
+Capture Tools uses schema version 6 and metadata uses version 4; both record
+`scope` and `appliesTo`. They may have identical
 display names; saving/replacing a metadata preset never overwrites a Capture Tools
 preset. Each dropdown accepts only its own extension, format and scope; invalid or
 renamed files are excluded.
@@ -268,12 +270,17 @@ the view buttons and stay enabled before opening a capture. Point size starts at
 retain overrides. The top-left viewport statistics remain unobstructed.
 The small **Ghost comparison** toggle below Grid and axes starts off. Turning it
 on freezes the currently visible points in world space as a white reference with
-a faint 12%-opacity interior and a soft, brighter outline. Opacity is composited
+a 15%-opacity interior by default and a soft, brighter outline. The unlabelled,
+full-width slider below the ghost icon adjusts opacity and is disabled without
+a frozen ghost. Opacity is composited
 once per pixel, so overlapping points do not turn opaque. The centred button uses
 separate Ghost/Ghost off icons, with the off state in grey.
 Time, transforms and modifier edits do not alter the snapshot; camera
 navigation still works. Turning it off or opening another capture removes it.
 The ghost is a transient preview overlay and is not saved/exported as capture data.
+Ghost state, opacity, Point size and Grid and axes are excluded from reusable
+presets; loading older presets ignores their preview settings as well. Capture
+Tools preset version 6 no longer stores viewport camera or display fields.
 Focus visible uses the points surviving current crop/colour/isolation filters,
 plus the active ghost, rather than the whole source bounding box or crop gizmo.
 Native dialogs remember separate capture, project and image locations. Display

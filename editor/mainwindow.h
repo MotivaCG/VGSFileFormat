@@ -22,6 +22,7 @@ class QAction;
 class QCloseEvent;
 class QMenu;
 class QToolButton;
+class QSlider;
 class QButtonGroup;
 class QComboBox;
 class QGroupBox;
@@ -51,6 +52,7 @@ private:
     bool save(bool saveAs = false);
     void newProject();
     void setTime(double seconds, bool edited);
+    int timelineFrame(double displayedValue) const;
     void requestFrame();
     void play(bool playing);
     void receiveFrame(FramePtr frame);
@@ -111,9 +113,9 @@ private:
     QDoubleSpinBox *cropWidth_, *cropDepth_;
     QComboBox *cropShapeCombo_;
     QFormLayout *cropForm_;
-    QSpinBox *frameSpin_, *inFrame_, *outFrame_;
+    QDoubleSpinBox *frameSpin_, *inFrame_, *outFrame_;
     RangeSlider *slider_;
-    QLabel *assetLabel_, *metadata_, *timeLabel_;
+    QLabel *assetLabel_, *metadata_;
     QLabel *transformTarget_, *cropStatus_;
     QPushButton *playButton_;
     QPushButton *resetTransformButton_, *savePresetButton_;
@@ -122,7 +124,8 @@ private:
     QGroupBox *presetBox_;
     QToolButton *presetFolderButton_;
     QCheckBox *loop_, *grid_;
-    QToolButton *ghostButton_;
+    QToolButton *ghostButton_, *timelineSecondsButton_;
+    QSlider *ghostOpacitySlider_;
     QButtonGroup *transformModes_;
     QToolButton *modeButtons_[3];
     QToolButton *spaceButtons_[3];

@@ -21,6 +21,8 @@
 #include <QGroupBox>
 #include <QCheckBox>
 #include <QTableWidget>
+#include <QLabel>
+#include <QSlider>
 #include <QtTest>
 
 class MainWindowTests : public QObject {
@@ -71,10 +73,35 @@ private slots:
         auto *cube=window.findChild<QWidget *>("viewCube");QVERIFY(cube);QCOMPARE(display->parentWidget(),cube);QVERIFY(cube->rect().contains(display->geometry()));
         auto *pointSize=window.findChild<QDoubleSpinBox *>("displayPointSize");QVERIFY(pointSize);QCOMPARE(pointSize->value(),5.);
         auto *ghost=window.findChild<QToolButton *>("ghostComparison");QVERIFY(ghost);QVERIFY(!ghost->isChecked());QVERIFY(!viewport->ghostEnabled());
+        auto *opacity=window.findChild<QSlider *>("ghostOpacity");QVERIFY(opacity);QCOMPARE(opacity->value(),15);QVERIFY(!opacity->isEnabled());QVERIFY(std::abs(viewport->ghostOpacity()-.15f)<1e-6);
         QVERIFY(std::abs(ghost->mapTo(display,QPoint(ghost->width()/2,0)).x()-display->width()/2)<=1);
         const auto ghostOff=ghost->icon().pixmap({24,24},QIcon::Normal,QIcon::Off).toImage();
-        ghost->click();QVERIFY(ghost->isChecked());QVERIFY(viewport->ghostEnabled());QVERIFY(ghost->icon().pixmap({24,24},QIcon::Normal,QIcon::On).toImage()!=ghostOff);
-        ghost->click();QVERIFY(!viewport->ghostEnabled());QVERIFY(!ghost->isChecked());
+        ghost->click();QVERIFY(ghost->isChecked());QVERIFY(viewport->ghostEnabled());QVERIFY(opacity->isEnabled());QVERIFY(ghost->icon().pixmap({24,24},QIcon::Normal,QIcon::On).toImage()!=ghostOff);
+        opacity->setValue(65);QVERIFY(std::abs(viewport->ghostOpacity()-.65f)<1e-6);
+        ghost->click();QVERIFY(!viewport->ghostEnabled());QVERIFY(!ghost->isChecked());QVERIFY(!opacity->isEnabled());opacity->setValue(15);
+        auto *frameField=window.findChild<QDoubleSpinBox *>("timelineFrame"),*inField=window.findChild<QDoubleSpinBox *>("timelineIn"),*outField=window.findChild<QDoubleSpinBox *>("timelineOut");
+        auto *secondsButton=window.findChild<QToolButton *>("timelineSeconds");QVERIFY(frameField);QVERIFY(inField);QVERIFY(outField);QVERIFY(secondsButton);QVERIFY(!secondsButton->isChecked());
+        QCOMPARE(frameField->prefix(),QString("Frame "));QCOMPARE(frameField->suffix(),QString(" of 5"));QCOMPARE(frameField->maximum(),4.);
+        auto *transport=window.findChild<QWidget *>("timelinePlaybackControls");auto *fields=window.findChild<QWidget *>("timelineFrameControls");auto *speedControls=window.findChild<QWidget *>("timelineSpeedControls");QVERIFY(transport);QVERIFY(fields);QVERIFY(speedControls);
+        QVERIFY(transport->mapTo(&window,QPoint()).y()<sliderControl->mapTo(&window,QPoint()).y());
+        QVERIFY(fields->geometry().right()<transport->geometry().left());QVERIFY(transport->geometry().right()<speedControls->geometry().left());
+        QVERIFY(std::abs(transport->geometry().center().x()-transport->parentWidget()->width()/2)<=1);
+        for (auto *label:transport->parentWidget()->findChildren<QLabel *>()) QVERIFY(label->text()!="TIMELINE");
+        auto enter=[&](QDoubleSpinBox *field,double value) {field->setFocus();field->selectAll();QTest::keyClicks(field,field->locale().toString(value,'f',3));QTest::keyClick(field,Qt::Key_Return);};
+        secondsButton->click();QVERIFY(secondsButton->isChecked());QCOMPARE(frameField->prefix(),QString("Time "));QCOMPARE(frameField->suffix(),QString(" of 0.167 s"));
+        QTRY_VERIFY(frameField->width()>=frameField->sizeHint().width());QVERIFY(inField->width()>=inField->sizeHint().width());QVERIFY(outField->width()>=outField->sizeHint().width());
+        QVERIFY(inField->geometry().right()<frameField->geometry().left());QVERIFY(frameField->geometry().right()<outField->geometry().left());QVERIFY(outField->geometry().right()<secondsButton->geometry().left());
+        enter(frameField,.045);QCOMPARE(sliderControl->playheadValue(),1);QCOMPARE(frameField->value(),.033);
+        enter(frameField,.044);QCOMPARE(sliderControl->playheadValue(),1);QCOMPARE(frameField->value(),.033);
+        enter(frameField,.061);QCOMPARE(sliderControl->playheadValue(),2);QCOMPARE(frameField->value(),.067);
+        enter(inField,.025);enter(outField,.112);QCOMPARE(sliderControl->startValue(),1);QCOMPARE(sliderControl->endValue(),3);QCOMPARE(inField->value(),.033);QCOMPARE(outField->value(),.1);
+        enter(inField,.125);QCOMPARE(sliderControl->startValue(),4);QCOMPARE(sliderControl->endValue(),4);QCOMPARE(sliderControl->playheadValue(),4);
+        enter(outField,.021);QCOMPARE(sliderControl->startValue(),1);QCOMPARE(sliderControl->endValue(),1);QCOMPARE(sliderControl->playheadValue(),1);
+        enter(frameField,.09);QCOMPARE(frameField->value(),.033);QCOMPARE(sliderControl->playheadValue(),1);
+        secondsButton->click();QVERIFY(!secondsButton->isChecked());QCOMPARE(frameField->value(),1.);QCOMPARE(inField->value(),1.);QCOMPARE(outField->value(),1.);
+        inField->setValue(0);outField->setValue(4);frameField->setValue(0);QCOMPARE(sliderControl->startValue(),0);QCOMPARE(sliderControl->endValue(),4);
+        viewport->grabFramebuffer();auto *stats=viewport->findChild<QLabel *>("viewportStatistics");QVERIFY(stats);QVERIFY(stats->text().endsWith("0.000 s / 0.167 s"));
+        viewport->setFocus();
         QTest::keyClick(viewport,Qt::Key_Tab);QTRY_VERIFY(button->isChecked());QVERIFY(viewport->cropEditing());
         auto crop=viewport->crop();auto captureTransform=viewport->transform();
         QTest::keyClick(viewport,Qt::Key_Tab);QTRY_VERIFY(!button->isChecked());QVERIFY(!viewport->cropEditing());
@@ -143,10 +170,13 @@ private slots:
         auto *editorCombo=window.findChild<QComboBox *>("savedPresetCombo");QVERIFY(editorCombo);
         QTRY_COMPARE(editorCombo->count(),2);QCOMPARE(editorCombo->findData(saved),-1);
         Camera camera=viewport->camera();camera.target={4,5,6};camera.yaw=57;camera.pitch=23;camera.distance=8;viewport->setCamera(camera);
+        pointSize->setValue(7);grid->setChecked(false);ghost->click();QVERIFY(ghost->isChecked());opacity->setValue(62);const auto ghostCount=viewport->ghostPointCount();const double ghostTime=viewport->ghostTime();
         editorCombo->setCurrentIndex(editorCombo->findData(editorPath));
         QVERIFY(QMetaObject::invokeMethod(editorCombo,"activated",Qt::DirectConnection,Q_ARG(int,editorCombo->currentIndex())));
         QCOMPARE(viewport->transform().position,setup.transform.position);QCOMPARE(viewport->camera().target,camera.target);
         QCOMPARE(viewport->camera().yaw,camera.yaw);QCOMPARE(viewport->camera().pitch,camera.pitch);QCOMPARE(viewport->camera().distance,camera.distance);
+        QCOMPARE(pointSize->value(),7.);QVERIFY(!grid->isChecked());QVERIFY(ghost->isChecked());QVERIFY(opacity->isEnabled());QCOMPARE(opacity->value(),62);QVERIFY(std::abs(viewport->ghostOpacity()-.62f)<1e-6);
+        QCOMPARE(viewport->ghostPointCount(),ghostCount);QCOMPARE(viewport->ghostTime(),ghostTime);ghost->click();QVERIFY(!opacity->isEnabled());
         newType->setCurrentIndex(newType->findData(2));add->click();QCOMPARE(modifiers->topLevelItemCount(),2);
         auto *saturation=window.findChild<QDoubleSpinBox *>("greenMinimumSaturation");QVERIFY(saturation);QVERIFY(saturation->isVisible());QCOMPARE(saturation->value(),50.);
         QVERIFY(!button->isVisible());

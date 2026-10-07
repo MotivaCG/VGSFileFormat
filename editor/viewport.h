@@ -36,10 +36,13 @@ public:
     CoordinateSpace coordinateSpace(TransformMode mode) const;
     void setPointSize(float size);
     void setDisplayControls(QWidget *controls);
+    void setPlaybackTime(double seconds,double duration);
     void setGrid(bool enabled);
     void fit(const QVector3D &minimum, const QVector3D &maximum);
     bool focusVisible();
     bool setGhost(bool enabled);
+    void setGhostOpacity(float opacity);
+    float ghostOpacity() const {return ghostOpacity_;}
     bool ghostEnabled() const {return ghostEnabled_;}
     size_t ghostPointCount() const {return ghostPoints_.size();}
     double ghostTime() const {return ghostTime_;}
@@ -90,6 +93,7 @@ private:
     Camera camera_;
     ViewCube *viewCube_;
     QLabel *statistics_;
+    QString playbackTimeText_;
     QWidget *displayControls_ = nullptr;
     CropVolume crop_;
     QVector<Modifier> modifiers_;
@@ -109,6 +113,7 @@ private:
     std::vector<GhostPoint> ghostPoints_;
     bool ghostEnabled_=false,ghostDirty_=false;
     double ghostTime_=0;
+    float ghostOpacity_=0.15f;
     GLuint ghostVao_=0,ghostBuffer_=0,ghostCompositeVao_=0;
     std::unique_ptr<QOpenGLShaderProgram> ghostShader_,ghostCompositeShader_;
     std::unique_ptr<QOpenGLFramebufferObject> ghostFramebuffer_;

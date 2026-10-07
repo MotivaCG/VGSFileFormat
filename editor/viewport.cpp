@@ -128,6 +128,7 @@ static const char *ghostCompositeFragment=R"GLSL(
 in vec2 uv;
 uniform sampler2D ghostMask;
 uniform float outlineWidth;
+uniform float ghostOpacity;
 out vec4 fragColor;
 void main() {
     vec2 texel=outlineWidth/vec2(textureSize(ghostMask,0));
@@ -138,7 +139,7 @@ void main() {
         coverage+=texture(ghostMask,uv+vec2(x,y)*texel).a*((x==0 || y==0) ? 2.0 : 1.0);
     }
     coverage/=16.0;
-    float opacity=centre*0.12+max(0.0,centre-coverage)*0.26+(1.0-centre)*coverage*0.10;
+    float opacity=min(1.0,ghostOpacity*(centre+max(0.0,centre-coverage)*0.55+(1.0-centre)*coverage*0.4));
     if(opacity<0.005) discard;
     fragColor=vec4(1,1,1,opacity);
 }
@@ -348,8 +349,10 @@ void Viewport::paintGL() {
         ? tr("Drag: orbit   ·   Right drag: pan   ·   Wheel: zoom   ·   G/R/S: transform")
         : tr("Drag a gizmo handle to transform   ·   Repeat G/R/S: Global/Local   ·   Esc: exit mode"));
     if (frame_) {
-        statistics_->setText(tr("%1 source points   ·   %2 s\nDecode %3 ms   ·   upload %4 ms   ·   %5")
-            .arg(qulonglong(frame_->points.size())).arg(frame_->seconds,0,'f',3).arg(frame_->decodeMs,0,'f',1).arg(uploadMs_,0,'f',1).arg(shCoefficients_ ? "SH" : "base colour"));
+        QString text=tr("%1 source points\nDecode %2 ms   ·   upload %3 ms   ·   %4")
+            .arg(qulonglong(frame_->points.size())).arg(frame_->decodeMs,0,'f',1).arg(uploadMs_,0,'f',1).arg(shCoefficients_ ? "SH" : "base colour");
+        if (!playbackTimeText_.isEmpty()) text+='\n'+playbackTimeText_;
+        statistics_->setText(text);
         statistics_->adjustSize();
     } else {
         statistics_->clear();
@@ -361,6 +364,9 @@ void Viewport::setFrame(FramePtr frame) {
     if (!frame) setGhost(false);
     if (!frame) setTransformMode(TransformMode::None);
     frame_ = std::move(frame); frameDirty_ = true; update();
+}
+void Viewport::setPlaybackTime(double seconds,double duration) {
+    playbackTimeText_=tr("%1 s / %2 s").arg(seconds,0,'f',3).arg(duration,0,'f',3);update();
 }
 void Viewport::setTransform(const Transform &transform) { transform_ = transform; update(); }
 void Viewport::setCamera(const Camera &camera) {
@@ -398,7 +404,7 @@ bool Viewport::focusVisible() {
     const auto points=visibleWorldPoints();bool any=false;QVector3D minimum,maximum;
     auto include=[&](QVector3D p) {if (!any) {minimum=maximum=p;any=true;}else for (int axis=0;axis<3;++axis) {minimum[axis]=std::min(minimum[axis],p[axis]);maximum[axis]=std::max(maximum[axis],p[axis]);}};
     for (const auto &point:points) include(point);
-    if (ghostEnabled_) for (const auto &point:ghostPoints_) include({point.position[0],point.position[1],point.position[2]});
+    if (ghostEnabled_ && ghostOpacity_>0) for (const auto &point:ghostPoints_) include({point.position[0],point.position[1],point.position[2]});
     if (!any) return false;camera_.target=(minimum+maximum)*.5f;
     const float radius=(maximum-minimum).length()*.5f,aspect=float(width())/std::max(1,height());
     const float halfAngle=std::atan(std::tan(qDegreesToRadians(22.5f))*std::min(1.f,aspect));camera_.distance=std::max(.1f,radius/std::sin(halfAngle)*1.15f);
@@ -411,8 +417,12 @@ bool Viewport::setGhost(bool enabled) {
     if (!ghostEnabled_ && initialized_) {makeCurrent();ghostFramebuffer_.reset();glBindBuffer(GL_ARRAY_BUFFER,ghostBuffer_);glBufferData(GL_ARRAY_BUFFER,0,nullptr,GL_STATIC_DRAW);doneCurrent();}
     update();emit ghostChanged(ghostEnabled_);return ghostEnabled_;
 }
+void Viewport::setGhostOpacity(float opacity) {
+    if (!std::isfinite(opacity)) return;
+    ghostOpacity_=std::clamp(opacity,0.0f,1.0f);update();
+}
 void Viewport::drawGhost(const QMatrix4x4 &viewProjection,const QSize &pixels,float dpr) {
-    if (!ghostEnabled_ || ghostPoints_.empty()) return;
+    if (!ghostEnabled_ || ghostPoints_.empty() || ghostOpacity_<=0) return;
     if (!ghostFramebuffer_ || ghostFramebuffer_->size()!=pixels) {
         QOpenGLFramebufferObjectFormat format;format.setInternalTextureFormat(GL_RGBA8);ghostFramebuffer_=std::make_unique<QOpenGLFramebufferObject>(pixels,format);
         if (!ghostFramebuffer_->isValid()) {emit renderFailed(tr("Could not create the ghost overlay framebuffer."));return;}
@@ -427,7 +437,7 @@ void Viewport::drawGhost(const QMatrix4x4 &viewProjection,const QSize &pixels,fl
     glDisable(GL_PROGRAM_POINT_SIZE);glEnable(GL_BLEND);glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,ghostFramebuffer_->texture());
     glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
-    ghostCompositeShader_->bind();ghostCompositeShader_->setUniformValue("ghostMask",0);ghostCompositeShader_->setUniformValue("outlineWidth",dpr);glBindVertexArray(ghostCompositeVao_);glDrawArrays(GL_TRIANGLES,0,3);ghostCompositeShader_->release();glDisable(GL_BLEND);glDepthMask(GL_TRUE);
+    ghostCompositeShader_->bind();ghostCompositeShader_->setUniformValue("ghostMask",0);ghostCompositeShader_->setUniformValue("outlineWidth",dpr);ghostCompositeShader_->setUniformValue("ghostOpacity",ghostOpacity_);glBindVertexArray(ghostCompositeVao_);glDrawArrays(GL_TRIANGLES,0,3);ghostCompositeShader_->release();glDisable(GL_BLEND);glDepthMask(GL_TRUE);
 }
 void Viewport::mousePressEvent(QMouseEvent *event) {
     lastMouse_ = event->position().toPoint(); setFocus();
