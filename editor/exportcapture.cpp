@@ -1,5 +1,7 @@
 #include "exportcapture.h"
 #include "nativeexport.h"
+#include "mintwriter.h"
+#include "isolation.h"
 #include "mintfile.h"
 #include "mintskinrecovery.h"
 #include "despillcolor.h"
@@ -21,6 +23,7 @@
 #include <cstring>
 #include <map>
 #include <set>
+#include <optional>
 
 namespace {
 constexpr double C0 = 0.28209479177387814, Pi = 3.14159265358979323846;
@@ -106,30 +109,27 @@ void processColour(vgs::Frame &frame,const CaptureSettings &settings,const Expor
     }
 }
 class Baker {
-    QMatrix4x4 model,cropInverse;
+    QMatrix4x4 model;
+    CompiledModifiers modifiers;
     Matrix a; ShMatrix sh;
     const Project &project;
     int coefficients;
 public:
-    Baker(const Project &p,int degree) : model(p.transform.matrix()),a(linear(model)),project(p),coefficients((degree+1)*(degree+1)-1) {
+    Baker(const Project &p,int degree) : model(p.transform.matrix()),modifiers(p),a(linear(model)),project(p),coefficients((degree+1)*(degree+1)-1) {
         if (!a.allFinite() || std::abs(a.determinant())<1e-15) throw std::runtime_error("Cannot export a singular capture transform.");
-        bool invertible=true; cropInverse=p.crop.transform.matrix().inverted(&invertible);
-        if (p.crop.enabled && !invertible) throw std::runtime_error("Cannot export a singular crop transform.");
         sh=angularBake(a);
     }
     vgs::Frame bake(const vgs::Frame &source,const ExportProgress &progress) const {
+        std::vector<QVector3D> worldPositions(size_t(source.count));std::vector<uint8_t> keep(size_t(source.count));
+        for (size_t i=0;i<source.count;++i) {worldPositions[i]=model.map({source.position[3*i],source.position[3*i+1],source.position[3*i+2]});keep[i]=source.active[i] && modifiers.keeps(worldPositions[i],{source.colorDc[3*i],source.colorDc[3*i+1],source.colorDc[3*i+2]});}
+        applyIsolation(worldPositions,keep,modifiers.isolations,[&] {report(progress,0,QStringLiteral("Purge Isolated: searching neighbours"));return false;});
         vgs::Frame input=source; processColour(input,project.captureSettings,progress);
         vgs::Frame out;out.shCoefficients=coefficients;out.seconds=source.seconds;
         for (size_t i=0;i<input.count;++i) {
             if ((i%8192)==0) report(progress,0,QStringLiteral("Baking transforms and crop"));
-            if (!input.active[i]) continue;
+            if (!keep[i]) continue;
             const QVector3D world=model.map(QVector3D(input.position[3*i],input.position[3*i+1],input.position[3*i+2]));
-            if (project.crop.enabled) {
-                const QVector3D p=cropInverse.map(world);const auto &c=project.crop;
-                if (p.y()<0 || p.y()>c.height || (c.shape==CropShape::Box
-                    ? std::abs(p.x())>c.width*.5f || std::abs(p.z())>c.depth*.5f
-                    : p.x()*p.x()+p.z()*p.z()>c.radius*c.radius)) continue;
-            }
+            if (!modifiers.keeps(world,{source.colorDc[3*i],source.colorDc[3*i+1],source.colorDc[3*i+2]})) continue;
             Eigen::Quaterniond q(input.rotation[4*i+3],input.rotation[4*i],input.rotation[4*i+1],input.rotation[4*i+2]);
             Eigen::Vector3d scale(input.scale[3*i],input.scale[3*i+1],input.scale[3*i+2]);
             if (!world.isNull() && (!std::isfinite(world.x()) || !std::isfinite(world.y()) || !std::isfinite(world.z()))) throw std::runtime_error("Non-finite Gaussian position.");
@@ -309,12 +309,15 @@ std::array<double,256> exportShTransform(const Transform &transform) {
     for (int row=0;row<16;++row) for (int col=0;col<16;++col) result[row*16+col]=matrix(row,col);return result;
 }
 
-vgs::Frame bakeExportFrame(const vgs::Frame &frame,const Project &project,int degree,const ExportProgress &progress) {
+vgs::Frame bakeExportFrame(const vgs::Frame &frame,const Project &project,int degree,const ExportProgress &progress,double frameRate) {
     if (degree<0 || degree>3) throw std::runtime_error("Invalid export SH degree.");
-    return Baker(project,degree).bake(frame,progress);
+    Project pose=project;pose.transform=project.transformAtFrame(frame.seconds*frameRate);return Baker(pose,degree).bake(frame,progress);
 }
 
-ExportResult exportCaptureFile(const Project &project,const QString &destination,const ExportProgress &progress) {
+ExportResult exportCaptureFile(const Project &inputProject,const QString &destination,const ExportProgress &progress) {
+    Project project=inputProject;const bool animated=project.hasAnimatedMotion();if (!animated) project.transform=inputProject.transformAtFrame(0);
+    if (animated) throw std::runtime_error("Animated export is temporarily blocked: the current writer expands the capture into one full block per frame and can multiply its size. Static/constant offsets still use native temporal export. A compact animated representation requires updated decoder support or a compatible temporal bake.");
+    const bool mintOutput=QFileInfo(destination).suffix().compare("mint",Qt::CaseInsensitive)==0;
     QString error;if (!project.captureSettings.validate(&error)) throw std::runtime_error(error.toStdString());
     if (QFileInfo(project.asset).absoluteFilePath().compare(QFileInfo(destination).absoluteFilePath(),Qt::CaseInsensitive)==0)
         throw std::runtime_error("Choose a destination different from the source capture.");
@@ -322,7 +325,7 @@ ExportResult exportCaptureFile(const Project &project,const QString &destination
     std::unique_ptr<MintFile> mint;std::unique_ptr<FileSource> source;std::unique_ptr<vgsdec::Capture> capture;
     ExportResult result;
     double rate,duration;int sourceDegree=3;vgs::Header header,sourceHeader;vgs::EncodeOptions options;
-    std::unique_ptr<vgs::MintLogicalSource> nativeMint;bool native=supportsNativeTransform(project);
+    std::unique_ptr<vgs::MintLogicalSource> nativeMint;bool native=!animated && supportsNativeTransform(project);
     if (QFileInfo(project.asset).suffix().compare("mint",Qt::CaseInsensitive)==0) {
         mint=std::make_unique<MintFile>();if (!mint->open(project.asset,&error)) throw std::runtime_error(error.toStdString());
         if (!mint->frameRateProblem().isEmpty()) {native=false;result.notes << QStringLiteral("The source uses varying sample rates and is resampled at the timeline frame rate.");}
@@ -366,7 +369,7 @@ ExportResult exportCaptureFile(const Project &project,const QString &destination
     m.captureStudio=utf(s.studio);m.copyright=utf(s.copyright);m.softwareName=utf(s.softwareName);m.softwareVersion=utf(s.softwareVersion);
     for (const auto &tag : s.tags) m.tags.push_back(utf(tag));
     QJsonObject provenance{{"editorExportVersion",2},{"colourProcessingVersion",2},{"sampling",native ? "native-temporal" : "native-frame-hold"},{"sourceInFrame",first},{"sourceOutFrame",last},
-        {"transform",project.json({})["transform"]},{"crop",project.json({})["crop"]},{"processing",s.json()}};
+        {"transform",inputProject.json({})["transform"]},{"crop",project.json({})["crop"]},{"modifiers",project.modifierJson()},{"processing",s.json()}};
     if (!s.extraJson.trimmed().isEmpty()) {const auto doc=QJsonDocument::fromJson(s.extraJson.toUtf8());provenance["userMetadata"]=doc.isArray() ? QJsonValue(doc.array()) : QJsonValue(doc.object());}
     for (const auto &extra : options.extras) if (extra.type==vgs::MetadataExtra2) provenance["sourceMetadata"]=QJsonDocument::fromJson(QByteArray(reinterpret_cast<const char *>(extra.bytes.data()),qsizetype(extra.bytes.size()))).object();
     options.extras.erase(std::remove_if(options.extras.begin(),options.extras.end(),[](const auto &e) {return e.type==vgs::MetadataExtra2;}),options.extras.end());
@@ -385,27 +388,36 @@ ExportResult exportCaptureFile(const Project &project,const QString &destination
                 chunk=assembleNativeChunk(vgs::decodeChunk(sourceHeader,plan.sourceIndex,bytes.data(),bytes.size()));
                 setNativeShDegree(chunk,sourceDegree,degree);
             }
+            std::optional<vgs::DecodedChunk> classification;
+            if (s.despill && !CompiledModifiers(project).greens.isEmpty()) classification=chunk;
             if (s.despill) {
                 MintDespillOptions processing;processing.strength=s.despillStrength;processing.greenGain=s.greenGain;
                 processing.viewChromaScale=s.viewChromaScale;processing.recoverSkinColour=s.recoverSkin;
                 report(progress,currentPercent,QStringLiteral("Processing native colour dictionaries"));
                 if (!MintFile::despillLogical(&chunk,1/rate,processing,innerProgress,&error)) throw std::runtime_error(error.toStdString());
             }
-            return editNativeChunk(std::move(chunk),plan,project,writing ? nullptr : &result,innerProgress);
+            return editNativeChunk(std::move(chunk),plan,project,writing ? nullptr : &result,innerProgress,classification ? &*classification : nullptr);
         }
         const double seconds=std::min(double(first+int(index))/rate,duration-1e-7);vgs::Frame frame;
         if (mint) {MintFrame decoded;if (!mint->decode(seconds,&decoded,true,&error)) throw std::runtime_error(error.toStdString());frame=copyFrame(decoded);}
         else frame=copyFrame(capture->setTime(seconds,true));
-        auto baked=baker.bake(frame,innerProgress);
+        auto baked=[&] {if (!animated) return baker.bake(frame,innerProgress);Project pose=project;pose.transform=inputProject.transformAtFrame(first+int(index));return Baker(pose,degree).bake(frame,innerProgress);}();
         if (!writing) {result.kept+=baked.count;result.removed+=std::count(frame.active.begin(),frame.active.end(),uint8_t(1))-baked.count;}
         return packFrame(std::move(baked),degree);
     };
-    vgs::encodeSequence(header,provider,[&](uint64_t offset,const uint8_t *data,size_t count) {
+    auto sink=[&](uint64_t offset,const uint8_t *data,size_t count) {
         if (!temporary.seek(qint64(offset)) || temporary.write(reinterpret_cast<const char *>(data),qint64(count))!=qint64(count)) throw std::runtime_error(temporary.errorString().toStdString());
-    },options,[&](int done,int total) {writing=done>=int(header.chunks.size());currentPercent=total ? 85*done/total : 0;report(progress,currentPercent,QStringLiteral("Encoding capture"));return true;});
-    if (!result.kept) throw std::runtime_error("The selected range contains no Gaussian centres inside the crop.");
+    };
+    auto encodingProgress=[&](int done,int total) {writing=done>=int(header.chunks.size());currentPercent=total ? 85*done/total : 0;report(progress,currentPercent,QStringLiteral("Encoding capture"));return true;};
+    if (mintOutput) writeMintSequence(header,provider,sink,encodingProgress);
+    else vgs::encodeSequence(header,provider,sink,options,encodingProgress);
+    if (!result.kept) throw std::runtime_error("The selected range contains no Gaussian records after applying active modifiers.");
     if (!temporary.flush()) throw std::runtime_error(temporary.errorString().toStdString());
-    {
+    if (mintOutput) {
+        MintFile verified;if (!verified.open(temporary.fileName(),&error)) throw std::runtime_error(error.toStdString());
+        for (int i=0;i<result.frames;++i) {report(progress,85+10*i/result.frames,QStringLiteral("Verifying MINT frame %1 / %2").arg(i+1).arg(result.frames));MintFrame frame;if (!verified.decode(i/rate,&frame,true,&error)) throw std::runtime_error(error.toStdString());}
+        result.notes << QStringLiteral("MINT format 6: capture metadata, audio, thumbnail and playback hints are omitted. Lower SH degrees are zero-padded to the MINT degree-3 layout.");
+    } else {
         FileSource verifySource(temporary.fileName());auto verified=vgsdec::Capture::openStream(verifySource);verified.setCachePolicy({0,0,64ull*1024*1024});
         for (int i=0;i<result.frames;++i) {report(progress,85+10*i/result.frames,QStringLiteral("Verifying frame %1 / %2").arg(i+1).arg(result.frames));verified.setTime(i/rate,true);}
     }
@@ -418,6 +430,7 @@ ExportResult exportCaptureFile(const Project &project,const QString &destination
     result.notes << (native ? QStringLiteral("Native temporal blocks are retained; unused Gaussian records and dictionary entries are removed.")
                           : QStringLiteral("Native-frame sampling; frames are held between samples. Attributes are requantized to the existing VGS dictionaries."));
     if (!native) result.notes << QStringLiteral("Nonuniform scale/shear and variable-rate sources currently use sampled export, which can produce larger files.");
+    if (animated) result.notes << QStringLiteral("Animated transform offsets are baked at each source frame, including covariance and SH. Animated exports currently use frame sampling and can be larger than native temporal exports.");
     const Matrix a=linear(project.transform.matrix()),metric=a.transpose()*a;
     if (!metric.isApprox(Matrix::Identity()*metric.trace()/3,1e-5)) result.notes << QStringLiteral("SH under nonuniform scale or shear is projected to the selected SH degree.");
     if (capture && (capture->hasAudio() || capture->hasThumbnail())) result.notes << QStringLiteral("Source audio and thumbnail are omitted because timeline and framing may have changed.");

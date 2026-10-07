@@ -5,6 +5,8 @@
 #include <QOpenGLShaderProgram>
 #include <QOpenGLWidget>
 class ViewCube;
+class QLabel;
+class QOpenGLFramebufferObject;
 
 class Viewport : public QOpenGLWidget, protected QOpenGLFunctions_3_3_Core {
     Q_OBJECT
@@ -17,11 +19,13 @@ public:
     void setTransformMode(TransformMode mode);
     TransformMode transformMode() const { return mode_; }
     void toggleTransformMode(TransformMode mode);
+    void activateTransformShortcut(TransformMode mode);
     void setCamera(const Camera &camera);
     Camera camera() const { return camera_; }
     void setViewPreset(ViewPreset preset, bool orthographic = true);
     bool handleViewKey(int key, Qt::KeyboardModifiers modifiers);
     void setCrop(const CropVolume &crop);
+    void setModifiers(const QVector<Modifier> &modifiers);
     CropVolume crop() const { return crop_; }
     void setCropEditing(bool enabled);
     bool cropEditing() const { return cropEditing_; }
@@ -31,8 +35,14 @@ public:
     void setCoordinateSpace(TransformMode mode,CoordinateSpace space);
     CoordinateSpace coordinateSpace(TransformMode mode) const;
     void setPointSize(float size);
+    void setDisplayControls(QWidget *controls);
     void setGrid(bool enabled);
     void fit(const QVector3D &minimum, const QVector3D &maximum);
+    bool focusVisible();
+    bool setGhost(bool enabled);
+    bool ghostEnabled() const {return ghostEnabled_;}
+    size_t ghostPointCount() const {return ghostPoints_.size();}
+    double ghostTime() const {return ghostTime_;}
     QString renderError() const { return error_; }
 signals:
     void cameraChanged();
@@ -41,6 +51,7 @@ signals:
     void transformModeChanged(TransformMode mode);
     void cropEdited(CropVolume crop);
     void frameRequested();
+    void ghostChanged(bool enabled);
 protected:
     bool event(QEvent *event) override;
     void initializeGL() override;
@@ -71,12 +82,19 @@ private:
     void applyEditableTransform(const Transform &transform);
     void orbit(float yawDelta, float pitchDelta);
     void drawCrop(const QMatrix4x4 &viewProjection);
+    std::vector<QVector3D> visibleWorldPoints() const;
+    void drawGhost(const QMatrix4x4 &viewProjection,const QSize &pixels,float dpr);
     Transform worldTransformed(const Transform &start,const QMatrix4x4 &delta) const;
     FramePtr frame_;
     Transform transform_;
     Camera camera_;
     ViewCube *viewCube_;
+    QLabel *statistics_;
+    QWidget *displayControls_ = nullptr;
     CropVolume crop_;
+    QVector<Modifier> modifiers_;
+    bool modifierStack_ = false, cpuFiltered_ = false;
+    GLuint modifierBuffer_ = 0, modifierTexture_ = 0;
     bool cropEditing_ = false;
     QPoint lastMouse_;
     bool grid_ = true, frameDirty_ = true, initialized_ = false;
@@ -86,7 +104,14 @@ private:
     std::unique_ptr<QOpenGLShaderProgram> pointShader_, gridShader_;
     QString error_;
     double uploadMs_ = 0;
-    float pointSize_ = 2;
+    float pointSize_ = 5;
+    struct GhostPoint {float position[3];};
+    std::vector<GhostPoint> ghostPoints_;
+    bool ghostEnabled_=false,ghostDirty_=false;
+    double ghostTime_=0;
+    GLuint ghostVao_=0,ghostBuffer_=0,ghostCompositeVao_=0;
+    std::unique_ptr<QOpenGLShaderProgram> ghostShader_,ghostCompositeShader_;
+    std::unique_ptr<QOpenGLFramebufferObject> ghostFramebuffer_;
     GLuint gizmoVao_ = 0, gizmoBuffer_ = 0;
     TransformMode mode_ = TransformMode::None;
     CoordinateSpace spaces_[3] = {CoordinateSpace::Global,CoordinateSpace::Global,CoordinateSpace::Global};

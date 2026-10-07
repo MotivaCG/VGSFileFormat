@@ -9,6 +9,7 @@ class ViewCube : public QWidget {
 public:
     explicit ViewCube(QWidget *parent);
     void setCamera(const Camera &camera);
+    void setDisplayControls(QWidget *controls);
 signals:
     void viewSelected(ViewPreset preset);
 protected:

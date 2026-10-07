@@ -145,3 +145,60 @@ matches despill without recovery, approximately (0.7998, 0.8006, 0.8094), while 
 skin-like candidates remain eligible. This is a material heuristic, not a semantic mask.
 A synthetic skin/cloth case, the reported record, and full per-Gaussian position/DC/SH
 parity tests protect the correction. Export provenance carries colourProcessingVersion=2.
+
+## Modifier stack
+
+Project versions 7 and 8 store a flat modifiers array with stable identifiers, activation,
+full-timeline coverage and selected modifier. Crop properties belong to that modifier;
+the top-level crop object is a legacy inspection mirror and does not evaluate effects.
+All active crop volumes combine by union. Enabled remove-green modifiers then test
+original clamped DC RGB, with saturation >= threshold and circular hue distance
+from 120 degrees <= tolerance. Achromatic colours are excluded from matching.
+The optional green.colourSpace field selects srgb or linear-rgb. New modifiers
+default to linear-rgb, 50% minimum saturation and 45 degrees hue distance. Linear
+classification applies the standard sRGB transfer function before HSV in both CPU
+and GLSL implementations. Missing colourSpace preserves legacy sRGB semantics.
+
+CompiledModifiers is shared by native/sample export and preview configuration.
+The native exporter retains unprocessed classification arrays when despill and a
+colour-removal modifier are both enabled, so despill cannot hide the original green
+from classification. Lifetime filtering/reentry splitting and dictionary compaction
+are unchanged. Editor presets use schema version 5 for animated modifier stacks;
+schema 4 stacks and schema 3 single-crop presets remain readable. Metadata preset
+schema/scoping is unchanged. Project version 8 and editor preset version 5 prevent
+older editors from opening and silently dropping new animation/isolation data.
+
+## Animated transforms and isolation
+
+Animate transform keys use absolute source frame numbers and reference-space
+offset TRS/shear. Translation/scale/shear interpolate linearly and rotation uses
+quaternion slerp. Project.transform remains the reference; active animations
+postmultiply it in stack order. Editing a selected animation solves its offset
+against the prefix/suffix matrices, retaining other animations and the reference.
+Single-key/constant-offset animation keeps native export where possible. Varying
+animation export is currently blocked before any destination is touched, because
+the per-frame bake fallback could multiply file size. The frame bake math remains
+available/tested independently; compact export requires the decision described in
+ANIMATED_EXPORT.md.
+Timeline trim evaluates offsets at the original source frames, not output frames.
+
+Purge Isolated adapts SMNForge's Nth-neighbour/upper-median rule with a vendored
+nanoflann KD-tree, excluding self and evaluating only currently surviving finite
+centres in world space. Source attributes stay unchanged. Preview visibility is
+calculated in CaptureWorker and uploaded as a separate vertex attribute, bypassed
+immediately when the modifier is disabled. Native export splits lifetimes according
+to the per-frame mask before dictionary compaction; sampled export applies the
+identical mask before colour processing/covariance bake. No statistical scale guard
+is applied; the user controls N and the median-distance percentage explicitly.
+
+## MINT export
+
+mintwriter reconstructs format-6 metadata, time index, type-3 dictionary headers,
+type-1 group headers and raw block arrays from the edited logical chunk provider.
+It uses two passes, zero-fills 256-byte allocation padding, and streams each block
+without accumulating the whole capture. Lower SH degrees expand to fifteen slots
+with zero coefficients. No VGS metadata/extras or signature are carried into MINT.
+The same crop/filter/bake/trim pipeline runs before either writer, and every output
+frame is decoded by MintFile before QSaveFile atomically replaces the destination.
+Tests compare position, quaternion, scale, opacity, DC and SH with VGS exports,
+including empty frames, native blocks, sampled affine transforms and cancellation.

@@ -31,7 +31,9 @@ CaptureSettingsDialog::CaptureSettingsDialog(const Project &project,PresetStore 
     save->setToolTip(tr("Save metadata, processing and output settings under a name (Ctrl+Shift+P). Editor/crop settings are not included."));
     auto *folder = new QToolButton; QPixmap icon = style()->standardIcon(QStyle::SP_DirOpenIcon).pixmap(24,24);
     QPainter tint(&icon); tint.setCompositionMode(QPainter::CompositionMode_SourceIn); tint.fillRect(icon.rect(),Qt::white); tint.end();
-    folder->setIcon(QIcon(icon)); folder->setFixedSize(34,34); folder->setToolTip(tr("Open the editor presets folder (Ctrl+Alt+P).")); presetRow->addWidget(folder);
+    QIcon folderIcon;folderIcon.addPixmap(icon,QIcon::Normal);
+    QPixmap disabled=icon;QPainter grey(&disabled);grey.setCompositionMode(QPainter::CompositionMode_SourceIn);grey.fillRect(disabled.rect(),QColor("#777777"));grey.end();folderIcon.addPixmap(disabled,QIcon::Disabled);
+    folder->setIcon(folderIcon); folder->setFixedSize(34,34); folder->setToolTip(tr("Open the editor presets folder (Ctrl+Alt+P).")); presetRow->addWidget(folder);
     layout->addLayout(presetRow); auto *columns = new QHBoxLayout;
     auto *metadata = new QGroupBox(tr("Metadata")); auto *form = new QFormLayout(metadata);
     const QString labels[] = {tr("Title"),tr("Catalogue ID"),tr("Author"),tr("Project"),tr("Take"),tr("Capture studio"),tr("Copyright"),tr("Software"),tr("Software version")};

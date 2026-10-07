@@ -1,4 +1,5 @@
 #include "nativeexport.h"
+#include "isolation.h"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -535,7 +536,7 @@ void setNativeShDegree(vgs::DecodedChunk &c,int sourceDegree,int targetDegree) {
     }
     normalizeSchemas(c);
 }
-vgs::DecodedChunk editNativeChunk(vgs::DecodedChunk chunk,const NativeChunkPlan &plan,const Project &project,ExportResult *statistics,const ExportProgress &progress) {
+vgs::DecodedChunk editNativeChunk(vgs::DecodedChunk chunk,const NativeChunkPlan &plan,const Project &project,ExportResult *statistics,const ExportProgress &progress,const vgs::DecodedChunk *classificationSource) {
     report(progress,QStringLiteral("Filtering native Gaussian lifetimes"));
     normalizeSchemas(chunk);const size_t T=chunk.groups[0].intervals;
     vgs::FrameDecoder decoder(chunk,1./30,vgs::FrameDecoder::Contents::Positions);
@@ -543,19 +544,31 @@ vgs::DecodedChunk editNativeChunk(vgs::DecodedChunk chunk,const NativeChunkPlan 
     for (size_t group=1;group<chunk.groups.size();++group) offsets[group+1]=offsets[group]+chunk.groups[group].splats;
     std::vector<std::vector<Span>> kept(chunk.groups.size());std::vector<std::vector<int>> starts(chunk.groups.size());
     for (size_t group=1;group<chunk.groups.size();++group) starts[group].assign(size_t(chunk.groups[group].splats),-1);
-    const auto model=project.transform.matrix();bool invertible=true;const auto inverse=project.crop.transform.matrix().inverted(&invertible);
-    if (project.crop.enabled && !invertible) throw std::runtime_error("Cannot export a singular crop transform.");
+    const auto model=project.transform.matrix();CompiledModifiers modifiers(project);
+    std::unique_ptr<vgs::FrameDecoder> colourDecoder;vgs::Frame colourFrame;
+    if (!modifiers.greens.isEmpty()) colourDecoder=std::make_unique<vgs::FrameDecoder>(classificationSource ? *classificationSource : chunk);
     std::vector<float> positions;
+    std::vector<QVector3D> worldPositions(offsets.back());std::vector<uint8_t> visibility(offsets.back());
     for (int sample=0;sample<=plan.intervals;++sample) {
         const bool closing=sample==plan.intervals;
-        if (!closing) decoder.evaluatePositions(std::min((plan.first+sample)/double(T),1.-1e-9),&positions);
+        if (!closing) {
+            const double normalized=std::min((plan.first+sample)/double(T),1.-1e-9);
+            decoder.evaluatePositions(normalized,&positions);
+            if (colourDecoder) colourDecoder->evaluateInto(normalized,false,&colourFrame);
+            for (size_t group=1;group<chunk.groups.size();++group) {
+                const auto &life=get(chunk,vgs::Lifetimes,uint32_t(group)).bytes;
+                for (size_t row=0;row<chunk.groups[group].splats;++row) {const size_t record=offsets[group]+row,index=record*3;worldPositions[record]=model.map({positions[index],positions[index+1],positions[index+2]});
+                    visibility[record]=plan.first+sample>=life[2*row] && plan.first+sample+1<=life[2*row+1] && modifiers.keepsPosition(worldPositions[record]) && (!colourDecoder || !modifiers.removesColour({colourFrame.colorDc[index],colourFrame.colorDc[index+1],colourFrame.colorDc[index+2]}));}
+            }
+            applyIsolation(worldPositions,visibility,modifiers.isolations,[&] {report(progress,QStringLiteral("Purge Isolated: searching neighbours"));return false;});
+        }
         for (size_t group=1;group<chunk.groups.size();++group) {
             const auto &life=get(chunk,vgs::Lifetimes,uint32_t(group)).bytes;
             for (size_t row=0;row<chunk.groups[group].splats;++row) {
                 bool active=!closing && plan.first+sample>=life[2*row] && plan.first+sample+1<=life[2*row+1],inside=active;
-                if (active && project.crop.enabled) {
-                    const size_t index=(offsets[group]+row)*3;const auto p=inverse.map(model.map({positions[index],positions[index+1],positions[index+2]}));const auto &crop=project.crop;
-                    inside=p.y()>=0 && p.y()<=crop.height && (crop.shape==CropShape::Box ? std::abs(p.x())<=crop.width*.5f && std::abs(p.z())<=crop.depth*.5f : p.x()*p.x()+p.z()*p.z()<=crop.radius*crop.radius);
+                if (active) {
+                    const size_t record=offsets[group]+row,index=record*3;
+                    Q_UNUSED(index);inside=visibility[record];
                 }
                 if (statistics && active) {if (inside) ++statistics->kept;else ++statistics->removed;}
                 if (inside && starts[group][row]<0) starts[group][row]=sample;

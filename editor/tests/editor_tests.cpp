@@ -2,6 +2,7 @@
 #include "project.h"
 #include "filehistory.h"
 #include "presetstore.h"
+#include "isolation.h"
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonArray>
@@ -13,14 +14,86 @@
 class EditorTests : public QObject {
     Q_OBJECT
 private slots:
+    void animationOffsetsInterpolationEditingAndPersistence() {
+        Project project;project.modifiers.clear();project.transform.position={10,20,30};project.transform.rotation={0,0,90};project.transform.scale={2,2,2};const auto reference=project.transform;
+        Modifier first;first.id=Project::newId();first.name="Animation";first.type=ModifierType::AnimateTransform;Transform a,b;b.position={4,0,0};b.rotation={0,0,90};b.scale={2,2,2};first.animation.setKey(0,a);first.animation.setKey(10,b);project.modifiers={first};project.selectedModifier=first.id;
+        const auto midpoint=first.animation.evaluate(5);QVERIFY((midpoint.position-QVector3D(2,0,0)).length()<1e-5);QVERIFY((midpoint.scale-QVector3D(1.5f,1.5f,1.5f)).length()<1e-5);QVERIFY(std::abs(midpoint.rotation.z()-45)<1e-3);
+        QVERIFY((project.transformAtFrame(5).position-QVector3D(10,24,30)).length()<1e-4);QVERIFY(project.hasAnimatedMotion());
+        auto desired=project.transformAtFrame(5);desired.position+=QVector3D(1,2,3);project.setAnimatedPose(5,desired);QCOMPARE(project.modifier()->animation.keys.size(),3);QVERIFY((project.transformAtFrame(5).position-desired.position).length()<1e-4);QCOMPARE(project.transform.position,reference.position);QCOMPARE(project.transform.rotation,reference.rotation);QCOMPARE(project.transform.scale,reference.scale);
+        Modifier second;second.id=Project::newId();second.name="Second animation";second.type=ModifierType::AnimateTransform;Transform extra;extra.position={0,1,0};second.animation.setKey(0,extra);project.modifiers.append(second);
+        desired=project.transformAtFrame(7);desired.position+=QVector3D(-2,0,1);project.setAnimatedPose(7,desired);QVERIFY((project.transformAtFrame(7).position-desired.position).length()<1e-4);
+        TransformAnimation wrap;Transform left,right;left.rotation={0,0,170};right.rotation={0,0,-170};wrap.setKey(0,left);wrap.setKey(10,right);QVERIFY(std::abs(std::abs(wrap.evaluate(5).rotation.z())-180)<1e-3);
+        QTemporaryDir dir;project.asset=dir.filePath("source.mint");const auto json=project.json(dir.filePath("scene.vgsproj"));Project restored;QString error;QVERIFY(Project::fromJson(json,dir.path(),&restored,&error));QCOMPARE(restored.modifierJson(),project.modifierJson());
+        auto invalid=json;auto mods=invalid["modifiers"].toArray();auto m=mods[0].toObject();auto animation=m["animation"].toObject();auto keys=animation["keys"].toArray();keys.append(keys[0]);animation["keys"]=keys;m["animation"]=animation;mods[0]=m;invalid["modifiers"]=mods;QVERIFY(!Project::fromJson(invalid,dir.path(),&restored,&error));
+        project.modifiers[0].enabled=false;project.modifiers[1].enabled=false;QCOMPARE(project.transformAtFrame(5).position,reference.position);
+    }
+    void isolationMatchesNthNeighbourMedianAndEdgeCases() {
+        std::vector<QVector3D> points;for (int y=0;y<5;++y) for (int x=0;x<5;++x) points.push_back({x*.01f,y*.01f,0});points.push_back({100,100,100});points.push_back({101,100,100});
+        IsolationFilter filter{4,300};std::vector<uint8_t> keep(points.size(),1);std::vector<float> expectedDistances;
+        for (size_t i=0;i<points.size();++i) {std::vector<float> distances;for (size_t j=0;j<points.size();++j) if (i!=j) distances.push_back((points[i]-points[j]).length());std::sort(distances.begin(),distances.end());expectedDistances.push_back(distances[3]);}
+        auto sorted=expectedDistances;std::sort(sorted.begin(),sorted.end());const float threshold=sorted[sorted.size()/2]*3;applyIsolation(points,keep,{filter});
+        for (size_t i=0;i<keep.size();++i) QCOMPARE(bool(keep[i]),expectedDistances[i]<=threshold);QCOMPARE(keep.back(),uint8_t(0));QCOMPARE(keep[0],uint8_t(1));
+        std::vector<QVector3D> small{{0,0,0},{1,0,0}};std::vector<uint8_t> smallMask{1,1};applyIsolation(small,smallMask,{filter});QCOMPARE(smallMask,std::vector<uint8_t>({1,1}));
+        std::vector<QVector3D> duplicates(10,QVector3D());std::vector<uint8_t> duplicateMask(10,1);applyIsolation(duplicates,duplicateMask,{filter});QCOMPARE(std::count(duplicateMask.begin(),duplicateMask.end(),uint8_t(1)),10);
+        std::fill(keep.begin(),keep.end(),1);keep.back()=0;applyIsolation(points,keep,{filter});QCOMPARE(keep.back(),uint8_t(0));
+        std::fill(keep.begin(),keep.end(),1);QVERIFY_EXCEPTION_THROWN(applyIsolation(points,keep,{filter},[] {return true;}),std::runtime_error);
+        std::vector<QVector3D> large;for (int y=0;y<80;++y) for (int x=0;x<80;++x) large.push_back({x*.01f,y*.01f,0});for (int i=0;i<4;++i) large.push_back({100.f+i,100,100});std::vector<uint8_t> largeMask(large.size(),1);applyIsolation(large,largeMask,{{4,400}});QCOMPARE(std::count(largeMask.begin(),largeMask.end(),uint8_t(1)),6400);
+    }
+    void linearRgbGreenFilterAndLegacyDefaults() {
+        GreenFilter filter;QVERIFY(filter.linearRgb);QCOMPARE(filter.minimumSaturation,.5f);QCOMPARE(filter.hueTolerance,45.f);
+        QVERIFY(filter.matches({.4f,.6f,.4f}));QVERIFY(!filter.matches({.6f,.6f,.6f}));QVERIFY(!filter.matches({.6f,.4f,.4f}));
+        filter.linearRgb=false;QVERIFY(!filter.matches({.4f,.6f,.4f}));
+        QTemporaryDir dir;Project project;project.asset=dir.filePath("source.mint");project.modifiers[0].type=ModifierType::RemoveGreen;
+        auto json=project.json(dir.filePath("scene.vgsproj"));auto rows=json["modifiers"].toArray();auto row=rows[0].toObject();auto green=row["green"].toObject();green.remove("colourSpace");row["green"]=green;rows[0]=row;json["modifiers"]=rows;
+        Project restored;QString error;QVERIFY(Project::fromJson(json,dir.path(),&restored,&error));QVERIFY(!restored.modifier()->green.linearRgb);
+    }
+    void animationAndIsolationIgnoreUnrelatedPropertiesAndPersist() {
+        QTemporaryDir dir;Project project;project.asset=dir.filePath("source.mint");project.modifiers.clear();
+        for (auto type:{ModifierType::AnimateTransform,ModifierType::PurgeIsolated}) {
+            Modifier modifier;modifier.id=Project::newId();modifier.name=type==ModifierType::AnimateTransform ? "Animate transform" : "Purge Isolated";modifier.type=type;
+            // Unused crop/filter properties must never become active by accident.
+            modifier.crop.enabled=true;modifier.crop.transform.scale={0,0,0};modifier.green.minimumSaturation=0;modifier.green.hueTolerance=180;
+            project.modifiers.append(modifier);
+        }
+        project.selectedModifier=project.modifiers.back().id;QString error;Project restored;
+        QVERIFY(Project::fromJson(project.json(dir.filePath("scene.vgsproj")),dir.path(),&restored,&error));
+        QCOMPARE(restored.modifierJson(),project.modifierJson());QCOMPARE(restored.selectedModifier,project.selectedModifier);
+        CompiledModifiers filters(restored);QVERIFY(filters.crops.isEmpty());QVERIFY(filters.greens.isEmpty());QVERIFY(filters.keeps({100,100,100},{0,1,0}));
+        PresetStore presets(dir.filePath("presets"));QString path;EditorPreset preset;
+        QVERIFY(presets.save("Placeholders",project,&path,&error,PresetScope::Editor));QVERIFY(presets.read(path,PresetScope::Editor,&preset,&error));
+        QCOMPARE(preset.settings.modifierJson(),project.modifierJson());
+    }
+    void modifierUnionGreenFilterAndPersistence() {
+        Project project;project.modifiers.clear();
+        Modifier left;left.id=Project::newId();left.name="Left crop";left.crop.enabled=true;left.crop.radius=.5f;left.crop.height=2;left.crop.transform.position={-1.5f,0,0};
+        Modifier right=left;right.id=Project::newId();right.name="Right crop";right.crop.shape=CropShape::Box;right.crop.width=right.crop.depth=1;right.crop.transform.position={1.5f,0,0};
+        Modifier green;green.id=Project::newId();green.name="Green removal";green.type=ModifierType::RemoveGreen;green.green.linearRgb=false;green.green.minimumSaturation=.8f;green.green.hueTolerance=20;
+        project.modifiers={left,right,green};project.selectedModifier=green.id;
+        CompiledModifiers filters(project);
+        QVERIFY(filters.keeps({-1.5f,1,0},{1,0,0}));QVERIFY(filters.keeps({1.5f,1,0},{0,0,1}));
+        QVERIFY(!filters.keeps({0,1,0},{1,1,1}));QVERIFY(!filters.keeps({1.5f,1,0},{0,1,0}));
+        QVERIFY(!green.green.matches({.5f,.5f,.5f}));QVERIFY(!green.green.matches({1,1,0}));QVERIFY(!green.green.matches({.3f,1,.3f}));
+        QVERIFY(green.green.matches({.2f,1,.2f}));QVERIFY(green.green.matches({0,1,0}));QVERIFY(!green.green.matches({0,0,0}));
+        green.green.hueTolerance=180;green.green.minimumSaturation=0;QVERIFY(green.green.matches({1,0,0}));QVERIFY(!green.green.matches({.5f,.5f,.5f}));
+        QTemporaryDir dir;project.asset=dir.filePath("capture.mint");QString error;const auto json=project.json(dir.filePath("scene.vgsproj"));
+        QCOMPARE(json["version"].toInt(),8);QCOMPARE(json["modifiers"].toArray().size(),3);QVERIFY(!json.contains("layers"));Project restored;
+        QVERIFY2(Project::fromJson(json,dir.path(),&restored,&error),qPrintable(error));QCOMPARE(restored.modifierJson(),project.modifierJson());QCOMPARE(restored.selectedModifier,green.id);
+        project.modifiers[0].enabled=false;QVERIFY(!CompiledModifiers(project).keeps({-1.5f,1,0},{1,0,0}));
+        project.modifiers[1].enabled=false;QVERIFY(CompiledModifiers(project).keeps({100,100,100},{1,0,0}));
+        project.modifiers[2].enabled=false;QVERIFY(CompiledModifiers(project).keeps({100,100,100},{0,1,0}));
+        auto invalid=json;auto items=invalid["modifiers"].toArray();auto item=items[1].toObject();item["id"]=items[0].toObject()["id"];items[1]=item;invalid["modifiers"]=items;
+        QVERIFY(!Project::fromJson(invalid,dir.path(),&restored,&error));
+        for (int i=0;i<100;++i) {auto copy=right;copy.id=Project::newId();project.modifiers.append(copy);}
+        QVERIFY(Project::fromJson(project.json(dir.filePath("many.vgsproj")),dir.path(),&restored,&error));QCOMPARE(restored.modifiers.size(),103);
+    }
     void reusablePresetStorage() {
         QTemporaryDir directory; PresetStore store(directory.filePath("presets")); Project settings;
         settings.asset = "D:/private-shoot/capture.mint"; settings.time = 12; settings.in = 10; settings.out = 20;
         settings.transform.position = {1,2,3}; settings.transform.rotation = {10,20,30}; settings.transform.scale = {2,3,4}; settings.transform.shear = {0.1f,0.2f,0.3f};
-        settings.crop.enabled = true; settings.crop.radius = 1.5f; settings.crop.height = 2.5f;
-        settings.crop.shape = CropShape::Box; settings.crop.width = 2; settings.crop.depth = 3;
+        settings.crop().enabled = true; settings.crop().radius = 1.5f; settings.crop().height = 2.5f;
+        settings.crop().shape = CropShape::Box; settings.crop().width = 2; settings.crop().depth = 3;
         settings.captureSettings.title = "Reusable settings"; settings.captureSettings.despill = true;
-        settings.crop.transform.position = {4,5,6}; settings.crop.transform.rotation = {30,20,10}; settings.crop.transform.scale = {0.5f,2,3};
+        settings.crop().transform.position = {4,5,6}; settings.crop().transform.rotation = {30,20,10}; settings.crop().transform.scale = {0.5f,2,3};
         settings.spaces[1] = CoordinateSpace::Local; settings.pointSize = 5; settings.grid = false; settings.speed = 0.5; settings.loop = false;
         settings.camera.preset = ViewPreset::Front; settings.camera.orthographic = true; settings.camera.yaw = settings.camera.pitch = 0;
         QString path,error; QVERIFY2(store.save("Reusable: ../T4DS?",settings,&path,&error,PresetScope::Editor),qPrintable(error));
@@ -28,9 +101,9 @@ private slots:
         PresetStore reloaded(store.directory()); EditorPreset preset;
         QVERIFY2(reloaded.read(path,&preset,&error),qPrintable(error)); QCOMPARE(preset.name,QString("Reusable: ../T4DS?"));
         QCOMPARE(preset.settings.transform.position,settings.transform.position); QCOMPARE(preset.settings.transform.shear,settings.transform.shear);
-        QCOMPARE(preset.settings.crop.transform.position,settings.crop.transform.position); QCOMPARE(preset.settings.crop.transform.scale,settings.crop.transform.scale);
-        QCOMPARE(preset.settings.crop.radius,settings.crop.radius); QCOMPARE(preset.settings.crop.enabled,true);
-        QCOMPARE(preset.settings.crop.shape,CropShape::Box); QCOMPARE(preset.settings.crop.depth,3.0f); QCOMPARE(preset.settings.captureSettings.despill,false);
+        QCOMPARE(preset.settings.crop().transform.position,settings.crop().transform.position); QCOMPARE(preset.settings.crop().transform.scale,settings.crop().transform.scale);
+        QCOMPARE(preset.settings.crop().radius,settings.crop().radius); QCOMPARE(preset.settings.crop().enabled,true);
+        QCOMPARE(preset.settings.crop().shape,CropShape::Box); QCOMPARE(preset.settings.crop().depth,3.0f); QCOMPARE(preset.settings.captureSettings.despill,false);
         QCOMPARE(preset.settings.spaces[1],CoordinateSpace::Local); QCOMPARE(preset.settings.camera.preset,ViewPreset::Front);
         QCOMPARE(preset.settings.pointSize,5.0); QCOMPARE(preset.settings.speed,0.5); QCOMPARE(preset.settings.time,0.0);
         QFile file(path); QVERIFY(file.open(QIODevice::ReadOnly)); const auto bytes = file.readAll(); file.close();
@@ -47,7 +120,7 @@ private slots:
     }
     void presetScopesAllowSameNameWithoutCrossingData() {
         QTemporaryDir directory; PresetStore store(directory.path()); Project settings; settings.asset = "source.mint";
-        settings.transform.position = {1,2,3}; settings.crop.enabled = true; settings.crop.shape = CropShape::Box;
+        settings.transform.position = {1,2,3}; settings.crop().enabled = true; settings.crop().shape = CropShape::Box;
         settings.captureSettings.title = "Metadata title"; settings.captureSettings.despill = true;
         QString editorPath,metadataPath,error;
         QVERIFY(store.save("T4DS",settings,&editorPath,&error,PresetScope::Editor));
@@ -57,14 +130,14 @@ private slots:
         EditorPreset editor,metadata; QVERIFY(store.read(editorPath,&editor,&error)); QVERIFY(store.read(metadataPath,&metadata,&error));
         QCOMPARE(editor.scope,PresetScope::Editor); QCOMPARE(metadata.scope,PresetScope::Metadata);
         QCOMPARE(editor.settings.transform.position,settings.transform.position); QCOMPARE(editor.settings.captureSettings.despill,false);
-        QCOMPARE(metadata.settings.transform.position,QVector3D()); QCOMPARE(metadata.settings.crop.enabled,false);
+        QCOMPARE(metadata.settings.transform.position,QVector3D()); QCOMPARE(metadata.settings.crop().enabled,false);
         QCOMPARE(metadata.settings.captureSettings.title,settings.captureSettings.title);
         settings.captureSettings.title = "Updated metadata"; QString updated;
         QVERIFY(store.save("t4ds",settings,&updated,&error,PresetScope::Metadata)); QCOMPARE(updated,metadataPath);
         QVERIFY(store.read(editorPath,&editor,&error)); QCOMPARE(editor.settings.transform.position,QVector3D(1,2,3));
         QFile file(metadataPath); QVERIFY(file.open(QIODevice::ReadOnly)); const auto root = QJsonDocument::fromJson(file.readAll()).object();
         QCOMPARE(root["scope"].toString(),QString("capture-metadata")); QVERIFY(root["appliesTo"].isArray());
-        QCOMPARE(root["format"].toString(),QString("vgs-editor-metadata-preset")); QCOMPARE(root["version"].toInt(),3);
+        QCOMPARE(root["format"].toString(),QString("vgs-editor-metadata-preset")); QCOMPARE(root["version"].toInt(),4);
         QCOMPARE(root["configuration"].toObject().size(),1);
         QVERIFY(!store.read(metadataPath,PresetScope::Editor,&editor,&error));
         QVERIFY(!store.read(editorPath,PresetScope::Metadata,&metadata,&error));
@@ -162,8 +235,8 @@ private slots:
         p.transform.shear = {0.1f,0.2f,0.3f}; p.spaces[0] = CoordinateSpace::Local; p.spaces[2] = CoordinateSpace::Local;
         p.camera.target = {1,2,3}; p.camera.distance = 8; p.time = 2; p.in = 1; p.out = 5; p.pointSize = 4;
         p.camera.preset = ViewPreset::Top; p.camera.pitch = 90; p.camera.orthographic = true;
-        p.crop.enabled = true; p.crop.radius = 0.8f; p.crop.height = 2.4f;
-        p.crop.transform.position = {1,2,3}; p.crop.transform.rotation = {20,30,40}; p.crop.transform.scale = {1,2,0.5f};
+        p.crop().enabled = true; p.crop().radius = 0.8f; p.crop().height = 2.4f;
+        p.crop().transform.position = {1,2,3}; p.crop().transform.rotation = {20,30,40}; p.crop().transform.scale = {1,2,0.5f};
         QString error; const auto path = dir.filePath("sample.vgsproj");
         QVERIFY2(p.write(path,&error),qPrintable(error));
         Project restored; QVERIFY2(Project::read(path,&restored,&error),qPrintable(error));
@@ -171,8 +244,8 @@ private slots:
         QCOMPARE(restored.transform.rotation,p.transform.rotation); QCOMPARE(restored.transform.scale,p.transform.scale);
         QCOMPARE(restored.transform.shear,p.transform.shear); QCOMPARE(restored.spaces[0],CoordinateSpace::Local); QCOMPARE(restored.spaces[2],CoordinateSpace::Local);
         QCOMPARE(restored.time,p.time); QCOMPARE(restored.pointSize,p.pointSize);
-        QCOMPARE(restored.crop.enabled,p.crop.enabled); QCOMPARE(restored.crop.radius,p.crop.radius);
-        QCOMPARE(restored.crop.height,p.crop.height); QCOMPARE(restored.crop.transform.rotation,p.crop.transform.rotation);
+        QCOMPARE(restored.crop().enabled,p.crop().enabled); QCOMPARE(restored.crop().radius,p.crop().radius);
+        QCOMPARE(restored.crop().height,p.crop().height); QCOMPARE(restored.crop().transform.rotation,p.crop().transform.rotation);
         QCOMPARE(restored.camera.preset,p.camera.preset); QCOMPARE(restored.camera.orthographic,true); QCOMPARE(restored.camera.pitch,90.0f);
         QCOMPARE(restored.json(path)["view"].toObject()["sh"].toBool(),true);
         auto legacy = p.json(path); legacy["version"] = 1; legacy.remove("crop");
@@ -180,7 +253,7 @@ private slots:
         auto legacyView = legacy["view"].toObject(); legacyView["sh"] = false; legacy["view"] = legacyView;
         QFile legacyFile(path); QVERIFY(legacyFile.open(QIODevice::WriteOnly)); legacyFile.write(QJsonDocument(legacy).toJson()); legacyFile.close();
         QVERIFY(Project::read(path,&restored,&error)); QCOMPARE(restored.json(path)["view"].toObject()["sh"].toBool(),true);
-        QCOMPARE(restored.crop.enabled,false); QCOMPARE(restored.camera.preset,ViewPreset::Free); QCOMPARE(restored.camera.orthographic,false);
+        QCOMPARE(restored.crop().enabled,false); QCOMPARE(restored.camera.preset,ViewPreset::Free); QCOMPARE(restored.camera.orthographic,false);
         // Relocate a complete project directory: relative capture paths remain portable.
         QTemporaryDir relocated; QFile::copy(path,relocated.filePath("copy.vgsproj"));
         QVERIFY(Project::read(relocated.filePath("copy.vgsproj"),&restored,&error));
@@ -221,12 +294,12 @@ private slots:
         const auto matrix = stretch*transform.matrix(); const auto restored = Transform::fromMatrix(matrix).matrix();
         for (int i=0; i<4; ++i) for (int j=0; j<4; ++j) QVERIFY(std::abs(matrix(i,j)-restored(i,j))<1e-5f);
         QTemporaryDir dir; Project project; project.asset = dir.filePath("capture.mint"); project.out = 1;
-        project.crop.enabled = true; project.crop.height = 2; project.crop.transform = transform;
+        project.crop().enabled = true; project.crop().height = 2; project.crop().transform = transform;
         auto legacy = project.json(dir.filePath("legacy.vgsproj")); legacy["version"] = 2;
         const auto expectedBase = transform.matrix().map(QVector3D(0,-1,0));
         QFile file(dir.filePath("legacy.vgsproj")); QVERIFY(file.open(QIODevice::WriteOnly)); file.write(QJsonDocument(legacy).toJson()); file.close();
         QString error; Project migrated; QVERIFY2(Project::read(file.fileName(),&migrated,&error),qPrintable(error));
-        QVERIFY((migrated.crop.transform.position-expectedBase).length()<1e-5f);
+        QVERIFY((migrated.crop().transform.position-expectedBase).length()<1e-5f);
         QVERIFY(migrated.spaces[0]==CoordinateSpace::Global);
     }
     void captureIntegration() {

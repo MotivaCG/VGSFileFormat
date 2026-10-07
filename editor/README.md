@@ -13,8 +13,9 @@ scale transforms the entire capture without changing point size.
 - `Ctrl+S` / `Ctrl+Shift+S`: save project / save as. Project commands are in File; there is no Project toolbar.
 - Space: play or pause. Arrow keys: previous or next frame.
 - Drag: orbit; right/middle drag or Shift+drag: pan; wheel: zoom.
-- `F`: frame capture. `Ctrl+E`: export the edited capture. `Ctrl+Shift+E`: export the viewport as PNG.
-- `W` / `E` / `R`: toggle Move / Rotate / Scale. `Esc`: leave all transform modes.
+- `Numpad decimal` / `Numpad Del` / `F`: Focus visible. `Ctrl+E`: export the edited capture. `Ctrl+Shift+E`: export the viewport as PNG.
+- `G` / `R` / `S`: activate Move / Rotate / Scale. Repeat the active mode's key to switch Global/Local. `Esc`: leave all transform modes.
+- `Shift+G`: toggle the world grid and reference axes.
 
 The timeline uses Gracia Converter's range control: drag the upper In marker, lower Out marker, or white playhead. It includes the current frame, in/out fields, playback speed and loop. In and Out are inclusive and define the export range.
 The side panel provides position, XYZ Euler orientation in degrees, XYZ scale and
@@ -23,7 +24,9 @@ reset, with each XYZ triplet on one horizontal row. The scene matrix is
 View-dependent colour uses spherical harmonics automatically,
 with no UI toggle. Older projects with SH disabled still open with SH enabled.
 
-Each transform group has a checkable W/E/R button before X; only one mode is active.
+Each transform group has a checkable G/R/S button before X; only one mode is active.
+Clicking an active button switches that mode off; repeating its keyboard shortcut
+keeps the mode active and alternates Global/Local reference space.
 The gizmo appears at the current target's origin or cylinder base. Each XYZ row
 has a **Global/Local** toggle directly after its Move/Rotate/Scale button; Global
 is the default. The space button has no checked/green state and is available only
@@ -81,7 +84,7 @@ before Catalogue ID in the metadata panel.
 
 Presets are separate, atomically saved JSON files in Qt's AppData directory:
 on Windows, normally `%APPDATA%/THE4DSCANNER/VGS Editor/presets`. The folder button
-opens that location in the system file manager and works without a capture loaded.
+opens that location in the system file manager; its button is grey while capture controls are disabled.
 The dropdown refreshes when returning to the application after external changes.
 Saving a reusable preset does not replace or save the current `.vgsproj` project.
 Automated previews and preset tests use temporary folders.
@@ -99,13 +102,76 @@ With focus in the viewport, the numeric keypad follows Blender's navigation keys
 | Ctrl+Numpad 2/4/6/8 | Pan |
 | Shift+Numpad 4/6 | Roll in 15-degree steps, returning to perspective |
 | Numpad +/- | Zoom |
-| Numpad decimal / F | Frame the current transform target |
-| Numpad 0 / Reset perspective | Reset the user perspective |
+| Numpad decimal / Numpad Del / F | Focus visible capture and ghost points |
+| Numpad 0 | Reset the user perspective |
 
 The keypad works with Num Lock on or off. Number keys used in numeric fields keep
 editing their values. Navigation mappings follow the
 [Blender navigation manual](https://docs.blender.org/manual/id/3.6/editors/3dview/navigate/navigation.html);
 Numpad 0 resets perspective because this editor has no separate scene camera.
+
+## Modifier stack
+
+Modifiers form a flat list below all playback/timeline controls. Each row has a
+name, an eye toggle and a full-duration coloured bar without text. The eye switches
+between eye/eye-off icons; inactive modifiers and a disabled panel use grey icons.
+Type is
+identified by colour and tooltips rather than a separate visible column. There are
+no container layers or fixed modifier-count limits. Rows have the same 30 px
+minimum height, including the initial crop. A fresh capture starts with an enabled
+crop automatically fitted to its bounds. The panel reserves enough height for
+four rows. Crop bars and wire volumes use the section-heading red; Remove green
+uses green, Animate transform uses blue, and Purge Isolated uses warm yellow.
+
+Add Cylinder, Box, Remove green points, Animate transform or Purge Isolated from
+the type selector. Select a row to
+edit that modifier's properties in Tools. The context menu provides add, rename,
+duplicate, move, remove and temporary enable/disable; buttons provide the same
+editing operations. Disabling/removing a modifier immediately updates the list and
+preview. Removing the final modifier leaves the source unfiltered.
+
+All enabled crops combine by **union** across the full source timeline: a Gaussian
+is retained if any crop contains its transformed world-space centre. With no active
+crop, all centres are retained. Colour-removal modifiers then exclude matching
+source RGB values. Order does not alter these two operations in this version.
+
+Remove green defaults to minimum HSV saturation **50%** and maximum circular hue
+distance **45 degrees** from pure green (**120 degrees**). By default, clamped
+source DC RGB is converted from sRGB to linear RGB before HSV classification.
+The Linear RGB checkbox changes this per modifier. Older presets without a colour
+space field retain sRGB classification. Classification is independent of
+camera/SH appearance and runs before despill. Neutral
+or black RGB has undefined hue and is not matched. Preview and both export paths
+share these rules; source records remain immutable.
+
+**Animate transform** stores keyframes as local offsets from the capture reference
+pose. Select it and use **Set key**, or edit the current-frame XYZ fields/gizmo to
+automatically create/update a key. Position/scale interpolate linearly; rotations
+use shortest-path quaternion slerp. Values hold before the first and after the last
+key. Multiple animations compose in modifier order without changing the reference.
+The key table edits frame, position, rotation and scale; each XYZ cell accepts three
+comma-separated values. **Remove key** deletes the selected key. White diamonds
+appear on the modifier's timeline bar and clicking one seeks to its frame. Disabled
+animations retain keys and leave the reference pose visible; table edits remain
+available, while the gizmo is disabled until the modifier is enabled again.
+
+**Purge Isolated** uses the exact Nth-neighbour distance, excluding self, and the
+global upper median of those distances among points surviving crops/colour filters.
+A point is removed when `d_N > median(d_N) * percentage / 100`. Defaults follow
+SMNForge's Nth-neighbour rule: **N=4**, **700%** (7 times median). Lower percentages
+remove more. Each frame is evaluated independently; small populations with at most
+N points and a zero median are preserved. Preview processing runs in the decode
+worker, so camera navigation does not rebuild the KD-tree. VGS/PGS/MINT export uses
+the same rule, retaining temporal blocks when the capture transform is constant.
+Varying animated-transform export is temporarily blocked: the previous fallback
+expanded the capture into complete per-frame blocks and could multiply file size.
+Preview/keyframe editing still work, and constant offsets retain existing export
+behaviour. See docs/ANIMATED_EXPORT.md for the compact representation and legacy
+compatibility decision. No oversized animated file is silently produced.
+
+Projects and editor presets preserve the flat stack, activation and selected row.
+Older projects/presets migrate their one crop to one crop modifier without changing
+its world-space placement or activation. Metadata presets still affect metadata only.
 
 ## Crop volumes
 
@@ -114,12 +180,12 @@ dimensions and share the same height and transform. **Edit** (C) creates a volum
 editing. Its pivot is the centre of its base, with local Y running from 0 to its
 height; rotation and scaling keep that base fixed. The crop is independent in
 world space: moving the capture does not move it. While
-editing, it is drawn as a wireframe, all source points remain visible, and the
-shared XYZ fields and W/E/R gizmos affect the cylinder instead of the capture.
+editing, it is drawn as a wireframe, crop clipping is paused while colour filters remain active, and the
+shared XYZ fields and G/R/S gizmos affect the cylinder instead of the capture.
 Radius/height configure Cylinder; width/height/depth configure Box. Local XYZ
 scale can also produce an elliptical cylinder. **Fit capture** (Ctrl+F) refits the volume to capture bounds, resets
 its transformation, enters Move mode and returns keyboard focus to the viewport.
-Press R afterwards to select Scale; pressing R again leaves Scale.
+Press S afterwards to select Scale; pressing S again switches Global/Local.
 
 The two buttons next to Edit reset the cylinder's position, orientation, scale
 and shear in world coordinates, place its base at (0, 0, 0), and enter editing
@@ -130,11 +196,11 @@ without changing the capture transform:
 
 `Tab` (or `C`) toggles crop Edit; its button and tooltip track the shortcut.
 Turn editing off to hide the cylinder and clip points whose centres lie outside
-it. **Clear crop** (Ctrl+Shift+C) restores all points. The preview clips on the GPU without
+the union of enabled crops. **Disable crop** (Ctrl+Shift+C) disables the selected modifier while retaining its settings. The preview clips on the GPU without
 changing decoded records, so camera/crop changes do not require frame decoding or
 point-buffer uploads. Membership is evaluated against transformed Gaussian centres
 inside the fixed world-space volume.
-Crop definitions, metadata/processing, reference spaces and fixed camera views are saved in version-6
+Modifier definitions, metadata/processing, reference spaces and fixed camera views are saved in version-7
 projects. Earlier projects and presets still open; their capture-local crops migrate
 to world space without changing their existing placement. Version-2 cylinders migrate from centre
 to base pivots without changing their volume. Editing activation is temporary; reopening applies
@@ -196,6 +262,20 @@ opened captures/projects or saved projects, most recent first. Entries persist
 across restarts and are deduplicated; **Clear recent** clears the list while
 preserving dialog folders. Missing files produce a message when selected.
 
+Point size and Grid and axes controls share the viewport view-cube group below
+the view buttons and stay enabled before opening a capture. Point size starts at
+**5 px**; projects and user settings
+retain overrides. The top-left viewport statistics remain unobstructed.
+The small **Ghost comparison** toggle below Grid and axes starts off. Turning it
+on freezes the currently visible points in world space as a white reference with
+a faint 12%-opacity interior and a soft, brighter outline. Opacity is composited
+once per pixel, so overlapping points do not turn opaque. The centred button uses
+separate Ghost/Ghost off icons, with the off state in grey.
+Time, transforms and modifier edits do not alter the snapshot; camera
+navigation still works. Turning it off or opening another capture removes it.
+The ghost is a transient preview overlay and is not saved/exported as capture data.
+Focus visible uses the points surviving current crop/colour/isolation filters,
+plus the active ghost, rather than the whole source bounding box or crop gizmo.
 Native dialogs remember separate capture, project and image locations. Display
 settings (point size, grid), playback speed/loop, window geometry and dock
 layout are also remembered. New captures/projects inherit display and playback
@@ -317,5 +397,18 @@ Batch export uses the same writer without opening the editor window:
 VGSEditor.exe capture.vgsproj --export-capture capture-edited.vgs
 ```
 
-The output extension selects VGS/PGS; the project supplies crop, transforms,
+The output extension selects VGS/PGS/MINT; the project supplies crop, transforms,
 metadata and processing. Files are verified and atomically saved as in the UI.
+
+Export also supports **MINT format 6** through the native save dialog or a `.mint`
+batch-export destination. It rebuilds the raw padded arrays from the same edited
+temporal blocks, including crops, colour filters, despill and baked transforms.
+Capture metadata, audio, thumbnails and playback hints are omitted. Lower SH
+degrees are zero-padded to MINT's fifteen-coefficient layout. MINT is uncompressed;
+VGS usually stays smaller. Every frame is decoded again before atomic saving.
+
+In orthographic views the background's coloured axes are hidden. Perspective axes
+share the exact Y=0 grid origin. The coincident grey X/Z segments are omitted in
+perspective and restored in orthographic views; equal-depth drawing covers grid
+crossings without moving X/Z upwards. Modifier data uses texture buffers, avoiding a fixed uniform
+array limit. A CPU preview fallback handles hardware texture-buffer limits.

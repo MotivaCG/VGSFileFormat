@@ -25,21 +25,70 @@ class ViewportTests : public QObject {
             const auto colour = image.pixelColor(x,y);
             const int values[] = {colour.red(),colour.green(),colour.blue()};
             if (values[channel]<180 || values[(channel+1)%3]>155 || values[(channel+2)%3]>155) continue;
+            // The crop wire is pink/red; identify the red gizmo by equal G/B.
+            if (channel==0 && std::abs(colour.green()-colour.blue())>12) continue;
             const double distance = QLineF(center,QPointF(x,y)).length();
             if (distance>best) { best = distance; point = QPoint(qRound(x/dpr),qRound(y/dpr)); }
         }
         return point;
     }
 private slots:
+    void focusOnlyIncludesVisibleWorldPointsAndPreservesModes() {
+        Viewport viewport;viewport.resize(500,500);auto frame=std::make_shared<RenderFrame>();
+        frame->points={{{0,1,0},{1,0,0},0},{{100,1,0},{0,1,0},1},{{-100,1,0},{1,0,0},2,0}};viewport.setFrame(frame);
+        Modifier crop;crop.crop.enabled=true;crop.crop.shape=CropShape::Box;crop.crop.width=crop.crop.depth=2;crop.crop.height=2;viewport.setModifiers({crop});viewport.setTransformMode(TransformMode::Scale);
+        QVERIFY(viewport.focusVisible());QCOMPARE(viewport.camera().target,QVector3D(0,1,0));QVERIFY(viewport.camera().distance<1);QCOMPARE(viewport.transformMode(),TransformMode::Scale);
+        Transform moved;moved.position={2,0,0};viewport.setTransform(moved);const auto camera=viewport.camera();QVERIFY(!viewport.focusVisible());QCOMPARE(viewport.camera().target,camera.target);
+        crop.crop.transform.position={2,0,0};viewport.setModifiers({crop});QVERIFY(viewport.focusVisible());QCOMPARE(viewport.camera().target,QVector3D(2,1,0));
+        Modifier green;green.type=ModifierType::RemoveGreen;Modifier purge;purge.type=ModifierType::PurgeIsolated;viewport.setModifiers({green,purge});QVERIFY(viewport.focusVisible());QCOMPARE(viewport.camera().target,QVector3D(2,1,0));
+        qRegisterMetaType<ViewPreset>();QSignalSpy requested(&viewport,&Viewport::frameRequested);viewport.show();QVERIFY(QTest::qWaitForWindowExposed(&viewport));viewport.setFocus();
+        QTest::keyClick(&viewport,Qt::Key_Delete,Qt::KeypadModifier);QCOMPARE(requested.size(),1);QTest::keyClick(&viewport,Qt::Key_Period,Qt::KeypadModifier);QCOMPARE(requested.size(),2);QTest::keyClick(&viewport,Qt::Key_Delete);QCOMPARE(requested.size(),2);
+    }
+    void ghostFreezesWorldPoseAndBlendsOncePerPixel() {
+        Viewport viewport;viewport.resize(600,450);viewport.setGrid(false);viewport.setPointSize(9);Camera camera;camera.yaw=camera.pitch=0;camera.distance=4;viewport.setCamera(camera);
+        auto first=std::make_shared<RenderFrame>();first->seconds=.25;first->points={{{-.7f,0,0},{1,0,0},0},{{-.7f,0,0},{1,0,0},1},{{-.7f,0,0},{1,0,0},2}};viewport.setFrame(first);viewport.show();QVERIFY(QTest::qWaitForWindowExposed(&viewport));
+        QVERIFY(!viewport.ghostEnabled());QCOMPARE(viewport.ghostPointCount(),size_t(0));QVERIFY(viewport.setGhost(true));QCOMPARE(viewport.ghostPointCount(),size_t(3));QCOMPARE(viewport.ghostTime(),.25);
+        auto second=std::make_shared<RenderFrame>();second->seconds=.75;second->points={{{.7f,0,0},{0,0,1},0}};viewport.setFrame(second);Transform moved;moved.position={.1f,0,0};viewport.setTransform(moved);
+        const auto image=viewport.grabFramebuffer();int ghostPixels=0,bluePixels=0;int brightest=0;
+        for (int y=int(image.height()*.2);y<int(image.height()*.8);++y) for (int x=int(image.width()*.1);x<int(image.width()*.7);++x) {const auto c=image.pixelColor(x,y);if (c.blue()>200 && c.red()<20 && c.green()<20) ++bluePixels;
+            if (x<image.width()/2 && c.red()>35 && std::abs(c.red()-c.green())<2 && std::abs(c.red()-c.blue())<2) {++ghostPixels;brightest=std::max(brightest,c.red());}}
+        QVERIFY(ghostPixels>10);QVERIFY(bluePixels>10);QVERIFY2(brightest<110,"Overlapping ghost points must remain translucent rather than accumulating opacity.");QCOMPARE(viewport.ghostTime(),.25);
+        QVERIFY(viewport.focusVisible());QVERIFY(std::abs(viewport.camera().target.x()-.05f)<1e-5f);
+        QVERIFY(!viewport.setGhost(false));QCOMPARE(viewport.ghostPointCount(),size_t(0));QVERIFY(viewport.focusVisible());QVERIFY(std::abs(viewport.camera().target.x()-.8f)<1e-5f);
+        const auto disabled=viewport.grabFramebuffer();int grey=0;for (int y=int(disabled.height()*.2);y<int(disabled.height()*.8);++y) for (int x=int(disabled.width()*.1);x<int(disabled.width()*.48);++x) {const auto c=disabled.pixelColor(x,y);if (c.red()>35 && std::abs(c.red()-c.green())<2 && std::abs(c.red()-c.blue())<2) ++grey;}QCOMPARE(grey,0);
+        QVERIFY(viewport.setGhost(true));viewport.setFrame({});QVERIFY(!viewport.ghostEnabled());QCOMPARE(viewport.ghostPointCount(),size_t(0));
+    }
+    void modifierPreviewUsesCropUnionAndOriginalRgb() {
+        Viewport viewport;viewport.resize(600,450);viewport.setGrid(false);auto frame=std::make_shared<RenderFrame>();frame->coefficients=0;
+        for (int i=0;i<3;++i) {PointVertex point{};point.position[0]=i==0 ? -1.5f : 1.5f;point.position[1]=1;point.color[i]=1;point.id=float(i);frame->points.push_back(point);}
+        frame->records.resize(3);viewport.setFrame(frame);Camera camera;camera.target={0,1,0};camera.yaw=camera.pitch=0;camera.distance=6;viewport.setCamera(camera);
+        frame->points[1].color[0]=frame->points[1].color[2]=.35f;frame->points[1].color[1]=.6f; // Desaturated sRGB green matches the linear-RGB default.
+        Modifier first;first.crop.enabled=true;first.crop.radius=.5f;first.crop.height=2;first.crop.transform.position={-1.5f,0,0};Modifier second=first;second.crop.transform.position={1.5f,0,0};
+        Modifier green;green.type=ModifierType::RemoveGreen;viewport.setModifiers({first,second,green});viewport.show();QVERIFY(QTest::qWaitForWindowExposed(&viewport));
+        auto count=[&](int channel) {const auto image=viewport.grabFramebuffer();int n=0;for (int y=160;y<image.height();++y) for (int x=0;x<image.width();++x) {const auto c=image.pixelColor(x,y);const int rgb[3]={c.red(),c.green(),c.blue()};if (rgb[channel]>150 && rgb[(channel+1)%3]<100 && rgb[(channel+2)%3]<100) ++n;}return n;};
+        QVERIFY(count(0)>0);QCOMPARE(count(1),0);QVERIFY(count(2)>0);
+        first.enabled=false;viewport.setModifiers({first,second,green});QCOMPARE(count(0),0);QVERIFY(count(2)>0);
+        second.enabled=false;green.enabled=false;viewport.setModifiers({first,second,green});QVERIFY(count(0)>0);QVERIFY(count(1)>0);
+        QCOMPARE(frame->points.size(),size_t(3));
+    }
+    void orthographicBackgroundHasNoColouredAxes() {
+        Viewport viewport;viewport.resize(600,450);viewport.show();QVERIFY(QTest::qWaitForWindowExposed(&viewport));
+        auto coloured=[&] {const auto image=viewport.grabFramebuffer();int count=0;for (int y=0;y<image.height();++y) for (int x=0;x<400;++x) {const auto c=image.pixelColor(x,y);if (std::max({c.red(),c.green(),c.blue()})-std::min({c.red(),c.green(),c.blue()})>70) ++count;}return count;};
+        QVERIFY(coloured()>10);viewport.setViewPreset(ViewPreset::Top,true);QCOMPARE(coloured(),0);viewport.setViewPreset(ViewPreset::Front,true);QCOMPARE(coloured(),0);
+    }
     void modeShortcutsAndNavigation() {
         Viewport viewport; viewport.resize(500,500); viewport.setGrid(false);
         viewport.setFrame(std::make_shared<RenderFrame>()); viewport.show();
         QVERIFY(QTest::qWaitForWindowExposed(&viewport)); viewport.setFocus();
-        QTest::keyClick(&viewport,Qt::Key_W); QCOMPARE(viewport.transformMode(),TransformMode::Move);
-        QTest::keyClick(&viewport,Qt::Key_W); QCOMPARE(viewport.transformMode(),TransformMode::None);
-        QTest::keyClick(&viewport,Qt::Key_E); QCOMPARE(viewport.transformMode(),TransformMode::Rotate);
-        QTest::keyClick(&viewport,Qt::Key_R); QCOMPARE(viewport.transformMode(),TransformMode::Scale);
+        for (int group=0;group<3;++group) {
+            const auto mode=TransformMode(group+1);const auto key=group==0 ? Qt::Key_G : group==1 ? Qt::Key_R : Qt::Key_S;
+            QTest::keyClick(&viewport,key);QCOMPARE(viewport.transformMode(),mode);QCOMPARE(viewport.coordinateSpace(mode),CoordinateSpace::Global);
+            QTest::keyClick(&viewport,key);QCOMPARE(viewport.transformMode(),mode);QCOMPARE(viewport.coordinateSpace(mode),CoordinateSpace::Local);
+            QTest::keyClick(&viewport,key);QCOMPARE(viewport.transformMode(),mode);QCOMPARE(viewport.coordinateSpace(mode),CoordinateSpace::Global);
+            QKeyEvent repeat(QEvent::KeyPress,key,Qt::NoModifier,QString(),true);QApplication::sendEvent(&viewport,&repeat);QCOMPARE(viewport.coordinateSpace(mode),CoordinateSpace::Global);
+        }
         QTest::keyClick(&viewport,Qt::Key_Escape); QCOMPARE(viewport.transformMode(),TransformMode::None);
+        QTest::keyClick(&viewport,Qt::Key_W);QTest::keyClick(&viewport,Qt::Key_E);QCOMPARE(viewport.transformMode(),TransformMode::None);
         for (auto mode : {TransformMode::Move,TransformMode::Rotate,TransformMode::Scale}) {
             viewport.setTransformMode(mode); const Transform before = viewport.transform();
             const Camera camera = viewport.camera();
@@ -61,7 +110,7 @@ private slots:
         auto *cube = viewport.findChild<ViewCube *>(); QVERIFY(cube);
         const ViewPreset presets[] = {ViewPreset::Front,ViewPreset::Back,ViewPreset::Left,ViewPreset::Right,ViewPreset::Top,ViewPreset::Bottom};
         for (int i=0; i<6; ++i) {
-            QTest::mouseClick(cube,Qt::LeftButton,Qt::NoModifier,{20+(i%2)*73,125+(i/2)*23});
+            QTest::mouseClick(cube,Qt::LeftButton,Qt::NoModifier,{20+(i%2)*73,97+(i/2)*23});
             QCOMPARE(viewport.camera().preset,presets[i]); QVERIFY(viewport.camera().orthographic);
             const auto view = viewport.camera().viewMatrix();
             for (int row=0; row<4; ++row) for (int col=0; col<4; ++col) QVERIFY(std::isfinite(view(row,col)));
@@ -83,13 +132,13 @@ private slots:
     void viewCubeHoverClearsWhenOrbitingAway() {
         Viewport viewport; viewport.resize(600,500); viewport.show(); QVERIFY(QTest::qWaitForWindowExposed(&viewport));
         auto *cube = viewport.findChild<ViewCube *>(); QVERIFY(cube);
-        auto background = [&] { const auto image = cube->grab().toImage(); const double dpr = cube->devicePixelRatioF(); return image.pixelColor(qRound(14*dpr),qRound(124*dpr)); };
+        auto background = [&] { const auto image = cube->grab().toImage(); const double dpr = cube->devicePixelRatioF(); return image.pixelColor(qRound(14*dpr),qRound(96*dpr)); };
         viewport.setViewPreset(ViewPreset::Front);
-        QTest::mouseMove(cube,{20,125}); auto selected = background(); QVERIFY(selected.green()>selected.red());
+        QTest::mouseMove(cube,{20,97}); auto selected = background(); QVERIFY(selected.green()>selected.red());
         QEvent leave(QEvent::Leave); QApplication::sendEvent(cube,&leave);
         drag(viewport,{20,220},{50,240}); QCOMPARE(viewport.camera().preset,ViewPreset::Free);
         auto free = background(); QCOMPARE(free.green(),free.red());
-        QMouseEvent hover(QEvent::MouseMove,QPointF(20,125),QPointF(cube->mapToGlobal(QPoint(20,125))),Qt::NoButton,Qt::NoButton,Qt::NoModifier);
+        QMouseEvent hover(QEvent::MouseMove,QPointF(20,97),QPointF(cube->mapToGlobal(QPoint(20,97))),Qt::NoButton,Qt::NoButton,Qt::NoModifier);
         QApplication::sendEvent(cube,&hover); auto hovered = background(); QVERIFY(hovered.green()>hovered.red());
         QCOMPARE(viewport.camera().preset,ViewPreset::Free); QApplication::sendEvent(cube,&leave);
         free = background(); QCOMPARE(free.green(),free.red());

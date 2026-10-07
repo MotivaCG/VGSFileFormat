@@ -1,5 +1,7 @@
 #include "mainwindow.h"
 #include "viewport.h"
+#include "modifierpanel.h"
+#include "animationpanel.h"
 #include "capturesettingsdialog.h"
 #include "exportcapture.h"
 #include <QProgressDialog>
@@ -53,34 +55,35 @@ static QIcon transportIcon(QStyle *style,QStyle::StandardPixmap symbol,const QCo
     for (auto mode : {QIcon::Normal,QIcon::Disabled}) {
         QPixmap pixmap = style->standardIcon(symbol).pixmap(24,24);
         QPainter painter(&pixmap); painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
-        painter.fillRect(pixmap.rect(),mode==QIcon::Disabled ? QColor("#999999") : colour); painter.end();
+        painter.fillRect(pixmap.rect(),mode==QIcon::Disabled ? QColor("#777777") : colour); painter.end();
         icon.addPixmap(pixmap,mode);
     }
     return icon;
 }
-static QIcon editorButtonIcon(const QString &resource,bool checkedOnly) {
+static QIcon editorButtonIcon(const QString &resource,bool checkedOnly,const QString &offResource={}) {
     // State variants are generated at runtime; the supplied PNGs remain untouched.
     static QHash<QString,QIcon> cache;
-    const QString key = resource+(checkedOnly ? ":toggle" : ":selection");
+    const QString key = resource+(checkedOnly ? ":toggle:" : ":selection:")+offResource;
     if (cache.contains(key)) return cache.value(key);
-    const QPixmap original(resource);
-    auto tinted = [&](const QColor &colour) {
-        QPixmap result = original; QPainter painter(&result);
+    const QPixmap original(resource),off(offResource.isEmpty() ? resource : offResource);
+    auto tinted = [&](const QPixmap &source,const QColor &colour) {
+        QPixmap result = source; QPainter painter(&result);
         painter.setCompositionMode(QPainter::CompositionMode_SourceIn); painter.fillRect(result.rect(),colour);
         painter.end(); return result;
     };
-    const QPixmap inactive = tinted(QColor("#888888")), disabled = tinted(QColor("#606060"));
+    const QPixmap inactive=tinted(off,QColor("#888888")),disabledOn=tinted(original,QColor("#606060")),disabledOff=tinted(off,QColor("#606060"));
     QIcon icon;
     for (auto mode : {QIcon::Normal,QIcon::Active,QIcon::Selected}) {
         icon.addPixmap(original,mode,QIcon::On);
-        icon.addPixmap(checkedOnly ? inactive : original,mode,QIcon::Off);
+        icon.addPixmap(checkedOnly ? inactive : off,mode,QIcon::Off);
     }
-    icon.addPixmap(disabled,QIcon::Disabled,QIcon::On); icon.addPixmap(disabled,QIcon::Disabled,QIcon::Off);
+    icon.addPixmap(disabledOn,QIcon::Disabled,QIcon::On); icon.addPixmap(disabledOff,QIcon::Disabled,QIcon::Off);
     cache.insert(key,icon); return icon;
 }
 
 MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory) : QMainWindow(parent), presetStore_(presetDirectory), worker_(new CaptureWorker) {
     qRegisterMetaType<FramePtr>(); qRegisterMetaType<CaptureInfo>();
+    qRegisterMetaType<Project>();
     project_ = defaultProject();
     buildUi();
     worker_->moveToThread(&thread_);
@@ -91,6 +94,8 @@ MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory) : QMainWi
         if (gen != openingGeneration_) return;
         loading_ = false; loaded_ = true; decoding_ = pendingDecode_ = false;
         generation_ = gen; info_ = info;
+        viewport_->setGhost(false);
+        processingState_={};
         project_ = pendingProject_.value_or(defaultProject()); project_.asset = info.path;
         if (project_.captureSettings.title.isEmpty()) project_.captureSettings.title = info.title;
         projectPath_ = pendingProjectPath_;
@@ -105,12 +110,13 @@ MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory) : QMainWi
         project_.out = std::round(project_.out*info.fps)/info.fps;
         project_.time = std::round(project_.time*info.fps)/info.fps;
         viewport_->setTransformMode(TransformMode::None);
-        viewport_->setCropEditing(false); viewport_->setCrop(project_.crop);
+        viewport_->setCropEditing(false); viewport_->setCrop(project_.crop());
         viewport_->setTransform(project_.transform);
         for (int g=0; g<3; ++g) viewport_->setCoordinateSpace(TransformMode(g+1),project_.spaces[g]);
         if (pendingProject_) viewport_->setCamera(project_.camera);
         else viewport_->fit(info.minimum, info.maximum);
         project_.camera = viewport_->camera();
+        if (!pendingProject_) {fitCrop();viewport_->setCropEditing(false);viewport_->setTransformMode(TransformMode::None);}
         setWindowModified(!pendingProject_.has_value());
         pendingProject_.reset(); refreshPresets(); syncUi(); title();
         viewport_->setFrame(frame);
@@ -142,11 +148,14 @@ MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory) : QMainWi
     });
     connect(viewport_, &Viewport::transformModeChanged, this, &MainWindow::syncTransformButtons);
     connect(viewport_, &Viewport::transformEdited, this, [this](const Transform &transform) {
-        project_.transform = transform;
-        syncTransformFields(); dirty();
+        const int frame=int(std::round(project_.time*info_.fps));
+        if (project_.modifier() && project_.modifier()->type==ModifierType::AnimateTransform) project_.setAnimatedPose(frame,transform);
+        else project_.transform=Transform::fromMatrix(transform.matrix()*project_.animationMatrix(frame).inverted());
+        syncUi();dirty();
     });
     connect(viewport_,&Viewport::cropEdited,this,[this](const CropVolume &crop) {
-        project_.crop = crop; syncTransformFields(); dirty();
+        if (!project_.modifier() || project_.modifier()->type!=ModifierType::Crop) return;
+        const bool enabled=project_.crop().enabled;project_.crop() = crop;project_.crop().enabled=enabled;syncUi();dirty();
     });
     connect(viewport_,&Viewport::frameRequested,this,&MainWindow::fitCurrentTarget);
     playback_.setInterval(16); playback_.setTimerType(Qt::PreciseTimer);
@@ -185,7 +194,7 @@ void MainWindow::buildUi() {
     saveAction_ = file->addAction(tr("Save project"), QKeySequence::Save, this, [this] { save(); });
     saveAsAction_ = file->addAction(tr("Save project as…"), QKeySequence::SaveAs, this, [this] { save(true); });
     exportAction_ = file->addAction(tr("Export capture\u2026"), QKeySequence("Ctrl+E"), this, &MainWindow::exportCapture);
-    exportAction_->setToolTip(tr("Export the selected In/Out range to VGS or PGS, baking capture transforms and the world-space crop (Ctrl+E)."));
+    exportAction_->setToolTip(tr("Export the selected In/Out range to VGS, PGS or MINT, baking capture transforms and active modifiers (Ctrl+E). MINT omits capture metadata."));
     imageAction_ = file->addAction(tr("Export viewport image…"), QKeySequence("Ctrl+Shift+E"), this, &MainWindow::exportImage);
     file->addSeparator(); file->addAction(tr("Exit"), QKeySequence::Quit, this, &QWidget::close);
     newAction->setIcon(style()->standardIcon(QStyle::SP_FileIcon));
@@ -208,8 +217,6 @@ void MainWindow::buildUi() {
     head->addStretch(); timeLabel_ = new QLabel; head->addWidget(timeLabel_); tl->addLayout(head);
     slider_ = new RangeSlider; slider_->setObjectName("captureRangeSlider");
     slider_->setToolTip(tr("Drag the upper marker to set In, the lower marker to set Out, or the white playhead to seek. The selected range is exported.")); tl->addWidget(slider_);
-    auto *rangeLabels = new QHBoxLayout; rangeLabels->addWidget(new QLabel("0 s")); rangeLabels->addStretch();
-    endLabel_ = new QLabel; rangeLabels->addWidget(endLabel_); tl->addLayout(rangeLabels);
     auto *controls = new QHBoxLayout;
     auto button = [&](QStyle::StandardPixmap icon, const QString &tip, auto fn) {
         auto *b = new QPushButton; b->setIcon(transportIcon(style(),icon)); b->setToolTip(tip); b->setFixedWidth(40);
@@ -228,6 +235,26 @@ void MainWindow::buildUi() {
     speed_ = new QDoubleSpinBox; speed_->setRange(0.1,4); speed_->setSingleStep(0.25); speed_->setSuffix(" ×"); controls->addWidget(speed_);
     loop_ = new QCheckBox(tr("Loop")); controls->addWidget(loop_); tl->addLayout(controls);
     loop_->setToolTip(tr("Toggle looping within the playback range (L)."));
+    modifierPanel_=new ModifierPanel;tl->addWidget(modifierPanel_);
+    connect(modifierPanel_,&ModifierPanel::selectionChanged,this,[this] {
+        const auto modifier=modifierPanel_->project().selectedModifier;
+        viewport_->setTransformMode(TransformMode::None);
+        viewport_->setCropEditing(false);project_.selectedModifier=modifier;
+        viewport_->setCrop(project_.crop());
+        syncUi();dirty();revealModifierProperties();
+    });
+    connect(modifierPanel_,&ModifierPanel::stackChanged,this,[this] {
+        const auto modifiers=modifierPanel_->project().modifiers;const auto modifier=modifierPanel_->project().selectedModifier;
+        const bool targetChanged=project_.selectedModifier!=modifier;
+        const bool keepEditing=viewport_->cropEditing() && project_.selectedModifier==modifier;
+        if (project_.selectedModifier!=modifier) viewport_->setTransformMode(TransformMode::None);
+        viewport_->setCropEditing(false);project_.modifiers=modifiers;project_.selectedModifier=modifier;
+        if (project_.modifier() && project_.modifier()->type==ModifierType::AnimateTransform && !project_.modifier()->enabled) viewport_->setTransformMode(TransformMode::None);
+        viewport_->setCrop(project_.crop());if (keepEditing && project_.modifier() && project_.modifier()->type==ModifierType::Crop) viewport_->setCropEditing(true);syncUi();dirty();
+        if (targetChanged) revealModifierProperties();
+    });
+    connect(modifierPanel_,&ModifierPanel::cropAdded,this,&MainWindow::fitCrop);
+    connect(modifierPanel_,&ModifierPanel::seekFrame,this,[this](int frame) {play(false);setTime(frame/info_.fps,true);});
     layout->addWidget(timeline_); setCentralWidget(center);
     auto *dock = new QDockWidget(tr("Tools"), this); dock->setObjectName("toolsDock");
     dock->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea);
@@ -245,26 +272,29 @@ void MainWindow::buildUi() {
     presetLayout->addLayout(savedPresetRow);
     savePresetButton_ = new QPushButton(tr("Save preset…")); savePresetButton_->setObjectName("saveEditorPreset");
     savePresetButton_->setToolTip(tr("Save capture/crop transforms, view and playback settings (Ctrl+Shift+P). Metadata templates are stored as separate .presetmetadata files."));
-    presetLayout->addWidget(savePresetButton_); side->addWidget(presetBox_);
+    presetLayout->addWidget(savePresetButton_);
     connect(savePresetButton_,&QPushButton::clicked,this,&MainWindow::savePreset);
     connect(presetFolderButton_,&QToolButton::clicked,this,&MainWindow::openPresetFolder);
     connect(presetCombo_,&QComboBox::activated,this,[this](int) { loadSelectedPreset(); });
     refreshPresets();
     assetLabel_ = new QLabel(tr("No capture")); assetLabel_->setWordWrap(true); assetLabel_->setObjectName("assetTitle"); side->addWidget(assetLabel_);
+    assetLabel_->setMinimumWidth(0);assetLabel_->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Preferred);
     metadata_ = new QLabel; metadata_->setWordWrap(true); metadata_->setTextInteractionFlags(Qt::TextSelectableByMouse); side->addWidget(metadata_);
     captureSettingsButton_ = new QPushButton(tr("Metadata and processing…")); captureSettingsButton_->setObjectName("captureSettingsButton");
     captureSettingsButton_->setToolTip(tr("Prepare metadata and processing options, including despill, before exporting (Ctrl+M).")); side->addWidget(captureSettingsButton_);
     connect(captureSettingsButton_,&QPushButton::clicked,this,&MainWindow::editCaptureSettings);
+    side->addWidget(presetBox_);
     transformTarget_ = new QLabel(tr("Transform target: Capture (local)")); side->addWidget(transformTarget_);
     const QString groups[] = {tr("Position"), tr("Orientation (degrees)"), tr("Scale")};
     const QString axes[] = {"X", "Y", "Z"};
-    const QString shortcuts[] = {"W", "E", "R"};
+    const QString shortcuts[] = {"G", "R", "S"};
     const QString modeIcons[] = {":/icons/move.png",":/icons/rotate.png",":/icons/scale.png"};
     const QString accessibleModes[] = {tr("Move"),tr("Rotate"),tr("Scale")};
-    const QString modeNames[] = {tr("Toggle Move for the current target (W). Esc exits all modes."),tr("Toggle Rotate for the current target (E). Esc exits all modes."),tr("Toggle Scale for the current target (R). Cylinder scaling stays anchored at its base. Esc exits all modes.")};
+    const QString modeNames[] = {tr("Click to toggle Move. G activates Move; repeat G to switch Global/Local. Esc exits all modes."),tr("Click to toggle Rotate. R activates Rotate; repeat R to switch Global/Local. Esc exits all modes."),tr("Click to toggle Scale. S activates Scale; repeat S to switch Global/Local. Crop scaling stays anchored at its base. Esc exits all modes.")};
     transformModes_ = new QButtonGroup(this); transformModes_->setExclusive(true);
     for (int g = 0; g < 3; ++g) {
         auto *box = new QGroupBox(groups[g]); auto *row = new QHBoxLayout(box);
+        box->setProperty("transformGroup",true);
         row->setSpacing(5);
         auto *modeButton = new QToolButton; modeButtons_[g] = modeButton;
         modeButton->setText(shortcuts[g]); modeButton->setCheckable(true); modeButton->setFixedSize(34,34);
@@ -299,17 +329,20 @@ void MainWindow::buildUi() {
     resetTransformButton_ = reset;
     reset->setToolTip(tr("Reset the current target's position, rotation and scale (Alt+Home)."));
     connect(reset, &QPushButton::clicked, this, &MainWindow::resetTransform);
-    auto *cropBox = new QGroupBox(tr("Crop")); auto *cropForm = new QFormLayout(cropBox); cropForm_ = cropForm;
+    side->addStretch(1);
+    parametersHeading_=new QLabel(tr("PARAMETERS"));parametersHeading_->setObjectName("sectionTitle");side->addWidget(parametersHeading_);
+    auto *cropBox = new QGroupBox(tr("Crop modifier")); cropProperties_=cropBox; auto *cropForm = new QFormLayout(cropBox); cropForm_ = cropForm;
+    cropBox->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Maximum);
     cropShapeCombo_ = new QComboBox; cropShapeCombo_->addItem(tr("Cylinder"),int(CropShape::Cylinder)); cropShapeCombo_->addItem(tr("Box"),int(CropShape::Box));
     cropShapeCombo_->setObjectName("cropShape"); cropShapeCombo_->setToolTip(tr("Choose Cylinder or Box. Both share the same base pivot and transform; their dimensions are retained separately."));
     cropForm->addRow(tr("Shape"),cropShapeCombo_);
     connect(cropShapeCombo_,&QComboBox::activated,this,[this](int) {
-        if (syncing_ || !loaded_ || loading_) return;
-        project_.crop.shape = CropShape(cropShapeCombo_->currentData().toInt()); viewport_->setCrop(project_.crop); syncUi(); dirty(); viewport_->setFocus();
+        if (syncing_ || !loaded_ || loading_ || !project_.modifier() || project_.modifier()->type!=ModifierType::Crop) return;
+        project_.crop().shape = CropShape(cropShapeCombo_->currentData().toInt()); viewport_->setCrop(project_.crop()); syncUi(); dirty(); viewport_->setFocus();
     });
     cropEditButton_ = new QPushButton(tr("Edit")); cropEditButton_->setCheckable(true);
     cropEditButton_->setObjectName("editCropVolume");
-    cropEditButton_->setToolTip(tr("Toggle crop editing (Tab / C). On: show the wire volume and edit it with W/E/R. Off: apply the crop preview."));
+    cropEditButton_->setToolTip(tr("Toggle crop editing (Tab / C). On: show the wire volume and edit it with G/R/S. Repeat the active mode key to switch Global/Local. Off: apply the crop preview."));
     t4dsPresetButton_ = new QPushButton(tr("T4DS Preset")); smnPresetButton_ = new QPushButton(tr("SMN Preset"));
     t4dsPresetButton_->setToolTip(tr("Reset the cylinder at (0, 0, 0), height 2.5 m, radius 1.5 m (Ctrl+Alt+1)."));
     smnPresetButton_->setToolTip(tr("Reset the cylinder at (0, 0, 0), height 2.5 m, radius 1 m (Ctrl+Alt+2)."));
@@ -328,35 +361,77 @@ void MainWindow::buildUi() {
     cropForm->addRow(tr("Radius"),cropRadius_); cropForm->addRow(tr("Height"),cropHeight_);
     cropForm->addRow(tr("Width"),cropWidth_); cropForm->addRow(tr("Depth"),cropDepth_);
     auto *cropButtons = new QWidget; auto *cropRow = new QHBoxLayout(cropButtons); cropRow->setContentsMargins(0,0,0,0);
-    cropFitButton_ = new QPushButton(tr("Fit capture")); cropClearButton_ = new QPushButton(tr("Clear crop"));
+    cropFitButton_ = new QPushButton(tr("Fit capture")); cropClearButton_ = new QPushButton(tr("Disable crop"));
     cropFitButton_->setToolTip(tr("Fit the crop volume to the capture bounds and enter Move mode (Ctrl+F)."));
-    cropClearButton_->setToolTip(tr("Remove the crop and show all source points (Ctrl+Shift+C)."));
+    cropClearButton_->setToolTip(tr("Disable this crop modifier without deleting its settings (Ctrl+Shift+C)."));
     cropRow->addWidget(cropFitButton_); cropRow->addWidget(cropClearButton_); cropForm->addRow(cropButtons);
     cropStatus_ = new QLabel; cropStatus_->setWordWrap(true); cropForm->addRow(cropStatus_); side->addWidget(cropBox);
     connect(cropEditButton_,&QPushButton::clicked,this,[this](bool checked) { editCrop(checked); viewport_->setFocus(); });
     connect(cropFitButton_,&QPushButton::clicked,this,&MainWindow::fitCrop);
     connect(cropClearButton_,&QPushButton::clicked,this,&MainWindow::clearCrop);
     connect(cropRadius_,&QDoubleSpinBox::valueChanged,this,[this](double value) {
-        if (syncing_) return; project_.crop.radius = float(value); viewport_->setCrop(project_.crop); dirty();
+        if (syncing_) return; project_.crop().radius = float(value); viewport_->setCrop(project_.crop()); syncModifiers(); dirty();
     });
     connect(cropHeight_,&QDoubleSpinBox::valueChanged,this,[this](double value) {
-        if (syncing_) return; project_.crop.height = float(value); viewport_->setCrop(project_.crop); dirty();
+        if (syncing_) return; project_.crop().height = float(value); viewport_->setCrop(project_.crop()); syncModifiers(); dirty();
     });
-    connect(cropWidth_,&QDoubleSpinBox::valueChanged,this,[this](double value) { if (!syncing_) { project_.crop.width = float(value); viewport_->setCrop(project_.crop); dirty(); } });
-    connect(cropDepth_,&QDoubleSpinBox::valueChanged,this,[this](double value) { if (!syncing_) { project_.crop.depth = float(value); viewport_->setCrop(project_.crop); dirty(); } });
-    auto *viewBox = new QGroupBox(tr("Display")); auto *viewForm = new QFormLayout(viewBox);
-    pointSize_ = new QDoubleSpinBox; pointSize_->setRange(1,12); pointSize_->setSingleStep(0.5); pointSize_->setSuffix(" px");
+    connect(cropWidth_,&QDoubleSpinBox::valueChanged,this,[this](double value) { if (!syncing_) { project_.crop().width = float(value); viewport_->setCrop(project_.crop()); syncModifiers(); dirty(); } });
+    connect(cropDepth_,&QDoubleSpinBox::valueChanged,this,[this](double value) { if (!syncing_) { project_.crop().depth = float(value); viewport_->setCrop(project_.crop()); syncModifiers(); dirty(); } });
+    greenProperties_=new QGroupBox(tr("Remove green points"));greenProperties_->setObjectName("greenModifierProperties");auto *greenForm=new QFormLayout(greenProperties_);
+    greenProperties_->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Maximum);
+    greenSaturation_=new QDoubleSpinBox;greenSaturation_->setObjectName("greenMinimumSaturation");greenSaturation_->setRange(0,100);greenSaturation_->setDecimals(1);greenSaturation_->setSuffix(" %");greenSaturation_->setValue(50);
+    greenSaturation_->setToolTip(tr("Minimum HSV saturation of source base RGB. Camera and SH shading do not affect the classification."));
+    greenHue_=new QDoubleSpinBox;greenHue_->setObjectName("greenHueTolerance");greenHue_->setRange(0,180);greenHue_->setDecimals(1);greenHue_->setSuffix(QString(QChar(0x00b0)));greenHue_->setValue(45);
+    greenHue_->setToolTip(tr("Maximum circular hue distance from pure green (120 degrees). Smaller values target a narrower green range."));
+    greenForm->addRow(tr("Minimum saturation"),greenSaturation_);greenForm->addRow(tr("Hue distance"),greenHue_);
+    greenLinearRgb_=new QCheckBox(tr("Linear RGB"));greenLinearRgb_->setObjectName("greenLinearRgb");greenLinearRgb_->setChecked(true);
+    greenLinearRgb_->setToolTip(tr("Convert source base RGB from sRGB to linear RGB before HSV matching. Saved older presets keep their original colour space."));greenForm->addRow(greenLinearRgb_);
+    auto *greenNote=new QLabel(tr("Removes matching source RGB points over the full timeline, after the union of enabled crops."));greenNote->setWordWrap(true);greenForm->addRow(greenNote);side->addWidget(greenProperties_);
+    auto greenChanged=[this] {
+        if (syncing_ || !project_.modifier() || project_.modifier()->type!=ModifierType::RemoveGreen) return;
+        project_.modifier()->green.minimumSaturation=float(greenSaturation_->value()/100);project_.modifier()->green.hueTolerance=float(greenHue_->value());project_.modifier()->green.linearRgb=greenLinearRgb_->isChecked();syncModifiers();dirty();
+    };
+    connect(greenSaturation_,&QDoubleSpinBox::valueChanged,this,[greenChanged](double) {greenChanged();});connect(greenHue_,&QDoubleSpinBox::valueChanged,this,[greenChanged](double) {greenChanged();});
+    connect(greenLinearRgb_,&QCheckBox::toggled,this,[greenChanged](bool) {greenChanged();});
+    animationProperties_=new AnimationPanel;side->addWidget(animationProperties_);
+    connect(animationProperties_,&AnimationPanel::setKeyRequested,this,[this] {auto *m=project_.modifier();if (!m || m->type!=ModifierType::AnimateTransform) return;const int frame=int(std::round(project_.time*info_.fps));m->animation.setKey(frame,m->animation.evaluate(frame));syncUi();dirty();});
+    connect(animationProperties_,&AnimationPanel::animationChanged,this,[this](const TransformAnimation &animation) {auto *m=project_.modifier();if (!m || m->type!=ModifierType::AnimateTransform) return;m->animation=animation;syncUi();dirty();});
+    connect(animationProperties_,&AnimationPanel::seekFrame,this,[this](int frame) {play(false);setTime(frame/info_.fps,true);});
+    isolationProperties_=new QGroupBox(tr("Purge Isolated"));isolationProperties_->setObjectName("isolationModifierProperties");auto *isolationForm=new QFormLayout(isolationProperties_);
+    isolationProperties_->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Maximum);
+    isolationNeighbour_=new QSpinBox;isolationNeighbour_->setObjectName("isolationNeighbour");isolationNeighbour_->setRange(1,256);isolationNeighbour_->setValue(4);
+    isolationPercent_=new QDoubleSpinBox;isolationPercent_->setObjectName("isolationMedianPercent");isolationPercent_->setRange(0,1000000);isolationPercent_->setDecimals(1);isolationPercent_->setSuffix(" %");isolationPercent_->setValue(700);
+    isolationForm->addRow(tr("Nth neighbour"),isolationNeighbour_);isolationForm->addRow(tr("Distance / median"),isolationPercent_);
+    auto *isolationNote=new QLabel(tr("Removes points whose distance to neighbour N exceeds this percentage of the frame's median Nth-neighbour distance, after crop and colour filtering. 100% = median; 700% = 7 times median."));isolationNote->setWordWrap(true);isolationForm->addRow(isolationNote);side->addWidget(isolationProperties_);
+    isolationNeighbour_->setToolTip(tr("Nearest-neighbour rank, excluding the point itself. Frames with too few surviving points are preserved."));isolationPercent_->setToolTip(tr("Maximum Nth-neighbour distance as a percentage of the frame median. Lower values remove more points."));
+    auto isolationChanged=[this] {if (syncing_ || !project_.modifier() || project_.modifier()->type!=ModifierType::PurgeIsolated) return;project_.modifier()->isolation={isolationNeighbour_->value(),isolationPercent_->value()};syncModifiers();dirty();};
+    connect(isolationNeighbour_,&QSpinBox::valueChanged,this,[isolationChanged](int) {isolationChanged();});connect(isolationPercent_,&QDoubleSpinBox::valueChanged,this,[isolationChanged](double) {isolationChanged();});
+    displayControls_=new QWidget;displayControls_->setObjectName("viewportDisplayControls");
+    displayControls_->setStyleSheet("QWidget#viewportDisplayControls QLabel { color: #dddddd; font-size: 9pt; }"
+        "QWidget#viewportDisplayControls QDoubleSpinBox { padding: 2px; min-height: 18px; }");
+    auto *displayLayout=new QVBoxLayout(displayControls_);displayLayout->setContentsMargins(6,0,6,0);displayLayout->setSpacing(4);
+    auto *viewForm = new QFormLayout;displayLayout->addLayout(viewForm);
+    pointSize_ = new QDoubleSpinBox;pointSize_->setObjectName("displayPointSize");pointSize_->setDecimals(1);pointSize_->setRange(1,12); pointSize_->setSingleStep(0.5); pointSize_->setSuffix(" px");pointSize_->setValue(5);
+    pointSize_->setToolTip(tr("Opaque point diameter in viewport pixels. Default: 5 px."));
+    pointSize_->setMinimumWidth(0);pointSize_->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Fixed);
     viewForm->addRow(tr("Point size"), pointSize_);
     grid_ = new QCheckBox(tr("Grid and axes")); viewForm->addRow(grid_);
-    grid_->setToolTip(tr("Toggle the world grid and reference axes (G)."));
-    side->addWidget(viewBox); side->addStretch();
+    grid_->setToolTip(tr("Toggle the world grid and reference axes (Shift+G)."));
+    ghostButton_=new QToolButton;ghostButton_->setObjectName("ghostComparison");ghostButton_->setCheckable(true);ghostButton_->setChecked(false);ghostButton_->setIcon(editorButtonIcon(":/icons/ghost.png",true,":/icons/ghost_off.png"));ghostButton_->setIconSize({24,24});ghostButton_->setFixedSize(30,30);ghostButton_->setAccessibleName(tr("Ghost comparison"));
+    ghostButton_->setStyleSheet("QToolButton:checked {background: #494949; border: 1px solid #888888; border-radius: 3px;}");
+    ghostButton_->setToolTip(tr("Freeze currently visible points as a faint white ghost with a soft outline. Timeline and transform changes leave the copy fixed. Switch off to remove it."));displayLayout->addWidget(ghostButton_,0,Qt::AlignHCenter);
+    connect(ghostButton_,&QToolButton::toggled,this,[this](bool checked) {const bool active=viewport_->setGhost(checked);QSignalBlocker blocker(ghostButton_);ghostButton_->setChecked(active);if (checked && !active) statusBar()->showMessage(tr("No visible points to freeze."),5000);viewport_->setFocus();});
+    connect(viewport_,&Viewport::ghostChanged,this,[this](bool active) {QSignalBlocker blocker(ghostButton_);ghostButton_->setChecked(active);});
+    viewport_->setDisplayControls(displayControls_);
     auto *note = new QLabel(tr("Projects save the capture reference, transform and view.")); note->setWordWrap(true); side->addWidget(note);
     auto *toolsScroll = new QScrollArea; toolsScroll->setWidgetResizable(true); toolsScroll->setFrameShape(QFrame::NoFrame);
+    toolsScroll->setObjectName("toolsScrollArea");
     toolsScroll->setWidget(tools_);
     dock->setWidget(toolsScroll); dock->setMinimumWidth(450); addDockWidget(Qt::RightDockWidgetArea, dock);
     auto *viewMenu = menuBar()->addMenu(tr("View")); viewMenu->addAction(dock->toggleViewAction());
-    auto *frameAction = viewMenu->addAction(tr("Frame current target"),QKeySequence("F"),this,&MainWindow::fitCurrentTarget);
-    frameAction->setToolTip(tr("Frame the capture or the crop cylinder being edited (F / Numpad decimal)."));
+    auto *frameAction = viewMenu->addAction(tr("Focus visible"),this,&MainWindow::fitCurrentTarget);
+    frameAction->setShortcuts({QKeySequence(Qt::KeypadModifier|Qt::Key_Delete),QKeySequence(Qt::KeypadModifier|Qt::Key_Period),QKeySequence(Qt::KeypadModifier|Qt::Key_Comma),QKeySequence("F")});
+    frameAction->setToolTip(tr("Focus visible capture and ghost points (Numpad decimal / Numpad Del / F)."));
     auto *standardViews = viewMenu->addMenu(tr("Standard views"));
     const QString viewNames[] = {tr("Perspective"),tr("Front (Numpad 1)"),tr("Back (Ctrl+Numpad 1)"),tr("Left (Ctrl+Numpad 3)"),tr("Right (Numpad 3)"),tr("Top (Numpad 7)"),tr("Bottom (Ctrl+Numpad 7)")};
     for (int i=0; i<7; ++i) standardViews->addAction(viewNames[i],this,[this,i] { viewport_->setViewPreset(ViewPreset(i)); viewport_->setFocus(); });
@@ -401,7 +476,7 @@ void MainWindow::buildUi() {
     for (int g=0; g<3; ++g) {
         auto *shortcut = new QShortcut(QKeySequence(shortcuts[g]),this);
         shortcut->setAutoRepeat(false);
-        connect(shortcut,&QShortcut::activated,this,[this,g] { toggleTransformMode(TransformMode(g+1)); });
+        connect(shortcut,&QShortcut::activated,this,[this,g] { activateTransformShortcut(TransformMode(g+1)); });
     }
     auto *escape = new QShortcut(QKeySequence(Qt::Key_Escape),this);
     connect(escape,&QShortcut::activated,this,[this] { viewport_->setTransformMode(TransformMode::None); });
@@ -418,20 +493,46 @@ void MainWindow::buildUi() {
     shortcut("Ctrl+Shift+P",[this] { savePreset(); });
     shortcut("Ctrl+Alt+P",[this] { openPresetFolder(); });
     shortcut("Ctrl+M",[this] { editCaptureSettings(); });
-    shortcut("G",[this] { if (loaded_ && !loading_) grid_->toggle(); });
+    shortcut("Shift+G",[this] {grid_->toggle();});
     shortcut("L",[this] { if (loaded_ && !loading_) loop_->toggle(); });
     for (int g=0; g<3; ++g) shortcut(QString("F%1").arg(g+6),[this,g] { toggleCoordinateSpace(g); });
     statusBar()->showMessage(tr("Open a capture to begin."));
 }
 
+void MainWindow::syncModifiers() {
+    viewport_->setModifiers(project_.modifiers);modifierPanel_->setProject(project_);
+    const bool purge=!CompiledModifiers(project_).isolations.isEmpty();
+    QJsonObject state;if (purge) state={{"modifiers",project_.modifierJson()},{"transform",project_.json({})["transform"]},{"cropEditing",viewport_->cropEditing()}};
+    if (state!=processingState_) {processingState_=state;if (purge) requestFrame();}
+}
+void MainWindow::revealModifierProperties() {
+    QTimer::singleShot(0,this,[this] {
+        const auto *m=project_.modifier();auto *scroll=findChild<QScrollArea *>("toolsScrollArea");if (!m || !scroll) return;
+        QWidget *panel=m->type==ModifierType::AnimateTransform ? static_cast<QWidget *>(animationProperties_) : m->type==ModifierType::PurgeIsolated ? isolationProperties_ : m->type==ModifierType::Crop ? cropProperties_ : greenProperties_;
+        scroll->ensureWidgetVisible(panel,0,12);
+    });
+}
 void MainWindow::syncUi() {
     syncing_ = true;
+    syncModifiers();
+    const auto *selected=project_.modifier();const bool selectedCrop=selected && selected->type==ModifierType::Crop;
+    parametersHeading_->setVisible(selected!=nullptr);
+    cropProperties_->setVisible(selectedCrop);greenProperties_->setVisible(selected && selected->type==ModifierType::RemoveGreen);
+    const bool animation=selected && selected->type==ModifierType::AnimateTransform,isolation=selected && selected->type==ModifierType::PurgeIsolated;
+    animationProperties_->setVisible(animation);isolationProperties_->setVisible(isolation);
+    if (animation) {animationProperties_->setTitle(tr("Animate transform: %1").arg(selected->name));animationProperties_->setAnimation(selected->animation,int(std::round(project_.time*info_.fps)),std::max(0,info_.frames-1));}
+    if (isolation) {isolationProperties_->setTitle(tr("Purge Isolated: %1").arg(selected->name));isolationNeighbour_->setValue(selected->isolation.neighbour);isolationPercent_->setValue(selected->isolation.medianPercent);}
+    viewport_->setTransform(project_.transformAtFrame(std::round(project_.time*info_.fps)));
+    displayControls_->setEnabled(true);
+    ghostButton_->setEnabled(loaded_ && !loading_);
+    if (selected) {cropProperties_->setTitle(tr("Crop: %1").arg(selected->name));greenProperties_->setTitle(tr("Remove green: %1").arg(selected->name));greenSaturation_->setValue(selected->green.minimumSaturation*100);greenHue_->setValue(selected->green.hueTolerance);greenLinearRgb_->setChecked(selected->green.linearRgb);}
     tools_->setEnabled(true); timeline_->setEnabled(loaded_ && !loading_);
     for (auto *group : tools_->findChildren<QGroupBox *>(QString(),Qt::FindDirectChildrenOnly))
-        group->setEnabled(group==presetBox_ || (loaded_ && !loading_));
-    resetTransformButton_->setEnabled(loaded_ && !loading_);
+        group->setEnabled(group==presetBox_ || (loaded_ && !loading_ && !(animation && !selected->enabled && group->property("transformGroup").toBool())));
+    resetTransformButton_->setEnabled(loaded_ && !loading_ && !(animation && !selected->enabled));
     captureSettingsButton_->setEnabled(loaded_ && !loading_);
     savePresetButton_->setEnabled(loaded_ && !loading_); presetCombo_->setEnabled(loaded_ && !loading_ && presetCombo_->count()>1);
+    presetFolderButton_->setEnabled(loaded_ && !loading_);
     saveAction_->setEnabled(loaded_ && !loading_); saveAsAction_->setEnabled(loaded_ && !loading_); imageAction_->setEnabled(loaded_ && !loading_); exportAction_->setEnabled(loaded_ && !loading_);
     assetLabel_->setText(loaded_ ? info_.title : tr("No capture"));
     assetLabel_->setToolTip(project_.asset);
@@ -444,29 +545,30 @@ void MainWindow::syncUi() {
     frameSpin_->setRange(0,maximum); inFrame_->setRange(0,maximum); outFrame_->setRange(0,maximum);
     inFrame_->setValue(int(std::round(project_.in*info_.fps))); outFrame_->setValue(int(std::round(project_.out*info_.fps)));
     const int frame = int(std::round(project_.time*info_.fps)); slider_->setPlayheadValue(frame); frameSpin_->setValue(frame);
+    modifierPanel_->setTimeline(frame,maximum);
     timeLabel_->setText(tr("%1 s / %2 s").arg(project_.time,0,'f',3).arg(info_.duration,0,'f',3));
-    endLabel_->setText(tr("%1 s").arg(info_.duration,0,'f',3));
     speed_->setValue(project_.speed); loop_->setChecked(project_.loop); grid_->setChecked(project_.grid);
     syncTransformButtons();
-    transformTarget_->setText(viewport_->cropEditing() ? tr("Transform target: Crop volume") : tr("Transform target: Capture"));
+    transformTarget_->setText(viewport_->cropEditing() || animation ? tr("Transform target: %1").arg(selected ? selected->name : tr("Crop")) : tr("Transform target: Capture reference"));
     for (int g=0; g<3; ++g) {
         const bool local = project_.spaces[g]==CoordinateSpace::Local;
         spaceButtons_[g]->setText(local ? tr("Local") : tr("Global"));
         // This single button displays the chosen reference space; both choices are active selections.
         spaceButtons_[g]->setIcon(editorButtonIcon(local ? ":/icons/local.png" : ":/icons/global.png",false));
         spaceButtons_[g]->setAccessibleName(local ? tr("Local reference space") : tr("Global reference space"));
-        spaceButtons_[g]->setToolTip(tr("Toggle Global/Local reference space for this transform (F%1). Current: %2.").arg(g+6).arg(local ? tr("Local") : tr("Global")));
+        const QString modeKeys[]={"G","R","S"};
+        spaceButtons_[g]->setToolTip(tr("Toggle Global/Local reference space (F%1 or repeat %2 in this mode). Current: %3.").arg(g+6).arg(modeKeys[g],local ? tr("Local") : tr("Global")));
     }
     cropEditButton_->setChecked(viewport_->cropEditing());
-    cropRadius_->setValue(project_.crop.radius); cropHeight_->setValue(project_.crop.height);
-    cropShapeCombo_->setCurrentIndex(cropShapeCombo_->findData(int(project_.crop.shape)));
-    cropWidth_->setValue(project_.crop.width); cropDepth_->setValue(project_.crop.depth);
-    cropForm_->setRowVisible(cropRadius_,project_.crop.shape==CropShape::Cylinder);
-    cropForm_->setRowVisible(cropWidth_,project_.crop.shape==CropShape::Box); cropForm_->setRowVisible(cropDepth_,project_.crop.shape==CropShape::Box);
-    cropWidth_->setEnabled(project_.crop.enabled); cropDepth_->setEnabled(project_.crop.enabled);
-    cropRadius_->setEnabled(project_.crop.enabled); cropHeight_->setEnabled(project_.crop.enabled); cropClearButton_->setEnabled(project_.crop.enabled);
-    cropStatus_->setText(!project_.crop.enabled ? tr("No crop. Click Edit to create a fitted volume.") : viewport_->cropEditing()
-        ? tr("Editing crop. All source points are shown.") : tr("Crop preview applied. Source data is preserved."));
+    cropRadius_->setValue(project_.crop().radius); cropHeight_->setValue(project_.crop().height);
+    cropShapeCombo_->setCurrentIndex(cropShapeCombo_->findData(int(project_.crop().shape)));
+    cropWidth_->setValue(project_.crop().width); cropDepth_->setValue(project_.crop().depth);
+    cropForm_->setRowVisible(cropRadius_,project_.crop().shape==CropShape::Cylinder);
+    cropForm_->setRowVisible(cropWidth_,project_.crop().shape==CropShape::Box); cropForm_->setRowVisible(cropDepth_,project_.crop().shape==CropShape::Box);
+    cropWidth_->setEnabled(selectedCrop); cropDepth_->setEnabled(selectedCrop);
+    cropRadius_->setEnabled(selectedCrop); cropHeight_->setEnabled(selectedCrop); cropClearButton_->setEnabled(project_.crop().enabled);
+    cropStatus_->setText(!project_.crop().enabled ? tr("Modifier disabled. Settings are retained; Edit adjusts this volume.") : viewport_->cropEditing()
+        ? tr("Editing the selected crop. Crop clipping is paused; colour filters remain active.") : tr("Enabled crop modifiers combine by union over the full timeline."));
     pointSize_->setValue(project_.pointSize); viewport_->setPointSize(float(project_.pointSize)); viewport_->setGrid(project_.grid);
     syncing_ = false;
 }
@@ -526,7 +628,8 @@ void MainWindow::setTime(double seconds, bool edited) {
 void MainWindow::requestFrame() {
     if (!loaded_ || loading_) return;
     if (decoding_) { pendingDecode_ = true; return; }
-    decoding_ = true; emit decodeRequested(project_.time, generation_, true);
+    Project snapshot=project_;if (viewport_->cropEditing()) for (auto &m:snapshot.modifiers) if (m.type==ModifierType::Crop) m.enabled=false;
+    decoding_ = true; emit decodeRequested(project_.time, generation_, true,snapshot);
 }
 void MainWindow::play(bool playing) {
     if (playing && (!loaded_ || loading_)) return;
@@ -560,6 +663,12 @@ void MainWindow::receiveFrame(FramePtr frame) {
             const QImage image = viewport_->grabFramebuffer();
             if (!viewport_->renderError().isEmpty() || image.isNull() || !image.save(smokeOutput_)) { qCritical("Viewport smoke test failed"); qApp->exit(2); return; }
             const bool ok = grab().save(smokeOutput_ + ".ui.png");
+            const auto liveTransform=viewport_->transform();const auto liveCamera=viewport_->camera();
+            if (!viewport_->setGhost(true)) {qCritical("Ghost snapshot failed");qApp->exit(2);return;}
+            auto comparison=liveTransform;comparison.position.setX(comparison.position.x()+0.18f);viewport_->setTransform(comparison);
+            viewport_->focusVisible();auto closeCamera=viewport_->camera();closeCamera.distance*=0.55f;viewport_->setCamera(closeCamera);
+            if (!viewport_->grabFramebuffer().save(smokeOutput_+".ghost.png") || !grab().save(smokeOutput_+".ghost.ui.png")) {qApp->exit(2);return;}
+            viewport_->setTransform(liveTransform);viewport_->setCamera(liveCamera);project_.camera=liveCamera;viewport_->setGhost(false);
             for (int g=0; g<3; ++g) {
                 setTransformMode(TransformMode(g+1));
                 for (int other=0; other<3; ++other) if (modeButtons_[other]->isChecked() != (other==g)) { qApp->exit(2); return; }
@@ -586,10 +695,10 @@ void MainWindow::receiveFrame(FramePtr frame) {
             viewport_->setTransformMode(TransformMode::None);
             for (auto *button : spaceButtons_) if (button->isEnabled()) { qApp->exit(2); return; }
             applyCropPreset(1.5f);
-            if (project_.crop.radius!=1.5f || project_.crop.height!=2.5f || project_.crop.transform.position!=QVector3D() || project_.crop.transform.scale!=QVector3D(1,1,1)) { qApp->exit(2); return; }
-            project_.crop.transform.position = {1,2,3}; project_.crop.transform.rotation = {10,20,30}; project_.crop.transform.scale = {2,3,4};
-            viewport_->setCrop(project_.crop); applyCropPreset(1.0f);
-            if (project_.crop.radius!=1.0f || project_.crop.height!=2.5f || project_.crop.transform.position!=QVector3D() || project_.crop.transform.rotation!=QVector3D() || project_.crop.transform.scale!=QVector3D(1,1,1)) { qApp->exit(2); return; }
+            if (project_.crop().radius!=1.5f || project_.crop().height!=2.5f || project_.crop().transform.position!=QVector3D() || project_.crop().transform.scale!=QVector3D(1,1,1)) { qApp->exit(2); return; }
+            project_.crop().transform.position = {1,2,3}; project_.crop().transform.rotation = {10,20,30}; project_.crop().transform.scale = {2,3,4};
+            viewport_->setCrop(project_.crop()); applyCropPreset(1.0f);
+            if (project_.crop().radius!=1.0f || project_.crop().height!=2.5f || project_.crop().transform.position!=QVector3D() || project_.crop().transform.rotation!=QVector3D() || project_.crop().transform.scale!=QVector3D(1,1,1)) { qApp->exit(2); return; }
             setTransformMode(TransformMode::Scale); fitCrop();
             if (viewport_->transformMode()!=TransformMode::Move || focusWidget()!=viewport_ || !viewport_->cropEditing()) { qApp->exit(2); return; }
             toggleTransformMode(TransformMode::Scale);
@@ -597,34 +706,40 @@ void MainWindow::receiveFrame(FramePtr frame) {
             setTransformMode(TransformMode::Move);
             editCrop(true);
             const double cropX = viewport_->displayedTransform().position.x()+0.2;
-            transform_[0][0]->setValue(cropX); cropRadius_->setValue(project_.crop.radius*0.7);
+            transform_[0][0]->setValue(cropX); cropRadius_->setValue(project_.crop().radius*0.7);
             if (project_.transform.position!=captureTransform.position || std::abs(viewport_->displayedTransform().position.x()-cropX)>0.001) { qApp->exit(2); return; }
             viewport_->setViewPreset(ViewPreset::Front);
-            if (!viewport_->grabFramebuffer().save(smokeOutput_+".crop-edit.png")) { qApp->exit(2); return; }
-            if (!grab().save(smokeOutput_+".crop-edit.ui.png")) { qApp->exit(2); return; }
+            if (!viewport_->grabFramebuffer().save(smokeOutput_+".crop()-edit.png")) { qApp->exit(2); return; }
+            if (!grab().save(smokeOutput_+".crop()-edit.ui.png")) { qApp->exit(2); return; }
             cropShapeCombo_->setCurrentIndex(cropShapeCombo_->findData(int(CropShape::Box)));
             QMetaObject::invokeMethod(cropShapeCombo_,"activated",Qt::DirectConnection,Q_ARG(int,cropShapeCombo_->currentIndex()));
-            if (project_.crop.shape!=CropShape::Box || !cropWidth_->isVisible() || cropRadius_->isVisible()) { qApp->exit(2); return; }
+            if (project_.crop().shape!=CropShape::Box || !cropWidth_->isVisible() || cropRadius_->isVisible()) { qApp->exit(2); return; }
             if (!viewport_->grabFramebuffer().save(smokeOutput_+".box-edit.png")) { qApp->exit(2); return; }
             CaptureSettings options = project_.captureSettings; options.title = "Editor metadata smoke"; options.despill = true; options.plain = true; options.tags = {"test","crop"};
             CaptureSettingsDialog metadataDialog(project_,presetStore_,this); metadataDialog.setSettings(options);
             if (metadataDialog.settings().json()!=options.json() || !metadataDialog.grab().save(smokeOutput_+".metadata.ui.png")) { qApp->exit(2); return; }
             project_.captureSettings = options;
             editCrop(false);
-            if (!viewport_->grabFramebuffer().save(smokeOutput_+".crop-preview.png")) { qApp->exit(2); return; }
+            if (!viewport_->grabFramebuffer().save(smokeOutput_+".crop()-preview.png")) { qApp->exit(2); return; }
             const Project snapshot = project_; QString presetPath,presetError;
             if (!presetStore_.save("Smoke setup",snapshot,&presetPath,&presetError,PresetScope::Editor)) { showError(presetError); return; }
             refreshPresets(presetPath);
-            project_.transform = {}; project_.crop = {}; viewport_->setTransform({}); viewport_->setCrop({});
+            project_.transform = {}; project_.crop() = {}; viewport_->setTransform({}); viewport_->setCrop({});
             const QString asset = project_.asset; const double time = project_.time;
             loadSelectedPreset();
             if (project_.asset!=asset || project_.time!=time || project_.transform.position!=snapshot.transform.position ||
-                project_.crop.shape!=snapshot.crop.shape || project_.crop.radius!=snapshot.crop.radius || project_.captureSettings.title!=snapshot.captureSettings.title || viewport_->cropEditing()) { qApp->exit(2); return; }
+                project_.crop().shape!=snapshot.crop().shape || project_.crop().radius!=snapshot.crop().radius || project_.captureSettings.title!=snapshot.captureSettings.title || viewport_->cropEditing()) { qApp->exit(2); return; }
             setTransformMode(TransformMode::Rotate);
             if (!grab().save(smokeOutput_+".preset-loaded.ui.png")) { qApp->exit(2); return; }
             viewport_->setTransformMode(TransformMode::None);
             QString cropError;
             if (!project_.write(smokeOutput_+".vgsproj",&cropError)) { showError(cropError); return; }
+            const auto selectedModifier=project_.selectedModifier;
+            for (const auto &m:project_.modifiers) if (m.type==ModifierType::AnimateTransform || m.type==ModifierType::PurgeIsolated) {
+                project_.selectedModifier=m.id;syncUi();auto *scroll=findChild<QScrollArea *>("toolsScrollArea");QWidget *panel=m.type==ModifierType::AnimateTransform ? static_cast<QWidget *>(animationProperties_) : isolationProperties_;scroll->ensureWidgetVisible(panel,0,12);
+                if (!grab().save(smokeOutput_+(m.type==ModifierType::AnimateTransform ? ".animation.ui.png" : ".isolation.ui.png"))) {qApp->exit(2);return;}
+            }
+            project_.selectedModifier=selectedModifier;syncUi();
             qInfo("Viewport smoke test: %s, %dx%d, project roundtrip OK", qPrintable(info_.format), image.width(),image.height());
             if (!ok) { qApp->exit(2); return; }
             setWindowModified(false); smokeStage_ = 3;
@@ -632,7 +747,7 @@ void MainWindow::receiveFrame(FramePtr frame) {
         });
     }
     else if (smokeStage_ == 3) {
-        if (project_.transform.position != QVector3D(0.2f,0.1f,0) || !project_.crop.enabled || viewport_->cropEditing() ||
+        if (project_.transform.position != QVector3D(0.2f,0.1f,0) || !project_.crop().enabled || viewport_->cropEditing() ||
             project_.camera.preset!=ViewPreset::Front || !project_.camera.orthographic) { qApp->exit(2); return; }
         qInfo("New project and reopen saved crop/orthographic view OK"); setWindowModified(false); qApp->exit(0);
     }
@@ -642,14 +757,17 @@ void MainWindow::exportCapture() {
     play(false);
     const QString extension=project_.captureSettings.plain ? "pgs" : "vgs";
     const QString suggested=QDir(settings_.value("Export/Directory",QFileInfo(project_.asset).absolutePath()).toString()).filePath(QFileInfo(project_.asset).completeBaseName()+"_edited."+extension);
+    QString selectedFilter=project_.captureSettings.plain ? tr("Plain Gaussian capture (*.pgs)") : tr("Compressed Gaussian capture (*.vgs)");
     QString destination=QFileDialog::getSaveFileName(this,tr("Export capture"),suggested,
-        project_.captureSettings.plain ? tr("Plain Gaussian capture (*.pgs)") : tr("Compressed Gaussian capture (*.vgs)"));
+        tr("Compressed Gaussian capture (*.vgs);;Plain Gaussian capture (*.pgs);;Gracia MINT capture (*.mint)"),&selectedFilter);
     if (destination.isEmpty()) return;
-    if (QFileInfo(destination).suffix().isEmpty()) destination+="."+extension;
-    if (QFileInfo(destination).suffix().compare(extension,Qt::CaseInsensitive)!=0) {
-        showError(tr("Select a .%1 destination. Change the output format in Metadata and processing to export another format.").arg(extension));return;
+    if (QFileInfo(destination).suffix().isEmpty()) destination+=selectedFilter.contains("*.mint") ? ".mint" : selectedFilter.contains("*.pgs") ? ".pgs" : ".vgs";
+    const auto outputExtension=QFileInfo(destination).suffix().toLower();
+    if (outputExtension!="vgs" && outputExtension!="pgs" && outputExtension!="mint") {
+        showError(tr("Select a .vgs, .pgs or .mint destination."));return;
     }
-    const Project snapshot=project_;
+    Project snapshot=project_;snapshot.captureSettings.plain=outputExtension=="pgs";
+    const qint64 originalBytes=QFileInfo(snapshot.asset).size();
     QProgressDialog progress(tr("Preparing export"),tr("Cancel"),0,100,this);
     progress.setWindowTitle(tr("Export capture"));progress.setWindowModality(Qt::ApplicationModal);
     progress.setAutoClose(false);progress.setAutoReset(false);progress.setMinimumDuration(0);
@@ -670,8 +788,9 @@ void MainWindow::exportCapture() {
     settings_.setValue("Export/LastFile",destination);
     settings_.setValue("CaptureSettings/Last",QJsonDocument(snapshot.captureSettings.json()).toJson(QJsonDocument::Compact));
     statusBar()->showMessage(tr("Exported %1 frames to %2").arg(result.frames).arg(destination),15000);
-    QMessageBox::information(this,tr("Export complete"),tr("Saved %1\n%2 frames \u00b7 %3 Gaussian samples kept \u00b7 %4 cropped.\n\n%5")
-        .arg(destination).arg(result.frames).arg(result.kept).arg(result.removed).arg(result.notes.join("\n")));
+    QMessageBox::information(this,tr("Export complete"),tr("Saved %1\nOriginal size: %2 MB  \u00b7  Exported size: %3 MB\n%4 frames \u00b7 %5 Gaussian samples kept \u00b7 %6 cropped.\n\n%7")
+        .arg(destination).arg(originalBytes/1000000.0,0,'f',2).arg(QFileInfo(destination).size()/1000000.0,0,'f',2)
+        .arg(result.frames).arg(result.kept).arg(result.removed).arg(result.notes.join("\n")));
 }
 
 void MainWindow::exportImage() {
@@ -702,9 +821,10 @@ void MainWindow::dropEvent(QDropEvent *event) {
 }
 Project MainWindow::defaultProject() const {
     Project p;
+    p.crop().enabled=true;
     const auto last = QJsonDocument::fromJson(settings_.value("CaptureSettings/Last").toByteArray()); QString error;
     if (last.isObject()) CaptureSettings::fromJson(last.object(),&p.captureSettings,&error);
-    p.pointSize = std::clamp(settings_.value("Display/PointSize",2).toDouble(),1.0,12.0);
+    p.pointSize = std::clamp(settings_.value("Display/PointSize",5).toDouble(),1.0,12.0);
     p.grid = settings_.value("Display/Grid",true).toBool();
     p.loop = settings_.value("Playback/Loop",true).toBool();
     p.speed = std::clamp(settings_.value("Playback/Speed",1).toDouble(),0.1,4.0);
@@ -716,7 +836,16 @@ void MainWindow::setTransformMode(TransformMode mode) {
 }
 void MainWindow::toggleTransformMode(TransformMode mode) {
     if (!loaded_ || loading_) return;
+    if (project_.modifier() && project_.modifier()->type==ModifierType::AnimateTransform && !project_.modifier()->enabled) return;
     viewport_->toggleTransformMode(mode);
+    syncTransformButtons();viewport_->setFocus(Qt::OtherFocusReason);
+}
+void MainWindow::activateTransformShortcut(TransformMode mode) {
+    if (!loaded_ || loading_ || mode==TransformMode::None) return;
+    if (project_.modifier() && project_.modifier()->type==ModifierType::AnimateTransform && !project_.modifier()->enabled) return;
+    const auto previous=viewport_->coordinateSpace(mode);viewport_->activateTransformShortcut(mode);
+    const auto space=viewport_->coordinateSpace(mode);project_.spaces[int(mode)-1]=space;
+    syncUi();if (previous!=space) dirty();viewport_->setFocus(Qt::OtherFocusReason);
 }
 void MainWindow::toggleCoordinateSpace(int group) {
     if (!loaded_ || loading_) return;
@@ -727,8 +856,10 @@ void MainWindow::toggleCoordinateSpace(int group) {
 }
 void MainWindow::resetTransform() {
     if (!loaded_ || loading_) return;
+    if (project_.modifier() && project_.modifier()->type==ModifierType::AnimateTransform && !project_.modifier()->enabled) return;
     viewport_->setTransformMode(TransformMode::None);
-    if (viewport_->cropEditing()) { project_.crop.transform = {}; viewport_->setCrop(project_.crop); }
+    if (viewport_->cropEditing()) { project_.crop().transform = {}; viewport_->setCrop(project_.crop()); }
+    else if (project_.modifier() && project_.modifier()->type==ModifierType::AnimateTransform) project_.modifier()->animation.setKey(int(std::round(project_.time*info_.fps)),{});
     else { project_.transform = {}; viewport_->setTransform(project_.transform); }
     syncUi(); dirty(); viewport_->setFocus(Qt::OtherFocusReason);
 }
@@ -757,10 +888,10 @@ void MainWindow::savePreset() {
 }
 void MainWindow::applyPresetSettings(const Project &settings) {
     play(false); viewport_->setTransformMode(TransformMode::None); viewport_->setCropEditing(false);
-    project_.transform = settings.transform; project_.crop = settings.crop; project_.camera = viewport_->camera();
+    project_.transform = settings.transform; project_.modifiers=settings.modifiers;project_.selectedModifier=settings.selectedModifier; project_.camera = viewport_->camera();
     project_.pointSize = settings.pointSize; project_.grid = settings.grid; project_.speed = settings.speed; project_.loop = settings.loop;
     for (int g=0; g<3; ++g) { project_.spaces[g] = settings.spaces[g]; viewport_->setCoordinateSpace(TransformMode(g+1),settings.spaces[g]); }
-    viewport_->setTransform(project_.transform); viewport_->setCrop(project_.crop);
+    viewport_->setTransform(project_.transform); viewport_->setCrop(project_.crop());
     syncUi(); dirty(); viewport_->setFocus();
 }
 void MainWindow::editCaptureSettings() {
@@ -790,17 +921,18 @@ void MainWindow::changeEvent(QEvent *event) {
     if (event->type()==QEvent::ActivationChange && isActiveWindow() && presetCombo_) refreshPresets();
 }
 void MainWindow::clearCrop() {
-    if (!loaded_ || loading_) return;
-    const auto shape = project_.crop.shape; viewport_->setCropEditing(false); project_.crop = {}; project_.crop.shape = shape; viewport_->setCrop(project_.crop);
+    if (!loaded_ || loading_ || !project_.modifier() || project_.modifier()->type!=ModifierType::Crop) return;
+    viewport_->setCropEditing(false);project_.modifier()->enabled=false;project_.crop().enabled=false;viewport_->setCrop(project_.crop());
     syncUi(); dirty(); viewport_->setFocus(Qt::OtherFocusReason);
 }
 void MainWindow::applyCropPreset(float radius) {
-    if (!loaded_ || loading_) return;
+    if (!loaded_ || loading_ || !project_.modifier() || project_.modifier()->type!=ModifierType::Crop) return;
+    project_.modifier()->enabled=true;
     viewport_->setTransformMode(TransformMode::None); viewport_->setCropEditing(false);
-    const auto shape = project_.crop.shape;
-    project_.crop = {}; project_.crop.shape = shape; project_.crop.enabled = true; project_.crop.radius = radius; project_.crop.height = 2.5f;
-    project_.crop.width = project_.crop.depth = 2*radius;
-    viewport_->setCrop(project_.crop); viewport_->setCropEditing(true); viewport_->setTransformMode(TransformMode::Move);
+    const auto shape = project_.crop().shape;
+    project_.crop() = {}; project_.crop().shape = shape; project_.crop().enabled = true; project_.crop().radius = radius; project_.crop().height = 2.5f;
+    project_.crop().width = project_.crop().depth = 2*radius;
+    viewport_->setCrop(project_.crop()); viewport_->setCropEditing(true); viewport_->setTransformMode(TransformMode::Move);
     syncUi(); dirty(); viewport_->setFocus(Qt::OtherFocusReason);
 }
 void MainWindow::syncTransformFields() {
@@ -811,47 +943,43 @@ void MainWindow::syncTransformFields() {
     syncing_ = wasSyncing;
 }
 void MainWindow::fitCrop() {
-    if (!loaded_ || loading_) return;
+    if (!loaded_ || loading_ || !project_.modifier() || project_.modifier()->type!=ModifierType::Crop) return;
+    project_.modifier()->enabled=true;
     viewport_->setTransformMode(TransformMode::None); viewport_->setCropEditing(false);
-    const auto shape = project_.crop.shape; project_.crop = {}; project_.crop.shape = shape; project_.crop.enabled = true;
+    const auto shape = project_.crop().shape; project_.crop() = {}; project_.crop().shape = shape; project_.crop().enabled = true;
     QVector3D minimum(1e30f,1e30f,1e30f),maximum(-1e30f,-1e30f,-1e30f);
     for (int i=0; i<8; ++i) {
-        const auto p = project_.transform.matrix().map(QVector3D((i&1)?info_.maximum.x():info_.minimum.x(),(i&2)?info_.maximum.y():info_.minimum.y(),(i&4)?info_.maximum.z():info_.minimum.z()));
+        const auto p = project_.transformAtFrame(std::round(project_.time*info_.fps)).matrix().map(QVector3D((i&1)?info_.maximum.x():info_.minimum.x(),(i&2)?info_.maximum.y():info_.minimum.y(),(i&4)?info_.maximum.z():info_.minimum.z()));
         for (int a=0; a<3; ++a) { minimum[a] = std::min(minimum[a],p[a]); maximum[a] = std::max(maximum[a],p[a]); }
     }
-    project_.crop.transform.position = (minimum+maximum)*0.5f;
-    project_.crop.transform.position.setY(minimum.y());
+    project_.crop().transform.position = (minimum+maximum)*0.5f;
+    project_.crop().transform.position.setY(minimum.y());
     const auto extent = maximum-minimum;
-    project_.crop.radius = std::clamp(std::sqrt(extent.x()*extent.x()+extent.z()*extent.z())*0.51f,0.0001f,1e6f);
-    project_.crop.height = std::clamp(extent.y()*1.02f,0.0001f,1e6f);
-    project_.crop.width = std::clamp(extent.x()*1.02f,0.0001f,1e6f); project_.crop.depth = std::clamp(extent.z()*1.02f,0.0001f,1e6f);
-    viewport_->setCrop(project_.crop); viewport_->setCropEditing(true); viewport_->setTransformMode(TransformMode::Move);
+    project_.crop().radius = std::clamp(std::sqrt(extent.x()*extent.x()+extent.z()*extent.z())*0.51f,0.0001f,1e6f);
+    project_.crop().height = std::clamp(extent.y()*1.02f,0.0001f,1e6f);
+    project_.crop().width = std::clamp(extent.x()*1.02f,0.0001f,1e6f); project_.crop().depth = std::clamp(extent.z()*1.02f,0.0001f,1e6f);
+    viewport_->setCrop(project_.crop()); viewport_->setCropEditing(true); viewport_->setTransformMode(TransformMode::Move);
     syncUi(); dirty(); viewport_->setFocus(Qt::OtherFocusReason);
 }
 void MainWindow::editCrop(bool editing) {
     if (!loaded_ || loading_) return;
-    if (editing && !project_.crop.enabled) { fitCrop(); return; }
-    viewport_->setCropEditing(editing);
+    if (!project_.modifier() || project_.modifier()->type!=ModifierType::Crop) return;
+    if (editing && !project_.crop().enabled && project_.modifier()->enabled) { fitCrop(); return; }
+    if (!editing) viewport_->setTransformMode(TransformMode::None);
+    viewport_->setCrop(project_.crop());viewport_->setCropEditing(editing);
     if (editing && viewport_->transformMode()==TransformMode::None) viewport_->setTransformMode(TransformMode::Move);
     syncUi();
     viewport_->setFocus(Qt::OtherFocusReason);
 }
 void MainWindow::fitCurrentTarget() {
     if (!loaded_) return;
-    if (!viewport_->cropEditing()) { viewport_->fit(info_.minimum,info_.maximum); return; }
-    const auto &crop = project_.crop; QVector3D minimum(1e30f,1e30f,1e30f),maximum(-1e30f,-1e30f,-1e30f);
-    for (int i=0; i<8; ++i) {
-        const float halfX = crop.shape==CropShape::Box ? crop.width*0.5f : crop.radius;
-        const float halfZ = crop.shape==CropShape::Box ? crop.depth*0.5f : crop.radius;
-        const auto p = crop.transform.matrix().map(QVector3D((i&1)?halfX:-halfX,(i&2)?crop.height:0.0f,(i&4)?halfZ:-halfZ));
-        for (int a=0; a<3; ++a) { minimum[a] = std::min(minimum[a],p[a]); maximum[a] = std::max(maximum[a],p[a]); }
-    }
-    const auto captureTransform = viewport_->transform(); viewport_->setTransform({}); viewport_->fit(minimum,maximum); viewport_->setTransform(captureTransform);
+    if (!viewport_->focusVisible()) statusBar()->showMessage(tr("Nothing visible to focus."),5000);
 }
 void MainWindow::syncTransformButtons() {
     transformModes_->setExclusive(false);
     for (int g=0; g<3; ++g) {
         const bool active = viewport_->transformMode()==TransformMode(g+1);
+        QSignalBlocker modeBlocker(modeButtons_[g]);QSignalBlocker spaceBlocker(spaceButtons_[g]);
         modeButtons_[g]->setChecked(active); spaceButtons_[g]->setEnabled(active && loaded_ && !loading_);
     }
     transformModes_->setExclusive(true);

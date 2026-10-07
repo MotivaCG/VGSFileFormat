@@ -4,6 +4,8 @@
 #include <QMouseEvent>
 #include <QKeyEvent>
 #include <QPainter>
+#include <QLabel>
+#include <QOpenGLFramebufferObject>
 #include <QWheelEvent>
 #include <QtMath>
 #include <algorithm>
@@ -15,6 +17,8 @@ static const char *pointVertex = R"GLSL(
 layout(location=0) in vec3 position;
 layout(location=1) in vec3 color;
 layout(location=2) in float sourceId;
+layout(location=3) in float modifierVisibility;
+uniform bool usePurgeMask;
 uniform mat4 model, view, projection;
 uniform vec3 eyeLocal;
 uniform samplerBuffer shData;
@@ -41,19 +45,38 @@ vec3 shadedColor() {
     return clamp(result,0.0,1.0);
 }
 uniform float pointSize;
-uniform bool cropEnabled;
-uniform mat4 cropInverse;
-uniform float cropRadius, cropHeight;
-uniform int cropShape;
-uniform vec2 cropHalfSize;
-void main() {
-    if(cropEnabled) {
-        vec3 p=(cropInverse*vec4(position,1)).xyz;
-        bool outside = cropShape==1 ? abs(p.x)>cropHalfSize.x || abs(p.z)>cropHalfSize.y : dot(p.xz,p.xz)>cropRadius*cropRadius;
-        if(outside || p.y<0 || p.y>cropHeight) {
-            rgba=vec4(0); gl_Position=vec4(2,2,2,1); gl_PointSize=pointSize; return;
+uniform samplerBuffer modifierData;
+uniform int cropCount, greenCount;
+uniform bool editingCrop;
+bool removedByModifiers() {
+    if(usePurgeMask && modifierVisibility<0.5) return true;
+    vec3 world=(model*vec4(position,1)).xyz;
+    if(cropCount>0 && !editingCrop) {
+        bool inside=false;
+        for(int i=0;i<cropCount;++i) {
+            int base=i*6;
+            mat4 inverse=mat4(texelFetch(modifierData,base),texelFetch(modifierData,base+1),texelFetch(modifierData,base+2),texelFetch(modifierData,base+3));
+            vec4 dimensions=texelFetch(modifierData,base+4);vec4 extent=texelFetch(modifierData,base+5);
+            vec3 p=(inverse*vec4(world,1)).xyz;
+            bool horizontal=dimensions.x>0.5 ? abs(p.x)<=extent.x && abs(p.z)<=extent.y : dot(p.xz,p.xz)<=dimensions.z*dimensions.z;
+            if(horizontal && p.y>=0.0 && p.y<=dimensions.y) {inside=true;break;}
         }
+        if(!inside) return true;
     }
+    vec3 baseRgb=clamp(color,0.0,1.0);
+    for(int i=0;i<greenCount;++i) {
+        vec4 filter=texelFetch(modifierData,cropCount*6+i);
+        vec3 rgb=filter.w>0.5 ? mix(baseRgb/12.92,pow((baseRgb+0.055)/1.055,vec3(2.4)),greaterThan(baseRgb,vec3(0.04045))) : baseRgb;
+        float maximum=max(rgb.r,max(rgb.g,rgb.b)),minimum=min(rgb.r,min(rgb.g,rgb.b)),chroma=maximum-minimum;
+        if(chroma<=0.0 || maximum<=0.0) continue;
+        float hue=maximum==rgb.r ? (rgb.g-rgb.b)/chroma : maximum==rgb.g ? 2.0+(rgb.b-rgb.r)/chroma : 4.0+(rgb.r-rgb.g)/chroma;
+        hue*=60.0;if(hue<0.0) hue+=360.0;float distance=abs(hue-120.0);distance=min(distance,360.0-distance);
+        if(chroma/maximum>=filter.x && distance<=filter.y) return true;
+    }
+    return false;
+}
+void main() {
+    if(removedByModifiers()) {rgba=vec4(0);gl_Position=vec4(2,2,2,1);gl_PointSize=pointSize;return;}
     rgba=vec4(shadedColor(),1);
     gl_Position=projection*view*model*vec4(position,1);
     gl_PointSize=pointSize;
@@ -84,10 +107,48 @@ out vec4 fragColor;
 void main() { fragColor=vec4(rgb,1); }
 )GLSL";
 
+static const char *ghostVertex=R"GLSL(
+#version 330 core
+layout(location=0) in vec3 position;
+uniform mat4 viewProjection;
+uniform float pointSize;
+out vec4 rgba;
+void main() {gl_Position=viewProjection*vec4(position,1);gl_PointSize=pointSize;rgba=vec4(1);}
+)GLSL";
+static const char *ghostCompositeVertex=R"GLSL(
+#version 330 core
+out vec2 uv;
+void main() {
+    vec2 p=gl_VertexID==0 ? vec2(-1,-1) : gl_VertexID==1 ? vec2(3,-1) : vec2(-1,3);
+    uv=(p+1)*0.5;gl_Position=vec4(p,0,1);
+}
+)GLSL";
+static const char *ghostCompositeFragment=R"GLSL(
+#version 330 core
+in vec2 uv;
+uniform sampler2D ghostMask;
+uniform float outlineWidth;
+out vec4 fragColor;
+void main() {
+    vec2 texel=outlineWidth/vec2(textureSize(ghostMask,0));
+    float centre=texture(ghostMask,uv).a;
+    float coverage=centre*4.0;
+    for(int y=-1;y<=1;++y) for(int x=-1;x<=1;++x) {
+        if(x==0 && y==0) continue;
+        coverage+=texture(ghostMask,uv+vec2(x,y)*texel).a*((x==0 || y==0) ? 2.0 : 1.0);
+    }
+    coverage/=16.0;
+    float opacity=centre*0.12+max(0.0,centre-coverage)*0.26+(1.0-centre)*coverage*0.10;
+    if(opacity<0.005) discard;
+    fragColor=vec4(1,1,1,opacity);
+}
+)GLSL";
 Viewport::Viewport(QWidget *parent) : QOpenGLWidget(parent) {
     setMinimumSize(400, 300); setFocusPolicy(Qt::StrongFocus);
     setMouseTracking(true);
     viewCube_ = new ViewCube(this); viewCube_->move(width()-viewCube_->width()-12,12);
+    statistics_=new QLabel(this);statistics_->setObjectName("viewportStatistics");statistics_->move(18,12);
+    statistics_->setAttribute(Qt::WA_TransparentForMouseEvents);statistics_->setStyleSheet("color: #aaaaaa; font-family: 'Segoe UI'; font-size: 9pt; background: transparent;");
     connect(viewCube_,&ViewCube::viewSelected,this,[this](ViewPreset preset) { setViewPreset(preset); setFocus(); });
 }
 Viewport::~Viewport() { cleanup(); }
@@ -102,7 +163,10 @@ void Viewport::cleanup() {
     if (!initialized_) return;
     makeCurrent();
     pointShader_.reset(); gridShader_.reset();
+    ghostFramebuffer_.reset();ghostShader_.reset();ghostCompositeShader_.reset();
+    glDeleteBuffers(1,&ghostBuffer_);glDeleteVertexArrays(1,&ghostVao_);glDeleteVertexArrays(1,&ghostCompositeVao_);
     glDeleteBuffers(1, &buffer_); glDeleteBuffers(1, &shBuffer_);
+    glDeleteBuffers(1,&modifierBuffer_);glDeleteTextures(1,&modifierTexture_);
     glDeleteTextures(1, &shTexture_); glDeleteVertexArrays(1, &vao_);
     glDeleteBuffers(1, &gridBuffer_); glDeleteVertexArrays(1, &gridVao_);
     glDeleteBuffers(1, &gizmoBuffer_); glDeleteVertexArrays(1, &gizmoVao_);
@@ -123,8 +187,12 @@ void Viewport::initializeGL() {
         return true;
     };
     if (!build(pointShader_, pointVertex, pointFragment) || !build(gridShader_, gridVertex, gridFragment)) return;
+    if (!build(ghostShader_,ghostVertex,pointFragment) || !build(ghostCompositeShader_,ghostCompositeVertex,ghostCompositeFragment)) return;
+    glGenVertexArrays(1,&ghostVao_);glGenBuffers(1,&ghostBuffer_);glGenVertexArrays(1,&ghostCompositeVao_);
+    glBindVertexArray(ghostVao_);glBindBuffer(GL_ARRAY_BUFFER,ghostBuffer_);glEnableVertexAttribArray(0);glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,sizeof(GhostPoint),nullptr);ghostDirty_=true;
     glGenVertexArrays(1, &vao_); glGenBuffers(1, &buffer_);
     glGenBuffers(1, &shBuffer_); glGenTextures(1, &shTexture_);
+    glGenBuffers(1,&modifierBuffer_);glGenTextures(1,&modifierTexture_);
     glBindVertexArray(vao_); glBindBuffer(GL_ARRAY_BUFFER, buffer_);
     const int widths[] = {3, 3, 1};
     const size_t offsets[] = {offsetof(PointVertex, position), offsetof(PointVertex, color), offsetof(PointVertex, id)};
@@ -134,6 +202,7 @@ void Viewport::initializeGL() {
         glVertexAttribDivisor(i, 0);
     }
     struct LineVertex { float p[3], c[3]; };
+    glEnableVertexAttribArray(3);glVertexAttribPointer(3,1,GL_FLOAT,GL_FALSE,sizeof(PointVertex),reinterpret_cast<void *>(offsetof(PointVertex,modifierVisibility)));
     std::vector<LineVertex> lines;
     auto line = [&](QVector3D a, QVector3D b, QVector3D c) {
         lines.push_back({{a.x(),a.y(),a.z()}, {c.x(),c.y(),c.z()}});
@@ -141,12 +210,23 @@ void Viewport::initializeGL() {
     };
     for (int i = -20; i <= 20; ++i) {
         const float shade = i % 5 == 0 ? 0.22f : 0.14f;
-        line({float(i),0,-20}, {float(i),0,20}, {shade,shade,shade});
-        line({-20,0,float(i)}, {20,0,float(i)}, {shade,shade,shade});
+        if (i == 0) {
+            // Reserve the positive X/Z segments for the coloured axes.
+            line({0,0,-20}, {0,0,0}, {shade,shade,shade});
+            line({0,0,2}, {0,0,20}, {shade,shade,shade});
+            line({-20,0,0}, {0,0,0}, {shade,shade,shade});
+            line({2,0,0}, {20,0,0}, {shade,shade,shade});
+        } else {
+            line({float(i),0,-20}, {float(i),0,20}, {shade,shade,shade});
+            line({-20,0,float(i)}, {20,0,float(i)}, {shade,shade,shade});
+        }
     }
-    line({0,0.002f,0}, {2,0.002f,0}, {0.9f,0.25f,0.28f});
+    // Restore these grid segments only when coloured axes are hidden.
+    line({0,0,0}, {2,0,0}, {0.22f,0.22f,0.22f});
+    line({0,0,0}, {0,0,2}, {0.22f,0.22f,0.22f});
+    line({0,0,0}, {2,0,0}, {0.9f,0.25f,0.28f});
     line({0,0,0}, {0,2,0}, {0.3f,0.8f,0.45f});
-    line({0,0.002f,0}, {0,0.002f,2}, {0.25f,0.5f,0.95f});
+    line({0,0,0}, {0,0,2}, {0.25f,0.5f,0.95f});
     gridVertices_ = int(lines.size());
     glGenVertexArrays(1, &gridVao_); glGenBuffers(1, &gridBuffer_);
     glBindVertexArray(gridVao_); glBindBuffer(GL_ARRAY_BUFFER, gridBuffer_);
@@ -192,7 +272,14 @@ void Viewport::paintGL() {
     glEnable(GL_DEPTH_TEST); glDepthMask(GL_TRUE);
     if (grid_) {
         gridShader_->bind(); gridShader_->setUniformValue("mvp", projection * view);
-        glBindVertexArray(gridVao_); glDrawArrays(GL_LINES, 0, gridVertices_); gridShader_->release();
+        glBindVertexArray(gridVao_); glDrawArrays(GL_LINES, 0, gridVertices_-10);
+        if (camera_.orthographic) {
+            glDrawArrays(GL_LINES,gridVertices_-10,4);
+        } else {
+            // No grid segment runs beneath X/Z; equal depth also covers crossings.
+            glDepthFunc(GL_LEQUAL);glDrawArrays(GL_LINES,gridVertices_-6,6);glDepthFunc(GL_LESS);
+        }
+        gridShader_->release();
     }
     if (frame_ && !frame_->points.empty()) {
         QElapsedTimer timer;
@@ -221,35 +308,57 @@ void Viewport::paintGL() {
         pointShader_->setUniformValue("model", model); pointShader_->setUniformValue("view", view);
         pointShader_->setUniformValue("projection", projection);
         pointShader_->setUniformValue("pointSize", pointSize_*dpr);
-        pointShader_->setUniformValue("cropEnabled",crop_.enabled && !cropEditing_);
-        pointShader_->setUniformValue("cropInverse",crop_.transform.matrix().inverted()*model);
-        pointShader_->setUniformValue("cropRadius",crop_.radius); pointShader_->setUniformValue("cropHeight",crop_.height);
-        pointShader_->setUniformValue("cropShape",int(crop_.shape)); pointShader_->setUniformValue("cropHalfSize",QVector2D(crop_.width*0.5f,crop_.depth*0.5f));
+        auto activeModifiers=modifiers_;
+        if (!modifierStack_) {Modifier modifier;modifier.crop=crop_;activeModifiers={modifier};}
+        CompiledModifiers modifiers(activeModifiers);std::vector<QVector4D> values;
+        pointShader_->setUniformValue("usePurgeMask",!modifiers.isolations.isEmpty());
+        for (const auto &crop:modifiers.crops) {
+            for (int col=0;col<4;++col) values.push_back(crop.inverse.column(col));
+            values.push_back({float(int(crop.volume.shape)),crop.volume.height,crop.volume.radius,0});
+            values.push_back({crop.volume.width*.5f,crop.volume.depth*.5f,0,0});
+        }
+        for (const auto &green:modifiers.greens) values.push_back({green.minimumSaturation,green.hueTolerance,120,green.linearRgb ? 1.f : 0.f});
+        GLint maximum=0;glGetIntegerv(GL_MAX_TEXTURE_BUFFER_SIZE,&maximum);size_t drawCount=frame_->points.size();
+        const bool cpuFiltering=values.size()>size_t(maximum);
+        if (cpuFiltering) {
+            std::vector<PointVertex> points;points.reserve(frame_->points.size());
+            for (const auto &p:frame_->points) if ((cropEditing_ || modifiers.keepsPosition(model.map({p.position[0],p.position[1],p.position[2]}))) && !modifiers.removesColour({p.color[0],p.color[1],p.color[2]})) points.push_back(p);
+            glBindBuffer(GL_ARRAY_BUFFER,buffer_);glBufferData(GL_ARRAY_BUFFER,GLsizeiptr(points.size()*sizeof(PointVertex)),points.data(),GL_STREAM_DRAW);drawCount=points.size();values.clear();
+        }
+        cpuFiltered_=cpuFiltering;
+        if (values.empty()) values.push_back({0,0,0,0});
+        glBindBuffer(GL_TEXTURE_BUFFER,modifierBuffer_);glBufferData(GL_TEXTURE_BUFFER,GLsizeiptr(values.size()*sizeof(QVector4D)),values.data(),GL_STREAM_DRAW);
+        glActiveTexture(GL_TEXTURE1);glBindTexture(GL_TEXTURE_BUFFER,modifierTexture_);glTexBuffer(GL_TEXTURE_BUFFER,GL_RGBA32F,modifierBuffer_);
+        pointShader_->setUniformValue("modifierData",1);pointShader_->setUniformValue("cropCount",cpuFiltering ? 0 : int(modifiers.crops.size()));pointShader_->setUniformValue("greenCount",cpuFiltering ? 0 : int(modifiers.greens.size()));pointShader_->setUniformValue("editingCrop",cropEditing_);
         const auto eye = view.inverted().map(QVector3D(0,0,0));
         pointShader_->setUniformValue("eyeLocal", model.inverted().map(eye));
         pointShader_->setUniformValue("shCoefficients", shCoefficients_);
         pointShader_->setUniformValue("shData", 0);
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_BUFFER, shTexture_);
-        glBindVertexArray(vao_); glDrawArrays(GL_POINTS, 0, GLsizei(frame_->points.size()));
+        glBindVertexArray(vao_); glDrawArrays(GL_POINTS, 0, GLsizei(drawCount));
         pointShader_->release(); glDisable(GL_BLEND); glDepthMask(GL_TRUE);
     }
+    drawGhost(projection*view,QSize(int(size.x()),int(size.y())),dpr);
     drawCrop(projection*view); drawGizmo(projection*view);
     glBindVertexArray(0);
     glDisable(GL_DEPTH_TEST); glDisable(GL_PROGRAM_POINT_SIZE);
     painter.endNativePainting();
     painter.setPen(QColor("#aaa")); painter.setFont(QFont("Segoe UI", 9));
     painter.drawText(18, height()-18, mode_ == TransformMode::None
-        ? tr("Drag: orbit   ·   Right drag: pan   ·   Wheel: zoom   ·   W/E/R: transform")
-        : tr("Drag a gizmo handle to transform   ·   Drag elsewhere to orbit   ·   Esc: exit mode"));
+        ? tr("Drag: orbit   ·   Right drag: pan   ·   Wheel: zoom   ·   G/R/S: transform")
+        : tr("Drag a gizmo handle to transform   ·   Repeat G/R/S: Global/Local   ·   Esc: exit mode"));
     if (frame_) {
-        painter.drawText(18, 28, tr("%1 source points   ·   %2 s").arg(qulonglong(frame_->points.size())).arg(frame_->seconds, 0, 'f', 3));
-        painter.drawText(18, 48, tr("Decode %1 ms   ·   upload %2 ms   ·   %3").arg(frame_->decodeMs,0,'f',1).arg(uploadMs_,0,'f',1).arg(shCoefficients_ ? "SH" : "base colour"));
+        statistics_->setText(tr("%1 source points   ·   %2 s\nDecode %3 ms   ·   upload %4 ms   ·   %5")
+            .arg(qulonglong(frame_->points.size())).arg(frame_->seconds,0,'f',3).arg(frame_->decodeMs,0,'f',1).arg(uploadMs_,0,'f',1).arg(shCoefficients_ ? "SH" : "base colour"));
+        statistics_->adjustSize();
     } else {
+        statistics_->clear();
         painter.setPen(QColor("#ddd")); painter.setFont(QFont("Segoe UI", 18));
         painter.drawText(rect().adjusted(30,30,-30,-30), Qt::AlignCenter, tr("Open a .vgs or .mint capture\n\nCtrl+O"));
     }
 }
 void Viewport::setFrame(FramePtr frame) {
+    if (!frame) setGhost(false);
     if (!frame) setTransformMode(TransformMode::None);
     frame_ = std::move(frame); frameDirty_ = true; update();
 }
@@ -260,6 +369,9 @@ void Viewport::setCamera(const Camera &camera) {
     viewCube_->setCamera(camera_); update();
 }
 void Viewport::setPointSize(float size) { if (pointSize_ != size) { pointSize_ = size; update(); } }
+void Viewport::setDisplayControls(QWidget *controls) {
+    displayControls_=controls;viewCube_->setDisplayControls(controls);
+}
 void Viewport::setGrid(bool enabled) { if (grid_ != enabled) { grid_ = enabled; update(); } }
 void Viewport::fit(const QVector3D &minimum, const QVector3D &maximum) {
     const auto m = transform_.matrix();
@@ -271,6 +383,51 @@ void Viewport::fit(const QVector3D &minimum, const QVector3D &maximum) {
     }
     camera_.distance = std::max(0.1f, radius / std::sin(qDegreesToRadians(22.5f)) * 1.15f);
     update(); emit cameraChanged();
+}
+std::vector<QVector3D> Viewport::visibleWorldPoints() const {
+    std::vector<QVector3D> points;if (!frame_) return points;points.reserve(frame_->points.size());const auto model=transform_.matrix();
+    auto stack=modifiers_;if (!modifierStack_) {Modifier m;m.crop=crop_;stack={m};}CompiledModifiers modifiers(stack);
+    for (const auto &point:frame_->points) {
+        if (!modifiers.isolations.isEmpty() && point.modifierVisibility<.5f) continue;
+        const auto world=model.map({point.position[0],point.position[1],point.position[2]});
+        if (!std::isfinite(world.x()) || !std::isfinite(world.y()) || !std::isfinite(world.z())) continue;
+        if ((cropEditing_ || modifiers.keepsPosition(world)) && !modifiers.removesColour({point.color[0],point.color[1],point.color[2]})) points.push_back(world);
+    }return points;
+}
+bool Viewport::focusVisible() {
+    const auto points=visibleWorldPoints();bool any=false;QVector3D minimum,maximum;
+    auto include=[&](QVector3D p) {if (!any) {minimum=maximum=p;any=true;}else for (int axis=0;axis<3;++axis) {minimum[axis]=std::min(minimum[axis],p[axis]);maximum[axis]=std::max(maximum[axis],p[axis]);}};
+    for (const auto &point:points) include(point);
+    if (ghostEnabled_) for (const auto &point:ghostPoints_) include({point.position[0],point.position[1],point.position[2]});
+    if (!any) return false;camera_.target=(minimum+maximum)*.5f;
+    const float radius=(maximum-minimum).length()*.5f,aspect=float(width())/std::max(1,height());
+    const float halfAngle=std::atan(std::tan(qDegreesToRadians(22.5f))*std::min(1.f,aspect));camera_.distance=std::max(.1f,radius/std::sin(halfAngle)*1.15f);
+    update();emit cameraChanged();return true;
+}
+bool Viewport::setGhost(bool enabled) {
+    if (enabled==ghostEnabled_) return ghostEnabled_;
+    ghostPoints_.clear();if (enabled) {for (const auto &p:visibleWorldPoints()) ghostPoints_.push_back({{p.x(),p.y(),p.z()}});ghostTime_=frame_ ? frame_->seconds : 0;}
+    ghostEnabled_=enabled && !ghostPoints_.empty();ghostDirty_=true;
+    if (!ghostEnabled_ && initialized_) {makeCurrent();ghostFramebuffer_.reset();glBindBuffer(GL_ARRAY_BUFFER,ghostBuffer_);glBufferData(GL_ARRAY_BUFFER,0,nullptr,GL_STATIC_DRAW);doneCurrent();}
+    update();emit ghostChanged(ghostEnabled_);return ghostEnabled_;
+}
+void Viewport::drawGhost(const QMatrix4x4 &viewProjection,const QSize &pixels,float dpr) {
+    if (!ghostEnabled_ || ghostPoints_.empty()) return;
+    if (!ghostFramebuffer_ || ghostFramebuffer_->size()!=pixels) {
+        QOpenGLFramebufferObjectFormat format;format.setInternalTextureFormat(GL_RGBA8);ghostFramebuffer_=std::make_unique<QOpenGLFramebufferObject>(pixels,format);
+        if (!ghostFramebuffer_->isValid()) {emit renderFailed(tr("Could not create the ghost overlay framebuffer."));return;}
+    }
+    // Draw an opaque white mask first, then blend once per pixel. Dense or
+    // overlapping points must not accumulate into an opaque reference layer.
+    ghostFramebuffer_->bind();glViewport(0,0,pixels.width(),pixels.height());glDisable(GL_DEPTH_TEST);glDisable(GL_BLEND);glDepthMask(GL_FALSE);glEnable(GL_PROGRAM_POINT_SIZE);
+    glClearColor(0,0,0,0);glClear(GL_COLOR_BUFFER_BIT);glBindVertexArray(ghostVao_);
+    if (ghostDirty_) {glBindBuffer(GL_ARRAY_BUFFER,ghostBuffer_);glBufferData(GL_ARRAY_BUFFER,GLsizeiptr(ghostPoints_.size()*sizeof(GhostPoint)),ghostPoints_.data(),GL_STATIC_DRAW);ghostDirty_=false;}
+    ghostShader_->bind();ghostShader_->setUniformValue("viewProjection",viewProjection);ghostShader_->setUniformValue("pointSize",pointSize_*dpr);glDrawArrays(GL_POINTS,0,GLsizei(ghostPoints_.size()));ghostShader_->release();
+    glBindFramebuffer(GL_FRAMEBUFFER,defaultFramebufferObject());glViewport(0,0,pixels.width(),pixels.height());
+    glDisable(GL_PROGRAM_POINT_SIZE);glEnable(GL_BLEND);glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,ghostFramebuffer_->texture());
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+    ghostCompositeShader_->bind();ghostCompositeShader_->setUniformValue("ghostMask",0);ghostCompositeShader_->setUniformValue("outlineWidth",dpr);glBindVertexArray(ghostCompositeVao_);glDrawArrays(GL_TRIANGLES,0,3);ghostCompositeShader_->release();glDisable(GL_BLEND);glDepthMask(GL_TRUE);
 }
 void Viewport::mousePressEvent(QMouseEvent *event) {
     lastMouse_ = event->position().toPoint(); setFocus();
@@ -310,10 +467,10 @@ void Viewport::keyPressEvent(QKeyEvent *event) {
     if (handleViewKey(event->key(),event->modifiers())) { event->accept(); return; }
     if (event->key()==Qt::Key_Escape) { setTransformMode(TransformMode::None); event->accept(); return; }
     if (!event->modifiers()) {
-        if (event->isAutoRepeat() && (event->key()==Qt::Key_W || event->key()==Qt::Key_E || event->key()==Qt::Key_R)) { event->accept(); return; }
-        if (event->key()==Qt::Key_W) { toggleTransformMode(TransformMode::Move); event->accept(); return; }
-        if (event->key()==Qt::Key_E) { toggleTransformMode(TransformMode::Rotate); event->accept(); return; }
-        if (event->key()==Qt::Key_R) { toggleTransformMode(TransformMode::Scale); event->accept(); return; }
+        if (event->isAutoRepeat() && (event->key()==Qt::Key_G || event->key()==Qt::Key_R || event->key()==Qt::Key_S)) { event->accept(); return; }
+        if (event->key()==Qt::Key_G) { activateTransformShortcut(TransformMode::Move); event->accept(); return; }
+        if (event->key()==Qt::Key_R) { activateTransformShortcut(TransformMode::Rotate); event->accept(); return; }
+        if (event->key()==Qt::Key_S) { activateTransformShortcut(TransformMode::Scale); event->accept(); return; }
     }
     QOpenGLWidget::keyPressEvent(event);
 }
@@ -329,6 +486,11 @@ void Viewport::setTransformMode(TransformMode mode) {
     emit transformModeChanged(mode);
 }
 void Viewport::toggleTransformMode(TransformMode mode) { setTransformMode(mode_==mode ? TransformMode::None : mode); }
+void Viewport::activateTransformShortcut(TransformMode mode) {
+    if (mode==TransformMode::None) return;
+    if (mode_!=mode) setTransformMode(mode);
+    else setCoordinateSpace(mode,coordinateSpace(mode)==CoordinateSpace::Global ? CoordinateSpace::Local : CoordinateSpace::Global);
+}
 Transform Viewport::editableTransform() const { return cropEditing_ ? crop_.transform : transform_; }
 CoordinateSpace Viewport::coordinateSpace(TransformMode mode) const {
     return mode==TransformMode::None ? CoordinateSpace::Global : spaces_[int(mode)-1];
@@ -377,7 +539,8 @@ void Viewport::applyEditableTransform(const Transform &transform) {
     else { transform_ = transform; emit transformEdited(transform); }
     update();
 }
-void Viewport::setCrop(const CropVolume &crop) { crop_ = crop; update(); }
+void Viewport::setCrop(const CropVolume &crop) { crop_ = crop; if (cpuFiltered_) frameDirty_=true; update(); }
+void Viewport::setModifiers(const QVector<Modifier> &modifiers) {modifiers_=modifiers;modifierStack_=true;if (cpuFiltered_) frameDirty_=true;update();}
 void Viewport::setCropEditing(bool enabled) {
     if (cropEditing_==enabled) return;
     cancelManipulation(); cropEditing_ = enabled; hoverHandle_ = -1; update();
@@ -649,11 +812,11 @@ bool Viewport::handleViewKey(int key,Qt::KeyboardModifiers modifiers) {
     return false;
 }
 void Viewport::drawCrop(const QMatrix4x4 &viewProjection) {
-    if (!crop_.enabled || !cropEditing_) return;
+    if (!cropEditing_) return;
     struct Vertex { float p[3],c[3]; }; std::vector<Vertex> lines;
     const auto m = crop_.transform.matrix();
     auto line = [&](QVector3D a,QVector3D b) {
-        for (const auto &point : {a,b}) { const auto p = m.map(point); lines.push_back({{p.x(),p.y(),p.z()},{1,0.8f,0.25f}}); }
+        for (const auto &point : {a,b}) { const auto p = m.map(point); lines.push_back({{p.x(),p.y(),p.z()},{240.f/255,60.f/255,90.f/255}}); }
     };
     if (crop_.shape==CropShape::Box) {
         QVector3D corners[8];

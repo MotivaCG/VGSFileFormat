@@ -7,4 +7,4 @@ std::vector<NativeChunkPlan> nativeExportPlan(const vgs::Header &, int first, in
 vgs::DecodedChunk assembleNativeChunk(vgs::DecodedChunk);
 void setNativeShDegree(vgs::DecodedChunk &, int sourceDegree, int targetDegree);
 vgs::DecodedChunk editNativeChunk(vgs::DecodedChunk, const NativeChunkPlan &, const Project &,
-                                 ExportResult *, const ExportProgress &);
+                                 ExportResult *, const ExportProgress &, const vgs::DecodedChunk *classificationSource=nullptr);

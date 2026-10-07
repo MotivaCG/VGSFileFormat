@@ -13,8 +13,8 @@
 namespace {
 QString suffix(PresetScope scope) { return scope==PresetScope::Metadata ? "presetmetadata" : "preset"; }
 QString format(PresetScope scope) { return scope==PresetScope::Metadata ? "vgs-editor-metadata-preset" : "vgs-editor-preset"; }
-QJsonArray appliesTo(PresetScope scope) {
-    return scope==PresetScope::Metadata ? QJsonArray{"capture-metadata","processing","output"} : QJsonArray{"capture-transform","crop","view","playback","reference-spaces"};
+QJsonArray appliesTo(PresetScope scope,bool old=false) {
+    return scope==PresetScope::Metadata ? QJsonArray{"capture-metadata","processing","output"} : QJsonArray{"capture-transform",old ? "crop" : "modifiers","view","playback","reference-spaces"};
 }
 }
 
@@ -35,15 +35,15 @@ bool PresetStore::read(const QString &path,EditorPreset *result,QString *error) 
     const double version = root["version"].toDouble();
     const bool legacy = version==1;
     if (parse.error!=QJsonParseError::NoError || !document.isObject() ||
-        (version!=1 && version!=2 && version!=3) || name.isEmpty() || name.size()>120 || !root["configuration"].isObject()) return fail();
+        (version!=1 && version!=2 && version!=3 && version!=4 && version!=5) || name.isEmpty() || name.size()>120 || !root["configuration"].isObject()) return fail();
     PresetScope scope = PresetScope::Editor;
     if (!legacy) {
         if (root["scope"]!="editor" && root["scope"]!="capture-metadata") return fail();
         if (root["scope"]=="capture-metadata") scope = PresetScope::Metadata;
     }
-    if (version==3) {
+    if (version>=3) {
         if (root["format"]!=format(scope) || QFileInfo(path).suffix().compare(suffix(scope),Qt::CaseInsensitive)!=0 ||
-            root["appliesTo"].toArray()!=appliesTo(scope)) return fail();
+            root["appliesTo"].toArray()!=appliesTo(scope,version==3)) return fail();
     } else if (root["format"]!="vgs-editor-preset" || QFileInfo(path).suffix().compare("json",Qt::CaseInsensitive)!=0) return fail();
     auto configuration = root["configuration"].toObject(); const bool hasMetadata = configuration.contains("captureSettings");
     if (scope==PresetScope::Metadata) {
@@ -55,7 +55,7 @@ bool PresetStore::read(const QString &path,EditorPreset *result,QString *error) 
     if (!legacy && hasMetadata) return fail();
     const auto playback = configuration.take("playback").toObject();
     configuration["format"] = "vgs-editor-project";
-    configuration["version"] = configuration["crop"].toObject()["space"]=="world" ? 6 : hasMetadata ? 5 : configuration["crop"].toObject().contains("shape") ? 4 : 3;
+    configuration["version"] = configuration["modifiers"].isArray() ? (version>=5 ? 8 : 7) : configuration["crop"].toObject()["space"]=="world" ? 6 : hasMetadata ? 5 : configuration["crop"].toObject().contains("shape") ? 4 : 3;
     if (!hasMetadata) configuration["captureSettings"] = CaptureSettings().json();
     configuration["asset"] = "__preset_capture__";
     configuration["timeline"] = QJsonObject{{"time",0},{"in",0},{"out",0},{"speed",playback["speed"]},{"loop",playback["loop"]}};
@@ -91,7 +91,7 @@ bool PresetStore::writePreset(const QString &path,const QString &name,const Proj
     configuration["playback"] = QJsonObject{{"speed",settings.speed},{"loop",settings.loop}};
     if (scope==PresetScope::Metadata) configuration = QJsonObject{{"captureSettings",settings.captureSettings.json()}};
     else configuration.remove("captureSettings");
-    const QJsonObject root{{"format",format(scope)},{"version",3},{"name",name},{"scope",scope==PresetScope::Metadata ? "capture-metadata" : "editor"},{"appliesTo",appliesTo(scope)},{"configuration",configuration}};
+    const QJsonObject root{{"format",format(scope)},{"version",scope==PresetScope::Metadata ? 4 : 5},{"name",name},{"scope",scope==PresetScope::Metadata ? "capture-metadata" : "editor"},{"appliesTo",appliesTo(scope)},{"configuration",configuration}};
     const auto bytes = QJsonDocument(root).toJson(); QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly) || file.write(bytes)!=bytes.size() || !file.commit()) { *error = file.errorString(); return false; }
     return true;

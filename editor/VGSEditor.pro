@@ -23,3 +23,12 @@ HEADERS += $$PWD/rangeslider.h $$PWD/exportcapture.h $$PWD/dependencies/mint/min
 
 SOURCES += $$PWD/nativeexport.cpp
 HEADERS += $$PWD/nativeexport.h
+
+SOURCES += $$PWD/modifiers.cpp
+SOURCES += $$PWD/isolation.cpp $$PWD/animationpanel.cpp
+HEADERS += $$PWD/isolation.h $$PWD/animationpanel.h
+SOURCES += $$PWD/mintwriter.cpp
+HEADERS += $$PWD/mintwriter.h
+
+SOURCES += $$PWD/modifierpanel.cpp
+HEADERS += $$PWD/modifierpanel.h

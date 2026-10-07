@@ -1,4 +1,5 @@
 #include "captureworker.h"
+#include "isolation.h"
 #include <QFile>
 #include <QFileInfo>
 #include <QElapsedTimer>
@@ -110,8 +111,16 @@ void CaptureWorker::open(const QString &path, quint64 generation, bool sh) {
         emit opened(info_, first, generation);
     } catch (const std::exception &e) { emit failed(QString::fromUtf8(e.what()), generation, true); }
 }
-void CaptureWorker::decode(double time, quint64 generation, bool sh) {
+void CaptureWorker::decode(double time, quint64 generation, bool sh,Project project) {
     if (generation != generation_) { emit failed("Capture replaced.", generation, false); return; }
-    try { emit decoded(frame(time, sh), generation); }
+    try {
+        QElapsedTimer processingTimer;processingTimer.start();auto out=frame(time,sh);CompiledModifiers modifiers(project);
+        if (!modifiers.isolations.isEmpty()) {
+            const auto model=project.transformAtFrame(std::round(out->seconds*info_.fps)).matrix();std::vector<QVector3D> positions(out->points.size());std::vector<uint8_t> keep(out->points.size());
+            for (size_t i=0;i<positions.size();++i) {const auto &p=out->points[i];positions[i]=model.map({p.position[0],p.position[1],p.position[2]});keep[i]=modifiers.keeps(positions[i],{p.color[0],p.color[1],p.color[2]});}
+            applyIsolation(positions,keep,modifiers.isolations);for (size_t i=0;i<keep.size();++i) out->points[i].modifierVisibility=keep[i] ? 1.f : 0.f;
+        }
+        out->decodeMs=processingTimer.nsecsElapsed()/1e6;emit decoded(out,generation);
+    }
     catch (const std::exception &e) { emit failed(QString::fromUtf8(e.what()), generation, false); }
 }

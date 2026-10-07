@@ -1,5 +1,6 @@
 #pragma once
 #include "mintfile.h"
+#include "project.h"
 #include "vgsdecoder/vgsdecoder.h"
 #include <QObject>
 #include <QVector3D>
@@ -11,6 +12,7 @@ struct Splat {
 };
 struct PointVertex {
     float position[3], color[3], id;
+    float modifierVisibility=1;
 };
 struct RenderFrame {
     // Full decoded records, including inactive/transparent entries. Preview buffers
@@ -43,7 +45,7 @@ public:
 public slots:
     void clear();
     void open(const QString &path, quint64 generation, bool sh);
-    void decode(double time, quint64 generation, bool sh);
+    void decode(double time, quint64 generation, bool sh,Project project = {});
 signals:
     void opened(CaptureInfo info, FramePtr frame, quint64 generation);
     void decoded(FramePtr frame, quint64 generation);

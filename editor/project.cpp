@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <QtMath>
 #include <QQuaternion>
+#include <QSet>
 
 QMatrix4x4 Transform::matrix() const {
     QMatrix4x4 m;
@@ -68,13 +69,14 @@ bool CropVolume::contains(const QVector3D &position) const {
 }
 static QJsonArray vec(const QVector3D &v) { return {v.x(), v.y(), v.z()}; }
 QJsonObject Project::json(const QString &path) const {
-    return {{"format", "vgs-editor-project"}, {"version", 6},
+    return {{"format", "vgs-editor-project"}, {"version", 8},
         {"asset", QDir(QFileInfo(path).absolutePath()).relativeFilePath(asset)},
         {"transform", QJsonObject{{"position", vec(transform.position)}, {"rotation", vec(transform.rotation)}, {"scale", vec(transform.scale)}, {"shear",vec(transform.shear)}}},
         {"camera", QJsonObject{{"target", vec(camera.target)}, {"yaw", camera.yaw}, {"pitch", camera.pitch}, {"roll",camera.roll}, {"distance", camera.distance}, {"preset", int(camera.preset)}, {"orthographic", camera.orthographic}}},
-        {"crop", QJsonObject{{"enabled",crop.enabled},{"space","world"},{"shape",crop.shape==CropShape::Box ? "box" : "cylinder"},
-            {"width",crop.width},{"depth",crop.depth},{"radius",crop.radius},{"height",crop.height},
-            {"position",vec(crop.transform.position)},{"rotation",vec(crop.transform.rotation)},{"scale",vec(crop.transform.scale)}, {"shear",vec(crop.transform.shear)}}},
+        {"crop", QJsonObject{{"enabled",crop().enabled},{"space","world"},{"shape",crop().shape==CropShape::Box ? "box" : "cylinder"},
+            {"width",crop().width},{"depth",crop().depth},{"radius",crop().radius},{"height",crop().height},
+            {"position",vec(crop().transform.position)},{"rotation",vec(crop().transform.rotation)},{"scale",vec(crop().transform.scale)}, {"shear",vec(crop().transform.shear)}}},
+        {"modifiers",modifierJson()},{"selection",QJsonObject{{"modifier",selectedModifier}}},
         {"spaces",QJsonArray{int(spaces[0]),int(spaces[1]),int(spaces[2])}},
         {"captureSettings",captureSettings.json()},
         {"timeline", QJsonObject{{"time", time}, {"in", in}, {"out", out}, {"speed", speed}, {"loop", loop}}},
@@ -101,7 +103,7 @@ bool Project::read(const QString &path, Project *result, QString *error) {
 bool Project::fromJson(const QJsonObject &root,const QString &baseDirectory,Project *result,QString *error) {
     auto fail = [&] { *error = QStringLiteral("Invalid project or unsupported project version."); return false; };
     const double version = root["version"].toDouble();
-    if (root["format"] != "vgs-editor-project" || version<1 || version>6 || version!=std::floor(version) ||
+    if (root["format"] != "vgs-editor-project" || version<1 || version>8 || version!=std::floor(version) ||
         !root["asset"].isString() || root["asset"].toString().isEmpty()) return fail();
     Project p;
     p.asset = QDir::cleanPath(QDir(baseDirectory).absoluteFilePath(root["asset"].toString()));
@@ -136,26 +138,28 @@ bool Project::fromJson(const QJsonObject &root,const QString &baseDirectory,Proj
         p.camera.preset = ViewPreset(int(preset)); p.camera.orthographic = c["orthographic"].toBool();
         p.camera.roll = float(number(c,"roll",-36000,36000));
         if (p.camera.preset==ViewPreset::Free && p.camera.orthographic) return fail();
+        if (version<7) {
         const auto crop = root["crop"].toObject();
-        valid &= crop["enabled"].isBool(); p.crop.enabled = crop["enabled"].toBool();
-        p.crop.radius = float(number(crop,"radius",0.0001,1e6)); p.crop.height = float(number(crop,"height",0.0001,1e6));
-        p.crop.width = p.crop.depth = 2*p.crop.radius;
+        valid &= crop["enabled"].isBool(); p.crop().enabled = crop["enabled"].toBool();
+        p.crop().radius = float(number(crop,"radius",0.0001,1e6)); p.crop().height = float(number(crop,"height",0.0001,1e6));
+        p.crop().width = p.crop().depth = 2*p.crop().radius;
         if (root["version"].toInt()>=4) {
             if (crop["shape"]!="box" && crop["shape"]!="cylinder") return fail();
-            p.crop.shape = crop["shape"]=="box" ? CropShape::Box : CropShape::Cylinder;
-            p.crop.width = float(number(crop,"width",0.0001,1e6)); p.crop.depth = float(number(crop,"depth",0.0001,1e6));
+            p.crop().shape = crop["shape"]=="box" ? CropShape::Box : CropShape::Cylinder;
+            p.crop().width = float(number(crop,"width",0.0001,1e6)); p.crop().depth = float(number(crop,"depth",0.0001,1e6));
         }
-        p.crop.transform.position = vector(crop,"position",-1e6,1e6);
-        p.crop.transform.rotation = vector(crop,"rotation",-36000,36000);
-        p.crop.transform.scale = vector(crop,"scale",0.0001,10000);
-        if (root["version"].toInt()==2 && p.crop.enabled) {
+        p.crop().transform.position = vector(crop,"position",-1e6,1e6);
+        p.crop().transform.rotation = vector(crop,"rotation",-36000,36000);
+        p.crop().transform.scale = vector(crop,"scale",0.0001,10000);
+        if (root["version"].toInt()==2 && p.crop().enabled) {
             // Version 2 placed the origin at the centre; preserve its volume with a base pivot.
-            p.crop.transform.position += p.crop.transform.matrix().mapVector({0,-p.crop.height*0.5f,0});
+            p.crop().transform.position += p.crop().transform.matrix().mapVector({0,-p.crop().height*0.5f,0});
         }
     }
+        }
     if (root["version"].toInt()>=3) {
         p.transform.shear = vector(t,"shear",-1e6,1e6);
-        p.crop.transform.shear = vector(root["crop"].toObject(),"shear",-1e6,1e6);
+        if (version<7) p.crop().transform.shear = vector(root["crop"].toObject(),"shear",-1e6,1e6);
         const auto spaces = root["spaces"].toArray(); if (spaces.size()!=3) return fail();
         for (int i=0; i<3; ++i) {
             const double space = spaces[i].toDouble(-1);
@@ -164,7 +168,43 @@ bool Project::fromJson(const QJsonObject &root,const QString &baseDirectory,Proj
     }
     if (root["version"].toInt()>=5 && !CaptureSettings::fromJson(root["captureSettings"].toObject(),&p.captureSettings,error)) return false;
     if (version==6 && root["crop"].toObject()["space"]!="world") return fail();
-    if (version<6 && p.crop.enabled) p.crop.transform = Transform::fromMatrix(p.transform.matrix()*p.crop.transform.matrix());
+    if (version<6 && p.crop().enabled) p.crop().transform = Transform::fromMatrix(p.transform.matrix()*p.crop().transform.matrix());
+    if (version>=7) {
+        if (!root["modifiers"].isArray()) return fail();
+        p.modifiers.clear();QSet<QString> ids;
+        auto identity=[&](const QJsonObject &item,const char *key,int maximum) {
+            const auto value=item[key];const QString text=value.toString().trimmed();valid &= value.isString() && !text.isEmpty() && text.size()<=maximum;return text;
+        };
+        for (const auto &value:root["modifiers"].toArray()) {
+            if (!value.isObject()) return fail();const auto item=value.toObject();Modifier m;
+            m.id=identity(item,"id",80);m.name=identity(item,"name",120);valid &= !ids.contains(m.id) && item["enabled"].isBool() && item["timeline"]=="full";ids.insert(m.id);m.enabled=item["enabled"].toBool();
+            if (item["type"]=="crop") {
+                const auto c=item["crop"].toObject();valid &= c["space"]=="world" && (c["shape"]=="box" || c["shape"]=="cylinder");m.crop.enabled=m.enabled;m.crop.shape=c["shape"]=="box" ? CropShape::Box : CropShape::Cylinder;
+                m.crop.radius=float(number(c,"radius",.0001,1e6));m.crop.height=float(number(c,"height",.0001,1e6));m.crop.width=float(number(c,"width",.0001,1e6));m.crop.depth=float(number(c,"depth",.0001,1e6));
+                m.crop.transform.position=vector(c,"position",-1e6,1e6);m.crop.transform.rotation=vector(c,"rotation",-36000,36000);m.crop.transform.scale=vector(c,"scale",.0001,10000);m.crop.transform.shear=vector(c,"shear",-1e6,1e6);
+            } else if (item["type"]=="remove-green") {
+                m.type=ModifierType::RemoveGreen;const auto g=item["green"].toObject();
+                m.green.minimumSaturation=float(number(g,"minimumSaturation",0,1));m.green.hueTolerance=float(number(g,"hueTolerance",0,180));valid &= g["targetHue"].toDouble()==120 && g["colourSource"]=="dc";
+                valid &= !g.contains("colourSpace") || g["colourSpace"]=="srgb" || g["colourSpace"]=="linear-rgb";
+                m.green.linearRgb=g["colourSpace"]=="linear-rgb";
+            } else if (item["type"]=="animate-transform") {
+                m.type=ModifierType::AnimateTransform;
+                if (item.contains("animation")) {
+                    const auto a=item["animation"].toObject();valid &= a["space"]=="reference-offset" && a["interpolation"]=="linear-slerp" && a["keys"].isArray();QSet<int> frames;
+                    for (const auto &value:a["keys"].toArray()) {
+                        if (!value.isObject()) return fail();const auto key=value.toObject();const double frame=number(key,"frame",0,1000000);valid &= frame==std::floor(frame) && !frames.contains(int(frame));frames.insert(int(frame));
+                        Transform offset;offset.position=vector(key,"position",-1e6,1e6);offset.rotation=vector(key,"rotation",-36000,36000);offset.scale=vector(key,"scale",.0001,10000);offset.shear=vector(key,"shear",-1e6,1e6);m.animation.setKey(int(frame),offset);
+                    }
+                }
+            } else if (item["type"]=="purge-isolated") {
+                m.type=ModifierType::PurgeIsolated;
+                if (item.contains("isolation")) {const auto p=item["isolation"].toObject();const double n=number(p,"neighbour",1,256);valid &= n==std::floor(n);m.isolation.neighbour=int(n);m.isolation.medianPercent=number(p,"medianPercent",0,1000000);}
+            } else return fail();
+            p.modifiers.append(m);
+        }
+        p.selectedModifier=root["selection"].toObject()["modifier"].toString();
+        if (!p.modifier()) p.selectedModifier=p.modifiers.isEmpty() ? QString() : p.modifiers.front().id;
+    }
     const auto tl = root["timeline"].toObject(), view = root["view"].toObject();
     p.time = number(tl, "time", 0, 1e9); p.in = number(tl, "in", 0, 1e9);
     p.out = number(tl, "out", 0, 1e9); p.speed = number(tl, "speed", 0.1, 4);

@@ -5,6 +5,7 @@
 #include "mintfile.h"
 #include "mintskinrecovery.h"
 #include "nativeexport.h"
+#include "captureworker.h"
 #include <Eigen/Geometry>
 #include <QTemporaryDir>
 #include <QSignalSpy>
@@ -104,6 +105,90 @@ double colour(const vgs::Frame &f,const Eigen::Vector3d &direction,int c) {
 class ExportTests : public QObject {
     Q_OBJECT
 private slots:
+    void animatedOffsetsBakeReferenceTrimCovarianceAndSh() {
+        QTemporaryDir dir;const auto source=dir.filePath("source.pgs");sourceFile(source,5);Project project;project.asset=source;project.in=.08;project.out=.16;project.transform.position={1,2,3};project.modifiers.clear();
+        Modifier animation;animation.id=Project::newId();animation.name="Motion";animation.type=ModifierType::AnimateTransform;Transform end;end.position={2,0,0};end.rotation={0,90,0};end.scale={2,1,1};animation.animation.setKey(0,{});animation.animation.setKey(4,end);project.modifiers.append(animation);
+        auto original=vgsdec::Capture::openFile(source.toStdString());
+        const auto guardedOutput=dir.filePath("existing.vgs");QFile guardedFile(guardedOutput);QVERIFY(guardedFile.open(QIODevice::WriteOnly));guardedFile.write("existing");guardedFile.close();
+        QVERIFY_EXCEPTION_THROWN(exportCaptureFile(project,guardedOutput),std::runtime_error);QVERIFY(guardedFile.open(QIODevice::ReadOnly));QCOMPARE(guardedFile.readAll(),QByteArray("existing"));guardedFile.close();
+        // Attribute bake correctness remains covered independently while compact
+        // animated export is developed; the writer must not expand implicitly.
+        for (int frame=2;frame<5;++frame) {const auto input=copy(original.setTime(frame/25.,true));const auto expected=bakeExportFrame(input,project,3,{},25);QVERIFY(expected.count>0);}
+        animation.animation.keys={animation.animation.keys.back()};project.modifiers[0]=animation;
+        for (const auto &extension:{QString("vgs"),QString("pgs"),QString("mint")}) {
+            project.captureSettings.plain=extension=="pgs";const auto path=dir.filePath("animated."+extension);const auto result=exportCaptureFile(project,path);QCOMPARE(result.frames,3);
+            std::unique_ptr<vgsdec::Capture> capture;MintFile mint;QString error;if (extension=="mint") QVERIFY(mint.open(path,&error));else capture=std::make_unique<vgsdec::Capture>(vgsdec::Capture::openFile(path.toStdString()));
+            for (int sample=0;sample<3;++sample) {
+                const auto input=copy(original.setTime((sample+2)/25.,true));const auto expected=bakeExportFrame(input,project,3,{},25);vgs::Frame actual;
+                if (capture) actual=copy(capture->setTime((sample+.25)/25.,true));else {MintFrame frame;QVERIFY(mint.decode((sample+.25)/25.,&frame,true,&error));actual.count=frame.count;actual.position={frame.position.begin(),frame.position.end()};actual.rotation={frame.rotation.begin(),frame.rotation.end()};actual.scale={frame.scale.begin(),frame.scale.end()};actual.colorDc={frame.colorDc.begin(),frame.colorDc.end()};actual.shRest={frame.shRest.begin(),frame.shRest.end()};actual.shCoefficients=15;}
+                QCOMPARE(actual.count,expected.count);for (size_t row=0;row<actual.count;++row) {
+                    for (int c=0;c<3;++c) QVERIFY(std::abs(actual.position[row*3+c]-expected.position[row*3+c])<1e-4f);
+                    QVERIFY((covariance(actual.rotation.data()+row*4,actual.scale.data()+row*3)-covariance(expected.rotation.data()+row*4,expected.scale.data()+row*3)).norm()<.002);
+                    for (int c=0;c<3;++c) QVERIFY(std::abs(actual.colorDc[row*3+c]-expected.colorDc[row*3+c])<.003);
+                    for (int c=0;c<45;++c) QVERIFY(std::abs(actual.shRest[row*45+c]-expected.shRest[row*45+c])<.003);
+                }
+            }
+        }
+    }
+    void isolationMatchesNativeSampledAndWorkerPreview() {
+        QTemporaryDir dir;const auto source=dir.filePath("cloud.pgs");vgs::Frame cloud;cloud.count=26;cloud.active.assign(26,1);cloud.opacity.assign(26,1);
+        for (int i=0;i<26;++i) {cloud.position.insert(cloud.position.end(),{i==25 ? 5.f : (i%5)*.01f,i==25 ? 5.f : 1.f,i==25 ? 5.f : (i/5)*.01f});cloud.rotation.insert(cloud.rotation.end(),{0,0,0,1});cloud.scale.insert(cloud.scale.end(),{.01f,.02f,.03f});cloud.colorDc.insert(cloud.colorDc.end(),{.8f,.4f,.2f});}
+        vgs::Header h;h.shDegree=0;h.frameCount=h.durationTicks=2;h.chunks.resize(2);for (int i=0;i<2;++i) {h.chunks[i].startTick=i;h.chunks[i].intervals=1;}vgs::EncodeOptions options;options.signer=vgs::authoringSigner();options.shDegree=0;QFile file(source);QVERIFY(file.open(QIODevice::WriteOnly));
+        vgs::encodeSequence(h,[&](size_t frame) {auto sample=cloud;if (frame) {sample.position[75]=.025f;sample.position[76]=1;sample.position[77]=.025f;}return packExportFrame(sample,0);},[&](uint64_t at,const uint8_t *data,size_t n) {if (!file.seek(at) || file.write(reinterpret_cast<const char *>(data),n)!=qint64(n)) throw std::runtime_error("Fixture write failed.");},options);file.close();
+        Project project;project.asset=source;project.out=1./30;project.modifiers.clear();Modifier purge;purge.id=Project::newId();purge.name="Purge";purge.type=ModifierType::PurgeIsolated;purge.isolation={4,300};project.modifiers.append(purge);
+        for (bool sampled:{false,true}) {project.transform.scale=sampled ? QVector3D(1,.8f,1) : QVector3D(1,1,1);const auto output=dir.filePath(sampled ? "sampled.vgs" : "native.vgs");exportCaptureFile(project,output);auto capture=vgsdec::Capture::openFile(output.toStdString());QCOMPARE(capture.setTime(0,true).activeCount,25ull);QCOMPARE(capture.setTime(1./30,true).activeCount,26ull);}
+        CaptureWorker worker;QSignalSpy decoded(&worker,&CaptureWorker::decoded);worker.open(source,1,true);worker.decode(0,1,true,project);QCOMPARE(decoded.size(),1);const auto preview=qvariant_cast<FramePtr>(decoded[0][0]);QCOMPARE(preview->points.size(),size_t(26));QCOMPARE(preview->records.size(),size_t(26));QCOMPARE(std::count_if(preview->points.begin(),preview->points.end(),[](const auto &point) {return point.modifierVisibility>.5;}),25);
+        project.modifiers[0].enabled=false;worker.decode(0,1,true,project);const auto disabled=qvariant_cast<FramePtr>(decoded[1][0]);QCOMPARE(std::count_if(disabled->points.begin(),disabled->points.end(),[](const auto &point) {return point.modifierVisibility>.5;}),26);
+    }
+    void mintExportPreservesEditedAttributesAndEmptyFrames() {
+        QTemporaryDir dir;const auto source=dir.filePath("source.pgs");sourceFile(source);
+        Project project;project.asset=source;project.out=.08;project.crop().enabled=true;project.transform.position={.2f,0,0};project.captureSettings.shDegree=1;QString error;
+        for (bool sampled:{false,true}) {
+            project.transform.scale=sampled ? QVector3D(1,.8f,1) : QVector3D(1,1,1);
+            const auto reference=dir.filePath(sampled ? "sampled.vgs" : "native.vgs"),output=dir.filePath(sampled ? "sampled.mint" : "native.mint");
+            exportCaptureFile(project,reference);const auto result=exportCaptureFile(project,output);QCOMPARE(result.frames,3);QCOMPARE(result.kept,2ull);
+            MintFile mint;QVERIFY2(mint.open(output,&error),qPrintable(error));QCOMPARE(mint.frameRate(),25.);QCOMPARE(mint.frameCount(),3);
+            auto expected=vgsdec::Capture::openFile(reference.toStdString());
+            for (int frame=0;frame<3;++frame) {
+                // The MINT runtime converts time to float32. Sample inside each
+                // frame to avoid choosing different sides of a chunk boundary.
+                const double seconds=(frame+.25)/25.;MintFrame actual;QVERIFY2(mint.decode(seconds,&actual,true,&error),qPrintable(error));const auto &before=expected.setTime(seconds,true);
+                QCOMPARE(actual.count,before.splatCount);for (size_t row=0;row<actual.count;++row) {QCOMPARE(actual.active[int(row)],before.active[row]);
+                    for (int c=0;c<3;++c) {QVERIFY(std::abs(actual.position[int(row*3+c)]-before.positions[row*3+c])<1e-5f);QVERIFY(std::abs(actual.scale[int(row*3+c)]-before.scales[row*3+c])<1e-5f);QVERIFY(std::abs(actual.colorDc[int(row*3+c)]-before.colors[row*3+c])<1e-5f);}
+                    for (int c=0;c<9;++c) QVERIFY(std::abs(actual.shRest[int(row*45+c)]-before.sphericalHarmonics[row*9+c])<1e-5f);
+                    for (int c=0;c<4;++c) QVERIFY(std::abs(actual.rotation[int(row*4+c)]-before.rotations[row*4+c])<1e-5f);
+                    QVERIFY(std::abs(actual.opacity[int(row)]-before.opacities[row])<1e-5f);
+                    for (int c=9;c<45;++c) QCOMPARE(actual.shRest[int(row*45+c)],0.f);
+                }
+            }
+            const auto bytes=mint.bytes();vgs::MintLogicalSource logical(reinterpret_cast<const uint8_t *>(bytes.constData()),size_t(bytes.size()));QCOMPARE(logical.header().frameCount,3ull);
+        }
+        const auto destination=dir.filePath("cancelled.mint");QFile existing(destination);QVERIFY(existing.open(QIODevice::WriteOnly));existing.write("existing");existing.close();
+        QVERIFY_EXCEPTION_THROWN(exportCaptureFile(project,destination,[](int value,const QString &) {return value<95;}),std::runtime_error);
+        QVERIFY(existing.open(QIODevice::ReadOnly));QCOMPARE(existing.readAll(),QByteArray("existing"));
+    }
+    void modifiersMatchAcrossNativeAndSampledExportBeforeDespill() {
+        vgs::Frame frame;frame.count=4;frame.position={-1.5f,1,0,1.5f,1,0,1.5f,1,0,0,1,0};frame.active={1,1,1,1};frame.opacity={1,1,1,1};
+        frame.colorDc={.9f,.1f,.1f,.1f,.1f,.9f,0,1,0,.8f,.8f,.8f};
+        for (int i=0;i<4;++i) {frame.rotation.insert(frame.rotation.end(),{0,0,0,1});frame.scale.insert(frame.scale.end(),{.1f,.2f,.3f});}
+        Project project;project.modifiers.clear();
+        Modifier first;first.id=Project::newId();first.name="First";first.crop.enabled=true;first.crop.radius=.5f;first.crop.height=2;first.crop.transform.position={-1.5f,0,0};
+        Modifier second=first;second.id=Project::newId();second.name="Second";second.crop.transform.position={1.5f,0,0};
+        Modifier green;green.id=Project::newId();green.name="Green";green.type=ModifierType::RemoveGreen;project.modifiers={first,second,green};project.selectedModifier=green.id;
+        project.captureSettings.despill=true;project.captureSettings.recoverSkin=false;
+        // Enabled future modifiers leave both export paths unchanged.
+        Modifier animate;animate.id=Project::newId();animate.name="Animate";animate.type=ModifierType::AnimateTransform;
+        Modifier purge=animate;purge.id=Project::newId();purge.name="Purge";purge.type=ModifierType::PurgeIsolated;
+        project.modifiers.insert(0,animate);project.modifiers.insert(0,purge);
+        QCOMPARE(bakeExportFrame(frame,project,0).count,2ull);
+        auto source=packExportFrame(frame,0);auto processed=source;MintDespillOptions options;options.recoverSkinColour=false;QString error;
+        QVERIFY(MintFile::despillLogical(&processed,1./30,options,{},&error));
+        ExportResult result;auto edited=editNativeChunk(processed,{0,0,1},project,&result,{},&source);vgs::FrameDecoder decoded(edited);
+        auto output=decoded.evaluate(0,false);QCOMPARE(std::count(output.active.begin(),output.active.end(),uint8_t(1)),2);QCOMPARE(result.kept,2ull);QCOMPARE(result.removed,2ull);
+        project.modifiers.back().enabled=false;QCOMPARE(bakeExportFrame(frame,project,0).count,3ull);
+        project.modifiers[2].enabled=false;QCOMPARE(bakeExportFrame(frame,project,0).count,2ull);
+        project.modifiers[3].enabled=false;QCOMPARE(bakeExportFrame(frame,project,0).count,4ull);
+    }
     void skinRecoveryProtectsNeutralClothWithSkinLikeDc() {
         const int n=402;MintFrame original,corrected;original.count=corrected.count=n;
         original.active.fill(1,n);original.opacity.fill(1,n);original.position.resize(n*3);original.colorDc.resize(n*3);original.shRest.fill(0,n*45);corrected.colorDc.resize(n*3);
@@ -139,7 +224,7 @@ private slots:
             for (size_t row=0;row<before.count;++row) {
                 if (!before.active[row] || before.opacity[row]<.1f) continue;
                 const auto position=p.transform.matrix().map({before.position[row*3],before.position[row*3+1],before.position[row*3+2]});
-                if (position.y()<.3 || position.y()>1.6 || !p.crop.contains(position)) continue;
+                if (position.y()<.3 || position.y()>1.6 || !p.crop().contains(position)) continue;
                 const auto original=rgb(before,row),processed=rgb(after,row),plain=rgb(withoutSkin,row);
                 const float low=std::min({original[0],original[1],original[2]}),high=std::max({original[0],original[1],original[2]});
                 if (low<.35f || high-low>.12f) continue;++white;
@@ -190,7 +275,7 @@ private slots:
     void nativeTemporalCropTrimAndRepeatedVisibility_data() {QTest::addColumn<bool>("residual");QTest::newRow("residual")<<true;QTest::newRow("direct")<<false;}
     void nativeTemporalCropTrimAndRepeatedVisibility() {
         QFETCH(bool,residual);auto source=temporalFixture(residual);vgs::FrameDecoder reference(source);Project project;
-        project.transform.position={.25f,0,0};project.crop.enabled=true;project.crop.radius=1;project.crop.height=2;
+        project.transform.position={.25f,0,0};project.crop().enabled=true;project.crop().radius=1;project.crop().height=2;
         for (auto plan:{NativeChunkPlan{0,0,6},NativeChunkPlan{0,1,4}}) {
             ExportResult result;auto edited=editNativeChunk(source,plan,project,&result,{});vgs::FrameDecoder output(edited);
             quint64 kept=0,removed=0;
@@ -199,7 +284,7 @@ private slots:
                 std::vector<size_t> expectedRows,actualRows;
                 for (size_t row=0;row<original.count;++row) if (original.active[row]) {
                     auto world=project.transform.matrix().map({original.position[row*3],original.position[row*3+1],original.position[row*3+2]});
-                    if (project.crop.contains(world)) {expectedRows.push_back(row);++kept;} else ++removed;
+                    if (project.crop().contains(world)) {expectedRows.push_back(row);++kept;} else ++removed;
                 }
                 for (size_t row=0;row<actual.count;++row) if (actual.active[row]) actualRows.push_back(row);
                 QCOMPARE(actualRows.size(),expectedRows.size());
@@ -230,7 +315,7 @@ private slots:
         const double fps=original.frameRate();const int first=int(std::round(project.in*fps));
         for (int frame=0;frame<result.frames;++frame) {
             MintFrame reference;QVERIFY2(original.decode((first+frame)/fps,&reference,true,&error),qPrintable(error));std::vector<size_t> expected;
-            for (size_t row=0;row<reference.count;++row) if (reference.active[row] && project.crop.contains(project.transform.matrix().map({reference.position[row*3],reference.position[row*3+1],reference.position[row*3+2]}))) expected.push_back(row);
+            for (size_t row=0;row<reference.count;++row) if (reference.active[row] && project.crop().contains(project.transform.matrix().map({reference.position[row*3],reference.position[row*3+1],reference.position[row*3+2]}))) expected.push_back(row);
             const auto &actual=verified.setTime(frame/fps,true);QCOMPARE(actual.activeCount,uint64_t(expected.size()));samples+=actual.activeCount;size_t next=0;
             for (size_t row=0;row<actual.splatCount;++row) if (actual.active[row]) {
                 const size_t sourceRow=expected[next++];
@@ -241,17 +326,17 @@ private slots:
                     for (int coefficient=0;coefficient<actual.shCoefficients;++coefficient) for (int channel=0;channel<3;++channel)
                         QCOMPARE(actual.sphericalHarmonics[(row*actual.shCoefficients+coefficient)*3+channel],reference.shRest[sourceRow*45+coefficient*3+channel]);
                 }
-                auto crop=project.crop;crop.radius+=1e-5f;crop.height+=1e-5f;crop.transform.position.setY(crop.transform.position.y()-1e-5f);
+                auto crop=project.crop();crop.radius+=1e-5f;crop.height+=1e-5f;crop.transform.position.setY(crop.transform.position.y()-1e-5f);
                 QVERIFY(crop.contains({actual.positions[row*3],actual.positions[row*3+1],actual.positions[row*3+2]}));
             }
         }
         QCOMPARE(samples,result.kept);
     }
     void cropUsesWorldAndKeepsZeroOpacity() {
-        auto f=sample();Project p;p.transform.position={-2,0,0};p.crop.enabled=true;p.crop.radius=1.1f;p.crop.height=2;
+        auto f=sample();Project p;p.transform.position={-2,0,0};p.crop().enabled=true;p.crop().radius=1.1f;p.crop().height=2;
         auto result=bakeExportFrame(f,p,3);QCOMPARE(result.count,1ull);QCOMPARE(result.opacity.front(),0.f);QCOMPARE(result.position.front(),1.f);
-        QCOMPARE(p.crop.transform.position,QVector3D());QCOMPARE(f.count,3ull);QCOMPARE(f.position[0],0.f);
-        p.crop.shape=CropShape::Box;p.crop.width=3;p.crop.depth=2;p.crop.transform.rotation={0,45,0};
+        QCOMPARE(p.crop().transform.position,QVector3D());QCOMPARE(f.count,3ull);QCOMPARE(f.position[0],0.f);
+        p.crop().shape=CropShape::Box;p.crop().width=3;p.crop().depth=2;p.crop().transform.rotation={0,45,0};
         result=bakeExportFrame(f,p,3);QCOMPARE(result.count,1ull);
         p.transform.position={0,0,0};result=bakeExportFrame(f,p,3);QCOMPARE(result.count,1ull);QCOMPARE(result.opacity[0],.7f);
     }
@@ -279,7 +364,7 @@ private slots:
     }
     void compatibleSignedExportTrimMetadataCropAndEmptyFrame() {
         QTemporaryDir dir;QString source=dir.filePath("source.pgs");sourceFile(source);
-        Project p;p.asset=source;p.in=1./25;p.out=2./25;p.crop.enabled=true;p.crop.radius=1;p.crop.height=2;
+        Project p;p.asset=source;p.in=1./25;p.out=2./25;p.crop().enabled=true;p.crop().radius=1;p.crop().height=2;
         p.transform.position={.25f,0,0};p.transform.rotation={0,25,0};p.transform.scale={2,1,.5f};
         p.captureSettings.title="Edited metadata";p.captureSettings.extraJson="[1,2,3]";p.captureSettings.plain=true;
         auto destination=dir.filePath("edited.pgs");auto result=exportCaptureFile(p,destination);QCOMPARE(result.frames,2);QCOMPARE(result.kept,1ull);QCOMPARE(result.removed,1ull);
@@ -302,12 +387,12 @@ private slots:
         MintFile mint;QString error;QVERIFY2(mint.open(asset,&error),qPrintable(error));MintFrame source;QVERIFY2(mint.decode(0,&source,true,&error),qPrintable(error));
         size_t seed=0;while (seed<source.count && (!source.active[seed] || source.opacity[seed]<.5f)) ++seed;QVERIFY(seed<source.count);
         Project p;p.asset=asset;p.out=1/mint.frameRate();p.transform.position={2,3,4};p.transform.rotation={10,20,30};p.transform.scale={1.1f,.8f,1.2f};
-        p.crop.enabled=true;p.crop.shape=CropShape::Box;p.crop.width=p.crop.depth=p.crop.height=.08f;
+        p.crop().enabled=true;p.crop().shape=CropShape::Box;p.crop().width=p.crop().depth=p.crop().height=.08f;
         auto position=p.transform.matrix().map(QVector3D(source.position[3*seed],source.position[3*seed+1],source.position[3*seed+2]));
-        p.crop.transform.position=position-QVector3D(0,.04f,0);p.captureSettings.title="Real MINT edited";
+        p.crop().transform.position=position-QVector3D(0,.04f,0);p.captureSettings.title="Real MINT edited";
         QTemporaryDir dir;auto output=dir.filePath("mint-edited.vgs");ExportResult result;try {result=exportCaptureFile(p,output);} catch (const std::exception &e) {QFAIL(e.what());}QCOMPARE(result.frames,2);QVERIFY(result.kept>0);QVERIFY(result.removed>0);
         auto verified=vgsdec::Capture::openFile(output.toStdString());QCOMPARE(verified.frameRate(),mint.frameRate());QCOMPARE(verified.metadata().title,std::string("Real MINT edited"));
-        for (int frame=0;frame<2;++frame) {const auto &f=verified.setTime(frame/mint.frameRate(),true);for (size_t i=0;i<f.splatCount;++i) if (f.active[i]) QVERIFY(p.crop.contains({f.positions[3*i],f.positions[3*i+1],f.positions[3*i+2]}));}
+        for (int frame=0;frame<2;++frame) {const auto &f=verified.setTime(frame/mint.frameRate(),true);for (size_t i=0;i<f.splatCount;++i) if (f.active[i]) QVERIFY(p.crop().contains({f.positions[3*i],f.positions[3*i+1],f.positions[3*i+2]}));}
     }
     void largeDictionariesKeepScaleOpacityAndShWithinQuantizationTolerance() {
         auto f=sample();f.count=5000;f.position.resize(15000);f.rotation.resize(20000);f.scale.resize(15000);f.opacity.resize(5000);f.active.assign(5000,1);f.colorDc.resize(15000);f.shRest.resize(5000*45);
@@ -328,7 +413,7 @@ private slots:
         QString output=dir.filePath("output.vgs");QFile file(output);QVERIFY(file.open(QIODevice::WriteOnly));file.write("existing");file.close();
         QVERIFY_EXCEPTION_THROWN(exportCaptureFile(p,output,[](int value,const QString &) {return value<95;}),std::runtime_error);
         QVERIFY(file.open(QIODevice::ReadOnly));QCOMPARE(file.readAll(),QByteArray("existing"));file.close();
-        p.crop.enabled=true;p.crop.transform.position={100,100,100};
+        p.crop().enabled=true;p.crop().transform.position={100,100,100};
         QVERIFY_EXCEPTION_THROWN(exportCaptureFile(p,output),std::runtime_error);QVERIFY(file.open(QIODevice::ReadOnly));QCOMPARE(file.readAll(),QByteArray("existing"));
         QVERIFY_EXCEPTION_THROWN(exportCaptureFile(p,source),std::runtime_error);
     }
@@ -345,7 +430,7 @@ private slots:
     }
 private:
     static vgs::Frame copy(const vgsdec::Frame &f) {
-        vgs::Frame out;out.count=f.splatCount;out.shCoefficients=f.shCoefficients;size_t n=f.splatCount;
+        vgs::Frame out;out.count=f.splatCount;out.seconds=f.seconds;out.shCoefficients=f.shCoefficients;size_t n=f.splatCount;
         out.position.assign(f.positions,f.positions+n*3);out.rotation.assign(f.rotations,f.rotations+n*4);out.scale.assign(f.scales,f.scales+n*3);
         out.opacity.assign(f.opacities,f.opacities+n);out.colorDc.assign(f.colors,f.colors+n*3);out.active.assign(f.active,f.active+n);
         out.shRest.assign(f.sphericalHarmonics,f.sphericalHarmonics+n*f.shCoefficients*3);return out;

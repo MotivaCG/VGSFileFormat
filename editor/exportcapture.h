@@ -13,7 +13,7 @@ using ExportProgress = std::function<bool(int, const QString &)>;
 
 // Source attributes are immutable. Crop tests transformed means in world space.
 vgs::Frame bakeExportFrame(const vgs::Frame &, const Project &, int degree,
-                          const ExportProgress & = {});
+                          const ExportProgress & = {},double frameRate = 30);
 ExportResult exportCaptureFile(const Project &, const QString &destination,
                                const ExportProgress & = {});
 

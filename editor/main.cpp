@@ -62,7 +62,7 @@ int main(int argc, char *argv[])
     QCommandLineParser parser; parser.addHelpOption();
     parser.addPositionalArgument("capture", "A .vgs, .pgs, .mint or .vgsproj file.");
     QCommandLineOption smoke("smoke-test", "Open, seek, verify a project and save a PNG preview.", "output");
-    QCommandLineOption exportOption("export-capture", "Export a .vgsproj to VGS/PGS without opening the editor window.", "output");
+    QCommandLineOption exportOption("export-capture", "Export a .vgsproj to VGS/PGS/MINT without opening the editor window.", "output");
     parser.addOption(smoke); parser.addOption(exportOption); parser.process(a);
     if (parser.isSet(exportOption)) {
         const auto paths=parser.positionalArguments();Project project;QString error;
@@ -70,7 +70,7 @@ int main(int argc, char *argv[])
             std::fprintf(stderr,"%s\n",paths.size()!=1 ? "Provide one .vgsproj file." : qPrintable(error));return 2;
         }
         const QString output=parser.value(exportOption),extension=QFileInfo(output).suffix().toLower();
-        if (extension!="vgs" && extension!="pgs") {std::fprintf(stderr,"Choose a .vgs or .pgs output.\n");return 2;}
+        if (extension!="vgs" && extension!="pgs" && extension!="mint") {std::fprintf(stderr,"Choose a .vgs, .pgs or .mint output.\n");return 2;}
         project.captureSettings.plain=extension=="pgs";
         try {
             int last=-1;QString lastMessage;const auto result=exportCaptureFile(project,output,[&](int percent,const QString &message) {

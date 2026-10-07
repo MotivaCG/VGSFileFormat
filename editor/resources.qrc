@@ -10,5 +10,9 @@
         <file alias="scale.png">assets/icons/scale.png</file>
         <file alias="global.png">assets/icons/global.png</file>
         <file alias="local.png">assets/icons/local.png</file>
+        <file alias="ghost.png">assets/icons/ghost.png</file>
+        <file alias="ghost_off.png">assets/icons/ghost_off.png</file>
+        <file alias="eye.png">assets/icons/eye.png</file>
+        <file alias="eye_off.png">assets/icons/eye_off.png</file>
     </qresource>
 </RCC>
