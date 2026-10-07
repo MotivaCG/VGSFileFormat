@@ -1,0 +1,177 @@
+#include "project.h"
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QSaveFile>
+#include <cmath>
+#include <algorithm>
+#include <QtMath>
+#include <QQuaternion>
+
+QMatrix4x4 Transform::matrix() const {
+    QMatrix4x4 m;
+    m.translate(position);
+    m.rotate(rotation.z(), 0, 0, 1);
+    m.rotate(rotation.y(), 0, 1, 0);
+    m.rotate(rotation.x(), 1, 0, 0);
+    QMatrix4x4 h; h(0,1) = shear.x(); h(0,2) = shear.y(); h(1,2) = shear.z(); m *= h;
+    m.scale(scale);
+    return m;
+}
+Transform Transform::fromMatrix(const QMatrix4x4 &m) {
+    Transform result; result.position = m.column(3).toVector3D();
+    QVector3D x = m.column(0).toVector3D(), y = m.column(1).toVector3D(), z = m.column(2).toVector3D();
+    const float sx = std::max(x.length(),1e-8f); x /= sx;
+    const float xy = QVector3D::dotProduct(x,y); y -= x*xy;
+    const float sy = std::max(y.length(),1e-8f); y /= sy;
+    const float xz = QVector3D::dotProduct(x,z), yz = QVector3D::dotProduct(y,z); z -= x*xz+y*yz;
+    const float sz = std::max(z.length(),1e-8f); z /= sz;
+    result.scale = {sx,sy,sz}; result.shear = {xy/sy,xz/sz,yz/sz};
+    QMatrix4x4 r; r.setColumn(0,QVector4D(x,0)); r.setColumn(1,QVector4D(y,0)); r.setColumn(2,QVector4D(z,0));
+    const float ry = std::asin(std::clamp(-r(2,0),-1.0f,1.0f));
+    const bool singular = std::abs(std::cos(ry))<1e-5f;
+    result.rotation = {qRadiansToDegrees(singular ? 0.0f : std::atan2(r(2,1),r(2,2))),qRadiansToDegrees(ry),
+        qRadiansToDegrees(singular ? std::atan2(-r(0,1),r(1,1)) : std::atan2(r(1,0),r(0,0)))};
+    return result;
+}
+QMatrix4x4 Transform::rotationMatrix() const {
+    QMatrix4x4 m;
+    m.rotate(rotation.z(),0,0,1); m.rotate(rotation.y(),0,1,0); m.rotate(rotation.x(),1,0,0);
+    return m;
+}
+Transform Transform::rotatedLocal(int axis,float degrees) const {
+    auto m = rotationMatrix(); QVector3D direction; direction[axis] = 1;
+    m.rotate(degrees,direction); // Postmultiply: rotate about a local axis.
+    Transform result = *this;
+    const float y = std::asin(std::clamp(-m(2,0),-1.0f,1.0f));
+    const bool singular = std::abs(std::cos(y))<1e-5f;
+    const float x = singular ? 0 : std::atan2(m(2,1),m(2,2));
+    const float z = singular ? std::atan2(-m(0,1),m(1,1)) : std::atan2(m(1,0),m(0,0));
+    result.rotation = {qRadiansToDegrees(x),qRadiansToDegrees(y),qRadiansToDegrees(z)};
+    return result;
+}
+QMatrix4x4 Camera::viewMatrix() const {
+    const float y = qDegreesToRadians(yaw), p = qDegreesToRadians(pitch);
+    const QVector3D direction(std::sin(y)*std::cos(p),std::sin(p),std::cos(y)*std::cos(p));
+    QVector3D up = pitch>89.5f ? QVector3D(0,0,-1) : pitch<-89.5f ? QVector3D(0,0,1) : QVector3D(0,1,0);
+    up = QQuaternion::fromAxisAndAngle(direction,roll).rotatedVector(up);
+    QMatrix4x4 view; view.lookAt(target+direction*distance,target,up); return view;
+}
+bool CropVolume::contains(const QVector3D &position) const {
+    if (!enabled) return true;
+    const QVector3D p = transform.matrix().inverted().map(position);
+    if (p.y()<0 || p.y()>height) return false;
+    return shape==CropShape::Box ? std::abs(p.x())<=width*0.5f && std::abs(p.z())<=depth*0.5f
+        : p.x()*p.x()+p.z()*p.z()<=radius*radius;
+}
+static QJsonArray vec(const QVector3D &v) { return {v.x(), v.y(), v.z()}; }
+QJsonObject Project::json(const QString &path) const {
+    return {{"format", "vgs-editor-project"}, {"version", 6},
+        {"asset", QDir(QFileInfo(path).absolutePath()).relativeFilePath(asset)},
+        {"transform", QJsonObject{{"position", vec(transform.position)}, {"rotation", vec(transform.rotation)}, {"scale", vec(transform.scale)}, {"shear",vec(transform.shear)}}},
+        {"camera", QJsonObject{{"target", vec(camera.target)}, {"yaw", camera.yaw}, {"pitch", camera.pitch}, {"roll",camera.roll}, {"distance", camera.distance}, {"preset", int(camera.preset)}, {"orthographic", camera.orthographic}}},
+        {"crop", QJsonObject{{"enabled",crop.enabled},{"space","world"},{"shape",crop.shape==CropShape::Box ? "box" : "cylinder"},
+            {"width",crop.width},{"depth",crop.depth},{"radius",crop.radius},{"height",crop.height},
+            {"position",vec(crop.transform.position)},{"rotation",vec(crop.transform.rotation)},{"scale",vec(crop.transform.scale)}, {"shear",vec(crop.transform.shear)}}},
+        {"spaces",QJsonArray{int(spaces[0]),int(spaces[1]),int(spaces[2])}},
+        {"captureSettings",captureSettings.json()},
+        {"timeline", QJsonObject{{"time", time}, {"in", in}, {"out", out}, {"speed", speed}, {"loop", loop}}},
+        {"view", QJsonObject{{"grid", grid}, {"sh", true}, {"pointSize", pointSize}}}};
+}
+bool Project::write(const QString &path, QString *error) const {
+    QSaveFile file(path);
+    const QByteArray bytes = QJsonDocument(json(path)).toJson();
+    if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit()) {
+        *error = file.errorString(); return false;
+    }
+    return true;
+}
+bool Project::read(const QString &path, Project *result, QString *error) {
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) { *error = file.errorString(); return false; }
+    QJsonParseError parse;
+    const auto doc = QJsonDocument::fromJson(file.readAll(), &parse);
+    if (parse.error!=QJsonParseError::NoError || !doc.isObject()) {
+        *error = QStringLiteral("Invalid project or unsupported project version."); return false;
+    }
+    return fromJson(doc.object(),QFileInfo(path).absolutePath(),result,error);
+}
+bool Project::fromJson(const QJsonObject &root,const QString &baseDirectory,Project *result,QString *error) {
+    auto fail = [&] { *error = QStringLiteral("Invalid project or unsupported project version."); return false; };
+    const double version = root["version"].toDouble();
+    if (root["format"] != "vgs-editor-project" || version<1 || version>6 || version!=std::floor(version) ||
+        !root["asset"].isString() || root["asset"].toString().isEmpty()) return fail();
+    Project p;
+    p.asset = QDir::cleanPath(QDir(baseDirectory).absoluteFilePath(root["asset"].toString()));
+    bool valid = true;
+    auto number = [&](const QJsonObject &o, const char *key, double lo, double hi) {
+        const auto value = o[key];
+        const double n = value.toDouble();
+        valid &= value.isDouble() && std::isfinite(n) && n >= lo && n <= hi;
+        return n;
+    };
+    auto vector = [&](const QJsonObject &o, const char *key, double lo, double hi) {
+        const auto a = o[key].toArray(); QVector3D v;
+        if (a.size() != 3) { valid = false; return v; }
+        for (int i = 0; i < 3; ++i) {
+            const double n = a[i].toDouble();
+            valid &= a[i].isDouble() && std::isfinite(n) && n >= lo && n <= hi;
+            v[i] = float(n);
+        }
+        return v;
+    };
+    const auto t = root["transform"].toObject(), c = root["camera"].toObject();
+    p.transform.position = vector(t, "position", -1e6, 1e6);
+    p.transform.rotation = vector(t, "rotation", -36000, 36000);
+    p.transform.scale = vector(t, "scale", 0.0001, 10000);
+    p.camera.target = vector(c, "target", -1e7, 1e7);
+    p.camera.yaw = float(number(c, "yaw", -36000, 36000));
+    p.camera.pitch = float(number(c, "pitch", -90, 90));
+    p.camera.distance = float(number(c, "distance", 0.001, 1e7));
+    if (root["version"].toInt()>=2) {
+        const double preset = number(c,"preset",0,6);
+        valid &= preset==std::floor(preset) && c["orthographic"].isBool();
+        p.camera.preset = ViewPreset(int(preset)); p.camera.orthographic = c["orthographic"].toBool();
+        p.camera.roll = float(number(c,"roll",-36000,36000));
+        if (p.camera.preset==ViewPreset::Free && p.camera.orthographic) return fail();
+        const auto crop = root["crop"].toObject();
+        valid &= crop["enabled"].isBool(); p.crop.enabled = crop["enabled"].toBool();
+        p.crop.radius = float(number(crop,"radius",0.0001,1e6)); p.crop.height = float(number(crop,"height",0.0001,1e6));
+        p.crop.width = p.crop.depth = 2*p.crop.radius;
+        if (root["version"].toInt()>=4) {
+            if (crop["shape"]!="box" && crop["shape"]!="cylinder") return fail();
+            p.crop.shape = crop["shape"]=="box" ? CropShape::Box : CropShape::Cylinder;
+            p.crop.width = float(number(crop,"width",0.0001,1e6)); p.crop.depth = float(number(crop,"depth",0.0001,1e6));
+        }
+        p.crop.transform.position = vector(crop,"position",-1e6,1e6);
+        p.crop.transform.rotation = vector(crop,"rotation",-36000,36000);
+        p.crop.transform.scale = vector(crop,"scale",0.0001,10000);
+        if (root["version"].toInt()==2 && p.crop.enabled) {
+            // Version 2 placed the origin at the centre; preserve its volume with a base pivot.
+            p.crop.transform.position += p.crop.transform.matrix().mapVector({0,-p.crop.height*0.5f,0});
+        }
+    }
+    if (root["version"].toInt()>=3) {
+        p.transform.shear = vector(t,"shear",-1e6,1e6);
+        p.crop.transform.shear = vector(root["crop"].toObject(),"shear",-1e6,1e6);
+        const auto spaces = root["spaces"].toArray(); if (spaces.size()!=3) return fail();
+        for (int i=0; i<3; ++i) {
+            const double space = spaces[i].toDouble(-1);
+            valid &= space==0 || space==1; p.spaces[i] = space==1 ? CoordinateSpace::Local : CoordinateSpace::Global;
+        }
+    }
+    if (root["version"].toInt()>=5 && !CaptureSettings::fromJson(root["captureSettings"].toObject(),&p.captureSettings,error)) return false;
+    if (version==6 && root["crop"].toObject()["space"]!="world") return fail();
+    if (version<6 && p.crop.enabled) p.crop.transform = Transform::fromMatrix(p.transform.matrix()*p.crop.transform.matrix());
+    const auto tl = root["timeline"].toObject(), view = root["view"].toObject();
+    p.time = number(tl, "time", 0, 1e9); p.in = number(tl, "in", 0, 1e9);
+    p.out = number(tl, "out", 0, 1e9); p.speed = number(tl, "speed", 0.1, 4);
+    p.pointSize = number(view, "pointSize", 1, 12);
+    valid &= tl["loop"].isBool() && view["grid"].isBool() && view["sh"].isBool();
+    // Keep reading version-1 projects, but their old SH toggle no longer affects rendering.
+    p.loop = tl["loop"].toBool(); p.grid = view["grid"].toBool();
+    if (!valid || p.out < p.in || p.time < p.in || p.time > p.out) return fail();
+    *result = p; return true;
+}

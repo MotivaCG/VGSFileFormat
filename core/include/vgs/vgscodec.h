@@ -5,6 +5,7 @@
 #include "vgscrypto.h"
 #include <array>
 #include <functional>
+#include <memory>
 #include <string>
 
 namespace vgs {
@@ -257,6 +258,20 @@ using Progress = std::function<bool(int done, int total)>;
 // metadata, padding or opaque residue. Unsupported source layouts are rejected.
 Bytes encodeMint(const uint8_t *mint, size_t size, const EncodeOptions & = {},
                  const Progress & = {});
+// Authoring access to the native temporal arrays, without encoding/decoding a
+// temporary VGS. Input bytes must outlive this object.
+class MintLogicalSource {
+public:
+  MintLogicalSource(const uint8_t *, size_t, uint32_t shDegree = 3);
+  ~MintLogicalSource();
+  MintLogicalSource(const MintLogicalSource &) = delete;
+  MintLogicalSource &operator=(const MintLogicalSource &) = delete;
+  const Header &header() const;
+  DecodedChunk chunk(size_t) const;
+private:
+  struct State;
+  std::unique_ptr<State> state;
+};
 #ifdef VGS_TEMPORAL_EXPERIMENT
 Bytes encodeLogical(const Header &, const std::vector<DecodedChunk> &,
                     const EncodeOptions &, const Progress & = {});

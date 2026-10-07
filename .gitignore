@@ -47,5 +47,4 @@ CMakeUserPresets.json
 *.pgs
 *.ply
 
-editor/
 usd/

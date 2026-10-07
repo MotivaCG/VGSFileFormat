@@ -697,8 +697,10 @@ static Bytes encodeSource(Source src, const uint8_t *mint, const EncodeOptions &
   std::map<uint32_t, Costs> costs;
   for (size_t ci = 0; ci < src.chunks.size(); ++ci) {
     const auto &sourceChunk = getChunk(ci);
-    h.maxChunkSplatRecords = std::max(h.maxChunkSplatRecords, sourceChunk.entry.splats);
-    h.maxSplatsPerFrame = std::max(h.maxSplatsPerFrame, sourceChunk.entry.splats);
+    if (src.provider) {
+      h.maxChunkSplatRecords = std::max(h.maxChunkSplatRecords, sourceChunk.entry.splats);
+      h.maxSplatsPerFrame = std::max(h.maxSplatsPerFrame, sourceChunk.entry.splats);
+    }
     for (const auto &p : pages(sourceChunk, mint, options.pageRows, options.splitTemporalShPages)) {
       auto &t = costs[p.page.attribute];
       int count = mgs::attributeModelCount(p.page.spec);
@@ -914,6 +916,30 @@ Bytes encodeMint(const uint8_t *mint, size_t size, const EncodeOptions &options,
   return encodeSource(importMint(mint, size, options.shDegree), mint, options, progress);
 }
 
+struct MintLogicalSource::State {
+  const uint8_t *bytes;
+  Source source;
+};
+MintLogicalSource::MintLogicalSource(const uint8_t *bytes,size_t size,uint32_t degree)
+    : state(new State{bytes,importMint(bytes,size,degree)}) {
+  for (const auto &chunk : state->source.chunks) state->source.header.chunks.push_back(chunk.entry);
+}
+MintLogicalSource::~MintLogicalSource() = default;
+const Header &MintLogicalSource::header() const { return state->source.header; }
+DecodedChunk MintLogicalSource::chunk(size_t index) const {
+  if (index>=state->source.chunks.size()) throw Error("source chunk out of range");
+  const auto &source=state->source.chunks[index];DecodedChunk result;result.groups=source.groups;
+  for (const auto &array : source.arrays) {
+    DecodedPage page;page.descriptor.attribute=array.attribute;page.descriptor.group=array.group;
+    page.descriptor.layer=detail::layer(array.attribute);page.descriptor.spec=array.spec;
+    page.descriptor.totalRows=array.spec.rows;page.descriptor.decodedSize=array.size;
+    if (!array.data.empty()) page.bytes=array.data;
+    else page.bytes.assign(state->bytes+array.offset,state->bytes+array.offset+array.size);
+    result.pages.push_back(std::move(page));
+  }
+  return result;
+}
+
 void encodeSequence(const Header &header, const ChunkProvider &provider,
                     const WriteSink &sink, const EncodeOptions &options,
                     const Progress &progress) {
@@ -998,7 +1024,7 @@ void verifyMint(const uint8_t *coded, size_t size, const uint8_t *mint,
     W ga, gb;
     for (const auto &g : d.groups)
       writeGroup(ga, g);
-    for (const auto &g : sourceChunk.groups)
+    for (const auto &g : src.chunks[ci].groups)
       writeGroup(gb, g);
     if (ga.b != gb.b)
       throw Error("VGS group metadata mismatch");

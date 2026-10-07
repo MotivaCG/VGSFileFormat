@@ -1,0 +1,321 @@
+# VGS Editor - phase 1
+
+Qt 6 desktop editor for animated `.vgs`, `.pgs` and `.mint` captures.
+The viewport draws **opaque points** with depth testing. Point size is fixed in
+pixels and adjustable; Gaussian opacity and individual scale do not affect the
+preview. Temporal activity determines which records are displayed. The scene
+scale transforms the entire capture without changing point size.
+
+## Controls
+
+- `Ctrl+O`: open a capture. Drag and drop or a command-line path also work.
+- `Ctrl+Shift+O`: open a `.vgsproj` project.
+- `Ctrl+S` / `Ctrl+Shift+S`: save project / save as. Project commands are in File; there is no Project toolbar.
+- Space: play or pause. Arrow keys: previous or next frame.
+- Drag: orbit; right/middle drag or Shift+drag: pan; wheel: zoom.
+- `F`: frame capture. `Ctrl+E`: export the edited capture. `Ctrl+Shift+E`: export the viewport as PNG.
+- `W` / `E` / `R`: toggle Move / Rotate / Scale. `Esc`: leave all transform modes.
+
+The timeline uses Gracia Converter's range control: drag the upper In marker, lower Out marker, or white playhead. It includes the current frame, in/out fields, playback speed and loop. In and Out are inclusive and define the export range.
+The side panel provides position, XYZ Euler orientation in degrees, XYZ scale and
+reset, with each XYZ triplet on one horizontal row. The scene matrix is
+`T * Rz * Ry * Rx * H * S`, where H preserves shear from global scaling.
+View-dependent colour uses spherical harmonics automatically,
+with no UI toggle. Older projects with SH disabled still open with SH enabled.
+
+Each transform group has a checkable W/E/R button before X; only one mode is active.
+The gizmo appears at the current target's origin or cylinder base. Each XYZ row
+has a **Global/Local** toggle directly after its Move/Rotate/Scale button; Global
+is the default. The space button has no checked/green state and is available only
+while that transform mode is active. F6/F7/F8 toggle
+the position/orientation/scale reference space. Numeric fields use the chosen
+space as well. Global gizmos align with world axes; local gizmos follow the target.
+Global nonuniform scaling preserves its full affine result, including shear.
+Local rotations are composed with the current orientation and displayed as XYZ
+Euler angles. The centre handle moves in the
+camera plane in Move mode and scales uniformly in Scale mode. Gizmos retain a
+constant screen size and stay visible over the point cloud.
+
+Navigation remains available in every mode: dragging outside the gizmo orbits,
+right/middle drag or Shift+drag pans, and the wheel zooms. Transformations only
+change while dragging an actual gizmo handle. `Esc` also cancels an unfinished
+gizmo drag; releasing the mouse commits it. Numeric XYZ values update during
+manipulation, and scene transforms leave source Gaussian attributes intact.
+
+## View cube and keyboard views
+
+The top-right view cube has clickable faces and buttons for Front, Back, Left,
+Right, Top and Bottom. Standard views default to orthographic; orbiting with the
+mouse or numeric keypad returns immediately to free perspective. Pan and zoom
+preserve a fixed orthographic view. Free orthographic views are intentionally
+unsupported. The capture coordinate system remains Y-up.
+Selected-view highlights clear when orbiting. Hover highlights are temporary and
+clear immediately when the pointer leaves the cube.
+
+## Reusable editor presets
+
+The Tools panel offers **Save preset…** (Ctrl+Shift+P), a **Load preset…** dropdown
+and a folder button (Ctrl+Alt+P). Give the preset a name; saving over an existing
+name asks before replacement within that scope. Selecting an entry restores capture and crop
+position, orientation, scale/shear, cylinder dimensions and crop state, reference
+spaces, camera, display and playback settings. The loaded capture path and its
+current time/range and metadata remain unchanged, so presets work across captures.
+
+Capture Tools presets use `.preset` files with format `vgs-editor-preset`.
+Metadata presets use `.presetmetadata` files with format `vgs-editor-metadata-preset`.
+Both use schema version 3 and record `scope` and `appliesTo`. They may have identical
+display names; saving/replacing a metadata preset never overwrites a Capture Tools
+preset. Each dropdown accepts only its own extension, format and scope; invalid or
+renamed files are excluded.
+
+Old JSON presets are converted automatically into separate typed files. Mixed
+version-1 templates produce one file of each applicable type; scoped version-2
+templates produce only their own type. Original JSON files are retained as backups
+and are not shown in the dropdowns. Existing native presets take precedence over
+legacy data, so later edits are preserved.
+
+Loading a Capture Tools preset keeps the current viewport camera, including its
+target, orientation, zoom and projection. Loading a metadata preset keeps the
+current Title and Catalogue ID, including edits not yet applied. Title appears
+before Catalogue ID in the metadata panel.
+
+Presets are separate, atomically saved JSON files in Qt's AppData directory:
+on Windows, normally `%APPDATA%/THE4DSCANNER/VGS Editor/presets`. The folder button
+opens that location in the system file manager and works without a capture loaded.
+The dropdown refreshes when returning to the application after external changes.
+Saving a reusable preset does not replace or save the current `.vgsproj` project.
+Automated previews and preset tests use temporary folders.
+
+With focus in the viewport, the numeric keypad follows Blender's navigation keys:
+
+| Key | Action |
+|---|---|
+| Numpad 1 / Ctrl+1 | Front / Back |
+| Numpad 3 / Ctrl+3 | Right / Left |
+| Numpad 7 / Ctrl+7 | Top / Bottom |
+| Numpad 9 | Opposite view |
+| Numpad 5 | Toggle orthographic/perspective while in a fixed view |
+| Numpad 2/4/6/8 | Orbit in 15-degree steps, returning to perspective |
+| Ctrl+Numpad 2/4/6/8 | Pan |
+| Shift+Numpad 4/6 | Roll in 15-degree steps, returning to perspective |
+| Numpad +/- | Zoom |
+| Numpad decimal / F | Frame the current transform target |
+| Numpad 0 / Reset perspective | Reset the user perspective |
+
+The keypad works with Num Lock on or off. Number keys used in numeric fields keep
+editing their values. Navigation mappings follow the
+[Blender navigation manual](https://docs.blender.org/manual/id/3.6/editors/3dview/navigate/navigation.html);
+Numpad 0 resets perspective because this editor has no separate scene camera.
+
+## Crop volumes
+
+Choose **Cylinder** or **Box** in the Shape dropdown. Both retain their own horizontal
+dimensions and share the same height and transform. **Edit** (C) creates a volume automatically fitted to the capture and activates
+editing. Its pivot is the centre of its base, with local Y running from 0 to its
+height; rotation and scaling keep that base fixed. The crop is independent in
+world space: moving the capture does not move it. While
+editing, it is drawn as a wireframe, all source points remain visible, and the
+shared XYZ fields and W/E/R gizmos affect the cylinder instead of the capture.
+Radius/height configure Cylinder; width/height/depth configure Box. Local XYZ
+scale can also produce an elliptical cylinder. **Fit capture** (Ctrl+F) refits the volume to capture bounds, resets
+its transformation, enters Move mode and returns keyboard focus to the viewport.
+Press R afterwards to select Scale; pressing R again leaves Scale.
+
+The two buttons next to Edit reset the cylinder's position, orientation, scale
+and shear in world coordinates, place its base at (0, 0, 0), and enter editing
+without changing the capture transform:
+
+- **T4DS Preset** (Ctrl+Alt+1): height 2.5 m, radius 1.5 m (Box width/depth 3 m).
+- **SMN Preset** (Ctrl+Alt+2): height 2.5 m, radius 1 m (Box width/depth 2 m).
+
+`Tab` (or `C`) toggles crop Edit; its button and tooltip track the shortcut.
+Turn editing off to hide the cylinder and clip points whose centres lie outside
+it. **Clear crop** (Ctrl+Shift+C) restores all points. The preview clips on the GPU without
+changing decoded records, so camera/crop changes do not require frame decoding or
+point-buffer uploads. Membership is evaluated against transformed Gaussian centres
+inside the fixed world-space volume.
+Crop definitions, metadata/processing, reference spaces and fixed camera views are saved in version-6
+projects. Earlier projects and presets still open; their capture-local crops migrate
+to world space without changing their existing placement. Version-2 cylinders migrate from centre
+to base pivots without changing their volume. Editing activation is temporary; reopening applies
+the saved crop preview. Export permanently excludes outside centres in each sampled frame.
+
+## Metadata and processing before export
+
+**Metadata & processing…** (Ctrl+M) is a main Tools button, independent of the
+export command. It follows the converter's metadata fields and adds tags, software
+information and extra JSON. Configure VGS/PGS, SH degree, playback and despill
+(strength, green gain, view chroma and skin recovery). Apply remembers the last
+configuration in QSettings and stores it in the current project. The panel uses
+its own metadata/processing preset scope, sharing the same folder as the editor.
+Loading a metadata preset does not modify capture or crop transforms.
+
+These options are applied during **File > Export capture…** (Ctrl+E); preview
+colours continue to use source data. Export writes signed encoding-0 VGS (compressed)
+or PGS (plain), with baked positions, full affine covariance, SH colour and the world
+crop, for the inclusive In/Out range. It runs off the UI thread with progress/cancel,
+checks every output frame with the decoder and atomically publishes the verified file.
+
+For constant-rate sources, translation, rotation, reflection and uniform scale use
+native temporal chunks. Crop removes unused rows, splits rows only on visibility
+reentry, and compacts unused dictionaries instead of duplicating the capture for
+every frame. Translation/uniform scale preserve the original rotation and colour
+coding. Rotations resample orientations at native frames and refit rotated SH
+trajectories, reporting coefficient RMS/maximum error. Both output formats remain
+compatible with the existing encoding-0 decoder.
+
+Nonuniform scale/shear and variable-rate MINT sources currently use the sampled
+fallback and can produce larger files. Its SH warp uses a finite-band approximation.
+The `.vgs` extension does not guarantee a size reduction for arbitrary transformed
+attributes; the native path avoids the earlier 30-fold duplication of static data.
+Source audio/thumbnail are omitted because they may no longer match the edited clip.
+See [EXPORT_DESIGN.md](docs/EXPORT_DESIGN.md) for the implementation and limits.
+
+Projects atomically save a relative capture reference, transform, camera, time,
+playback range and display settings. Keep the capture with the project when moving
+it to another computer. This phase supports one capture per project. Selection,
+manual deletion, attribute editing, rigging, audio and Gaussian
+splat rendering are future work.
+
+## Appearance and resources
+
+Application text and numeric formatting use English. Open/save dialogs use the
+native operating-system UI and follow its language. The Fusion palette follows
+Gracia4DGSConverter: neutral dark greys with section headings in RGB (190, 0, 51),
+green highlights and green section headings. The application icon
+and timeline illustration use unmodified local copies in `assets/gracia`.
+Resources are embedded in both qmake and CMake builds. The ICO is also embedded
+in the Windows executable. No converter checkout is required at runtime.
+
+## Recent files and preferences
+
+On Windows, QSettings stores preferences under
+`HKEY_CURRENT_USER\Software\THE4DSCANNER\VGS Editor`.
+The File menu offers **Open recent**, listing up to ten successfully
+opened captures/projects or saved projects, most recent first. Entries persist
+across restarts and are deduplicated; **Clear recent** clears the list while
+preserving dialog folders. Missing files produce a message when selected.
+
+Native dialogs remember separate capture, project and image locations. Display
+settings (point size, grid), playback speed/loop, window geometry and dock
+layout are also remembered. New captures/projects inherit display and playback
+defaults; saved projects retain their own settings. Smoke tests use an isolated
+temporary settings store and do not modify the user's registry.
+
+## Build in Qt Creator
+
+Open **`editor/VGSEditor.pro`** with Qt 6.8 MSVC 2022 x64. Sources and headers are
+resolved from `$$PWD`, including shadow builds. After adding or changing sources,
+use **Build > Run qmake** if Creator retains an earlier Makefile.
+Both qmake Debug and Release builds have been checked.
+
+CMake builds the same sources and adds automated tests:
+
+```powershell
+cmake -S . -B build/cmake-msvc -G "Visual Studio 17 2022" -A x64 -DCMAKE_PREFIX_PATH=C:/Qt/Qt6.8.1/6.8.0/msvc2022_64
+cmake --build build/cmake-msvc --config Release --parallel 8
+$env:PATH = 'C:\Qt\Qt6.8.1\6.8.0\msvc2022_64\bin;' + $env:PATH
+ctest --test-dir build/cmake-msvc -C Release --output-on-failure
+```
+
+Requires OpenGL 3.3. CMake's `VGS_ROOT` overrides the VGSFileFormat source directory;
+its default is the parent folder. qmake compiles the same sources directly, so
+Debug and Release use their respective runtimes without prebuilt `.lib` files.
+Use `windeployqt` to run outside Qt Creator.
+
+## Data and rendering
+
+- `CaptureWorker` owns the decoder on a worker thread. VGS uses its official API
+  and authenticates the container. MINT reuses the converter's format-6 reader in
+  `dependencies/mint`, preserving its reconstruction and interpolation rules.
+- `RenderFrame::records` retains **all** decoded records: position, XYZW rotation,
+  XYZ scale, RGB and original opacity. `active` retains lifetime information;
+  `chunkIndex` identifies the chunk. Row identities are local to each chunk.
+  SH coefficients are reconstructed with each displayed frame; all original
+  coefficients remain in the source capture.
+- `RenderFrame::points` is a compact 28-byte preview: position, RGB and source row
+  index. It contains no opacity or scale. Preview generation never alters the
+  underlying Gaussian attributes.
+- `Viewport` receives frames and scene transforms without knowing file formats.
+  Camera and transform changes update uniforms without decoding or reuploading
+  point buffers. A new frame is uploaded once.
+- Seeking keeps one decode request in flight and coalesces later requests into the
+  latest requested time. The UI displays the latest completed frame while waiting.
+  Failed opens preserve the previous capture. New projects release decoder caches.
+
+## Qt and libigl
+
+The architecture uses **Qt for UI and the OpenGL context, with libigl reserved for
+future geometry processing**. No unused libigl dependency is introduced yet.
+The available checkout is `D:/Dependencias/libigl/libigl_git`.
+
+| Approach | Benefits | Costs |
+|---|---|---|
+| QOpenGLWidget + custom renderer | Native timeline and docks; direct control of GPU data; scene transform gizmos | Implement Gaussian selection and the future splat renderer |
+| libigl Viewer | Existing mesh interaction and overlays | GLFW-based viewer needs context/event adaptation for Qt; Gaussian splats still need custom rendering |
+| Qt + libigl algorithms | Reuse weights, skinning and deformation without coupling capture formats to the viewer | Define rest geometry, skeleton and temporal correspondences for captured Gaussians |
+
+The local libigl checkout includes `lbs_matrix`, `dqs`, `bbw` and `deform_skeleton`.
+These functions do not require its Viewer. Automatic weights require suitable
+geometry and constraints; importing libigl does not automatically rig a 4D capture.
+Future Gaussian deformation must also transform orientations/covariances.
+
+This phase draws a single `GL_POINTS` batch without CPU depth sorting or alpha
+blending. Drawing and transfer costs scale with active point count; the preview
+buffer uses 28 MB per million points. Complete attributes stay in CPU memory.
+Degree-3 SH adds up to 180 bytes per record, CPU reconstruction and GPU evaluation.
+It is always enabled when coefficients are available. Captures without higher-order
+SH naturally retain their base colour; oversized SH buffers fall back to base
+colour with a status message if they exceed the GPU's texture-buffer limit.
+
+Switching Qt for the Viewer alone does not remove these costs: both send buffers
+to OpenGL. Phase 2 adds projected covariances, sorting and overdraw. Solve skinning
+weights outside the render loop and consider GPU deformation for large captures.
+The HUD reports CPU decoding and upload time; **it does not measure GPU duration
+or guarantee a frame rate**. Use Release builds to assess performance.
+
+MINT holds the entire file in RAM, following the original reader. VGS reads file
+ranges and applies a 512 MiB cache policy; an individual chunk may exceed that
+budget. A candidate capture may temporarily coexist with the previous capture.
+
+References: [QOpenGLWidget](https://doc.qt.io/qt-6/qopenglwidget.html),
+[libigl tutorial and Viewer](https://libigl.github.io/tutorial/).
+
+## Verification
+
+Tests cover persisted recent-file history and dialog locations, project round
+trips, relocatable paths, invalid data, transform order
+and opaque points of equal size despite differing source opacity and scale.
+Transport icons are light grey. Buttons explain their operation and keyboard
+shortcut in tooltips; Ctrl+Home/Ctrl+End jump to playback range boundaries,
+Alt+Home resets the current target, G toggles the grid and L toggles looping.
+
+Transform and reference-space buttons use the supplied PNGs in `assets/icons`,
+embedded as Qt resources. Checked transform modes retain the original white
+icons; inactive modes are grey and unavailable controls are darker grey. The
+reference-space button swaps between Global and Local icons to show its current
+selection. Icon variants are cached at runtime without modifying the source PNGs.
+
+Gizmo tests exercise global/local translation/rotation/scaling, fixed-base scaling, mode toggles, drag
+cancellation, view-cube clicks, numpad views, orthographic exit, independent crop
+editing and GPU crop visibility. Source records are preserved.
+To exercise decoding with a real capture:
+
+```powershell
+$env:EDITOR_TEST_CAPTURE = 'D:\path\capture.mint' # or .vgs / .pgs
+ctest --test-dir build/cmake-msvc -C Release --output-on-failure
+```
+
+`VGSEditor.exe capture.mint --smoke-test build/preview.png` opens a capture, seeks
+to a middle frame with SH, transforms it, round-trips a project, saves viewport
+and UI images, creates an empty project and reopens the saved project. It exits
+with code 0 on success.
+
+Batch export uses the same writer without opening the editor window:
+
+```powershell
+VGSEditor.exe capture.vgsproj --export-capture capture-edited.vgs
+```
+
+The output extension selects VGS/PGS; the project supplies crop, transforms,
+metadata and processing. Files are verified and atomically saved as in the UI.

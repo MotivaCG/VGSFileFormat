@@ -1,0 +1,59 @@
+#pragma once
+#include "mintfile.h"
+#include "vgsdecoder/vgsdecoder.h"
+#include <QObject>
+#include <QVector3D>
+#include <memory>
+#include <vector>
+
+struct Splat {
+    float position[3], rotation[4], scale[3], color[4], id;
+};
+struct PointVertex {
+    float position[3], color[3], id;
+};
+struct RenderFrame {
+    // Full decoded records, including inactive/transparent entries. Preview buffers
+    // below are a separate view; they never mutate or discard the source attributes.
+    std::vector<Splat> records;
+    std::vector<uint8_t> active;
+    std::vector<PointVertex> points;
+    std::vector<float> sh;
+    int coefficients = 0;
+    double seconds = 0;
+    quint64 total = 0;
+    size_t chunkIndex = 0;
+    double decodeMs = 0;
+};
+using FramePtr = std::shared_ptr<RenderFrame>;
+Q_DECLARE_METATYPE(FramePtr)
+struct CaptureInfo {
+    QString path, title, format;
+    double duration = 0, fps = 30;
+    int frames = 0;
+    QVector3D minimum, maximum;
+};
+Q_DECLARE_METATYPE(CaptureInfo)
+
+class CaptureWorker : public QObject {
+    Q_OBJECT
+public:
+    explicit CaptureWorker(QObject *parent = nullptr);
+    ~CaptureWorker() override;
+public slots:
+    void clear();
+    void open(const QString &path, quint64 generation, bool sh);
+    void decode(double time, quint64 generation, bool sh);
+signals:
+    void opened(CaptureInfo info, FramePtr frame, quint64 generation);
+    void decoded(FramePtr frame, quint64 generation);
+    void failed(QString message, quint64 generation, bool opening);
+private:
+    class FileSource;
+    std::unique_ptr<FileSource> source_;
+    std::unique_ptr<vgsdec::Capture> vgs_;
+    std::unique_ptr<MintFile> mint_;
+    CaptureInfo info_;
+    quint64 generation_ = 0;
+    FramePtr frame(double time, bool sh);
+};
