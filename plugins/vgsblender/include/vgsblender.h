@@ -66,7 +66,7 @@ extern "C" {
 
 /* Bumped whenever a struct below or a signature changes, so a stale add-on refuses to load
  * a newer library rather than read its structs wrongly. */
-#define VGSB_API_VERSION 3
+#define VGSB_API_VERSION 4
 
 typedef struct vgsb_player vgsb_player;
 
@@ -148,6 +148,15 @@ VGSB_API void vgsb_set_include_sh(vgsb_player *, int include_sh);
  * discards what is decoded ahead.
  */
 VGSB_API void vgsb_set_density(vgsb_player *, float density);
+
+/*
+ * How many decoded chunks each lane keeps besides the one it is on, and a ceiling on what
+ * they may take together, in bytes (0 for none). 0 chunks, the default, keeps only the
+ * chunk being played, which is all that playing one timeline needs. A host asking for
+ * instants all over the capture at once - copies of it at different times - keeps them
+ * all, or it would decode a chunk again on every frame.
+ */
+VGSB_API void vgsb_set_cache(vgsb_player *, int chunks, uint64_t max_bytes);
 
 #ifdef __cplusplus
 }

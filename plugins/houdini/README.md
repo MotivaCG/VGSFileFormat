@@ -38,6 +38,8 @@ The controls, and what they correspond to in Blender:
 | Linearize Color    | —                      | Houdini wants scene-linear `Cd`               |
 | Cast Shadows in Karma | —                   | off, as Bake GSplats leaves it                |
 | `VGS_SLOTS`, `VGS_THREADS`, `VGS_PLAYBACK_WAIT_MS` | add-on preferences | environment variables, defaults 4 / 0 / 250 |
+| Points, Variants, Phase Spread, Speed Variation, Seed, Output | — | scatter: a copy per point, see below |
+| `VGS_CACHE_MB`     | —                      | what a scatter may keep decoded, default 4096 |
 
 Blender's *strip splats on save* has no counterpart: a SOP's cooked geometry is not saved
 in the .hip unless the node is locked.
@@ -70,6 +72,64 @@ Houdini's own.
 **What renders them.** Karma XPU, through Solaris. Mantra, which is what the Render
 Region in /obj starts, does not know GSplats and draws the points as blobs; Storm and
 Karma CPU show a coloured point cloud. This is Houdini's, not the plugin's.
+
+## Scatter
+
+The SOP takes points - its first input, or a SOP named in **Points** - and puts a copy of
+the capture on each, placed as Copy to Points does (`P`, `orient`, `pscale`) and each at its
+own time. Asked for by a user who wanted variety in the distance from a few captures.
+
+- **Groups.** Copies on the same capture and timeline (phase, speed, loop, delay) form a
+  group: one decode, written once per copy. **Variants** (8 by default) gives each point
+  one of N timelines at random - phases spread over the capture by **Phase Spread**,
+  speeds varied by **Speed Variation** - so a frame costs N decodes per capture however
+  many points there are. 0 gives every point its own.
+- **Per-point overrides:** `vgs_path`, `vgs_start_frame`, `vgs_offset` (scene frames of
+  delay), `vgs_speed`, `vgs_loop` (-1 from the capture), `vgs_variant`. A point with
+  timings of its own is its own timeline.
+- **One player per capture file**, reopened with more frame slots when a scatter needs
+  more instants at once than it has. With more than one instant it keeps every chunk
+  decoded (`vgsb_set_cache`, capped by `VGS_CACHE_MB`, 4096 by default); otherwise a
+  frame spread over the capture would decode a chunk again every time.
+- **Two passes per cook.** Every group's frame is checked ready first, so a late one during
+  playback leaves the whole previous result showing rather than copies missing; then all
+  the points are appended at once, their pages hardened, and the copies written in
+  parallel, blocks of 4096 splats per task.
+- **The harmonics turn with the copy:** `restorient` keeps the capture's own orientation,
+  and `orient` gets the copy's rotation on top.
+- No points: the same code with one copy at the origin, which is the single capture as
+  before.
+- **Output: Packed Instances** (the default for a scatter). Each group's splats are written
+  once into a geometry of its own, and every copy is a packed primitive referencing it,
+  with the point's position and its `orient` and `pscale` as the local transform. SOP
+  Import turns that into USD instances: 20 copies on 7 timelines arrive as 7
+  `ParticleField3DGaussianSplat` prototypes under 20 instances, and Karma XPU renders them
+  as instances - 210 MiB of splat positions on the device against 592 MiB for the same
+  scatter written out, and the same picture (checked with `husk`, random rotations and
+  scales included). **Splats** writes every copy out, for SOPs that edit splats.
+
+Measured in hython (always full density there, the worst case) with the 7-second, 7-chunk
+boxing capture, 20 points and 8 variants, stepping frame by frame:
+
+| Output           | no harmonics | harmonics |
+|------------------|-------------:|----------:|
+| Packed Instances |        78 ms |    168 ms |
+| Splats           |       104 ms |    253 ms |
+
+against 10 ms for a single copy. Packed writes 8 timelines' splats instead of 20 copies';
+what remains is mostly decoding the 8 instants, which hython's frame stepping gives the
+decoder no time to do ahead - during playback it decodes the next frames of every variant
+while the current one shows. The splats written out rose memory by about 1.5 GB; packed
+holds each timeline once.
+
+**The viewport misplaces them.** Checked in the interface: with Packed Instances the
+copies are drawn away from their points, while unpacking them gives exactly the splats the
+Splats output writes (to a millionth) and Karma renders both alike - so it is how Houdini
+22.0.429's viewport draws Gaussian splats inside packed primitives. Confirmed in the
+interface: an Unpack SOP after the capture, with Output on Packed Instances, puts every
+copy back on its point. Hence **Output: Auto**,
+the default: Splats for the viewport, Packed Instances whenever the cook is a render (the
+same test that gives renders every splat), with the ROP hooks recooking at both ends.
 
 ## Playback and renders
 

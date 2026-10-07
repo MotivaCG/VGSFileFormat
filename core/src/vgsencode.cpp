@@ -258,6 +258,7 @@ struct SourceChunk {
 struct Source {
   Header header;
   std::vector<SourceChunk> chunks;
+  std::function<SourceChunk(size_t)> provider;
 };
 const uint32_t SharedSlots[] = {8,   112, 128, 168, 184, 208,
                                 232, 248, 264, 304, 320};
@@ -558,25 +559,25 @@ Source importMint(const uint8_t *data, size_t size, uint32_t shDegree = 3) {
   setTimebase(src.header, sourceInterval);
   return src;
 }
-// Split on trajectory boundaries. Entry-major temporal SH pages retain every
-// time sample for their entry subset; this requires a gather but enables
-// parallel decode.
+// Split trajectories on their boundaries. Temporal SH can split into contiguous
+// blocks of complete sample-major entry rows: every page resets the predictor,
+// and firstRow places its bytes back in the original array without a gather.
 struct InputPage {
   Page page;
   Bytes data;
 };
 std::vector<InputPage> pages(const SourceChunk &c, const uint8_t *mint,
-                             uint32_t pageRows) {
+                             uint32_t pageRows, bool splitTemporalSh = false) {
   std::vector<InputPage> out;
   for (const auto &a : c.arrays) {
     const auto &s = a.spec;
-    const uint64_t stride = s.family == 1 || s.family == 7 ? s.samples
+    const uint64_t stride = s.family == 2 ? s.entries
+                            : s.family == 1 || s.family == 7 ? s.samples
                             : s.family == 4                ? s.intervals
                                                            : 1;
     const uint64_t step =
         std::max<uint64_t>(stride, (pageRows / stride) * stride);
-    if (s.family == 2) { // Keep sample-major entry dictionary as one
-                         // independently coded section for v1.
+    if (s.family == 2 && !splitTemporalSh) {
       InputPage p;
       p.page.attribute = a.attribute;
       p.page.group = a.group;
@@ -671,11 +672,10 @@ static void tighten(Header &h, size_t ci, const uint8_t *chunk, size_t size) {
   }
 }
 
-Bytes encodeMint(const uint8_t *mint, size_t size, const EncodeOptions &options,
-                 const Progress &progress) {
+static Bytes encodeSource(Source src, const uint8_t *mint, const EncodeOptions &options,
+                          const Progress &progress, const WriteSink &sink = {}) {
   if (options.pageRows < 1024 || options.pageRows > 1048576)
     throw Error("VGS pageRows outside 1024..1048576");
-  auto src = importMint(mint, size, options.shDegree);
   Header h = src.header;
   h.pageRows = options.pageRows;
   auto report = [&](int done) {
@@ -683,6 +683,11 @@ Bytes encodeMint(const uint8_t *mint, size_t size, const EncodeOptions &options,
       throw Error("cancelled");
   };
   report(0);
+  SourceChunk provided;
+  auto getChunk = [&](size_t index) -> const SourceChunk & {
+    if (!src.provider) return src.chunks[index];
+    provided = src.provider(index); return provided;
+  };
   // First pass measures complete candidate cost over every page in the file.
   struct Costs {
     uint32_t family = 0;
@@ -691,7 +696,10 @@ Bytes encodeMint(const uint8_t *mint, size_t size, const EncodeOptions &options,
   };
   std::map<uint32_t, Costs> costs;
   for (size_t ci = 0; ci < src.chunks.size(); ++ci) {
-    for (const auto &p : pages(src.chunks[ci], mint, options.pageRows)) {
+    const auto &sourceChunk = getChunk(ci);
+    h.maxChunkSplatRecords = std::max(h.maxChunkSplatRecords, sourceChunk.entry.splats);
+    h.maxSplatsPerFrame = std::max(h.maxSplatsPerFrame, sourceChunk.entry.splats);
+    for (const auto &p : pages(sourceChunk, mint, options.pageRows, options.splitTemporalShPages)) {
       auto &t = costs[p.page.attribute];
       int count = mgs::attributeModelCount(p.page.spec);
       if (t.models.empty()) {
@@ -709,7 +717,7 @@ Bytes encodeMint(const uint8_t *mint, size_t size, const EncodeOptions &options,
             t.models[model] =
                 add(t.models[model],
                     mgs::encodeAttribute(p.page.spec, model, p.data.data(),
-                                         p.data.size())
+                                         p.data.size(), options.entropySearch)
                         .size());
           } catch (const Error &) {
             if (!model)
@@ -781,14 +789,17 @@ Bytes encodeMint(const uint8_t *mint, size_t size, const EncodeOptions &options,
     h.extras[i].offset = out.b.size();
     out.bytes(options.extras[i].bytes);
   }
+  uint64_t outputBase = 0;
+  if (sink) { sink(0,out.b.data(),out.b.size()); outputBase = out.b.size(); out.b.clear(); }
   for (size_t ci = 0; ci < src.chunks.size(); ++ci) {
-    auto inputs = pages(src.chunks[ci], mint, options.pageRows);
+    const auto &sourceChunk = getChunk(ci);
+    auto inputs = pages(sourceChunk, mint, options.pageRows, options.splitTemporalShPages);
     std::stable_sort(inputs.begin(), inputs.end(),
                      [](const InputPage &a, const InputPage &b) {
                        return a.page.layer < b.page.layer;
                      });
     ChunkDirectory d;
-    d.groups = src.chunks[ci].groups;
+    d.groups = sourceChunk.groups;
     std::vector<Bytes> payloads;
     for (auto &input : inputs) {
       auto p = input.page;
@@ -797,7 +808,7 @@ Bytes encodeMint(const uint8_t *mint, size_t size, const EncodeOptions &options,
           pol.codec == Raw
               ? input.data
               : mgs::encodeAttribute(p.spec, int(pol.model), input.data.data(),
-                                     input.data.size());
+                                     input.data.size(), options.entropySearch);
       p.size = payload.size();
       p.crc = crc32(payload.data(), payload.size());
       if (options.verify &&
@@ -813,14 +824,14 @@ Bytes encodeMint(const uint8_t *mint, size_t size, const EncodeOptions &options,
       at = aligned(add(at, p.size));
     }
     dir = directory(d);
-    auto c = src.chunks[ci].entry;
+    auto c = sourceChunk.entry;
     // A starting box that certainly contains the chunk: the position quantisation
     // range, which is a scalar and so the same on every axis. The real extent is
     // measured below, once the chunk can be decoded; this stands in until then and
     // remains the answer for a chunk with nothing alive in it.
     float lo = 0, hi = 0;
     bool first = true;
-    for (const auto &g : src.chunks[ci].groups) {
+    for (const auto &g : sourceChunk.groups) {
       if (g.type != 1)
         continue;
       lo = first ? float(g.positionMin) : std::min(lo, float(g.positionMin));
@@ -831,16 +842,16 @@ Bytes encodeMint(const uint8_t *mint, size_t size, const EncodeOptions &options,
       c.bounds[k] = lo;
       c.bounds[k + 3] = hi;
     }
-    pad(out);
-    c.offset = out.b.size();
+    while ((outputBase + out.b.size()) % 16) out.b.push_back(0);
+    c.offset = outputBase + out.b.size();
     c.directoryDigest = digest(dir.b.data(), dir.b.size());
     out.bytes(dir.b);
     for (size_t pi = 0; pi < payloads.size(); ++pi) {
-      while (out.b.size() - c.offset < d.pages[pi].offset)
+      while (outputBase + out.b.size() - c.offset < d.pages[pi].offset)
         out.b.push_back(0);
       out.bytes(payloads[pi]);
     }
-    c.size = out.b.size() - c.offset;
+    c.size = outputBase + out.b.size() - c.offset;
     h.chunks[ci] = c;
     // What a player does with this box is fit things to it: culling, and the shadow
     // map of a directional light. The quantisation cube is several times the size of
@@ -849,7 +860,8 @@ Bytes encodeMint(const uint8_t *mint, size_t size, const EncodeOptions &options,
     // sample grid measured: positions move linearly between samples, so the extremes
     // are all at sample points and this is exact, not an estimate. Only live splats
     // count - a dead one's stored position is not on screen.
-    tighten(h, ci, out.b.data() + c.offset, size_t(c.size));
+    tighten(h, ci, out.b.data() + size_t(c.offset - outputBase), size_t(c.size));
+    if (sink) { sink(outputBase,out.b.data(),out.b.size()); outputBase += out.b.size(); out.b.clear(); }
     report(int(src.chunks.size() + ci + 1));
   }
   // The capture's own box, and the only one a player has before it fetches a chunk:
@@ -871,7 +883,7 @@ Bytes encodeMint(const uint8_t *mint, size_t size, const EncodeOptions &options,
     if (any)
       h.bounds = box;
   }
-  h.fileSize = out.b.size();
+  h.fileSize = outputBase + out.b.size();
   if (!h.createdMillis)
     h.createdMillis = uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
                                    std::chrono::system_clock::now().time_since_epoch())
@@ -883,18 +895,74 @@ Bytes encodeMint(const uint8_t *mint, size_t size, const EncodeOptions &options,
   auto hb = headerBytes(h);
   if (hb.b.size() != h.signedSize)
     throw Error("VGS header size mismatch");
-  std::copy(hb.b.begin(), hb.b.end(), out.b.begin());
+  if (!sink) std::copy(hb.b.begin(), hb.b.end(), out.b.begin());
   // Signed last, over the bytes as they will be read: the signature covers the whole
   // structural region and nothing else, so verifying is one range request and one call.
   if (!options.signer.sign)
     throw Error("VGS encoding needs a signer");
   h.signature.algorithm = Ed25519Signature;
   h.signature.keyId = options.signer.keyId;
-  h.signature.signature = options.signer.sign(out.b.data(), size_t(h.signedSize));
+  h.signature.signature = options.signer.sign(hb.b.data(), size_t(h.signedSize));
   auto sb = signatureBytes(h.signature);
-  std::copy(sb.b.begin(), sb.b.end(), out.b.begin() + size_t(h.signedSize));
+  if (sink) { sink(0,hb.b.data(),hb.b.size()); sink(h.signedSize,sb.b.data(),sb.b.size()); }
+  else std::copy(sb.b.begin(), sb.b.end(), out.b.begin() + size_t(h.signedSize));
   return std::move(out.b);
 }
+
+Bytes encodeMint(const uint8_t *mint, size_t size, const EncodeOptions &options,
+                 const Progress &progress) {
+  return encodeSource(importMint(mint, size, options.shDegree), mint, options, progress);
+}
+
+void encodeSequence(const Header &header, const ChunkProvider &provider,
+                    const WriteSink &sink, const EncodeOptions &options,
+                    const Progress &progress) {
+  if (header.encoding != 0 || header.chunks.empty() || !provider || !sink)
+    throw Error("invalid edited sequence header");
+  Source src; src.header = header;
+  src.header.policies.clear(); src.header.layers.clear(); src.header.extras.clear();
+  src.chunks.resize(header.chunks.size());
+  src.provider = [&](size_t index) {
+    auto chunk = provider(index);
+    SourceChunk c; c.entry = header.chunks[index]; c.groups = std::move(chunk.groups);
+    c.entry.splats = 0;
+    for (const auto &group : c.groups) if (group.type == 1) c.entry.splats += group.splats;
+    for (auto &page : chunk.pages) {
+      if (page.descriptor.firstRow || page.bytes.size() != mgs::attributeSize(page.descriptor.spec))
+        throw Error("edited input requires complete attribute arrays");
+      c.arrays.push_back({page.descriptor.attribute,page.descriptor.group,0,
+                         page.bytes.size(),page.descriptor.spec,std::move(page.bytes)});
+    }
+    return c;
+  };
+  encodeSource(std::move(src),nullptr,options,progress,sink);
+}
+
+#ifdef VGS_TEMPORAL_EXPERIMENT
+Bytes encodeLogical(const Header &header, const std::vector<DecodedChunk> &chunks,
+                    const EncodeOptions &options, const Progress &progress) {
+  if (header.chunks.size() != chunks.size() || chunks.empty() || header.encoding > 1)
+    throw Error("invalid native sequence header");
+  Source src;
+  src.header = header;
+  src.header.policies.clear();
+  src.header.layers.clear();
+  src.header.extras.clear();
+  for (size_t i = 0; i < chunks.size(); ++i) {
+    SourceChunk c;
+    c.entry = header.chunks[i];
+    c.groups = chunks[i].groups;
+    for (const auto &p : chunks[i].pages) {
+      if (p.descriptor.firstRow || p.bytes.size() != mgs::attributeSize(p.descriptor.spec))
+        throw Error("native input requires complete attribute arrays");
+      c.arrays.push_back({p.descriptor.attribute, p.descriptor.group, 0,
+                         p.bytes.size(), p.descriptor.spec, p.bytes});
+    }
+    src.chunks.push_back(std::move(c));
+  }
+  return encodeSource(std::move(src), nullptr, options, progress);
+}
+#endif
 
 void verifyMint(const uint8_t *coded, size_t size, const uint8_t *mint,
                 size_t mintSize) {
@@ -921,13 +989,16 @@ void verifyMint(const uint8_t *coded, size_t size, const uint8_t *mint,
   for (size_t ci = 0; ci < h.chunks.size(); ++ci) {
     const auto &e = h.chunks[ci];
     auto d = readChunkDirectory(h, ci, coded + e.offset, size_t(e.size));
-    auto expected = pages(src.chunks[ci], mint, h.pageRows);
+    const bool splitTemporalSh = std::any_of(d.pages.begin(), d.pages.end(), [](const Page& p) {
+      return p.spec.family == 2 && p.spec.rows != p.totalRows;
+    });
+    auto expected = pages(src.chunks[ci], mint, h.pageRows, splitTemporalSh);
     if (d.pages.size() != expected.size())
       throw Error("VGS page count mismatch");
     W ga, gb;
     for (const auto &g : d.groups)
       writeGroup(ga, g);
-    for (const auto &g : src.chunks[ci].groups)
+    for (const auto &g : sourceChunk.groups)
       writeGroup(gb, g);
     if (ga.b != gb.b)
       throw Error("VGS group metadata mismatch");

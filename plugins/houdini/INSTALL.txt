@@ -45,3 +45,4 @@ Optional settings, as environment variables (for example in houdini.env):
   VGS_SLOTS              decoded frames kept ready per capture, 2-64 (default 4)
   VGS_THREADS            cores used to decode, 0 for half of them (default 0)
   VGS_PLAYBACK_WAIT_MS   how long playback waits for a late frame (default 250)
+  VGS_CACHE_MB           how much a scatter may keep decoded, in MB (default 4096)

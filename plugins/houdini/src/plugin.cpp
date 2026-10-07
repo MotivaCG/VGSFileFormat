@@ -18,8 +18,10 @@ constexpr unsigned oneInput = 1;
 
 void newSopOperator(OP_OperatorTable *table) {
   SOP_VGSCapture::installHooks();
+  // One optional input: points to scatter copies of the capture on.
+  static const char *inputLabels[] = {"Points", nullptr};
   auto *op = new OP_Operator(SOP_VGSCapture::TypeName, "VGS Capture", SOP_VGSCapture::create,
-                             captureTemplates, noInputs, noInputs);
+                             captureTemplates, noInputs, oneInput, nullptr, 0, inputLabels);
   op->setOpTabSubMenuPath("Import");
   table->addOperator(op);
 }

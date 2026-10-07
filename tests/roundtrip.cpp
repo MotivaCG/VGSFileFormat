@@ -37,8 +37,9 @@ template <typename T> void equals(const T &got, const T &want, const char *what)
 } // namespace
 
 int main(int argc, char **argv) {
-  if (argc != 3) {
-    std::fprintf(stderr, "usage: roundtrip <input.mint> <output.vgs>\n");
+  if (argc != 3 && (argc != 4 || (std::string(argv[3]) != "--entropy-search" &&
+                                 std::string(argv[3]) != "--split-temporal-sh"))) {
+    std::fprintf(stderr, "usage: roundtrip <input.mint> <output.vgs> [--entropy-search|--split-temporal-sh]\n");
     return 2;
   }
 
@@ -49,6 +50,8 @@ int main(int argc, char **argv) {
   vgsenc::Encoder encoder;
   check(encoder.setInputFile(argv[1]), "the source opens");
   encoder.setCoding(vgsenc::Coding::Compressed);
+  encoder.setEntropySearch(argc == 4 && std::string(argv[3]) == "--entropy-search");
+  encoder.setTemporalShPageSplit(argc == 4 && std::string(argv[3]) == "--split-temporal-sh");
   encoder.setSphericalHarmonicDegree(2);
   encoder.setId(id);
   encoder.setTitle(title);

@@ -6,6 +6,7 @@
 #include <map>
 #include <string>
 #include <memory>
+#include <chrono>
 
 namespace mgs {
 namespace {
@@ -14,6 +15,21 @@ const uint32_t kMagic = 0x3153474D;  // "MGS1"
 const uint32_t kVersion = 4;
 const uint32_t kRansL = 1u << 23;
 const uint64_t kMaxTableEntries = 1u << 24;
+
+// Scoped per attribute, so concurrent encoders/profilers do not affect one another
+// and exceptions restore the previous setting. MGS whole-file coding stays Standard.
+thread_local EntropySearch entropySearch = EntropySearch::Standard;
+thread_local DecodeStats* decodeStats = nullptr;
+template <class T> struct ScopedValue {
+    T& target;
+    T previous;
+    ScopedValue(T& into, T value) : target(into), previous(into) { target = value; }
+    ~ScopedValue() { target = previous; }
+};
+using ProfileClock = std::chrono::steady_clock;
+double elapsedMs(ProfileClock::time_point start) {
+    return std::chrono::duration<double, std::milli>(ProfileClock::now() - start).count();
+}
 
 // ================================================================ byte io
 
@@ -221,7 +237,25 @@ void writeTable(Writer& w, const uint32_t* f, uint32_t A)
         w.u8(0);
         return;
     }
-    if (uint64_t(k) * 2 > A) {
+    bool dense = uint64_t(k) * 2 > A;
+    if (entropySearch == EntropySearch::Thorough) {
+        auto varintSize = [](uint64_t v) {
+            size_t n = 1;
+            while (v >= 128) { v >>= 7; ++n; }
+            return n;
+        };
+        size_t denseSize = 1, sparseSize = 1 + varintSize(k);
+        int64_t previous = -1;
+        for (uint32_t s = 0; s < A; ++s) {
+            denseSize += varintSize(f[s]);
+            if (f[s]) {
+                sparseSize += varintSize(uint64_t(int64_t(s) - previous - 1)) + varintSize(f[s] - 1);
+                previous = s;
+            }
+        }
+        dense = denseSize < sparseSize;
+    }
+    if (dense) {
         w.u8(2);
         for (uint32_t s = 0; s < A; ++s)
             w.varint(f[s]);
@@ -256,8 +290,7 @@ void encodeSymbols(Writer& w, const int32_t* sym, size_t N, const Ctx* ctx)
             nctx = std::max<uint32_t>(nctx, uint32_t(ctx[i]) + 1);
     if (uint64_t(nctx) * A > kMaxTableEntries)
         throw Error("context tables too large");
-    const int bits = std::min(16, std::max(12, bitlen(A - 1) + 3));
-    const uint32_t M = 1u << bits;
+    const int standardBits = std::min(16, std::max(12, bitlen(A - 1) + 3));
 
     std::vector<uint32_t> counts(size_t(nctx) * A, 0), freq(size_t(nctx) * A, 0), cum(size_t(nctx) * A, 0);
     if (ctx)
@@ -267,49 +300,80 @@ void encodeSymbols(Writer& w, const int32_t* sym, size_t N, const Ctx* ctx)
         for (size_t i = 0; i < N; ++i)
             ++counts[sym[i]];
 
-    w.varint(A);
-    w.u8(uint8_t(bits));
-    w.varint(nctx);
-    for (uint32_t c = 0; c < nctx; ++c) {
-        const uint32_t* f = &freq[size_t(c) * A];
-        normalize(&counts[size_t(c) * A], A, &freq[size_t(c) * A], M);
-        writeTable(w, f, A);
-        uint32_t acc = 0;
-        for (uint32_t s = 0; s < A; ++s) {
-            cum[size_t(c) * A + s] = acc;
-            acc += f[s];
+    uint32_t maxPresent = 0;
+    if (entropySearch == EntropySearch::Thorough) {
+        for (uint32_t c = 0; c < nctx; ++c) {
+            uint32_t present = 0;
+            for (uint32_t s = 0; s < A; ++s)
+                present += counts[size_t(c) * A + s] != 0;
+            maxPresent = std::max(maxPresent, present);
         }
     }
+    auto candidate = [&](int bits) {
+        const uint32_t M = 1u << bits;
+        std::fill(freq.begin(), freq.end(), 0);
+        Writer output;
+        output.varint(A);
+        output.u8(uint8_t(bits));
+        output.varint(nctx);
+        for (uint32_t c = 0; c < nctx; ++c) {
+            const uint32_t* f = &freq[size_t(c) * A];
+            normalize(&counts[size_t(c) * A], A, &freq[size_t(c) * A], M);
+            writeTable(output, f, A);
+            uint32_t acc = 0;
+            for (uint32_t s = 0; s < A; ++s) {
+                cum[size_t(c) * A + s] = acc;
+                acc += f[s];
+            }
+        }
 
-    // Encoded backwards, then reversed so the decoder reads forwards.
-    // Interleaved states: symbol i belongs to state i % states, so the decoder has
-    // several independent chains in flight and the CPU can overlap their work. Measured
-    // at 1.6x on real symbol streams. Short sequences keep one state: four would pay
-    // four flushes and four lengths for nothing.
-    const int states = N >= 4096 ? 4 : 1;
-    w.u8(uint8_t(states));
-    std::vector<std::vector<uint8_t>> rev(states);
-    std::vector<uint32_t> x(states, kRansL);
-    const uint32_t xmaxBase = (kRansL >> bits) << 8;
-    for (size_t i = N; i-- > 0;) {
-        const int s = int(i % states);
-        const size_t k = (ctx ? size_t(ctx[i]) * A : 0) + size_t(sym[i]);
-        const uint32_t fr = freq[k];
-        const uint64_t xmax = uint64_t(xmaxBase) * fr;
-        while (x[s] >= xmax) {
-            rev[s].push_back(uint8_t(x[s] & 255));
-            x[s] >>= 8;
+        // Encoded backwards, then reversed so the decoder reads forwards.
+        // Interleaved states: symbol i belongs to state i % states, so the decoder has
+        // several independent chains in flight and the CPU can overlap their work. Measured
+        // at 1.6x on real symbol streams. Short sequences keep one state: four would pay
+        // four flushes and four lengths for nothing.
+        const int states = N >= 4096 ? 4 : 1;
+        output.u8(uint8_t(states));
+        std::vector<std::vector<uint8_t>> rev(states);
+        std::vector<uint32_t> x(states, kRansL);
+        const uint32_t xmaxBase = (kRansL >> bits) << 8;
+        for (size_t i = N; i-- > 0;) {
+            const int s = int(i % states);
+            const size_t k = (ctx ? size_t(ctx[i]) * A : 0) + size_t(sym[i]);
+            const uint32_t fr = freq[k];
+            const uint64_t xmax = uint64_t(xmaxBase) * fr;
+            while (x[s] >= xmax) {
+                rev[s].push_back(uint8_t(x[s] & 255));
+                x[s] >>= 8;
+            }
+            x[s] = (x[s] / fr) * M + (x[s] % fr) + cum[k];
         }
-        x[s] = (x[s] / fr) * M + (x[s] % fr) + cum[k];
+        for (int s = 0; s < states; ++s) {
+            for (int k = 3; k >= 0; --k)
+                rev[s].push_back(uint8_t(x[s] >> (8 * k)));
+            std::reverse(rev[s].begin(), rev[s].end());
+            output.varint(rev[s].size());
+        }
+        for (int s = 0; s < states; ++s)
+            output.bytes(rev[s]);
+        return output;
+    };
+    // Preserve the exact original table representation as well as its precision.
+    Writer best;
+    {
+        ScopedValue<EntropySearch> standard(entropySearch, EntropySearch::Standard);
+        best = candidate(standardBits);
     }
-    for (int s = 0; s < states; ++s) {
-        for (int k = 3; k >= 0; --k)
-            rev[s].push_back(uint8_t(x[s] >> (8 * k)));
-        std::reverse(rev[s].begin(), rev[s].end());
-        w.varint(rev[s].size());
-    }
-    for (int s = 0; s < states; ++s)
-        w.bytes(rev[s]);
+    if (entropySearch == EntropySearch::Thorough)
+        for (int bits = 12; bits <= 16; ++bits) {
+            // normalize() requires at least one frequency for every present symbol.
+            // Skipping impossible scales also prevents its correction loop stalling.
+            if ((1u << bits) < maxPresent || uint64_t(nctx) * (uint64_t(1) << bits) > (uint64_t(1) << 26))
+                continue;
+            Writer trial = candidate(bits);
+            if (trial.size() < best.size()) best = std::move(trial);
+        }
+    w.bytes(best.buf);
 }
 
 struct Tables
@@ -321,6 +385,8 @@ struct Tables
 
     void read(Reader& r)
     {
+        const auto start = decodeStats ? ProfileClock::now() : ProfileClock::time_point{};
+        const size_t before = r.remaining();
         const uint64_t a = r.varint();
         bits = r.u8();
         const uint64_t n = r.varint();
@@ -372,6 +438,12 @@ struct Tables
             if (acc != 0 && acc != M)
                 throw Error("frequencies do not sum to their scale");
         }
+        if (decodeStats) {
+            decodeStats->tableMilliseconds += elapsedMs(start);
+            decodeStats->tablePayloadBytes += before - r.remaining();
+            decodeStats->maxTableBytes = std::max(decodeStats->maxTableBytes,
+                uint64_t(nctx) * (uint64_t(A) * 8 + uint64_t(M) * 2));
+        }
     }
 };
 
@@ -379,6 +451,7 @@ struct Tables
 template <class Out, class CtxOf>
 void decodeLoop(Reader& r, Out* out, size_t N, const Tables& t, CtxOf ctxOf)
 {
+    const auto start = decodeStats ? ProfileClock::now() : ProfileClock::time_point{};
     const int states = r.u8();
     if (states < 1 || states > 8)
         throw Error("malformed symbol stream");
@@ -419,6 +492,11 @@ void decodeLoop(Reader& r, Out* out, size_t N, const Tables& t, CtxOf ctxOf)
             }
             out[i] = Out(sym);
         }
+    }
+    if (decodeStats) {
+        decodeStats->symbolMilliseconds += elapsedMs(start);
+        ++decodeStats->streams;
+        decodeStats->symbols += N;
     }
 }
 
@@ -463,8 +541,11 @@ void decodeSymbolsRun(Reader& r, Out* out, size_t N, uint64_t P, int64_t start)
     const uint32_t first = start < 0 ? t.A : uint32_t(start);
     if (first >= t.nctx || t.A > t.nctx || P == 0)
         throw Error("context out of range");
-    decodeLoop(r, out, N, t, [P, first](size_t i, const Out* o) {
-        return i % P == 0 ? first : uint32_t(o[i - 1]);
+    // decodeLoop visits symbols in order, including across interleaved states.
+    // Track the next boundary instead of dividing every symbol index by P.
+    decodeLoop(r, out, N, t, [P, first, next = uint64_t(0)](size_t i, const Out* o) mutable {
+        if (uint64_t(i) == next) { next += P; return first; }
+        return uint32_t(o[i - 1]);
     });
 }
 
@@ -506,6 +587,12 @@ void encodeWide(Writer& w, const int32_t* v, size_t N, const Ctx* ctx)
         if (std::find(options.begin(), options.end(), lo) == options.end())
             options.push_back(lo);
     }
+    if (entropySearch == EntropySearch::Thorough)
+        for (int drop : {14, 10}) {
+            const int lo = std::max(0, bl - drop);
+            if (std::find(options.begin(), options.end(), lo) == options.end())
+                options.push_back(lo);
+        }
     Writer best;
     bool have = false;
     Col hi;
@@ -1248,8 +1335,9 @@ std::vector<uint8_t> runStarts(size_t rows, uint64_t S)
 uint8_t* runStartMask(size_t rows, uint64_t S)
 {
     uint8_t* m = bytes(BMask, rows);
-    for (size_t i = 0; i < rows; ++i)
-        m[i] = i % S == 0;
+    std::fill_n(m, rows, uint8_t(0));
+    for (size_t i = 0; i < rows; i += size_t(S))
+        m[i] = 1;
     return m;
 }
 
@@ -1419,14 +1507,20 @@ void decodeModel(Reader& r, const Item& it, int model, const Sink& emit)
     case FTime: {
         int32_t* buf = ints(SBuf, rows);
         uint8_t* ctx = bytes(BCtx, rows);
-        for (size_t i = 0; i < rows; ++i)
-            ctx[i] = uint8_t(std::min<uint64_t>(i % it.S, 2));
+        const size_t samples = size_t(it.S);
+        std::fill_n(ctx, rows, uint8_t(2));
+        for (size_t base = 0; base < rows; base += samples) {
+            ctx[base] = 0;
+            if (samples > 1) ctx[base + 1] = 1;
+        }
         const uint8_t* absolute = runStartMask(rows, it.S);
         for (size_t k = 0; k < C; ++k) {
             decodeSplit(r, buf, rows, absolute, ctx);
-            for (size_t i = 0; i < rows; ++i)
-                if (i % it.S)
+            for (size_t base = 0; base < rows; base += samples)
+                for (size_t sample = 1; sample < samples; ++sample) {
+                    const size_t i = base + sample;
                     buf[i] = buf[i - 1] + unzig(uint32_t(buf[i]));
+                }
             emit(k, buf);
         }
         return;
@@ -1498,10 +1592,14 @@ void decodeModel(Reader& r, const Item& it, int model, const Sink& emit)
         decodeSymbolsRun(r, sign, rows, it.S, 2);
         uint8_t* cv = bytes(BCv, rows);
         uint8_t* absolute = bytes(BMask, rows);
-        for (size_t i = 0; i < rows; ++i) {
-            const bool start = i % it.S == 0;
-            cv[i] = start ? 0 : largest[i] == largest[i - 1] ? (sign[i] == sign[i - 1] ? 2 : 3) : 1;
-            absolute[i] = cv[i] < 2;
+        const size_t samples = size_t(it.S);
+        for (size_t base = 0; base < rows; base += samples) {
+            for (size_t sample = 0; sample < samples; ++sample) {
+                const size_t i = base + sample;
+                const bool start = sample == 0;
+                cv[i] = start ? 0 : largest[i] == largest[i - 1] ? (sign[i] == sign[i - 1] ? 2 : 3) : 1;
+                absolute[i] = cv[i] < 2;
+            }
         }
         emit(4, largest);
         emit(0, sign);
@@ -1980,11 +2078,21 @@ Item attributeItem(const AttributeSpec& s) {
 uint64_t attributeSize(const AttributeSpec& spec) { return attributeItem(spec).bytes; }
 int attributeModelCount(const AttributeSpec& spec) { return kModelCount[attributeItem(spec).family]; }
 Bytes encodeAttribute(const AttributeSpec& spec, int model, const uint8_t* data, size_t size) {
+    return encodeAttribute(spec, model, data, size, EntropySearch::Standard);
+}
+Bytes encodeAttribute(const AttributeSpec& spec, int model, const uint8_t* data, size_t size,
+                      EntropySearch search) {
+    ScopedValue<EntropySearch> setting(entropySearch, search);
     const Item it = attributeItem(spec);
     if (size != it.bytes || model < 0 || model >= kModelCount[it.family]) throw Error("invalid attribute input");
     Writer w; encodeModel(w, it, model, readColumns(data, it)); return std::move(w.buf);
 }
 Bytes decodeAttribute(const AttributeSpec& spec, int model, const uint8_t* data, size_t size) {
+    return decodeAttribute(spec, model, data, size, nullptr);
+}
+Bytes decodeAttribute(const AttributeSpec& spec, int model, const uint8_t* data, size_t size,
+                      DecodeStats* stats) {
+    ScopedValue<DecodeStats*> profiling(decodeStats, stats);
     const Item it = attributeItem(spec);
     if (model < 0 || model >= kModelCount[it.family]) throw Error("invalid attribute model");
     Bytes out(size_t(it.bytes)); Reader r(data, size);

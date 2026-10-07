@@ -103,6 +103,88 @@ Fit Scene:
     Set the scene's frame rate to the capture's, and its frame range to play it once at
     this speed.
 
+Points:
+    #id: points
+
+    A SOP whose points each get a copy of the capture. The SOP's first input does the same
+    and takes precedence. Empty, with nothing wired in, the capture plays once, where it
+    is. See Scatter below.
+
+Variants:
+    #id: variants
+
+    How many different timelines the copies share, 8 by default. Each point takes one at
+    random. 0 gives every point its own, which is the slowest.
+
+Phase Spread:
+    #id: phasespread
+
+    How much of the capture the variants' starting points cover: 1 spreads them over all
+    of it, 0 starts them all at __Phase__.
+
+Speed Variation:
+    #id: speedvariation
+
+    How much the variants' speeds differ, as a fraction of __Speed__: 0.2 plays them
+    between 0.8 and 1.2 times as fast.
+
+Seed:
+    #id: seed
+
+    Changes which variant each point gets, and the variants' speeds.
+
+Output:
+    #id: output
+
+    What a scatter outputs.
+
+    Auto:
+        Splats in the viewport, Packed Instances in renders. The default: Houdini 22's
+        viewport misplaces Gaussian splats inside packed primitives, while Karma renders
+        them right.
+    Packed Instances:
+        Each timeline's splats once, and a packed instance of them on every point. A
+        frame costs what the timelines cost, memory holds each timeline once, and
+        Solaris gets USD instances, which Karma XPU renders as such. The viewport
+        draws them in the wrong places.
+    Splats:
+        Every copy's splats written out, for SOPs downstream that need to edit the
+        splats themselves.
+
+== Scatter ==
+
+Wire points into the SOP's input, or name a SOP in __Points__, and every point gets a copy
+of the capture, each at its own time: a crowd, a stand, a background, from a handful of
+captures. Copies are placed as Copy to Points places them: moved to `P`, turned by
+`orient`, scaled by `pscale`.
+
+What a frame costs grows with the number of different timelines, not the number of
+copies: copies on the same capture and timeline are decoded once. __Variants__ keeps the
+timelines to a few, 8 by default, and gives each point one of them at random. The splats
+of every copy still have to be drawn, so for a large or distant scatter lower __Viewport
+Density__: renders draw every splat whatever it says.
+
+Point attributes override the node for the copy on that point:
+
+`vgs_path` (string):
+    The capture to put there, so one scatter can mix several.
+`vgs_start_frame` (integer):
+    The capture's frame on the scene's first frame, as __Start Frame__.
+`vgs_offset` (float):
+    How many scene frames later this copy starts moving.
+`vgs_speed` (float):
+    Its speed; negative plays it backwards.
+`vgs_loop` (integer):
+    -1 from the capture, 0 no loop, 1 loop, 2 ping-pong.
+`vgs_variant` (integer):
+    Which of the node's variants it plays, instead of one at random.
+
+A point with timings of its own is a timeline of its own, outside the variants.
+
+Every capture played at several times at once is kept decoded whole, so that no frame
+decodes a chunk again: for a 7-second capture that is around 1.5 GB. `VGS_CACHE_MB` caps
+it, 4096 by default.
+
 == Environment ==
 
 `VGS_SLOTS`:
@@ -114,3 +196,7 @@ Fit Scene:
 `VGS_PLAYBACK_WAIT_MS`:
     How long playback waits for a frame that is not ready before showing the previous one
     again. Default 250.
+
+`VGS_CACHE_MB`:
+    The most a capture played at several times at once, in a scatter, may keep decoded.
+    Default 4096.

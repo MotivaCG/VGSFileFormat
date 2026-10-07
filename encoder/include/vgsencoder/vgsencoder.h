@@ -81,6 +81,10 @@ public:
   // ---- what to write ----------------------------------------------------------
 
   void setCoding(Coding);
+  /** Experimental entropy search for smaller lossless pages. Slower to encode;
+   *  does not optimize decode time and may choose larger tables. Compatible stream
+   *  syntax. Off by default; Standard is recommended for normal exports. */
+  void setEntropySearch(bool enabled);
   /**
    * Highest spherical harmonic degree to keep, 0 to 3. The source carries 3; writing
    * less drops whole planes of coefficients, which is where about a third of the file
@@ -95,8 +99,13 @@ public:
   void setMotionType(MotionType);
   /** Reserved: how fast a walking capture moves, in its own units per second. 0 unless set. */
   void setMovingSpeed(float);
-  /** Rows per page. The default suits every capture seen so far; 1024 to 1048576. */
+  /** Target rows per page, rounded to complete coding blocks. Default 65536;
+   *  accepted range 1024 to 1048576. */
   void setPageRows(uint32_t);
+  /** Experimental split of temporal SH into complete sample blocks near pageRows.
+   *  Smaller tasks can improve scheduling but do not guarantee faster full decode
+   *  or lower memory use. Off by default; decoded values and syntax are unchanged. */
+  void setTemporalShPageSplit(bool enabled);
 
   // ---- metadata ---------------------------------------------------------------
   //

@@ -32,6 +32,68 @@ Blender 5.3 or later, Windows x64.
 The capture is a reference to its file. Moving or renaming the file breaks it; *Reload*
 after fixing the path.
 
+## Scatter
+
+*Distribution* in the capture's panel holds a note and a button, *Sample: Scatter on
+Points* (also *Object > VGS Scatter on Points*). The note says what it is: a sample, one
+Geometry Nodes scatter of the capture over the points, and an invitation to build one's
+own distribution. It is wrapped to the panel's width, since a label does not wrap itself.
+
+The button puts a copy of the active capture on every point of the other selected object
+(mesh, point cloud or curves), for variety at a distance from a few captures - the idea of
+the Houdini plugin's scatter, done the Blender way:
+
+- **Variants** are point clouds of their own, copies of the capture's settings at phases
+  spread over it and at speeds varied around a speed, deterministic in a seed. They sit in
+  a collection named after the scatter, excluded from the view layer, and play like any
+  capture: each has its player, so a frame costs one decode per variant, all decoding at
+  once.
+- A **Geometry Nodes modifier** on the points object, *VGS Scatter*, instances them:
+  Collection Info (separate children, children keep their transforms - the capture's
+  up-axis turn) into Instance on Points with Pick Instance, then Scale Instances.
+- **Everything is set on the modifier**: *Variants*, *Phase Spread*, *Speed*, *Speed
+  Variation*, *Seed*, *Random Z Rotation*, *Inherit Object Scale*, *Follow Normal*, *Show
+  Original Geometry*. The first five shape the
+  variants, which are point clouds rather than nodes, so a `depsgraph_update_post` handler
+  compares them - and the capture's own settings and transform - with what the variants
+  were last built from, and rebuilds them when they differ: changing the count adds or
+  removes point clouds, changing the capture's loop or density passes it on.
+- **Which variant**: the point's `vgs_variant` attribute when it has one, random otherwise.
+- **Turn**: the point's `rotation` (quaternion) when it has one; otherwise a random angle
+  about the vertical axis up to *Random Z Rotation* either way, 360 degrees by default,
+  different for every copy; 0 leaves them unturned.
+- **Follow Normal** (off by default) stands each copy along the surface's normal instead
+  of straight up. The random turn comes first, about the copy's own vertical axis, and
+  Align Rotation to Vector then takes Z to the normal by the shortest rotation, which keeps
+  that turn: on a slope a copy still spins on itself. The normal is the point's `normal`
+  attribute if it has one, the mesh's vertex normal otherwise; points from Distribute
+  Points on Faces carry none, so store its Normal output as `normal`. Checked on an ico
+  sphere: every copy's up within 0.00 degrees of its normal, every copy facing its own way.
+- **Scale**: the point's `scale` (vector) when it has one. The points object's own scale is
+  not passed on: instances live in that object's space, so a Scale Instances node undoes it
+  with the inverse of the object's scale (Self Object -> Object Info), about each copy's
+  own position and in the object's space - exact for a non-uniform scale and a turned
+  copy, while the copies' places still follow the scaled surface. *Inherit Object Scale*
+  brings it back. The object's rotation is passed on.
+- **The object's own geometry** is joined to the copies, so the plane stays visible;
+  *Show Original Geometry* turns it off.
+- **No greyed-out inputs.** Blender greys an input the nodes do not reach, and *Phase
+  Spread*, *Speed* and *Speed Variation* are read by the add-on, not the nodes; each copy
+  stores them as instance attributes (`vgs_phase_spread`, `vgs_speed`,
+  `vgs_speed_variation`), which makes them count as used and records what a copy was made
+  with.
+- Copies are **instances**: no splat is copied per copy. EEVEE and Cycles both draw
+  instanced Gaussian splat point clouds; checked before building this.
+- Running the button again on the same points replaces the scatter; *Object > Remove VGS
+  Scatter* takes it off, variants and all.
+
+Tested in the background: with the modifier's inputs changed and the object tagged, as the
+interface does, Variants 8 -> 5 left five variants at phases 0, 0.2 ... 0.8; Speed 1.5 with
+0.2 variation gave speeds 1.28 to 1.77; the capture's loop set to ping-pong reached every
+variant; the turn at 180 degrees gave 20 copies 20 different angles, at 0 one; a points
+object scaled 2 had copies at scale 1, and at 2 with Inherit Object Scale. With the
+7-second boxing capture, 8 variants and 20 points: 165 ms a frame paused, harmonics on.
+
 ## Settings that are deliberate
 
 | Setting | Value | Why |

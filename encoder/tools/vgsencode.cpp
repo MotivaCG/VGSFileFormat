@@ -19,8 +19,8 @@ int usage() {
                "usage: vgsencode <input.mint> <output.vgs|output.pgs> [options]\n"
                "\n"
                "  --plain                store pages without entropy coding (.pgs)\n"
-               "  --sh <0..3>            highest spherical harmonic degree to keep\n"
-               "  --page-rows <n>        rows per page (1024..1048576)\n"
+               "  --sh <0..3>            highest spherical harmonic degree to keep (default 3)\n"
+               "  --page-rows <n>        target rows per page (1024..1048576, default 65536)\n"
                "  --start-tick <n>       where the capture starts on an external timeline\n"
                "  --playback <mode>      how players run it: once, loop or pingpong (default loop)\n"
                "\n"
@@ -40,6 +40,10 @@ int usage() {
                "  --metadata <file>      free-form UTF-8 JSON\n"
                "  --metadata2 <file>     a second, independent JSON block\n"
                "  --quiet                no progress output\n"
+               "\n"
+               "Experimental options (both disabled by default):\n"
+               "  --entropy-search       try more lossless parameters; slower encode, tiny size savings\n"
+               "  --split-temporal-sh    smaller SH decode tasks; may increase decoder memory\n"
                "\n"
                "The identifier has no option: it is derived from the metadata and the\n"
                "contents, and printed when the file is written.\n");
@@ -108,6 +112,10 @@ int main(int argc, char **argv) {
 
     if (flag == "--plain")
       encoder.setCoding(vgsenc::Coding::Plain);
+    else if (flag == "--entropy-search")
+      encoder.setEntropySearch(true);
+    else if (flag == "--split-temporal-sh")
+      encoder.setTemporalShPageSplit(true);
     else if (flag == "--quiet")
       quiet = true;
     else if (flag == "--sh") {

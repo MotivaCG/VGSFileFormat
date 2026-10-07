@@ -383,6 +383,14 @@ has **no model prefix**: that value is fixed in the global policy. This reuses n
 coding only; no MGS header, chunk table, original offsets or .mint metadata is embedded.
 Raw pages contain exactly the logical array bytes, without the numerical transform.
 
+The temporal SH entry dictionary may occupy one page or several contiguous blocks
+of complete samples. Each block begins on an `entries`-row boundary and resets its
+entry predictor at that boundary. Its `firstRow` places decoded rows back into the
+original sample-major array; no entry gather or permutation is involved. The
+sample count and entry stride retain their full attribute meaning. Opt-in encoder
+searches may also vary stored rANS precision and high/low bit splits within the
+already supported ranges. Neither option changes the encoding ID or model IDs.
+
 Attribute IDs and shapes are named in `core/include/vgs/vgscodec.h` and `attributeName()`. IDs 1..11
 are shared dictionaries/LUTs; IDs 32..46 are group attributes. Their interpretation,
 quantized field widths, quaternion ordering and reconstruction arithmetic are defined

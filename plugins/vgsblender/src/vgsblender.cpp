@@ -1,6 +1,7 @@
 // vgsblender - a capture player for hosts that pull frames. vgsblender.h says what and why.
 
 #include "vgsblender.h"
+#include "framepack.h"
 
 #include "vgsdecoder/vgsdecoder.h"
 
@@ -34,21 +35,12 @@ namespace {
 
 thread_local std::string lastError;
 
-/** The constant that turns a spherical harmonic DC term into a colour, and back. */
-constexpr float C0 = 0.28209479177387814f;
-
 /**
  * How close two times must be to name the same frame. The host computes a frame's time
  * the same way when it schedules it and when it asks for it, so they normally match
  * exactly; this only absorbs rounding, and is far below any frame interval.
  */
 constexpr double SameTime = 1e-6;
-
-/**
- * Blender stores log(scale) for drawing and treats an exact zero as log(0), packing -1e6
- * into the range every other splat is quantised against. Nothing drawn is this small.
- */
-constexpr float SmallestScale = 1e-6f;
 
 /**
  * The capture, mapped whole. A chunk is tens of megabytes and the decoder reads each one
@@ -149,7 +141,7 @@ private:
 };
 
 /** One decoded frame, laid out as vgsb_frame describes. */
-struct Slot {
+struct Slot : vgsbdetail::FrameBuffers {
   enum class State { Empty, Filling, Ready };
   State state = State::Empty;
   double seconds = 0;
@@ -157,9 +149,6 @@ struct Slot {
   uint64_t generation = 0;
   /** Handed to the host and not to be touched until it lets go. */
   bool pinned = false;
-  uint64_t count = 0;
-  int shCoefficients = 0;
-  std::vector<float> positions, rotations, scales, radiance, sh;
 };
 
 int coefficientsForDegree(uint32_t degree) {
@@ -179,21 +168,6 @@ bool sameTime(double a, double b) { return std::fabs(a - b) < SameTime; }
 
 /** The least density accepted: below it a capture is a scattering of dots. */
 constexpr float SmallestDensity = 0.01f;
-
-/**
- * Whether a record stays at a given density. A hash of the index rather than every n-th
- * record, because records are stored in an order that means something - by term count,
- * by group - and taking every n-th would thin some parts of the capture more than others.
- */
-bool keeps(size_t record, uint64_t threshold) {
-  uint32_t x = uint32_t(record) * 0x9E3779B1u;
-  x ^= x >> 16;
-  x *= 0x85EBCA6Bu;
-  x ^= x >> 13;
-  x *= 0xC2B2AE35u;
-  x ^= x >> 16;
-  return x < threshold;
-}
 
 /**
  * Two lanes, one for the even chunks and one for the odd ones, each a Capture of its own
@@ -238,6 +212,11 @@ struct vgsb_player {
   bool includeSh = true;
   float density = 1.0f;
   uint64_t generation = 1;
+  // The cache each lane should keep, applied by the lane itself on its own thread: a
+  // Capture belongs to one thread, so the host cannot set it directly.
+  size_t cacheChunks = 0;
+  uint64_t cacheBytes = 0;
+  uint64_t cacheGeneration = 0;
   std::string failure;
   bool quit = false;
 };
@@ -297,73 +276,7 @@ int pickVictim(const vgsb_player &player) {
  */
 void decodeInto(vgsdec::Capture &capture, Slot &slot, double seconds, bool includeSh,
                 float density) {
-  const vgsdec::Frame &frame = capture.setTime(seconds, includeSh);
-  const size_t total = size_t(frame.splatCount);
-
-  // Thinning is one more test in the loop that already drops dead records, and everything
-  // after it - the copy into the host, its packing, the upload, the sort, the drawing -
-  // then has that much less to do.
-  const bool thinned = density < 1.0f;
-  const uint64_t threshold = uint64_t(double(density) * 4294967296.0);
-  const float exponent = thinned ? 1.0f / density : 1.0f;
-  const auto wanted = [&](size_t i) {
-    return (!frame.active || frame.active[i]) && (!thinned || keeps(i, threshold));
-  };
-
-  size_t live = 0;
-  for (size_t i = 0; i < total; ++i)
-    live += wanted(i) ? 1 : 0;
-
-  const int coefficients =
-      (includeSh && frame.sphericalHarmonics) ? frame.shCoefficients : 0;
-  slot.positions.resize(live * 3);
-  slot.rotations.resize(live * 4);
-  slot.scales.resize(live * 3);
-  slot.radiance.resize(live * 4);
-  slot.sh.resize(live * 3 * size_t(coefficients));
-
-  size_t j = 0;
-  for (size_t i = 0; i < total; ++i) {
-    if (!wanted(i))
-      continue;
-
-    for (int c = 0; c < 3; ++c)
-      slot.positions[j * 3 + c] = frame.positions[i * 3 + c];
-
-    // xyzw in, wxyz out, normalised the way Blender's own importer does.
-    const float *q = frame.rotations + i * 4;
-    const float length = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
-    float *r = &slot.rotations[j * 4];
-    if (length > 0) {
-      r[0] = q[3] / length;
-      r[1] = q[0] / length;
-      r[2] = q[1] / length;
-      r[3] = q[2] / length;
-    } else {
-      r[0] = 1;
-      r[1] = r[2] = r[3] = 0;
-    }
-
-    for (int c = 0; c < 3; ++c)
-      slot.scales[j * 3 + c] = std::max(frame.scales[i * 3 + c], SmallestScale);
-
-    for (int c = 0; c < 3; ++c)
-      slot.radiance[j * 4 + c] = (frame.colors[i * 3 + c] - 0.5f) / C0;
-    // What a thinned-out neighbour would have covered, the ones that stay cover instead.
-    const float opacity = frame.opacities[i];
-    slot.radiance[j * 4 + 3] =
-        thinned ? 1.0f - std::pow(std::max(0.0f, 1.0f - opacity), exponent) : opacity;
-
-    // Per splat per coefficient in, one plane per coefficient out.
-    for (int k = 0; k < coefficients; ++k)
-      for (int c = 0; c < 3; ++c)
-        slot.sh[(size_t(k) * live + j) * 3 + size_t(c)] =
-            frame.sphericalHarmonics[(i * size_t(coefficients) + size_t(k)) * 3 + size_t(c)];
-    ++j;
-  }
-
-  slot.count = live;
-  slot.shCoefficients = coefficients;
+  vgsbdetail::packFrame(capture.setTime(seconds, includeSh), slot, includeSh, density);
 }
 
 /** Which lane plays the chunk holding `seconds`, asked of that lane's own capture. */
@@ -398,7 +311,20 @@ size_t chunkToPrepare(const vgsb_player &player, size_t lane, vgsdec::Capture &c
 void run(vgsb_player &player, size_t lane) {
   vgsdec::Capture &capture = *player.lanes[lane].capture;
   std::unique_lock<std::mutex> lock(player.mutex);
+  uint64_t cacheApplied = 0;
   while (!player.quit) {
+    if (cacheApplied != player.cacheGeneration) {
+      vgsdec::CachePolicy policy;
+      policy.behind = player.cacheChunks;
+      policy.ahead = player.cacheChunks;
+      policy.maxBytes = player.cacheBytes;
+      cacheApplied = player.cacheGeneration;
+      lock.unlock();
+      capture.setCachePolicy(policy);
+      lock.lock();
+      continue;
+    }
+
     if (!player.failure.empty()) {
       player.workChanged.wait(lock);
       continue;
@@ -640,7 +566,7 @@ int vgsb_acquire(vgsb_player *player, double seconds, double timeoutMs, vgsb_fra
   out->rotations = slot.rotations.data();
   out->scales = slot.scales.data();
   out->radiance = slot.radiance.data();
-  out->sh = slot.sh.empty() ? nullptr : slot.sh.data();
+  out->sh = slot.count && slot.shCoefficients ? slot.sh.data() : nullptr;
   return VGSB_OK;
 }
 
@@ -663,6 +589,21 @@ void vgsb_set_include_sh(vgsb_player *player, int includeSh) {
       return;
     player->includeSh = includeSh != 0;
     ++player->generation;
+  }
+  player->workChanged.notify_all();
+}
+
+void vgsb_set_cache(vgsb_player *player, int chunks, uint64_t maxBytes) {
+  if (!player)
+    return;
+  {
+    std::lock_guard<std::mutex> lock(player->mutex);
+    const size_t wanted = size_t(std::max(chunks, 0));
+    if (wanted == player->cacheChunks && maxBytes == player->cacheBytes)
+      return;
+    player->cacheChunks = wanted;
+    player->cacheBytes = maxBytes;
+    ++player->cacheGeneration;
   }
   player->workChanged.notify_all();
 }

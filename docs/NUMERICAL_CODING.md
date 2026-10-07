@@ -245,6 +245,12 @@ u8[]   bytes ×states
 
 Frequencies sum to `M` in every non-empty context. `bits` is `clamp(bitlen(A-1) + 3, 12, 16)`:
 tables stay in cache for small alphabets and stay precise for big ones.
+This is the Standard encoder's choice, not a constraint on a reader: the stored
+precision is authoritative. VGS's opt-in Thorough search also tests 12..16 bits
+where every present symbol can have a non-zero frequency and the reader's table
+limits are met. It compares the complete table and rANS payload, retaining the
+Standard output as a candidate. Sparse and dense tables are compared by their
+actual serialized size. MGS whole-file encoding keeps its Standard choices.
 
 **Decoding.** State `s` holds symbol `i` where `s = i mod states`, decoded in order of `i`,
 so a context may still be the symbol before it. Per symbol, with context `c`:
@@ -261,7 +267,9 @@ exactly, so running out of bytes means the data is corrupt.
 
 **Wide values** (anything that can exceed the alphabet) are coded as `u8 lo`, then the
 symbols `v >> lo`, then the low `lo` bits of every value packed LSB-first with three bytes
-of padding. The encoder tries `lo = max(0, bitlen(max) - 16/12/8)` and keeps the smallest.
+of padding. The Standard encoder tries `lo = max(0, bitlen(max) - 16/12/8)` and keeps
+the smallest. VGS's opt-in Thorough search adds the 14- and 10-bit high-part targets;
+the stored `lo` still defines decoding, so this does not change the stream syntax.
 
 ### 7.5 Residue
 

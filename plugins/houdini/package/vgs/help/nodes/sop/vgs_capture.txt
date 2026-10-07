@@ -17,4 +17,8 @@ Inside a [VGS Capture object|Node:obj/vgs_capture], which File > Import creates,
 parameters follow the object's. On its own, in any SOP network or a SOP Create LOP, it is
 driven by its own parameters.
 
+With points wired into its input, or named in __Points__, it puts a copy of the capture on
+every point, each at its own time; see Scatter in the
+[VGS Capture object|Node:obj/vgs_capture]'s help.
+
 The parameters are those of the [VGS Capture object|Node:obj/vgs_capture].

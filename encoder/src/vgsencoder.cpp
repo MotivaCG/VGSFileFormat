@@ -127,6 +127,11 @@ void Encoder::setSphericalHarmonicDegree(uint32_t degree) {
   state->options.shDegree = degree > 3 ? 3 : degree;
 }
 
+void Encoder::setEntropySearch(bool enabled) {
+  state->options.entropySearch = enabled ? mgs::EntropySearch::Thorough
+                                       : mgs::EntropySearch::Standard;
+}
+
 void Encoder::setStartTick(uint64_t tick) { state->options.startTick = tick; }
 
 void Encoder::setPlaybackMode(PlaybackMode mode) {
@@ -140,6 +145,8 @@ void Encoder::setMotionType(MotionType type) {
 void Encoder::setMovingSpeed(float speed) { state->options.movingSpeed = speed; }
 
 void Encoder::setPageRows(uint32_t rows) { state->options.pageRows = rows; }
+
+void Encoder::setTemporalShPageSplit(bool enabled) { state->options.splitTemporalShPages = enabled; }
 
 void Encoder::setId(std::string v) { state->options.metadata.id = std::move(v); }
 void Encoder::setTitle(std::string v) { state->options.metadata.title = std::move(v); }

@@ -152,7 +152,19 @@ std::vector<SourceAttribute> sourceAttributes(const uint8_t* mint, size_t size, 
 uint64_t attributeSize(const AttributeSpec& spec);
 int attributeModelCount(const AttributeSpec& spec);
 Bytes encodeAttribute(const AttributeSpec& spec, int model, const uint8_t* data, size_t size);
+// Thorough searches legal table precisions and more high/low bit splits. It keeps
+// Standard as a candidate and changes neither the models nor the decoded values.
+enum class EntropySearch { Standard, Thorough };
+Bytes encodeAttribute(const AttributeSpec& spec, int model, const uint8_t* data, size_t size,
+                      EntropySearch search);
+struct DecodeStats {
+    double tableMilliseconds = 0, symbolMilliseconds = 0;
+    uint64_t streams = 0, symbols = 0, tablePayloadBytes = 0, maxTableBytes = 0;
+};
 Bytes decodeAttribute(const AttributeSpec& spec, int model, const uint8_t* data, size_t size);
+// Optional profiling, accumulated into stats. Timing is disabled on the normal path.
+Bytes decodeAttribute(const AttributeSpec& spec, int model, const uint8_t* data, size_t size,
+                      DecodeStats* stats);
 
 // Decodes a residue stream into `out` (the total size of the residue spans).
 void decodeResidue(const uint8_t* payload, size_t size, uint8_t* out, size_t count);

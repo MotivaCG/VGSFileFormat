@@ -38,6 +38,14 @@ int statusOf(Wrapper &w) {
 
 extern "C" {
 
+VGS_ENCODER_API void vgs_encoder_set_entropy_search(vgs_encoder *handle, int enabled) {
+  self(handle)->encoder.setEntropySearch(enabled != 0);
+}
+
+VGS_ENCODER_API void vgs_encoder_set_temporal_sh_page_split(vgs_encoder *handle, int enabled) {
+  self(handle)->encoder.setTemporalShPageSplit(enabled != 0);
+}
+
 VGS_ENCODER_API vgs_encoder *vgs_encoder_create(void) {
   return reinterpret_cast<vgs_encoder *>(new (std::nothrow) Wrapper);
 }

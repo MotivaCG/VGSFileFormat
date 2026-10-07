@@ -16,6 +16,7 @@ build*/
 *.so
 *.dylib
 *.wasm
+*.log
 
 # Assembled packages. Routine runs of the packaging script produce these constantly and
 # they are rebuilt from source, so they are not worth committing.
@@ -31,6 +32,7 @@ build*/
 # exposure - the key is in core/crypto/vgskeys.h as source - but it is one more reason
 # this repository stays private.
 dist/
+experiments/
 
 # Editors and tools
 .vs/
@@ -44,3 +46,6 @@ CMakeUserPresets.json
 *.vgs
 *.pgs
 *.ply
+
+editor/
+usd/

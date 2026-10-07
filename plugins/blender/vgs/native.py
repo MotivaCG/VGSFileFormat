@@ -13,7 +13,7 @@ import sys
 
 import numpy as np
 
-API_VERSION = 3
+API_VERSION = 4
 
 _c_float_p = ctypes.POINTER(ctypes.c_float)
 

@@ -16,5 +16,12 @@ File: vgs-<version>.zip  (do not unzip it)
 Use it: File > Import > VGS (.vgs, .pgs), or drag a .vgs file onto the 3D viewport.
 The controls of each capture are in Properties > Data > VGS.
 
+Distribution: the capture's VGS panel has a sample of laying copies of it out.
+Select an object whose points should get copies (a mesh, a point cloud), then the
+capture, so it is active, and press Sample: Scatter on Points. Each point gets a copy
+at one of a few timelines, turned at random; everything is then set on the object's
+VGS Scatter modifier. It is a sample - build your own distribution as you like.
+Object > Remove VGS Scatter takes it off again.
+
 To update: install the new zip the same way; restart Blender afterwards.
 To remove: Edit > Preferences > Get Extensions, find it, and choose Uninstall.

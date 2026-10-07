@@ -34,7 +34,31 @@ constexpr const char *NoShPlaying = "noshplaying";
 constexpr const char *Linearize = "linearize";
 constexpr const char *CastShadows = "castshadows";
 constexpr const char *FitScene = "fitscene";
+constexpr const char *ScatterHeading = "scatterheading";
+constexpr const char *Points = "points";
+constexpr const char *Variants = "variants";
+constexpr const char *PhaseSpread = "phasespread";
+constexpr const char *SpeedVariation = "speedvariation";
+constexpr const char *Seed = "seed";
+constexpr const char *Output = "output";
 } // namespace parm
+
+/**
+ * What a scatter outputs: an instance per point, or every copy's splats written out. Auto
+ * writes splats for the viewport and instances for renders: Houdini 22's viewport misplaces
+ * Gaussian splats inside packed primitives, while Karma renders them right.
+ */
+enum class ScatterOutput { Auto = 0, Packed = 1, Splats = 2 };
+
+// Point attributes that override the node's parameters for the copy on that point.
+namespace pointattrib {
+constexpr const char *Path = "vgs_path";
+constexpr const char *StartFrame = "vgs_start_frame";
+constexpr const char *Offset = "vgs_offset";
+constexpr const char *Speed = "vgs_speed";
+constexpr const char *Loop = "vgs_loop";
+constexpr const char *Variant = "vgs_variant";
+} // namespace pointattrib
 
 /** How a capture runs past its ends: the capture's own playback mode, in the same order. */
 enum class LoopMode { None = 0, Loop = 1, PingPong = 2 };

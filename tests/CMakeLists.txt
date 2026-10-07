@@ -15,6 +15,17 @@ set(VGS_TEST_MINT "" CACHE FILEPATH "A .mint capture for the tests that need one
 
 # ---- always ----------------------------------------------------------------------------
 
+add_executable(vgs_framepack framepack.cpp)
+target_link_libraries(vgs_framepack PRIVATE ${VGS_DECODER_LINK})
+vgs_apply_settings(vgs_framepack)
+add_test(NAME plugin_framepack COMMAND vgs_framepack)
+
+add_executable(vgs_entropy entropy.cpp)
+target_include_directories(vgs_entropy PRIVATE ${VGS_CORE_INCLUDE_DIRS})
+target_link_libraries(vgs_entropy PRIVATE ${VGS_DECODER_LINK})
+vgs_apply_settings(vgs_entropy)
+add_test(NAME entropy_search COMMAND vgs_entropy)
+
 add_executable(vgs_keyleak keyleak.cpp)
 target_include_directories(vgs_keyleak PRIVATE ${VGS_CORE_INCLUDE_DIRS})
 vgs_apply_settings(vgs_keyleak)
@@ -68,6 +79,30 @@ vgs_apply_settings(vgs_tamper)
 # roundtrip writes the capture the others read, so it goes first and they wait for it.
 add_test(NAME roundtrip COMMAND vgs_roundtrip ${VGS_TEST_MINT} ${fixture})
 set_tests_properties(roundtrip PROPERTIES FIXTURES_SETUP capture)
+
+set(search_fixture ${CMAKE_CURRENT_BINARY_DIR}/roundtrip_search.vgs)
+add_test(NAME roundtrip_entropy_search
+         COMMAND vgs_roundtrip ${VGS_TEST_MINT} ${search_fixture} --entropy-search)
+set_tests_properties(roundtrip_entropy_search PROPERTIES FIXTURES_SETUP capture_search)
+add_test(NAME tamper_entropy_search COMMAND vgs_tamper ${search_fixture})
+add_test(NAME tool_play_entropy_search COMMAND vgsplay ${search_fixture})
+set_tests_properties(tamper_entropy_search tool_play_entropy_search PROPERTIES FIXTURES_REQUIRED capture_search)
+
+set(split_fixture ${CMAKE_CURRENT_BINARY_DIR}/roundtrip_split_sh.vgs)
+add_test(NAME roundtrip_temporal_sh_split
+         COMMAND vgs_roundtrip ${VGS_TEST_MINT} ${split_fixture} --split-temporal-sh)
+set_tests_properties(roundtrip_temporal_sh_split PROPERTIES FIXTURES_SETUP capture_split)
+add_test(NAME tamper_temporal_sh_split COMMAND vgs_tamper ${split_fixture})
+add_test(NAME tool_play_temporal_sh_split COMMAND vgsplay ${split_fixture})
+set_tests_properties(tamper_temporal_sh_split tool_play_temporal_sh_split PROPERTIES FIXTURES_REQUIRED capture_split)
+
+add_executable(vgs_verify_source verify_source.cpp)
+target_include_directories(vgs_verify_source PRIVATE ${VGS_CORE_INCLUDE_DIRS})
+target_link_libraries(vgs_verify_source PRIVATE ${VGS_ENCODER_LINK})
+vgs_apply_settings(vgs_verify_source)
+add_test(NAME entropy_source_parity
+         COMMAND vgs_verify_source ${VGS_TEST_MINT} ${fixture} ${search_fixture} ${split_fixture})
+set_tests_properties(entropy_source_parity PROPERTIES FIXTURES_REQUIRED "capture;capture_search;capture_split")
 
 add_test(NAME tamper COMMAND vgs_tamper ${fixture})
 set_tests_properties(tamper PROPERTIES FIXTURES_REQUIRED capture)

@@ -248,6 +248,8 @@ struct EncodeOptions {
   uint32_t shDegree = 3;
   bool verify = true;
   Compression compression = Compression::Auto;
+  mgs::EntropySearch entropySearch = mgs::EntropySearch::Standard;
+  bool splitTemporalShPages = false;
 };
 using Progress = std::function<bool(int done, int total)>;
 
@@ -255,6 +257,18 @@ using Progress = std::function<bool(int done, int total)>;
 // metadata, padding or opaque residue. Unsupported source layouts are rejected.
 Bytes encodeMint(const uint8_t *mint, size_t size, const EncodeOptions & = {},
                  const Progress & = {});
+#ifdef VGS_TEMPORAL_EXPERIMENT
+Bytes encodeLogical(const Header &, const std::vector<DecodedChunk> &,
+                    const EncodeOptions &, const Progress & = {});
+#endif
+// Authoring edited sequences in the existing encoding-0 format. The provider is
+// called twice per chunk (measurement and writing), so it must be deterministic.
+// The sink supports random writes: payloads arrive sequentially, the signed header last.
+// Neither the complete sequence nor the complete output is retained in memory.
+using ChunkProvider = std::function<DecodedChunk(size_t)>;
+using WriteSink = std::function<void(uint64_t, const uint8_t *, size_t)>;
+void encodeSequence(const Header &, const ChunkProvider &, const WriteSink &,
+                    const EncodeOptions &, const Progress & = {});
 // What a reader says when a capture is not ours, or has been altered since it was
 // made. Every signature failure reports the same thing on purpose: telling a caller
 // which check failed only helps whoever is trying to get past them.

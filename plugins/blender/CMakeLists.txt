@@ -24,6 +24,7 @@ set(addon_files
     playback.py
     properties.py
     operators.py
+    scatter.py
     interface.py
     logo.png)
 set(addon_sources "")

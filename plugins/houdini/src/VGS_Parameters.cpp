@@ -236,6 +236,20 @@ PRM_Name noShPlayingName(parm::NoShPlaying, "Off While Playing");
 PRM_Name linearizeName(parm::Linearize, "Linearize Color");
 PRM_Name castShadowsName(parm::CastShadows, "Cast Shadows in Karma");
 PRM_Name fitSceneName(parm::FitScene, "Fit Scene");
+PRM_Name scatterHeadingName(parm::ScatterHeading, "Scatter");
+PRM_Name pointsName(parm::Points, "Points");
+PRM_Name variantsName(parm::Variants, "Variants");
+PRM_Name phaseSpreadName(parm::PhaseSpread, "Phase Spread");
+PRM_Name speedVariationName(parm::SpeedVariation, "Speed Variation");
+PRM_Name seedName(parm::Seed, "Seed");
+PRM_Name outputName(parm::Output, "Output");
+PRM_Name outputItems[] = {
+    PRM_Name("auto", "Auto"),
+    PRM_Name("packed", "Packed Instances"),
+    PRM_Name("splats", "Splats"),
+    PRM_Name(),
+};
+PRM_ChoiceList outputMenu(PRM_CHOICELIST_SINGLE, outputItems);
 
 PRM_Name loopModeItems[] = {
     PRM_Name("capture", "From Capture"),
@@ -262,6 +276,10 @@ PRM_Range phaseRange(PRM_RANGE_RESTRICTED, 0.0, PRM_RANGE_RESTRICTED, 1.0);
 PRM_Range startFrameRange(PRM_RANGE_RESTRICTED, 0, PRM_RANGE_UI, 300);
 PRM_Range speedRange(PRM_RANGE_UI, -4.0, PRM_RANGE_UI, 4.0);
 PRM_Range densityRange(PRM_RANGE_RESTRICTED, 0.01, PRM_RANGE_RESTRICTED, 1.0);
+PRM_Range variantsRange(PRM_RANGE_RESTRICTED, 0, PRM_RANGE_UI, 32);
+PRM_Range unitRange(PRM_RANGE_RESTRICTED, 0.0, PRM_RANGE_UI, 1.0);
+PRM_Range seedRange(PRM_RANGE_UI, 0, PRM_RANGE_UI, 100);
+PRM_Default variantsDefault(8);
 
 PRM_SpareData filePattern(PRM_SpareArgs()
                           << PRM_SpareToken(PRM_SpareData::getFileChooserPatternToken(),
@@ -317,12 +335,43 @@ PRM_Template captureTemplates[] = {
     PRM_Template(PRM_CALLBACK, 1, &fitSceneName, nullptr, nullptr, nullptr, onFitScene, nullptr, 1,
                  "Set the scene's frame rate to the capture's, and its frame range to play it "
                  "once at this speed."),
+    PRM_Template(PRM_HEADING, 1, &scatterHeadingName),
+    PRM_Template(PRM_STRING_OPREF, PRM_TYPE_DYNAMIC_PATH, 1, &pointsName, nullptr, nullptr,
+                 nullptr, nullptr, &PRM_SpareData::sopPath, 1,
+                 "A SOP whose points each get a copy of the capture, placed by P, orient and "
+                 "pscale, each at its own time. The SOP's first input does the same and wins. "
+                 "Empty, with nothing wired in, plays the capture once, where it is."),
+    PRM_Template(PRM_INT_J, 1, &variantsName, &variantsDefault, nullptr, &variantsRange,
+                 nullptr, nullptr, 1,
+                 "How many different timelines the copies share. Each point takes one at "
+                 "random. What a frame costs grows with this, not with the number of copies. "
+                 "0 gives every point its own."),
+    PRM_Template(PRM_FLT_J, 1, &phaseSpreadName, PRMoneDefaults, nullptr, &unitRange, nullptr,
+                 nullptr, 1,
+                 "How much of the capture the variants' starting points cover: 1 spreads them "
+                 "over all of it, 0 starts them all at Phase."),
+    PRM_Template(PRM_FLT_J, 1, &speedVariationName, PRMzeroDefaults, nullptr, &unitRange,
+                 nullptr, nullptr, 1,
+                 "How much the variants' speeds differ, as a fraction of Speed: 0.2 plays them "
+                 "between 0.8 and 1.2 times as fast."),
+    PRM_Template(PRM_INT_J, 1, &seedName, PRMzeroDefaults, nullptr, &seedRange, nullptr,
+                 nullptr, 1, "Changes which variant each point gets, and the variants' speeds."),
+    PRM_Template(PRM_ORD, 1, &outputName, PRMzeroDefaults, &outputMenu, nullptr, nullptr,
+                 nullptr, 1,
+                 "Auto writes every copy's splats for the viewport and packed instances for "
+                 "renders. Packed Instances writes each timeline's splats once and puts a "
+                 "packed instance of them on every point: a frame costs what the timelines "
+                 "cost, and Solaris gets USD instances, which Karma renders right; Houdini's "
+                 "viewport misplaces them. Splats writes every copy out, which the viewport "
+                 "draws right and SOPs can edit."),
     PRM_Template(),
 };
 
 const char *const linkedParms[] = {
     parm::File,  parm::Phase,  parm::StartFrame,  parm::Speed,     parm::LoopMode,    parm::Density,
-    parm::UpAxis, parm::UseSh, parm::NoShPlaying, parm::Linearize, parm::CastShadows, nullptr,
+    parm::UpAxis, parm::UseSh, parm::NoShPlaying, parm::Linearize, parm::CastShadows,
+    parm::Points, parm::Variants, parm::PhaseSpread, parm::SpeedVariation, parm::Seed,
+    parm::Output, nullptr,
 };
 
 } // namespace vgs

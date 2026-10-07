@@ -16,6 +16,11 @@
 namespace vgs {
 using namespace detail;
 const char *attributeName(uint32_t id) {
+#ifdef VGS_TEMPORAL_EXPERIMENT
+  static const char *native[] = {"native_records", "native_tracks", "native_values",
+      "native_times", "native_bases", "native_steps", "native_deltas"};
+  if (id >= 64 && id <= 70) return native[id - 64];
+#endif
   static const char *shared[] = {"scale_lut",
                                  "sh_static_codebooks",
                                  "sh_temporal_codebooks",
@@ -153,7 +158,13 @@ Header readHeader(const uint8_t *data, size_t size) {
   // A tick is timeNumerator / timeDenominator seconds: 1/30 here, but 1/24, 1/25,
   // 1/50, 1/60 or 1001/30000 are all expressible.
   const double rate = h.timeNumerator ? double(h.timeDenominator) / h.timeNumerator : 0;
-  if (h.encoding || !np || np > 64 || !nc || nc > 1000000 || ne > 64 ||
+  const uint32_t maxEncoding =
+#ifdef VGS_TEMPORAL_EXPERIMENT
+      1;
+#else
+      0;
+#endif
+  if (h.encoding > maxEncoding || !np || np > 64 || !nc || nc > 1000000 || ne > 64 ||
       !nl || nl > 64 ||
       h.headerSize != tablesSize(np, nl, ne, nc) ||
       metadataBytes > MaxMetadataSize ||

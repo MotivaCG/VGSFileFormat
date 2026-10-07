@@ -10,12 +10,13 @@ into the point cloud's attributes, which Blender draws natively.
     playback.py    which frame each capture shows, and writing it into Blender
     properties.py  per-capture settings and add-on preferences
     operators.py   import, reload, fit the scene to a capture
+    scatter.py     a capture scattered over points, instanced with Geometry Nodes
     interface.py   the panel and the menu entry
 """
 
-from . import interface, operators, playback, properties
+from . import interface, operators, playback, properties, scatter
 
-_modules = (properties, operators, interface, playback)
+_modules = (properties, operators, scatter, interface, playback)
 
 
 def register():

@@ -134,6 +134,7 @@ signing key - and builds `decoder/wasm/` instead of the static library. See
 | `VGS_BUILD_TESTS` | `ON` | the test programs, run with `ctest` |
 | `VGS_BUILD_WASM` | `OFF` | build the WebAssembly decoder instead of the libraries |
 | `VGS_BUILD_SHARED` | `OFF` | build DLLs (`.so`) exporting the C interface, instead of static libraries |
+| `VGS_ENTROPY_EXPERIMENT` | `OFF` | native per-page entropy profiling and search comparison tool |
 | `VGS_CACHE_BEHIND` | per target | decoded chunks kept behind the one being played |
 | `VGS_CACHE_AHEAD` | per target | decoded chunks kept ahead of it |
 | `VGS_CACHE_MAX_BYTES` | per target | ceiling on the decoded chunks held |
@@ -264,6 +265,24 @@ including the JavaScript one, on purpose.
 | `vgsdump capture.vgs 1.5 frame.ply` | one instant as a Gaussian splat `.ply` |
 | `vgsexport capture.vgs out/` | the whole capture as a numbered `.ply` sequence |
 | `vgspagecost capture.vgs` | where the bytes and decoding time go, per attribute and per detail level, and what a CPU-sorting player spends |
+
+The recommended export uses the defaults: Standard entropy coding, 65536 target rows
+per page, and temporal SH splitting disabled. The source's SH degree is preserved
+by default (`--sh 3`). The temporal decoder loop optimization is always active in
+the updated decoder and also applies to existing captures; it needs no encoder flag.
+
+Two experimental opt-in encoder settings preserve decoded attributes and the existing stream syntax:
+`--entropy-search` compares more rANS precisions, bit splits and table representations;
+`--split-temporal-sh` divides the temporal SH dictionary into complete sample blocks
+near `--page-rows`. The first trades encoding time for size, the second trades a little
+size for smaller decode tasks. Both are off by default. The C++ setters are
+`setEntropySearch(bool)` and `setTemporalShPageSplit(bool)`; the C interface exposes
+`vgs_encoder_set_entropy_search` and `vgs_encoder_set_temporal_sh_page_split`.
+See [the measurements and reproduction commands](experiments/entropy/README.md).
+Neither option is recommended as a general decode-speed improvement: entropy search
+saved less than 0.1% in the tested exports, while SH splitting left overall preparation
+time essentially unchanged and increased the observed WASM heap in one capture.
+See the [four-capture review and compatibility checks](docs/DECODER_EXPECTATIONS_REVIEW.md).
 
 `vgsexport` is the bridge to everything that does not read VGS - the 3DGS tools, the DCC
 importers, the training code all read per-frame `.ply`. Expect it to be large: a capture is

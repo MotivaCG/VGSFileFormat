@@ -90,6 +90,10 @@ enum vgs_motion_type_setting { VGS_ENCODE_MOTION_IN_PLACE = 0, VGS_ENCODE_MOTION
 VGS_ENCODER_API void vgs_encoder_set_motion_type(vgs_encoder *, int type);
 VGS_ENCODER_API void vgs_encoder_set_moving_speed(vgs_encoder *, float speed);
 VGS_ENCODER_API void vgs_encoder_set_page_rows(vgs_encoder *, uint32_t rows);
+/** Experimental lossless size search; slower encode, no decode speed guarantee. Default: disabled. */
+VGS_ENCODER_API void vgs_encoder_set_entropy_search(vgs_encoder *, int enabled);
+  /** Experimental smaller SH tasks; decoder memory may grow. Default: disabled. */
+VGS_ENCODER_API void vgs_encoder_set_temporal_sh_page_split(vgs_encoder *, int enabled);
 
 VGS_ENCODER_API void vgs_encoder_set_id(vgs_encoder *, const char *);
 VGS_ENCODER_API void vgs_encoder_set_title(vgs_encoder *, const char *);

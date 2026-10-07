@@ -126,6 +126,23 @@ if(NOT VGS_BUILD_WASM)
 endif()
 add_subdirectory(decoder)
 
+option(VGS_ENTROPY_EXPERIMENT "Build native per-page entropy diagnostics" OFF)
+if(VGS_ENTROPY_EXPERIMENT AND NOT VGS_BUILD_WASM)
+  add_subdirectory(experiments/entropy)
+endif()
+
+option(VGS_TEMPORAL_EXPERIMENT "Build isolated native temporal codec experiments" OFF)
+if(VGS_TEMPORAL_EXPERIMENT AND VGS_BUILD_WASM)
+  target_compile_definitions(vgsdecoder_wasm PRIVATE VGS_TEMPORAL_EXPERIMENT=1)
+endif()
+if(VGS_TEMPORAL_EXPERIMENT AND NOT VGS_BUILD_WASM)
+  if(VGS_BUILD_SHARED)
+    message(FATAL_ERROR "Temporal experiments require a static isolated build")
+  endif()
+  target_compile_definitions(vgsencoder PRIVATE VGS_TEMPORAL_EXPERIMENT=1)
+  add_subdirectory(experiments/temporal)
+endif()
+
 # Native only, like the encoder: a plugin is loaded into a desktop application.
 if(VGS_BUILD_PLUGINS AND NOT VGS_BUILD_WASM)
   add_subdirectory(plugins)

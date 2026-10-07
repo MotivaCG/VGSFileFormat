@@ -1,0 +1,107 @@
+--- a/src/vgs/vgspack.mjs
++++ b/src/vgs/vgspack.mjs
+@@ -92,6 +92,13 @@
+     const name = attributeName(page.attribute);
+     if (!name) continue;                          // an attribute this viewer ignores
+     const stride = page.bytes.length / page.rows, group = groups[page.group];
++    // Borrow only complete attributes. No input view escapes in the output.
++    // The caller must keep this layout alive and unchanged until packing finishes.
++    if (page.firstRow === 0 && page.rows === page.totalRows) {
++      group.arrays.set(name, page.bytes);
++      yield;
++      continue;
++    }
+     let dest = group.arrays.get(name);
+     if (!dest) { dest = new Uint8Array(page.totalRows * stride); group.arrays.set(name, dest); }
+     if (page.kind === 3) {
+@@ -134,11 +141,16 @@
+   const u32 = bytes => new Uint32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength >> 2);
+ 
+   // --- per splat, concatenated over the groups and packed three words at a time
+-  const splatA = new Uint32Array(total * 4);
+-  const splatB = new Uint32Array(total * 4);
+-  const splatC = new Uint32Array(total * 4);
+-  const shStaticIdx = hasSh ? new Uint32Array(total * planes) : null;
+-  const shTemporalIdx = hasSh ? new Uint32Array(total * planes) : null;
++  const splatATexture = yield* texture('RGBA32U', total, null);
++  const splatA = splatATexture.data;
++  const splatBTexture = yield* texture('RGBA32U', total, null);
++  const splatB = splatBTexture.data;
++  const splatCTexture = yield* texture('RGBA32U', total, null);
++  const splatC = splatCTexture.data;
++  const shStaticIdxTexture = hasSh ? yield* texture('R32U', total * planes, null) : null;
++  const shStaticIdx = shStaticIdxTexture?.data;
++  const shTemporalIdxTexture = hasSh ? yield* texture('R32U', total * planes, null) : null;
++  const shTemporalIdx = shTemporalIdxTexture?.data;
+   const posTermChunks = [], rotTermChunks = [], posSampleChunks = [], rotSampleChunks = [];
+   const groupA = new Float32Array(MAX_GROUPS * 4), groupB = new Float32Array(MAX_GROUPS * 4);
+ 
+@@ -212,11 +224,17 @@
+     at += n;
+   }
+ 
+-  const join = function* (parts) {
+-    const out = new Uint8Array(parts.reduce((n, c) => n + c.byteLength, 0));
++  // Copy each group directly into the final texture, including its zero padding.
++  const textureParts = function* (format, count, parts) {
++    const result = yield* texture(format, count, null);
++    const bytes = new Uint8Array(result.data.buffer);
+     let offset = 0;
+-    for (const part of parts) { yield* copyBatches(out, part, offset); offset += part.byteLength; }
+-    return out;
++    for (const part of parts) {
++      if (offset >= bytes.length) break;
++      yield* copyBatches(bytes, part.subarray(0, bytes.length - offset), offset);
++      offset += part.byteLength;
++    }
++    return result;
+   };
+ 
+   const intervals = shared.intervals;
+@@ -229,15 +247,15 @@
+     rotDelta: yield* texture('R8U', rotationEntries * intervals * 4, array(shared, 'rotation_delta_indices')),
+     rotLut: yield* texture('R32F', 256, array(shared, 'rotation_delta_lut')),
+     // per splat
+-    splatA: yield* texture('RGBA32U', total, splatA),
+-    splatB: yield* texture('RGBA32U', total, splatB),
+-    splatC: yield* texture('RGBA32U', total, splatC),
+-    shStaticIdx: hasSh ? yield* texture('R32U', total * planes, shStaticIdx) : null,
+-    shTemporalIdx: hasSh ? yield* texture('R32U', total * planes, shTemporalIdx) : null,
+-    posTerms: posTerms ? yield* texture('R32U', posTerms, yield* join(posTermChunks)) : null,
+-    rotTerms: rotTerms ? yield* texture('R16U', rotTerms, yield* join(rotTermChunks)) : null,
+-    posSample: posSampleTexels ? yield* texture('RG32U', posSampleTexels, yield* join(posSampleChunks)) : null,
+-    rotSample: rotSampleTexels ? yield* texture('R32U', rotSampleTexels, yield* join(rotSampleChunks)) : null,
++    splatA: splatATexture,
++    splatB: splatBTexture,
++    splatC: splatCTexture,
++    shStaticIdx: shStaticIdxTexture,
++    shTemporalIdx: shTemporalIdxTexture,
++    posTerms: posTerms ? yield* textureParts('R32U', posTerms, posTermChunks) : null,
++    rotTerms: rotTerms ? yield* textureParts('R16U', rotTerms, rotTermChunks) : null,
++    posSample: posSampleTexels ? yield* textureParts('RG32U', posSampleTexels, posSampleChunks) : null,
++    rotSample: rotSampleTexels ? yield* textureParts('R32U', rotSampleTexels, rotSampleChunks) : null,
+     shBooks: null,
+     luts: null
+   };
+@@ -248,8 +266,8 @@
+   if (hasSh) {
+     const staticEntries = planes * 3 * shStatic, temporalEntries = samples * planes * 3 * shTemporal;
+     booksTemporal = staticEntries;
+-    const source = [new Uint16Array(array(shared, 'sh_static_codebooks').buffer, 0, staticEntries * 3),
+-                    new Uint16Array(array(shared, 'sh_temporal_codebooks').buffer, 0, temporalEntries * 3)];
++    const source = [new Uint16Array(array(shared, 'sh_static_codebooks').buffer, array(shared, 'sh_static_codebooks').byteOffset, staticEntries * 3),
++                    new Uint16Array(array(shared, 'sh_temporal_codebooks').buffer, array(shared, 'sh_temporal_codebooks').byteOffset, temporalEntries * 3)];
+     const books = yield* texture('RGBA16F', staticEntries + temporalEntries, null);
+     const pixels = books.data;                         // raw binary16 bits, four per texel
+     let out = 0;
+@@ -265,8 +283,8 @@
+ 
+   // Scale and base colour share one small texture.
+   {
+-    const scale = new Float32Array(array(shared, 'scale_lut').buffer.slice(0, 1024));
+-    const sh0 = new Uint16Array(array(shared, 'sh0_base_lut').buffer.slice(0, 512));
++    const scale = new Float32Array(array(shared, 'scale_lut').buffer, array(shared, 'scale_lut').byteOffset, 256);
++    const sh0 = new Uint16Array(array(shared, 'sh0_base_lut').buffer, array(shared, 'sh0_base_lut').byteOffset, 256);
+     const luts = yield* texture('RG32F', 256, null, 256);
+     const pairs = luts.data;
+     for (let i = 0; i < 256; i++) { pairs[i * 2] = scale[i]; pairs[i * 2 + 1] = halfToFloat(sh0[i]); }

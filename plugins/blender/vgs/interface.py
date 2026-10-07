@@ -3,12 +3,13 @@
 """The capture panel in the point cloud's data properties, and File > Import."""
 
 import os
+import textwrap
 
 import bpy
 import bpy.utils.previews
 from bpy.types import Panel
 
-from . import playback
+from . import playback, scatter
 from .operators import VGS_OT_fit_scene, VGS_OT_import, VGS_OT_reload
 
 
@@ -21,6 +22,19 @@ _LOGO_SCALE = 5.0
 
 def _logo_icon():
     return _previews["logo"].icon_id if _previews is not None else 0
+
+
+def _wrapped_note(layout, context, text):
+    """A paragraph as labels, broken to the panel's width: a label does not wrap by itself,
+    and a long one is cut off in a narrow editor."""
+    width = context.region.width if context.region is not None else 300
+    scale = context.preferences.system.ui_scale
+    # About 7 pixels a character at scale 1, less the icon and the panel's margins.
+    columns = max(20, int((width - 50 * scale) / (7.0 * scale)))
+    column = layout.column(align=True)
+    column.scale_y = 0.8
+    for index, line in enumerate(textwrap.wrap(text, columns)):
+        column.label(text=line, icon='INFO' if index == 0 else 'BLANK1')
 
 
 class DATA_PT_vgs_capture(Panel):
@@ -68,6 +82,14 @@ class DATA_PT_vgs_capture(Panel):
         row = layout.row(align=True)
         row.operator(VGS_OT_fit_scene.bl_idname, icon='TIME')
         row.operator(VGS_OT_reload.bl_idname, text="", icon='FILE_REFRESH')
+        # Ways to lay copies of the capture out. One sample for now, offered as such: a
+        # scatter onto the other selected object's points, which the operator explains.
+        header, body = layout.panel("vgs_distribution", default_closed=True)
+        header.label(text="Distribution")
+        if body:
+            _wrapped_note(body, context, scatter.NOTE)
+            body.operator(scatter.VGS_OT_scatter.bl_idname, text="Sample: Scatter on Points",
+                          icon='PARTICLES')
 
         info, error = playback.status(pointcloud)
         if error:
@@ -104,16 +126,24 @@ def _menu_import(self, context):
     self.layout.operator(VGS_OT_import.bl_idname, text="VGS (.vgs, .pgs)")
 
 
+def _menu_object(self, context):
+    self.layout.separator()
+    self.layout.operator(scatter.VGS_OT_scatter.bl_idname, text="VGS Scatter on Points")
+    self.layout.operator(scatter.VGS_OT_remove_scatter.bl_idname)
+
+
 def register():
     global _previews
     _previews = bpy.utils.previews.new()
     _previews.load("logo", os.path.join(os.path.dirname(__file__), "logo.png"), 'IMAGE')
     bpy.utils.register_class(DATA_PT_vgs_capture)
     bpy.types.TOPBAR_MT_file_import.append(_menu_import)
+    bpy.types.VIEW3D_MT_object.append(_menu_object)
 
 
 def unregister():
     global _previews
+    bpy.types.VIEW3D_MT_object.remove(_menu_object)
     bpy.types.TOPBAR_MT_file_import.remove(_menu_import)
     bpy.utils.unregister_class(DATA_PT_vgs_capture)
     if _previews is not None:
