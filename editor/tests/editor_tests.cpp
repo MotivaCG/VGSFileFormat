@@ -3,6 +3,7 @@
 #include "filehistory.h"
 #include "presetstore.h"
 #include "isolation.h"
+#include "displayscaling.h"
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonArray>
@@ -14,6 +15,11 @@
 class EditorTests : public QObject {
     Q_OBJECT
 private slots:
+    void compactDensityMatchesFullHdAndFourK() {
+        QCOMPARE(compactDisplayScale({1920,1080}),.875);QCOMPARE(compactDisplayScale({3840,2160}),1.0);
+        QCOMPARE(compactDisplayScale({1080,1920}),.875);QCOMPARE(compactDisplayScale({2560,1440}),1.0);
+        QCOMPARE(compactDisplayScale({0,0}),1.0);QCOMPARE(compactDisplayScale({1280,720}),.875);
+    }
     void animationOffsetsInterpolationEditingAndPersistence() {
         Project project;project.modifiers.clear();project.transform.position={10,20,30};project.transform.rotation={0,0,90};project.transform.scale={2,2,2};const auto reference=project.transform;
         Modifier first;first.id=Project::newId();first.name="Animation";first.type=ModifierType::AnimateTransform;Transform a,b;b.position={4,0,0};b.rotation={0,0,90};b.scale={2,2,2};first.animation.setKey(0,a);first.animation.setKey(10,b);project.modifiers={first};project.selectedModifier=first.id;

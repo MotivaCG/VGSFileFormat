@@ -14,5 +14,12 @@
         <file alias="ghost_off.png">assets/icons/ghost_off.png</file>
         <file alias="eye.png">assets/icons/eye.png</file>
         <file alias="eye_off.png">assets/icons/eye_off.png</file>
+        <file alias="spin_up.png">assets/theme/UpArrow.png</file>
+        <file alias="spin_down.png">assets/theme/DownArrow.png</file>
+        <file alias="spin_up_disabled.png">assets/theme/UpArrowDisabled.png</file>
+        <file alias="spin_down_disabled.png">assets/theme/DownArrowDisabled.png</file>
+        <file alias="combo_arrow.png">assets/theme/dropArrowInv.png</file>
+        <file alias="combo_arrow.svg">assets/theme/ComboArrow.svg</file>
+        <file alias="combo_arrow_disabled.svg">assets/theme/ComboArrowDisabled.svg</file>
     </qresource>
 </RCC>

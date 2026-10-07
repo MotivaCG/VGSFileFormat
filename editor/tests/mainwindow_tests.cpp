@@ -3,6 +3,7 @@
 #include "rangeslider.h"
 #include "exportcapture.h"
 #include "vgssign.h"
+#include "editortheme.h"
 #include "capturesettingsdialog.h"
 #include <QApplication>
 #include <QSurfaceFormat>
@@ -90,7 +91,7 @@ private slots:
         auto enter=[&](QDoubleSpinBox *field,double value) {field->setFocus();field->selectAll();QTest::keyClicks(field,field->locale().toString(value,'f',3));QTest::keyClick(field,Qt::Key_Return);};
         secondsButton->click();QVERIFY(secondsButton->isChecked());QCOMPARE(frameField->prefix(),QString("Time "));QCOMPARE(frameField->suffix(),QString(" of 0.167 s"));
         QTRY_VERIFY(frameField->width()>=frameField->sizeHint().width());QVERIFY(inField->width()>=inField->sizeHint().width());QVERIFY(outField->width()>=outField->sizeHint().width());
-        QVERIFY(inField->geometry().right()<frameField->geometry().left());QVERIFY(frameField->geometry().right()<outField->geometry().left());QVERIFY(outField->geometry().right()<secondsButton->geometry().left());
+        QVERIFY(secondsButton->geometry().right()<inField->geometry().left());QVERIFY(inField->geometry().right()<frameField->geometry().left());QVERIFY(frameField->geometry().right()<outField->geometry().left());
         enter(frameField,.045);QCOMPARE(sliderControl->playheadValue(),1);QCOMPARE(frameField->value(),.033);
         enter(frameField,.044);QCOMPARE(sliderControl->playheadValue(),1);QCOMPARE(frameField->value(),.033);
         enter(frameField,.061);QCOMPARE(sliderControl->playheadValue(),2);QCOMPARE(frameField->value(),.067);
@@ -210,7 +211,7 @@ private slots:
 };
 int main(int argc,char **argv) {
     QSurfaceFormat format;format.setVersion(3,3);format.setProfile(QSurfaceFormat::CoreProfile);format.setDepthBufferSize(24);QSurfaceFormat::setDefaultFormat(format);
-    QApplication app(argc,argv);QCoreApplication::setOrganizationName("Editor Tests");QCoreApplication::setApplicationName("MainWindow Tests");
+    QApplication app(argc,argv);EditorTheme::install();QCoreApplication::setOrganizationName("Editor Tests");QCoreApplication::setApplicationName("MainWindow Tests");
     MainWindowTests tests;return QTest::qExec(&tests,argc,argv);
 }
 #include "mainwindow_tests.moc"

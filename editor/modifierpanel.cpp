@@ -1,4 +1,5 @@
 #include "modifierpanel.h"
+#include "editortheme.h"
 #include <QTreeWidget>
 #include <QToolButton>
 #include <QComboBox>
@@ -138,13 +139,10 @@ ModifierPanel::ModifierPanel(QWidget *parent):QWidget(parent) {
     tree_->setColumnHidden(1,true);
     tree_->setUniformRowHeights(true);tree_->setRootIsDecorated(false);tree_->setSelectionMode(QAbstractItemView::SingleSelection);tree_->setMinimumHeight(90);tree_->setMaximumHeight(190);
     tree_->setAlternatingRowColors(true);
-    auto palette=tree_->palette();palette.setColor(QPalette::Base,QColor(35,35,35));palette.setColor(QPalette::AlternateBase,QColor(41,41,41));
-    palette.setColor(QPalette::Highlight,QColor(73,73,73));palette.setColor(QPalette::HighlightedText,Qt::white);tree_->setPalette(palette);
-    tree_->setStyleSheet("QTreeWidget { border: 1px solid #484848; border-radius: 3px; color: #eeeeee; }"
-        "QTreeWidget::item { padding: 2px 5px; border-bottom: 1px solid #303030; }"
-        "QTreeWidget::item:selected { background: #494949; color: #ffffff; }"
-        "QTreeWidget::item:hover:!selected { background: #353535; }"
-        "QHeaderView::section { background: #303030; color: #bbbbbb; padding: 4px 7px; border: 0; border-bottom: 1px solid #484848; } ");
+    auto palette=tree_->palette();palette.setColor(QPalette::Base,EditorTheme::field());palette.setColor(QPalette::AlternateBase,EditorTheme::panel());
+    palette.setColor(QPalette::Highlight,QColor("#333a40"));palette.setColor(QPalette::HighlightedText,EditorTheme::text());tree_->setPalette(palette);
+    tree_->setStyleSheet("QTreeWidget {border-radius: 3px;} QTreeWidget::item {padding: 2px 5px; border-bottom: 1px solid #23262a;}"
+        "QTreeWidget::item:selected {background: #333a40; color: #e7eaeb;} QTreeWidget::item:hover:!selected {background: #1b1e21;}");
     tree_->header()->setSectionResizeMode(0,QHeaderView::ResizeToContents);tree_->header()->setSectionResizeMode(1,QHeaderView::ResizeToContents);tree_->header()->setSectionResizeMode(2,QHeaderView::Stretch);
     auto *delegate=new CoverageDelegate(tree_);delegate->seek=[this](int frame) {emit seekFrame(frame);};tree_->setItemDelegate(delegate);tree_->setToolTip(tr("Click the eye to enable or disable a modifier. Select a modifier to edit its properties in Tools. Click a keyframe diamond to seek."));layout->addWidget(tree_);
     connect(tree_,&QTreeWidget::currentItemChanged,this,[this](QTreeWidgetItem *item) {

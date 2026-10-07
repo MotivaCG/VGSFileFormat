@@ -1,5 +1,6 @@
 #include "viewport.h"
 #include "viewcube.h"
+#include "editortheme.h"
 #include <QApplication>
 #include <QImage>
 #include <QMouseEvent>
@@ -51,7 +52,7 @@ private slots:
         auto second=std::make_shared<RenderFrame>();second->seconds=.75;second->points={{{.7f,0,0},{0,0,1},0}};viewport.setFrame(second);Transform moved;moved.position={.1f,0,0};viewport.setTransform(moved);
         const auto image=viewport.grabFramebuffer();int ghostPixels=0,bluePixels=0;int brightest=0;
         for (int y=int(image.height()*.2);y<int(image.height()*.8);++y) for (int x=int(image.width()*.1);x<int(image.width()*.7);++x) {const auto c=image.pixelColor(x,y);if (c.blue()>200 && c.red()<20 && c.green()<20) ++bluePixels;
-            if (x<image.width()/2 && c.red()>35 && std::abs(c.red()-c.green())<2 && std::abs(c.red()-c.blue())<2) {++ghostPixels;brightest=std::max(brightest,c.red());}}
+            if (x<image.width()/2 && c.red()>35 && std::abs(c.red()-c.green())<6 && std::abs(c.red()-c.blue())<6) {++ghostPixels;brightest=std::max(brightest,c.red());}}
         QVERIFY(ghostPixels>10);QVERIFY(bluePixels>10);QVERIFY2(brightest<140,"Overlapping ghost points must remain translucent rather than accumulating opacity.");QCOMPARE(viewport.ghostTime(),.25);
         QCOMPARE(viewport.ghostOpacity(),.15f);
         auto ghostBrightness=[&] {const auto rendered=viewport.grabFramebuffer();int peak=0;for (int y=int(rendered.height()*.2);y<int(rendered.height()*.8);++y) for (int x=int(rendered.width()*.1);x<rendered.width()/2;++x) peak=std::max(peak,rendered.pixelColor(x,y).red());return peak;};
@@ -59,7 +60,7 @@ private slots:
         viewport.setGhostOpacity(0);QVERIFY(ghostBrightness()<30);QVERIFY(viewport.ghostEnabled());viewport.setGhostOpacity(.15f);
         QVERIFY(viewport.focusVisible());QVERIFY(std::abs(viewport.camera().target.x()-.05f)<1e-5f);
         QVERIFY(!viewport.setGhost(false));QCOMPARE(viewport.ghostPointCount(),size_t(0));QVERIFY(viewport.focusVisible());QVERIFY(std::abs(viewport.camera().target.x()-.8f)<1e-5f);
-        const auto disabled=viewport.grabFramebuffer();int grey=0;for (int y=int(disabled.height()*.2);y<int(disabled.height()*.8);++y) for (int x=int(disabled.width()*.1);x<int(disabled.width()*.48);++x) {const auto c=disabled.pixelColor(x,y);if (c.red()>35 && std::abs(c.red()-c.green())<2 && std::abs(c.red()-c.blue())<2) ++grey;}QCOMPARE(grey,0);
+        const auto disabled=viewport.grabFramebuffer();int grey=0;for (int y=int(disabled.height()*.2);y<int(disabled.height()*.8);++y) for (int x=int(disabled.width()*.1);x<int(disabled.width()*.48);++x) {const auto c=disabled.pixelColor(x,y);if (c.red()>35 && std::abs(c.red()-c.green())<6 && std::abs(c.red()-c.blue())<6) ++grey;}QCOMPARE(grey,0);
         QVERIFY(viewport.setGhost(true));viewport.setFrame({});QVERIFY(!viewport.ghostEnabled());QCOMPARE(viewport.ghostPointCount(),size_t(0));
     }
     void modifierPreviewUsesCropUnionAndOriginalRgb() {
@@ -138,14 +139,14 @@ private slots:
         auto *cube = viewport.findChild<ViewCube *>(); QVERIFY(cube);
         auto background = [&] { const auto image = cube->grab().toImage(); const double dpr = cube->devicePixelRatioF(); return image.pixelColor(qRound(14*dpr),qRound(96*dpr)); };
         viewport.setViewPreset(ViewPreset::Front);
-        QTest::mouseMove(cube,{20,97}); auto selected = background(); QVERIFY(selected.green()>selected.red());
+        QTest::mouseMove(cube,{20,97}); auto selected = background(); QVERIFY(selected.green()>selected.red()+20);
         QEvent leave(QEvent::Leave); QApplication::sendEvent(cube,&leave);
         drag(viewport,{20,220},{50,240}); QCOMPARE(viewport.camera().preset,ViewPreset::Free);
-        auto free = background(); QCOMPARE(free.green(),free.red());
+        auto free = background(); QCOMPARE(free,EditorTheme::field());
         QMouseEvent hover(QEvent::MouseMove,QPointF(20,97),QPointF(cube->mapToGlobal(QPoint(20,97))),Qt::NoButton,Qt::NoButton,Qt::NoModifier);
         QApplication::sendEvent(cube,&hover); auto hovered = background(); QVERIFY(hovered.green()>hovered.red());
         QCOMPARE(viewport.camera().preset,ViewPreset::Free); QApplication::sendEvent(cube,&leave);
-        free = background(); QCOMPARE(free.green(),free.red());
+        free = background(); QCOMPARE(free,EditorTheme::field());
     }
     void localMoveAndCropTargetIsolation() {
         Viewport viewport; viewport.resize(500,500); viewport.setGrid(false); viewport.setFrame(std::make_shared<RenderFrame>());

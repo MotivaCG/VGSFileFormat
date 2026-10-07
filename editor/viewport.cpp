@@ -1,5 +1,6 @@
 #include "viewport.h"
 #include "viewcube.h"
+#include "editortheme.h"
 #include <QElapsedTimer>
 #include <QMouseEvent>
 #include <QKeyEvent>
@@ -149,7 +150,7 @@ Viewport::Viewport(QWidget *parent) : QOpenGLWidget(parent) {
     setMouseTracking(true);
     viewCube_ = new ViewCube(this); viewCube_->move(width()-viewCube_->width()-12,12);
     statistics_=new QLabel(this);statistics_->setObjectName("viewportStatistics");statistics_->move(18,12);
-    statistics_->setAttribute(Qt::WA_TransparentForMouseEvents);statistics_->setStyleSheet("color: #aaaaaa; font-family: 'Segoe UI'; font-size: 9pt; background: transparent;");
+    statistics_->setAttribute(Qt::WA_TransparentForMouseEvents);statistics_->setStyleSheet(QString("color: %1; font-family: 'Segoe UI'; font-size: 9pt; background: transparent;").arg(EditorTheme::mutedText().name()));
     connect(viewCube_,&ViewCube::viewSelected,this,[this](ViewPreset preset) { setViewPreset(preset); setFocus(); });
 }
 Viewport::~Viewport() { cleanup(); }
@@ -257,7 +258,7 @@ void Viewport::paintGL() {
     if (!initialized_) return;
     QPainter painter(this);
     painter.beginNativePainting();
-    glClearColor(0.075f,0.075f,0.075f,1);
+    const auto background=EditorTheme::viewportBackground();glClearColor(float(background.redF()),float(background.greenF()),float(background.blueF()),1);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     if (!error_.isEmpty()) {
         painter.endNativePainting(); painter.setPen(Qt::white);
@@ -344,7 +345,7 @@ void Viewport::paintGL() {
     glBindVertexArray(0);
     glDisable(GL_DEPTH_TEST); glDisable(GL_PROGRAM_POINT_SIZE);
     painter.endNativePainting();
-    painter.setPen(QColor("#aaa")); painter.setFont(QFont("Segoe UI", 9));
+    painter.setPen(EditorTheme::mutedText()); painter.setFont(QFont("Segoe UI", 9));
     painter.drawText(18, height()-18, mode_ == TransformMode::None
         ? tr("Drag: orbit   ·   Right drag: pan   ·   Wheel: zoom   ·   G/R/S: transform")
         : tr("Drag a gizmo handle to transform   ·   Repeat G/R/S: Global/Local   ·   Esc: exit mode"));

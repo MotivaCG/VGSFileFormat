@@ -1,5 +1,7 @@
 #include "mainwindow.h"
 #include "exportcapture.h"
+#include "displayscaling.h"
+#include "editortheme.h"
 
 #include <QApplication>
 #include <QCommandLineParser>
@@ -12,6 +14,8 @@
 #include <QTimer>
 #include <cstdio>
 #include <QFileInfo>
+#include <QScreen>
+#include <QWindow>
 
 int main(int argc, char *argv[])
 {
@@ -24,46 +28,13 @@ int main(int argc, char *argv[])
     QApplication a(argc, argv);
     a.setApplicationName("VGS Editor"); a.setOrganizationName("THE4DSCANNER");
     a.setWindowIcon(QIcon(":/icons/logo.png"));
-    a.setStyle("Fusion");
-    QPalette palette;
-    // Match Gracia4DGSConverter's Fusion palette and green section headings.
-    palette.setColor(QPalette::Window,QColor(43,43,43));
-    palette.setColor(QPalette::WindowText,Qt::white);
-    palette.setColor(QPalette::Base,QColor(25,25,25));
-    palette.setColor(QPalette::AlternateBase,QColor(43,43,43));
-    palette.setColor(QPalette::Text,Qt::white);
-    palette.setColor(QPalette::Button,QColor(53,53,53));
-    palette.setColor(QPalette::ButtonText,Qt::white);
-    palette.setColor(QPalette::ToolTipBase,QColor(53,53,53));
-    palette.setColor(QPalette::ToolTipText,Qt::white);
-    palette.setColor(QPalette::Link,QColor(46,109,78));
-    palette.setColor(QPalette::Highlight,QColor(46,109,78));
-    palette.setColor(QPalette::HighlightedText,Qt::black);
-    palette.setColor(QPalette::BrightText,Qt::red);
-    palette.setColor(QPalette::Disabled,QPalette::Window,QColor(33,33,33));
-    palette.setColor(QPalette::Disabled,QPalette::WindowText,QColor(120,120,120));
-    palette.setColor(QPalette::Disabled,QPalette::Text,QColor(120,120,120));
-    palette.setColor(QPalette::Disabled,QPalette::Base,QColor(30,30,30));
-    palette.setColor(QPalette::Disabled,QPalette::Button,QColor(35,35,35));
-    palette.setColor(QPalette::Disabled,QPalette::ButtonText,QColor(100,100,100));
-    a.setPalette(palette);
-    a.setStyleSheet("QWidget { font-family: 'Segoe UI'; font-size: 10pt; }"
-        "QDockWidget::title { padding: 9px; background: #303030; }"
-        "QGroupBox { border: 1px solid #555; border-radius: 4px; margin-top: 16px; padding: 12px 4px 4px 4px; }"
-        "QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; }"
-        "QDoubleSpinBox, QSpinBox { padding: 5px; min-height: 20px; }"
-        "QPushButton { padding: 7px; }"
-        "QToolButton:checked { background: #2e6d4e; border: 1px solid #41b018; border-radius: 3px; }"
-        "QPushButton:checked { background: #2e6d4e; border: 1px solid #41b018; border-radius: 3px; }"
-        "QLabel#assetTitle { font-size: 14pt; font-weight: 600; }"
-        "QLabel#sectionTitle { color: rgb(240,60,90); font-size: 12pt; font-weight: 600; }"
-        "QWidget#timeline { background: #2b2b2b; border-top: 1px solid #555; }"
-        "QStatusBar { color: #aaa; }");
+    EditorTheme::install();
     QCommandLineParser parser; parser.addHelpOption();
     parser.addPositionalArgument("capture", "A .vgs, .pgs, .mint or .vgsproj file.");
     QCommandLineOption smoke("smoke-test", "Open, seek, verify a project and save a PNG preview.", "output");
+    QCommandLineOption smokeScreen("smoke-screen", "Maximise an automated preview on the specified screen index.", "index");
     QCommandLineOption exportOption("export-capture", "Export a .vgsproj to VGS/PGS/MINT without opening the editor window.", "output");
-    parser.addOption(smoke); parser.addOption(exportOption); parser.process(a);
+    parser.addOption(smoke);parser.addOption(smokeScreen); parser.addOption(exportOption); parser.process(a);
     if (parser.isSet(exportOption)) {
         const auto paths=parser.positionalArguments();Project project;QString error;
         if (paths.size()!=1 || !Project::read(paths.first(),&project,&error)) {
@@ -94,6 +65,12 @@ int main(int argc, char *argv[])
     });
     MainWindow w(nullptr,smokeSettings ? smokeSettings->path()+"/presets" : QString());
     w.show();
+    if (parser.isSet(smoke) && parser.isSet(smokeScreen)) {
+        bool valid=false;const int index=parser.value(smokeScreen).toInt(&valid);const auto screens=QGuiApplication::screens();
+        if (!valid || index<0 || index>=screens.size()) {std::fprintf(stderr,"Invalid smoke screen index.\n");return 2;}
+        auto *screen=screens[index];w.windowHandle()->setScreen(screen);w.move(screen->availableGeometry().topLeft()+QPoint(10,10));w.showMaximized();
+        qInfo("Preview screen: %s, logical %dx%d, DPR %.2f",qPrintable(screen->name()),screen->size().width(),screen->size().height(),screen->devicePixelRatio());
+    }
     const auto paths = parser.positionalArguments();
     if (parser.isSet(smoke)) {
         if (paths.size() != 1) parser.showHelp(1);

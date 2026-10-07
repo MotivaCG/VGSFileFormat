@@ -17,9 +17,11 @@ scale transforms the entire capture without changing point size.
 - `G` / `R` / `S`: activate Move / Rotate / Scale. Repeat the active mode's key to switch Global/Local. `Esc`: leave all transform modes.
 - `Shift+G`: toggle the world grid and reference axes.
 
-The timeline uses Gracia Converter's range control: drag the upper In marker, lower Out marker, or white playhead. Above it, In/Frame/Out sit on the left, transport buttons are centred and Loop/Speed sit on the right. The frame field reads **Frame X of Y**, with a zero-based index and the full capture frame count. The clock toggle after Out switches all three fields to seconds; typed values snap to the nearest valid frame. In and Out are inclusive and define the export range. Current time / full duration appears below decode statistics in the viewport. The unit preference is remembered without changing the project range.
-The side panel provides position, XYZ Euler orientation in degrees, XYZ scale and
-reset, with each XYZ triplet on one horizontal row. The scene matrix is
+The timeline uses Gracia Converter's range control: drag the upper In marker, lower Out marker, or white playhead. Above it, the clock toggle comes first, followed by In/Frame/Out on the left; transport buttons are centred and Loop/Speed sit on the right. The frame field reads **Frame X of Y**, with a zero-based index and the full capture frame count. The clock switches all three fields to seconds; typed values snap to the nearest valid frame. In and Out are inclusive and define the export range. Current time / full duration appears below decode statistics in the viewport. The unit preference is remembered without changing the project range.
+The single **Transform** group provides Position, Rotation (XYZ Euler degrees)
+and Scale on three compact rows, plus reset. X/Y/Z labels use the red, green and
+blue modifier colours. Numeric values remain fully editable without stepper
+buttons; keyboard and wheel stepping still work. The scene matrix is
 `T * Rz * Ry * Rx * H * S`, where H preserves shear from global scaling.
 View-dependent colour uses spherical harmonics automatically,
 with no UI toggle. Older projects with SH disabled still open with SH enabled.
@@ -248,12 +250,29 @@ splat rendering are future work.
 ## Appearance and resources
 
 Application text and numeric formatting use English. Open/save dialogs use the
-native operating-system UI and follow its language. The Fusion palette follows
-Gracia4DGSConverter: neutral dark greys with section headings in RGB (190, 0, 51),
-green highlights and green section headings. The application icon
-and timeline illustration use unmodified local copies in `assets/gracia`.
+native operating-system UI and follow its language. The Fusion theme adapts
+Motiva Layama's surfaces, with a subtly lighter, more neutral variation: window RGB (28, 29, 30), raised panels (36, 37, 38),
+subtle borders and flat, recessed controls. The viewport independently keeps its
+original dark neutral background, RGB (19, 19, 19). The editor keeps red headings
+RGB (240, 60, 90), green interaction accents and its modifier colours.
+The theme is local in `editortheme.h/.cpp`; no Layama checkout is needed at runtime.
+Small spinner/combo arrow PNGs are copied from Layama into `assets/theme` and
+embedded in the editor resources.
+Combo boxes use a larger local SVG chevron for a clear dropdown indicator;
+their popups highlight the hovered item with a brighter grey. Ghost and timeline
+unit toggles share the theme's neutral checked-button styling.
+The application icon uses the copied Gracia artwork in `assets/gracia`.
 Resources are embedded in both qmake and CMake builds. The ICO is also embedded
 in the Windows executable. No converter checkout is required at runtime.
+
+**View > Compact controls on smaller screens** starts enabled. On Full HD it
+reduces fixed controls, icons, spacing and margins to 87.5%, keeping fonts at
+their readable native size. A 4K display at 150% retains the normal layout.
+Qt always uses native Windows DPI for rendering, repaint regions, mouse
+coordinates and tooltip placement; the editor sets no scale environment overrides.
+Moving between monitors adapts control geometry using public widget APIs.
+The preference belongs to the application and is excluded from capture presets.
+Restart applies a preference change; disabling it restores normal widget geometry.
 
 ## Recent files and preferences
 

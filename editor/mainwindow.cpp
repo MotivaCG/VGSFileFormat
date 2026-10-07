@@ -1,4 +1,5 @@
 #include "mainwindow.h"
+#include "displayscaling.h"
 #include "viewport.h"
 #include "modifierpanel.h"
 #include "animationpanel.h"
@@ -22,6 +23,7 @@
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QGridLayout>
 #include <QImage>
 #include <QInputDialog>
 #include <QLineEdit>
@@ -32,6 +34,10 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QMimeData>
+#include <QMouseEvent>
+#include <QAbstractItemView>
+#include <QHelpEvent>
+#include <QToolTip>
 #include <QPushButton>
 #include <QPixmap>
 #include <QPainter>
@@ -45,6 +51,7 @@
 #include <QSlider>
 #include <QStatusBar>
 #include <QStyle>
+#include <QStyleOptionButton>
 #include <QToolButton>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -199,6 +206,7 @@ MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory) : QMainWi
     thread_.start(); syncUi(); title();
     restoreGeometry(settings_.value("geometry").toByteArray());
     restoreState(settings_.value("windowState").toByteArray());
+    installCompactControls(this,settings_.value("Interface/CompactDensity",true).toBool());
 }
 MainWindow::~MainWindow() {
     playback_.stop(); thread_.quit(); thread_.wait();
@@ -248,7 +256,7 @@ void MainWindow::buildUi() {
     inFrame_=field("timelineIn");frameSpin_=field("timelineFrame");outFrame_=field("timelineOut");
     timelineSecondsButton_=new QToolButton;timelineSecondsButton_->setObjectName("timelineSeconds");timelineSecondsButton_->setCheckable(true);timelineSecondsButton_->setChecked(settings_.value("Playback/SecondsDisplay",false).toBool());
     timelineSecondsButton_->setIcon(timelineClockIcon());timelineSecondsButton_->setIconSize({22,22});timelineSecondsButton_->setFixedSize(30,30);timelineSecondsButton_->setAccessibleName(tr("Timeline units"));
-    timelineSecondsButton_->setStyleSheet("QToolButton:checked {background: #494949; border: 1px solid #888888; border-radius: 3px;}");frames->addWidget(timelineSecondsButton_);
+    timelineSecondsButton_->setProperty("neutralToggle",true);frames->insertWidget(0,timelineSecondsButton_);
     controls->addWidget(frameControls);controls->addStretch();
     auto *playbackControls=new QWidget;playbackControls->setObjectName("timelinePlaybackControls");playbackControls->setSizePolicy(QSizePolicy::Maximum,QSizePolicy::Fixed);
     auto *transport=new QHBoxLayout(playbackControls);transport->setContentsMargins(0,0,0,0);transport->setSpacing(5);
@@ -318,46 +326,50 @@ void MainWindow::buildUi() {
     connect(captureSettingsButton_,&QPushButton::clicked,this,&MainWindow::editCaptureSettings);
     side->addWidget(presetBox_);
     transformTarget_ = new QLabel(tr("Transform target: Capture (local)")); side->addWidget(transformTarget_);
-    const QString groups[] = {tr("Position"), tr("Orientation (degrees)"), tr("Scale")};
+    const QString groups[] = {tr("Position"), tr("Rotation"), tr("Scale")};
     const QString axes[] = {"X", "Y", "Z"};
     const QString shortcuts[] = {"G", "R", "S"};
     const QString modeIcons[] = {":/icons/move.png",":/icons/rotate.png",":/icons/scale.png"};
     const QString accessibleModes[] = {tr("Move"),tr("Rotate"),tr("Scale")};
     const QString modeNames[] = {tr("Click to toggle Move. G activates Move; repeat G to switch Global/Local. Esc exits all modes."),tr("Click to toggle Rotate. R activates Rotate; repeat R to switch Global/Local. Esc exits all modes."),tr("Click to toggle Scale. S activates Scale; repeat S to switch Global/Local. Crop scaling stays anchored at its base. Esc exits all modes.")};
     transformModes_ = new QButtonGroup(this); transformModes_->setExclusive(true);
+    auto *transformBox=new QGroupBox(tr("Transform"));transformBox->setObjectName("transformProperties");transformBox->setProperty("transformGroup",true);
+    transformBox->setStyleSheet("QDoubleSpinBox {padding: 3px; min-height: 18px; font-size: 9pt;}");
+    auto *transformLayout=new QGridLayout(transformBox);transformLayout->setHorizontalSpacing(5);transformLayout->setVerticalSpacing(6);
+    const QColor axisColours[]={{240,60,90},{85,185,105},{67,147,214}};
     for (int g = 0; g < 3; ++g) {
-        auto *box = new QGroupBox(groups[g]); auto *row = new QHBoxLayout(box);
-        box->setProperty("transformGroup",true);
-        row->setSpacing(5);
+        transformLayout->addWidget(new QLabel(groups[g]),g,0);
         auto *modeButton = new QToolButton; modeButtons_[g] = modeButton;
         modeButton->setText(shortcuts[g]); modeButton->setCheckable(true); modeButton->setFixedSize(34,34);
         modeButton->setIcon(editorButtonIcon(modeIcons[g],true)); modeButton->setIconSize(QSize(26,26));
         modeButton->setToolButtonStyle(Qt::ToolButtonIconOnly); modeButton->setAccessibleName(accessibleModes[g]);
         modeButton->setToolTip(modeNames[g]); modeButton->setObjectName(QString("transformMode_%1").arg(g));
-        transformModes_->addButton(modeButton,g); row->addWidget(modeButton);
+        transformModes_->addButton(modeButton,g); transformLayout->addWidget(modeButton,g,1);
         connect(modeButton,&QToolButton::clicked,this,[this,g] { toggleTransformMode(TransformMode(g+1)); viewport_->setFocus(); });
         auto *space = new QToolButton; spaceButtons_[g] = space; space->setText(tr("Global"));
         space->setObjectName(QString("coordinateSpace_%1").arg(g)); space->setFixedSize(34,34);
         space->setToolButtonStyle(Qt::ToolButtonIconOnly); space->setIconSize(QSize(26,26));
-        space->setIcon(editorButtonIcon(":/icons/global.png",false)); row->addWidget(space);
+        space->setIcon(editorButtonIcon(":/icons/global.png",false)); transformLayout->addWidget(space,g,2);
         connect(space,&QToolButton::clicked,this,[this,g] { toggleCoordinateSpace(g); viewport_->setFocus(); });
         for (int axis = 0; axis < 3; ++axis) {
             auto *spin = new QDoubleSpinBox; transform_[g][axis] = spin; spin->setDecimals(g == 1 ? 2 : 4);
+            spin->setButtonSymbols(QAbstractSpinBox::NoButtons);
             spin->setRange(g == 2 ? 0.0001 : (g == 1 ? -36000 : -1e6), g == 2 ? 10000 : (g == 1 ? 36000 : 1e6));
             spin->setSingleStep(g == 1 ? 1 : 0.01);
             // Avoid a wide minimum size driven by the largest representable number.
             spin->setMinimumWidth(0); spin->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Fixed);
             spin->setObjectName(QString("transform_%1_%2").arg(g).arg(axis));
-            spin->setToolTip(groups[g] + " " + axes[axis]);
+            spin->setToolTip(groups[g] + " " + axes[axis] + (g==1 ? tr(" (degrees)") : QString()));
             auto *label = new QLabel(axes[axis]); label->setBuddy(spin);
-            row->addWidget(label); row->addWidget(spin,1);
+            label->setObjectName(QString("transformAxis_%1_%2").arg(g).arg(axis));label->setStyleSheet(QString("color: %1; font-weight: 600;").arg(axisColours[axis].name()));
+            transformLayout->addWidget(label,g,3+axis*2);transformLayout->addWidget(spin,g,4+axis*2);transformLayout->setColumnStretch(4+axis*2,1);
             connect(spin, &QDoubleSpinBox::valueChanged, this, [this, g, axis](double v) {
                 if (syncing_) return;
                 viewport_->setDisplayedComponent(g,axis,float(v));
             });
         }
-        side->addWidget(box);
     }
+    side->addWidget(transformBox);
     auto *reset = new QPushButton(tr("Reset transform")); side->addWidget(reset);
     resetTransformButton_ = reset;
     reset->setToolTip(tr("Reset the current target's position, rotation and scale (Alt+Home)."));
@@ -451,7 +463,7 @@ void MainWindow::buildUi() {
     grid_ = new QCheckBox(tr("Grid and axes")); viewForm->addRow(grid_);
     grid_->setToolTip(tr("Toggle the world grid and reference axes (Shift+G)."));
     ghostButton_=new QToolButton;ghostButton_->setObjectName("ghostComparison");ghostButton_->setCheckable(true);ghostButton_->setChecked(false);ghostButton_->setIcon(editorButtonIcon(":/icons/ghost.png",true,":/icons/ghost_off.png"));ghostButton_->setIconSize({24,24});ghostButton_->setFixedSize(30,30);ghostButton_->setAccessibleName(tr("Ghost comparison"));
-    ghostButton_->setStyleSheet("QToolButton:checked {background: #494949; border: 1px solid #888888; border-radius: 3px;}");
+    ghostButton_->setProperty("neutralToggle",true);
     ghostButton_->setToolTip(tr("Freeze currently visible points as a faint white ghost with a soft outline. Timeline and transform changes leave the copy fixed. Switch off to remove it."));displayLayout->addWidget(ghostButton_,0,Qt::AlignHCenter);
     ghostOpacitySlider_=new QSlider(Qt::Horizontal);ghostOpacitySlider_->setObjectName("ghostOpacity");ghostOpacitySlider_->setRange(0,100);ghostOpacitySlider_->setValue(15);ghostOpacitySlider_->setEnabled(false);
     ghostOpacitySlider_->setAccessibleName(tr("Ghost opacity"));ghostOpacitySlider_->setToolTip(tr("Adjust the frozen ghost's opacity."));ghostOpacitySlider_->setMinimumHeight(16);
@@ -468,6 +480,9 @@ void MainWindow::buildUi() {
     toolsScroll->setWidget(tools_);
     dock->setWidget(toolsScroll); dock->setMinimumWidth(450); addDockWidget(Qt::RightDockWidgetArea, dock);
     auto *viewMenu = menuBar()->addMenu(tr("View")); viewMenu->addAction(dock->toggleViewAction());
+    auto *density=viewMenu->addAction(tr("Compact controls on smaller screens"));density->setObjectName("compactInterfaceDensity");density->setCheckable(true);density->setChecked(settings_.value("Interface/CompactDensity",true).toBool());
+    density->setToolTip(tr("Reduce control sizes and spacing on smaller screens while preserving readable text and native Windows DPI. Changes apply at the next launch."));
+    connect(density,&QAction::toggled,this,[this](bool compact) {settings_.setValue("Interface/CompactDensity",compact);statusBar()->showMessage(tr("Interface density preference saved. Restart the editor to apply it."),7000);});
     auto *frameAction = viewMenu->addAction(tr("Focus visible"),this,&MainWindow::fitCurrentTarget);
     frameAction->setShortcuts({QKeySequence(Qt::KeypadModifier|Qt::Key_Delete),QKeySequence(Qt::KeypadModifier|Qt::Key_Period),QKeySequence(Qt::KeypadModifier|Qt::Key_Comma),QKeySequence("F")});
     frameAction->setToolTip(tr("Focus visible capture and ghost points (Numpad decimal / Numpad Del / F)."));
@@ -731,6 +746,22 @@ void MainWindow::receiveFrame(FramePtr frame) {
             QCoreApplication::sendPostedEvents(nullptr,QEvent::LayoutRequest);
             if (!grab().save(smokeOutput_+".alternate-time.ui.png")) {qApp->exit(2);return;}
             timelineSecondsButton_->setChecked(seconds);
+            auto *modifierType=modifierPanel_->findChild<QComboBox *>("newModifierType");modifierType->showPopup();
+            QCoreApplication::sendPostedEvents(nullptr,QEvent::LayoutRequest);
+            auto *popupView=modifierType->view();const auto hoverPosition=popupView->visualRect(modifierType->model()->index(2,0)).center();
+            QMouseEvent hover(QEvent::MouseMove,QPointF(hoverPosition),QPointF(popupView->viewport()->mapToGlobal(hoverPosition)),Qt::NoButton,Qt::NoButton,Qt::NoModifier);
+            QApplication::sendEvent(popupView->viewport(),&hover);
+            if (!popupView->window()->grab().save(smokeOutput_+".dropdown-hover.png")) {qApp->exit(2);return;}
+            modifierType->hidePopup();
+            QStyleOptionButton buttonOption;buttonOption.initFrom(captureSettingsButton_);buttonOption.state|=QStyle::State_MouseOver;buttonOption.rect=captureSettingsButton_->rect();buttonOption.text=captureSettingsButton_->text();
+            QPixmap hoverImage(captureSettingsButton_->size()*captureSettingsButton_->devicePixelRatioF());hoverImage.setDevicePixelRatio(captureSettingsButton_->devicePixelRatioF());hoverImage.fill(Qt::transparent);
+            QPainter buttonPainter(&hoverImage);buttonPainter.setFont(captureSettingsButton_->font());captureSettingsButton_->style()->drawControl(QStyle::CE_PushButton,&buttonOption,&buttonPainter,captureSettingsButton_);buttonPainter.end();
+            if (!hoverImage.save(smokeOutput_+".button-hover.png")) {qApp->exit(2);return;}
+            QHelpEvent buttonTip(QEvent::ToolTip,captureSettingsButton_->rect().center(),captureSettingsButton_->mapToGlobal(captureSettingsButton_->rect().center()));
+            QApplication::sendEvent(captureSettingsButton_,&buttonTip);
+            for (auto *window:QApplication::topLevelWidgets()) if (window->windowType()==Qt::ToolTip)
+                if (!window->grab().save(smokeOutput_+".button-tooltip.png")) {qApp->exit(2);return;}
+            QToolTip::hideText();
             for (int g=0; g<3; ++g) {
                 setTransformMode(TransformMode(g+1));
                 for (int other=0; other<3; ++other) if (modeButtons_[other]->isChecked() != (other==g)) { qApp->exit(2); return; }

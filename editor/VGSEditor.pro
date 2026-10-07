@@ -2,6 +2,10 @@ QT += core gui widgets opengl openglwidgets
 CONFIG += c++17
 DEFINES += VGS_AUTHORING
 TARGET = VGSEditor
+SOURCES += $$PWD/displayscaling.cpp
+HEADERS += $$PWD/displayscaling.h
+SOURCES += $$PWD/editortheme.cpp
+HEADERS += $$PWD/editortheme.h
 VGS_ROOT = $$clean_path($$PWD/..)
 INCLUDEPATH += $$PWD/dependencies/eigen $$PWD $$PWD/dependencies/mint $$VGS_ROOT/decoder/include \
     $$VGS_ROOT/core/include/vgs $$VGS_ROOT/core/crypto $$VGS_ROOT/core/src
@@ -13,7 +17,7 @@ SOURCES += $$PWD/main.cpp $$PWD/mainwindow.cpp $$PWD/viewport.cpp $$PWD/viewcube
     $$VGS_ROOT/core/crypto/tweetnacl.c
 HEADERS += $$PWD/mainwindow.h $$PWD/viewport.h $$PWD/viewcube.h $$PWD/captureworker.h $$PWD/project.h $$PWD/filehistory.h $$PWD/presetstore.h $$PWD/capturesettings.h $$PWD/capturesettingsdialog.h $$PWD/dependencies/mint/mintfile.h
 msvc: QMAKE_CXXFLAGS += /utf-8 /bigobj
-win32: LIBS += -lopengl32
+win32: LIBS += -lopengl32 -luser32
 RESOURCES += $$PWD/resources.qrc
 win32: RC_ICONS = $$PWD/assets/gracia/logo.ico
 DISTFILES += $$PWD/README.md $$PWD/dependencies/mint/README.md

@@ -1,4 +1,5 @@
 #include "viewcube.h"
+#include "editortheme.h"
 #include <QMouseEvent>
 #include <QPainter>
 #include <algorithm>
@@ -38,18 +39,18 @@ ViewPreset ViewCube::hit(const QPointF &point) const {
 }
 void ViewCube::paintEvent(QPaintEvent *) {
     QPainter painter(this); painter.setRenderHint(QPainter::Antialiasing);
-    painter.setPen(QColor("#555")); painter.setBrush(QColor("#252525")); painter.drawRoundedRect(rect().adjusted(1,1,-1,-1),6,6);
+    painter.setPen(EditorTheme::fieldBorder()); painter.setBrush(EditorTheme::panel()); painter.drawRoundedRect(rect().adjusted(1,1,-1,-1),6,6);
     painter.setFont(QFont("Segoe UI",8)); painter.setPen(QColor("#bbb"));
     for (const auto &face : faces()) {
         const bool active = face.preset==camera_.preset;
-        painter.setBrush(face.preset==hover_ ? QColor("#497957") : active ? QColor("#2e6d4e") : QColor("#414141"));
+        painter.setBrush(face.preset==hover_ ? QColor("#497957") : active ? QColor("#2e6d4e") : EditorTheme::panelBorder());
         painter.setPen(QColor("#aaa")); painter.drawPolygon(face.polygon);
         const int index = int(std::find(std::begin(presets),std::end(presets),face.preset)-std::begin(presets));
         painter.setPen(Qt::white); painter.drawText(face.polygon.boundingRect(),Qt::AlignCenter,QString::fromLatin1(names[index]));
     }
     for (int i=0; i<6; ++i) {
-        painter.setBrush(presets[i]==hover_ ? QColor("#497957") : presets[i]==camera_.preset ? QColor("#2e6d4e") : QColor("#353535"));
-        painter.setPen(QColor("#555")); painter.drawRoundedRect(buttonRect(i),3,3);
+        painter.setBrush(presets[i]==hover_ ? QColor("#497957") : presets[i]==camera_.preset ? QColor("#2e6d4e") : EditorTheme::field());
+        painter.setPen(EditorTheme::fieldBorder()); painter.drawRoundedRect(buttonRect(i),3,3);
         painter.setPen(Qt::white); painter.drawText(buttonRect(i),Qt::AlignCenter,QString::fromLatin1(names[i]));
     }
 }
