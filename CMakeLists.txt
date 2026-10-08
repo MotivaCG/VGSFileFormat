@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(VGSFileFormat VERSION 2.0.0 LANGUAGES C CXX)
+project(VGSFileFormat VERSION 3.0.0 LANGUAGES C CXX)
 
 # The VFGS container: an encoder, a decoder, and the codec they share.
 #

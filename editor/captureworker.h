@@ -33,6 +33,9 @@ struct CaptureInfo {
     QString path, title, format;
     double duration = 0, fps = 30;
     int frames = 0;
+    // Trained with anti-aliasing: Gracia .mint captures always, a .vgs when its header says
+    // so. Splats are then drawn with the matching opacity compensation.
+    bool antialiased = false;
     QVector3D minimum, maximum;
 };
 Q_DECLARE_METATYPE(CaptureInfo)

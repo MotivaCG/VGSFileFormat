@@ -92,6 +92,10 @@ VGS_ENCODER_API void vgs_encoder_set_moving_speed(vgs_encoder *handle, float spe
   self(handle)->encoder.setMovingSpeed(speed);
 }
 
+VGS_ENCODER_API void vgs_encoder_set_render_hints(vgs_encoder *handle, unsigned hints) {
+  self(handle)->encoder.setRenderHints(hints);
+}
+
 VGS_ENCODER_API void vgs_encoder_set_page_rows(vgs_encoder *handle, uint32_t rows) {
   self(handle)->encoder.setPageRows(rows);
 }

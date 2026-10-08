@@ -85,9 +85,9 @@ int main(int argc, char **argv) {
   const std::vector<uint8_t> original = readFile(argv[1]);
   mustAccept("untouched", original);
 
-  // The fixed header is the first 192 bytes: magic, version, sizes, timing, bounds, the
-  // playback mode, the motion. The signature block sits at signedSize and the payload
-  // after it.
+  // The fixed header is the first 256 bytes: magic, version, sizes, timing, bounds, the
+  // playback mode, the motion, the render hints and 64 reserved bytes. The signature block
+  // sits at signedSize and the payload after it.
   const uint64_t structural = vgsdec::Capture::structuralSize(original.data(), original.size());
 
   // The first eight bytes answer "what is this", not "is this genuine", and they get
@@ -102,12 +102,16 @@ int main(int argc, char **argv) {
   mustRefuse("the playback mode", original, 176);
   mustRefuse("the motion type", original, 180);
   mustRefuse("the moving speed", original, 184);
-  mustRefuse("the last byte of the fixed header", original, 191);
+  // A render hint only changes how the capture looks, and it is still signed: turning
+  // anti-aliasing on or off afterwards is an edit like any other.
+  mustRefuse("the render hints", original, 188);
+  mustRefuse("a reserved byte", original, 220);
+  mustRefuse("the last byte of the fixed header", original, 255);
 
   // Past the fixed header and before the signature: the tables and the metadata, which
   // is where a capture says what it is. Altering a title has to fail as hard as altering
   // a chunk offset.
-  const size_t afterHeader = 192;
+  const size_t afterHeader = 256;
   const size_t beforeSignature = size_t(structural) - 80;
   mustRefuse("the first table byte", original, afterHeader);
   mustRefuse("the middle of the tables", original, (afterHeader + beforeSignature) / 2);

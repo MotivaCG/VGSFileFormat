@@ -30,7 +30,10 @@ does not know the format, so there is no second implementation of it to keep in 
 The header is getters: `duration`, `frameCount`, `frameRate` (the capture's own, not
 always 30), `shDegree`, `bounds`, and `playbackMode`, one of the exported `PlaybackMode`
 values: how the capture's author means it to play. `motionType` and `movingSpeed` are
-reserved for later and read `MotionType.inPlace` and 0 for now.
+reserved for later and read `MotionType.inPlace` and 0 for now. `antialiased` says the
+capture was trained with anti-aliasing and is drawn with the matching opacity compensation
+(in PlayCanvas, `app.scene.gsplat.antiAlias = true`); without it its needle splats show as
+solid lines. `renderHints` holds every such `RenderHint` bit.
 
 `hasMotion` says whether the capture moves as a whole. `setTime` and `positionsAt` return
 it already moved, harmonics included. In packed mode, `motionAt(seconds)` gives

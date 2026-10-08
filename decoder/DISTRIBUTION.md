@@ -53,6 +53,13 @@ Besides its metadata, a capture says how its author means it to play:
 that way unless your user chooses otherwise. `motionType()` and `movingSpeed()` are
 reserved for later and read `InPlace` and 0 for now.
 
+`antialiased()` says how to draw it: the capture was trained with anti-aliasing (every
+capture converted from a Gracia `.mint` is). If your renderer widens a splat smaller than
+a pixel to a pixel, lower its opacity by the same factor - `sqrt(det(cov) / det(cov +
+0.3 I))` on the screen-space covariance, PlayCanvas' gsplat `antiAlias` - or the capture's
+needle splats show as solid lines. `renderHints()` holds all such bits; ignore the ones
+you do not know.
+
 A capture can also move as a whole - `hasMotion()` says so. Frames from `setTime` and
 `positionsAt` are already moved, spherical harmonics included, so a player that draws
 them needs nothing more. In `Output::Packed` the buffers hold the capture in its own

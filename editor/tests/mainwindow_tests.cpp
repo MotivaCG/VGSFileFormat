@@ -158,7 +158,8 @@ private slots:
         QTest::mouseClick(modifiers->viewport(),Qt::LeftButton,Qt::NoModifier,firstEye);QCOMPARE(modifiers->topLevelItem(0)->checkState(0),Qt::Checked);
         QCOMPARE(modifiers->topLevelItem(0)->text(2),QString());
         auto *add=window.findChild<QToolButton *>("addModifier"),*remove=window.findChild<QToolButton *>("removeModifier"),*duplicate=window.findChild<QToolButton *>("duplicateModifier");QVERIFY(add);QVERIFY(remove);QVERIFY(duplicate);
-        auto *newType=window.findChild<QComboBox *>("newModifierType");QVERIFY(newType);QCOMPARE(newType->findData(1),-1);newType->setCurrentIndex(newType->findData(0));QCOMPARE(newType->currentText(),QString("Crop"));add->click();
+        auto *newType=window.findChild<QComboBox *>("newModifierType");QVERIFY(newType);QCOMPARE(newType->findData(1),-1);
+        for (int i=0;i<newType->count();++i) QVERIFY2(newType->itemData(i,Qt::ToolTipRole).toString().size()>40,qPrintable(newType->itemText(i)));newType->setCurrentIndex(newType->findData(0));QCOMPARE(newType->currentText(),QString("Crop"));add->click();
         QCOMPARE(modifiers->topLevelItem(0)->text(0),QString("Crop"));QCOMPARE(modifiers->topLevelItemCount(),2);QCOMPARE(modifiers->currentItem()->text(1),QString("Crop cylinder"));QCOMPARE(modifiers->currentItem()->text(0),QString("Crop 2"));
         auto *shape=window.findChild<QComboBox *>("cropShape");QVERIFY(shape);shape->setCurrentIndex(shape->findData(int(CropShape::Box)));
         QVERIFY(QMetaObject::invokeMethod(shape,"activated",Qt::DirectConnection,Q_ARG(int,shape->currentIndex())));QCOMPARE(modifiers->currentItem()->text(1),QString("Crop box"));

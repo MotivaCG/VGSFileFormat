@@ -29,7 +29,7 @@ import { BufferedSource, BytesSource, toSource } from './vgssource.mjs';
 /** What a reader says about a capture it cannot vouch for. */
 export const INVALID_CAPTURE = 'invalid 4dgs capture';
 
-const FIXED_HEADER_SIZE = 192;
+const FIXED_HEADER_SIZE = 256;
 
 // Field and attribute numbers, matching the enums in vgswasm.cpp.
 const Field = {
@@ -40,7 +40,7 @@ const Number_ = {
   duration: 0, frameCount: 1, frameRate: 2, startSeconds: 3, shDegree: 4,
   maxSplatsPerFrame: 5, fileSize: 6, createdMillis: 7, chunkCount: 8,
   signatureKeyId: 9, signatureAlgorithm: 10, signedBytes: 11, version: 12, isPlain: 13,
-  playbackMode: 14, motionType: 15, movingSpeed: 16, hasMotion: 17,
+  playbackMode: 14, motionType: 15, movingSpeed: 16, hasMotion: 17, renderHints: 18,
 };
 const Chunk = { offset: 0, size: 1, startSeconds: 2, endSeconds: 3, splats: 4 };
 const Attribute = {
@@ -73,6 +73,11 @@ export const Detail = Object.freeze({ positions: 0, base: 1, full: 2 });
 export const PlaybackMode = Object.freeze({ once: 0, loop: 1, pingPong: 2 });
 /** Reserved, not used by any player yet; see VgsCapture.motionType. */
 export const MotionType = Object.freeze({ inPlace: 0, walking: 1 });
+/**
+ * How the splats are meant to be drawn, as bits; see VgsCapture.renderHints. A renderer
+ * honours the ones it knows and ignores the rest.
+ */
+export const RenderHint = Object.freeze({ antialiasedSplats: 1 });
 
 // The layout array written by vgs_chunk_layout, whose shape is described in vgswasm.cpp.
 const LAYOUT_HEADER = 4;
@@ -265,6 +270,13 @@ export class VgsCapture {
   get motionType() { return this.#module._vgs_number(Number_.motionType); }
   /** Reserved: how fast a walking capture moves, in its own units per second; 0 in place. */
   get movingSpeed() { return this.#module._vgs_number(Number_.movingSpeed); }
+  /** How the splats are meant to be drawn: RenderHint bits. */
+  get renderHints() { return this.#module._vgs_number(Number_.renderHints); }
+  /**
+   * Draw with anti-aliasing compensation: the capture was trained with it, and without it
+   * its needle splats show as solid lines. In PlayCanvas, the scene's gsplat antiAlias.
+   */
+  get antialiased() { return (this.renderHints & RenderHint.antialiasedSplats) !== 0; }
   /**
    * Whether the capture moves as a whole. Frames from setTime and positionsAt are
    * already moved; see motionAt for a renderer that draws the stored data itself.

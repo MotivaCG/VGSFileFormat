@@ -279,7 +279,8 @@ enum Number {
   NumberPlaybackMode,
   NumberMotionType,
   NumberMovingSpeed,
-  NumberHasMotion
+  NumberHasMotion,
+  NumberRenderHints
 };
 
 EMSCRIPTEN_KEEPALIVE double vgs_number(int which) {
@@ -304,6 +305,7 @@ EMSCRIPTEN_KEEPALIVE double vgs_number(int which) {
   case NumberMotionType: return double(int(capture->motionType()));
   case NumberMovingSpeed: return double(capture->movingSpeed());
   case NumberHasMotion: return capture->hasMotion() ? 1 : 0;
+  case NumberRenderHints: return double(capture->renderHints());
   default: return 0;
   }
 }

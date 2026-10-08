@@ -755,6 +755,7 @@ void FrameDecoder::evaluateInto(double normalized, bool includeSh, Frame *out,
     RankLookup positionRanks, rotationRanks;
     const uint8_t *scaleIndices = nullptr, *lifetimes = nullptr;
     const char *opacityWords = nullptr, *sh0Indices = nullptr, *sh0Words = nullptr;
+    const uint8_t *opacityScales = nullptr; // optional: a per-splat factor, or none
     const char *shStaticIndices = nullptr, *shTemporalIndices = nullptr;
   };
   std::vector<GroupPlan> plans;
@@ -782,6 +783,8 @@ void FrameDecoder::evaluateInto(double normalized, bool includeSh, Frame *out,
       }
       plan.scaleIndices = reinterpret_cast<const uint8_t *>(group->array("scale_indices"));
       plan.opacityWords = group->array("opacity_rq_indices");
+      if (group->arrays.count("opacity_scales"))
+        plan.opacityScales = reinterpret_cast<const uint8_t *>(group->array("opacity_scales"));
       plan.lifetimes = reinterpret_cast<const uint8_t *>(group->array("lifetimes"));
       plan.sh0Indices = group->array("sh0_base_indices");
       plan.sh0Words = group->array("sh0_rq_indices");
@@ -945,7 +948,10 @@ void FrameDecoder::evaluateInto(double normalized, bool includeSh, Frame *out,
         const uint64_t stage = (word >> (12 * k)) & 0xFFFull;
         opacity += basis.opacity[size_t(uint64_t(k) * opacityStride + stage)];
       }
-      out->opacity[size_t(written + i)] = clamp01(opacity);
+      opacity = clamp01(opacity);
+      if (plan.opacityScales)
+        opacity *= opacityScale(plan.opacityScales[i]);
+      out->opacity[size_t(written + i)] = opacity;
 
       const uint8_t begins = plan.lifetimes[i * 2];
       const uint8_t ends = plan.lifetimes[i * 2 + 1];
@@ -1132,6 +1138,9 @@ FrameDecoder::FrameDecoder(const DecodedChunk &chunk, double tick, Contents cont
   std::map<std::pair<uint32_t, uint32_t>, uint64_t> covered;
   for (const auto &item : chunk.pages) {
     const auto &p = item.descriptor;
+    // An optional attribute this reader cannot name: the policy allowed skipping it.
+    if (std::strcmp(attributeName(p.attribute), "unknown") == 0)
+      continue;
     if (p.group >= blocks.size() || !p.spec.rows ||
         item.bytes.size() != mgs::attributeSize(p.spec) ||
         p.firstRow > p.totalRows || p.spec.rows > p.totalRows - p.firstRow)
@@ -1158,8 +1167,9 @@ FrameDecoder::FrameDecoder(const DecodedChunk &chunk, double tick, Contents cont
                   item.bytes.size());
   }
   for (const auto &item : chunk.pages)
-    if (covered[{item.descriptor.group, item.descriptor.attribute}] !=
-        item.descriptor.totalRows)
+    if (std::strcmp(attributeName(item.descriptor.attribute), "unknown") != 0 &&
+        covered[{item.descriptor.group, item.descriptor.attribute}] !=
+            item.descriptor.totalRows)
       throw Error("incomplete attribute");
   // Validate all shapes and dictionary indices before any pointer-based
   // evaluation.
@@ -1218,6 +1228,8 @@ FrameDecoder::FrameDecoder(const DecodedChunk &chunk, double tick, Contents cont
     require(b, "sh0_base_indices", n * 3);
     require(b, "sh0_rq_indices", n * 8);
     require(b, "opacity_rq_indices", n * 8);
+    if (b.arrays.count("opacity_scales"))
+      require(b, "opacity_scales", n);
     if (!positionsOnly) {
       checkRq(b, "sh0_rq_indices", shared.sh0Entries / 5);
       checkRq(b, "opacity_rq_indices", shared.opacityEntries / 5);

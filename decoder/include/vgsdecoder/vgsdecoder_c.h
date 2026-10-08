@@ -132,6 +132,10 @@ VGS_DECODER_API int vgs_playback_mode(const vgs_capture *);
 enum vgs_motion_type { VGS_MOTION_IN_PLACE = 0, VGS_MOTION_WALKING = 1 };
 VGS_DECODER_API int vgs_motion_type(const vgs_capture *);
 VGS_DECODER_API float vgs_moving_speed(const vgs_capture *);
+/* How the splats are meant to be drawn: vgs_render_hint bits; unknown bits are ignored.
+ * VGS_ANTIALIASED_SPLATS: draw with anti-aliasing compensation (see vgsdecoder.h). */
+enum vgs_render_hint { VGS_ANTIALIASED_SPLATS = 1 };
+VGS_DECODER_API unsigned vgs_render_hints(const vgs_capture *);
 VGS_DECODER_API uint32_t vgs_sh_degree(const vgs_capture *);
 VGS_DECODER_API uint64_t vgs_max_splats_per_frame(const vgs_capture *);
 VGS_DECODER_API uint64_t vgs_file_size(const vgs_capture *);

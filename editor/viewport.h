@@ -45,6 +45,10 @@ public:
     // Spherical-harmonic bands the splats evaluate, 0 (base colour) to 3, or -1 for all the
     // capture has; points use them all.
     void setSplatShDegree(int degree);
+    // Whether the capture was trained with anti-aliasing, and its splats are drawn with the
+    // opacity compensation that goes with it (the VGS AntialiasedSplats render hint).
+    void setSplatAntialiasing(bool antialiased);
+    bool splatAntialiasing() const { return splatAntialiasing_; }
     int splatShDegree() const { return splatShDegree_; }
     void setDisplayControls(QWidget *controls);
     void setPlaybackTime(double seconds,double duration);
@@ -129,6 +133,7 @@ private:
     std::unique_ptr<QOpenGLShaderProgram> pointShader_, gridShader_, splatShader_;
     bool splats_ = false, splatsDirty_ = true, splatLimitReported_ = false;
     int splatShDegree_ = -1;
+    bool splatAntialiasing_ = false;
     GLuint splatVao_ = 0, cornerBuffer_ = 0, orderBuffer_ = 0, splatBuffer_ = 0, splatTexture_ = 0;
     std::vector<uint32_t> splatOrder_;
     std::vector<float> splatDepths_;

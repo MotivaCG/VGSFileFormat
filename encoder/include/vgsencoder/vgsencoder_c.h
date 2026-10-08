@@ -89,6 +89,9 @@ VGS_ENCODER_API void vgs_encoder_set_playback_mode(vgs_encoder *, int mode);
 enum vgs_motion_type_setting { VGS_ENCODE_MOTION_IN_PLACE = 0, VGS_ENCODE_MOTION_WALKING = 1 };
 VGS_ENCODER_API void vgs_encoder_set_motion_type(vgs_encoder *, int type);
 VGS_ENCODER_API void vgs_encoder_set_moving_speed(vgs_encoder *, float speed);
+/* How the splats are meant to be drawn: a combination of vgs_render_hint_setting bits. */
+enum vgs_render_hint_setting { VGS_ENCODE_ANTIALIASED_SPLATS = 1 };
+VGS_ENCODER_API void vgs_encoder_set_render_hints(vgs_encoder *, unsigned hints);
 VGS_ENCODER_API void vgs_encoder_set_page_rows(vgs_encoder *, uint32_t rows);
 /** Experimental lossless size search; slower encode, no decode speed guarantee. Default: disabled. */
 VGS_ENCODER_API void vgs_encoder_set_entropy_search(vgs_encoder *, int enabled);

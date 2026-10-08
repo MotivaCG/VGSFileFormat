@@ -64,6 +64,8 @@ int main(int argc, char **argv) {
   encoder.setPlaybackMode(vgsenc::PlaybackMode::PingPong);
   encoder.setMotionType(vgsenc::MotionType::Walking);
   encoder.setMovingSpeed(1.25f);
+  // The anti-aliasing hint, plus a bit no reader knows yet: hints are kept, never refused.
+  encoder.setRenderHints(vgsenc::AntialiasedSplats | 0x80000000u);
 
   if (!encoder.write(argv[2])) {
     std::fprintf(stderr, "encode failed: %s\n", encoder.lastError().c_str());
@@ -88,6 +90,9 @@ int main(int argc, char **argv) {
           "the playback mode survives");
     check(capture.motionType() == vgsdec::MotionType::Walking, "the motion type survives");
     check(capture.movingSpeed() == 1.25f, "the moving speed survives");
+    check(capture.antialiased(), "the anti-aliasing hint survives");
+    check(capture.renderHints() == (vgsdec::AntialiasedSplats | 0x80000000u),
+          "an unknown render hint is kept, not refused");
 
     check(capture.duration() > 0, "the timeline has a duration");
     check(capture.chunkCount() > 0, "the timeline has chunks");

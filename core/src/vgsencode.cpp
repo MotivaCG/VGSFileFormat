@@ -188,7 +188,9 @@ W headerBytes(const Header &h) {
   w.u32(uint32_t(h.playbackMode));
   w.u32(uint32_t(h.motionType));
   w.f32(h.movingSpeed);
-  w.u32(0);
+  w.u32(h.renderHints);
+  for (uint32_t i = 0; i < ReservedHeaderBytes / 8; ++i)
+    w.u64(0);
   for (const auto &p : h.policies) {
     w.u32(p.attribute);
     w.u32(p.codec);
@@ -809,6 +811,9 @@ static Bytes encodeSource(Source src, const uint8_t *mint, const EncodeOptions &
   for (const auto &kv : costs) {
     Policy p;
     p.attribute = kv.first;
+    // Readers that predate it may skip it: they draw the capture as it was before baking.
+    if (p.attribute == OpacityScales)
+      p.flags = OptionalAttribute;
     p.family = kv.second.family;
     uint64_t best = kv.second.raw;
     for (uint32_t m = 0; m < kv.second.models.size(); ++m)
@@ -830,6 +835,7 @@ static Bytes encodeSource(Source src, const uint8_t *mint, const EncodeOptions &
     throw Error("invalid VGS moving speed");
   h.motionType = options.motionType;
   h.movingSpeed = options.movingSpeed;
+  h.renderHints = options.renderHints;
   h.layers.push_back({0, BaseLayer, 0, 0});
   if (h.shDegree) {
     h.layers.push_back({1, StaticShLayer, 0, 0});

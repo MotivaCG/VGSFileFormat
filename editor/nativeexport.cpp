@@ -62,6 +62,7 @@ void normalizeSchemas(vgs::DecodedChunk &chunk) {
         switch (d.attribute) {
         case vgs::ScaleIndices:case vgs::Sh0Base:scalar(3,n,1,3);break;
         case vgs::Lifetimes:scalar(2,n,1,5);break;
+        case vgs::OpacityScales:scalar(1,n,1,0);break;
         case vgs::Sh0Terms:case vgs::OpacityTerms:packed(8,n,0,{12,12,12,12,12,4});break;
         case vgs::PositionBase:packed(8,n,0,{1,21,21,21});break;
         case vgs::PositionSamples:packed(8,n*S,1,{1,21,21,21});s.samples=S;break;
@@ -437,6 +438,32 @@ void rotateOrientations(vgs::DecodedChunk &c,const Project &project,const Export
     for (uint32_t group=1;group<c.groups.size();++group) {c.groups[group].flags|=2;vgs::DecodedPage page;page.descriptor.attribute=vgs::RotationSamples;page.descriptor.group=group;page.bytes=std::move(rotations[group]);c.pages.push_back(std::move(page));}
     c.groups[0].counts[4]=0;
 }
+// Bake anti-aliasing for plain renderers: every splat's covariance plus size^2 I, as in
+// Mip-Splatting's 3D filter, and its opacity lowered by the growth of its two largest axes
+// (bakedOpacityFactor in nativeexport.h says why). The scale
+// table takes the widening exactly - a scale is a table entry, and sqrt(s^2+b^2) keeps the
+// table's order - while the opacity, held in tables shared by many splats, takes it as a
+// per-splat factor in the optional opacity_scales attribute (combined with one already
+// there). Runs after transformPositions, so the table is in world units.
+void bakeAntialiasing(vgs::DecodedChunk &c,double size) {
+    if (size<=0) return;
+    auto &lutPage=get(c,vgs::ScaleLut);const size_t entries=lutPage.bytes.size()/4;const float b2=float(size*size);
+    std::vector<float> ratio(entries);
+    for (size_t i=0;i<entries;++i) {const float s=f32(lutPage.bytes.data()+i*4),grown=std::sqrt(s*s+b2);ratio[i]=grown>0 ? s/grown : 0;putFloat(lutPage.bytes.data()+i*4,grown);}
+    for (uint32_t group=1;group<c.groups.size();++group) {
+        const auto &indices=get(c,vgs::ScaleIndices,group).bytes;const size_t n=size_t(c.groups[group].splats);
+        if (indices.size()!=n*3) throw std::runtime_error("Invalid native scale indices.");
+        Bytes codes(n);auto *existing=find(c,vgs::OpacityScales,group);
+        for (size_t i=0;i<n;++i) {
+            const float ratios[3]={ratio[indices[i*3]],ratio[indices[i*3+1]],ratio[indices[i*3+2]]};
+            const float factor=bakedOpacityFactor(ratios);
+            const int code=int(vgs::opacityScaleCode(factor))+(existing ? int(existing->bytes[i]) : 0); // factors multiply: codes add
+            codes[i]=uint8_t(std::min(255,code));
+        }
+        if (existing) existing->bytes=std::move(codes);
+        else {vgs::DecodedPage page;page.descriptor.attribute=vgs::OpacityScales;page.descriptor.group=group;page.bytes=std::move(codes);c.pages.push_back(std::move(page));}
+    }
+}
 void transformPositions(vgs::DecodedChunk &c,const Project &p) {
     const auto model=p.transform.matrix();const double scale=uniformScale(model);
     const bool simple=axisUniform(model);
@@ -596,6 +623,7 @@ vgs::DecodedChunk editNativeChunk(vgs::DecodedChunk chunk,const NativeChunkPlan 
         if (statistics) statistics->notes << QStringLiteral("Baked rotations are sampled at native frame times.");
     }
     transformPositions(chunk,project);
+    bakeAntialiasing(chunk,project.antialiasingBake());
     compactRq(chunk,vgs::Sh0Terms,vgs::Sh0Trajectories,2,3);compactRq(chunk,vgs::OpacityTerms,vgs::OpacityTrajectories,3,1);
     compactResidual(chunk,true);compactResidual(chunk,false);compactSh(chunk,false);compactSh(chunk,true);
     normalizeSchemas(chunk);return chunk;

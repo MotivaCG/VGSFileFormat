@@ -120,6 +120,8 @@ vec3 position; vec3 color; float sourceId; float modifierVisibility;
 static const char *splatMain = R"GLSL(
 uniform vec2 viewportPixels;
 uniform bool orthographic;
+uniform bool antialiased;
+uniform float bakeSize; // Bake anti-aliasing, in the capture's own units; 0 for none
 out vec2 uv;
 mat3 rotationMatrix(vec4 q) { // xyzw
     q=normalize(q); float x=q.x,y=q.y,z=q.z,w=q.w;
@@ -132,14 +134,22 @@ void main() {
     vec4 a=texelFetch(splatData,base), q=texelFetch(splatData,base+1), s=texelFetch(splatData,base+2), c=texelFetch(splatData,base+3);
     position=a.xyz; sourceId=s.w; color=c.rgb; modifierVisibility=c.a;
     vec4 culled=vec4(0,0,2,1);
+    // Bake anti-aliasing, as the export writes it: every axis grows to sqrt(s^2+b^2), and the
+    // opacity falls by the growth of the two largest - the footprint most views see, so a
+    // flat splat seen face on keeps its opacity while needles and specks fade.
+    vec3 scale=s.xyz; float opacity=a.w;
+    if(bakeSize>0.0) {
+        vec3 grown=sqrt(scale*scale+bakeSize*bakeSize), ratio=scale/max(grown,vec3(1e-30));
+        opacity*=ratio.x*ratio.y*ratio.z/max(min(ratio.x,min(ratio.y,ratio.z)),1e-30); scale=grown;
+    }
     int removed=removedByModifiers();
-    if(removed==1 || a.w<1.0/255.0) {gl_Position=culled;return;}
+    if(removed==1 || opacity<1.0/255.0) {gl_Position=culled;return;}
     mat4 modelView=view*model;
     vec4 centre=modelView*vec4(position,1);
     vec4 clip=projection*centre;
     if(clip.w<=0.0 || (!orthographic && centre.z>-1e-4)) {gl_Position=culled;return;}
     // World covariance M*M^T with M = R*S, carried into the view (the model's scale included).
-    mat3 M=rotationMatrix(q)*mat3(s.x,0,0, 0,s.y,0, 0,0,s.z);
+    mat3 M=rotationMatrix(q)*mat3(scale.x,0,0, 0,scale.y,0, 0,0,scale.z);
     mat3 W=mat3(modelView)*M;
     mat3 sigma=W*transpose(W);
     // Jacobian of the projection to pixels at the centre.
@@ -148,7 +158,12 @@ void main() {
     if(orthographic) {j0=vec3(focal.x,0,0);j1=vec3(0,focal.y,0);}
     else {float z=-centre.z; j0=vec3(focal.x/z,0,focal.x*centre.x/(z*z)); j1=vec3(0,focal.y/z,focal.y*centre.y/(z*z));}
     // Plus a 0.3 px^2 low-pass so sub-pixel splats still cover a pixel.
-    float d1=dot(j0,sigma*j0)+0.3, off=dot(j0,sigma*j1), d2=dot(j1,sigma*j1)+0.3;
+    float raw1=dot(j0,sigma*j0), off=dot(j0,sigma*j1), raw2=dot(j1,sigma*j1);
+    float d1=raw1+0.3, d2=raw2+0.3;
+    // Anti-aliasing compensation (Mip-Splatting; PlayCanvas GSPLAT_AA), for captures trained
+    // with it: the low-pass widens a sub-pixel splat to a pixel, so its opacity falls by the
+    // same factor. Such captures hold needle splats that otherwise draw as solid lines.
+    float aaFactor=antialiased ? sqrt(max((raw1*raw2-off*off)/(d1*d2-off*off),0.0)) : 1.0;
     float mid=0.5*(d1+d2), radius=length(vec2(0.5*(d1-d2),off));
     float lambda1=mid+radius, lambda2=max(mid-radius,0.1);
     vec2 axis=vec2(off,lambda1-d1);
@@ -161,7 +176,7 @@ void main() {
     vec2 offset=corner.x*l1*axis+corner.y*l2*vec2(axis.y,-axis.x);
     gl_Position=clip+vec4(offset*toClip,0,0);
     uv=corner;
-    rgba=vec4(displayedColor(removed),a.w);
+    rgba=vec4(displayedColor(removed),opacity*aaFactor);
 }
 )GLSL";
 static const char *splatFragment = R"GLSL(
@@ -648,6 +663,11 @@ void Viewport::paintGL() {
             shader->setUniformValue("splatData", 2);
             shader->setUniformValue("viewportPixels", size);
             shader->setUniformValue("orthographic", camera_.orthographic && camera_.preset!=ViewPreset::Free);
+            // A baked capture is plain 3DGS: it is no longer drawn with the compensation.
+            double bake=0;for (const auto &m:modifiers_) if (m.active() && m.type==ModifierType::BakeAntialiasing) bake=std::max(bake,m.bakeSize());
+            const float modelScale=float(std::cbrt(std::abs(double(model.determinant())))); // affine: the 3x3 block's
+            shader->setUniformValue("antialiased", splatAntialiasing_ && bake<=0);
+            shader->setUniformValue("bakeSize", float(bake)/std::max(modelScale,1e-6f));
             // Premultiplied, back to front; tested against the floor but leaving no depth behind.
             glEnable(GL_BLEND); glBlendFuncSeparate(GL_ONE, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
             glDepthMask(GL_FALSE);
@@ -695,6 +715,7 @@ void Viewport::setCamera(const Camera &camera) {
 }
 void Viewport::setPointSize(float size) { if (pointSize_ != size) { pointSize_ = size; update(); } }
 void Viewport::setSplatShDegree(int degree) { degree = std::clamp(degree,-1,3); if (splatShDegree_ != degree) { splatShDegree_ = degree; update(); } }
+void Viewport::setSplatAntialiasing(bool antialiased) { if (splatAntialiasing_ != antialiased) { splatAntialiasing_ = antialiased; update(); } }
 void Viewport::setSplatRendering(bool splats) { if (splats_ != splats) { splats_ = splats; splatsDirty_ = true; update(); } }
 void Viewport::setDisplayControls(QWidget *controls) {
     displayControls_=controls;viewCube_->setDisplayControls(controls);

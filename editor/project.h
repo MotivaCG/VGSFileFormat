@@ -48,7 +48,7 @@ struct CropVolume {
     bool contains(const QVector3D &worldPosition) const;
 };
 Q_DECLARE_METATYPE(CropVolume)
-enum class ModifierType { Crop, RemoveGreen, AnimateTransform, PurgeIsolated, Walk };
+enum class ModifierType { Crop, RemoveGreen, AnimateTransform, PurgeIsolated, Walk, BakeAntialiasing };
 struct GreenFilter {
     float minimumSaturation = 0.5f, hueTolerance = 45; // HSV: saturation 0..1, circular distance from 120 degrees.
     bool linearRgb = true; // Convert clamped sRGB base colour to linear RGB before HSV.
@@ -100,6 +100,13 @@ struct Modifier {
     double walkSpeed = 1;
     // Whether the Walk speed is shown in km/h. Display only: walkSpeed stays in m/s.
     bool walkKmh = false;
+    // Bake anti-aliasing: the viewing distance (m) and screen height (px) the capture is
+    // prepared for, at the editor's 45 degree vertical field of view.
+    double bakeDistance = 2.5;
+    int bakeScreenHeight = 1080;
+    // The world-space size every splat is widened by: the renderer's 0.3 px^2 low-pass,
+    // as a distance at bakeDistance.
+    double bakeSize() const;
     bool active() const { return enabled && (type!=ModifierType::Crop || crop.enabled); }
 };
 struct Project {
@@ -128,6 +135,9 @@ struct Project {
     // at a time along +Z, from the start of the export range.
     double walkSpeed() const;
     double walkDistance(double seconds) const;
+    // The size the active Bake anti-aliasing modifiers widen every splat by (the largest of
+    // them), in world units; 0 when none is active.
+    double antialiasingBake() const;
     static QString newId();
     CaptureSettings captureSettings;
     double time = 0, in = 0, out = 0, speed = 1;

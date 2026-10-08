@@ -184,6 +184,12 @@ and `movingSpeed` to the header, for players to carry it along +Z (rotate the ca
 choose the direction). Several active Walk modifiers add up. MINT has no such field and
 reports that the walk is not stored.
 
+**Anti-aliased splats.** Gracia trains its captures with anti-aliasing, which leaves needle
+splats far thinner than a pixel; drawn at full opacity they show as solid coloured lines.
+The Gaussian view draws a `.mint` with the matching opacity compensation, and a `.vgs` when
+its header carries the anti-aliasing render hint. Exports write that hint for anything
+converted from a `.mint` and keep whatever a `.vgs`/`.pgs` source says.
+
 Projects and editor presets preserve the flat stack, activation and selected row.
 Older projects/presets migrate their one crop to one crop modifier without changing
 its world-space placement or activation. Metadata presets still affect metadata only.

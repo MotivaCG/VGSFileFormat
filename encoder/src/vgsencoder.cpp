@@ -144,6 +144,8 @@ void Encoder::setMotionType(MotionType type) {
 
 void Encoder::setMovingSpeed(float speed) { state->options.movingSpeed = speed; }
 
+void Encoder::setRenderHints(uint32_t hints) { state->options.renderHints = hints; }
+
 void Encoder::setPageRows(uint32_t rows) { state->options.pageRows = rows; }
 
 void Encoder::setTemporalShPageSplit(bool enabled) { state->options.splitTemporalShPages = enabled; }

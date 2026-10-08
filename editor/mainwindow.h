@@ -102,7 +102,10 @@ private:
     Viewport *viewport_;
     ModifierPanel *modifierPanel_;
     AnimationPanel *animationProperties_;
-    QGroupBox *isolationProperties_, *walkProperties_;
+    QGroupBox *isolationProperties_, *walkProperties_, *bakeProperties_;
+    QDoubleSpinBox *bakeDistance_;
+    QSpinBox *bakeScreenHeight_;
+    QLabel *bakeSizeLabel_;
     QComboBox *cropModeCombo_, *cropPreviewCombo_;
     QToolButton *walkUnits_;
     void showWalkSpeed(const Modifier &);

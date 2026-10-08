@@ -260,6 +260,7 @@ MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory) : QMainWi
         loading_ = false; loaded_ = true; decoding_ = pendingDecode_ = false;
         generation_ = gen; info_ = info;
         viewport_->setGhost(false); slider_->resetView(); // a newly opened capture is seen whole
+        viewport_->setSplatAntialiasing(info.antialiased);
         processingState_={};
         project_ = pendingProject_.value_or(defaultProject()); project_.asset = info.path;
         if (project_.captureSettings.title.isEmpty()) project_.captureSettings.title = info.title;
@@ -682,6 +683,26 @@ void MainWindow::buildUi() {
     auto *walkRow=new QWidget;auto *walkRowLayout=new QHBoxLayout(walkRow);walkRowLayout->setContentsMargins(0,0,0,0);walkRowLayout->setSpacing(4);
     walkRowLayout->addWidget(walkSpeed_,1);walkRowLayout->addWidget(walkUnits_);walkForm->addRow(tr("Speed"),walkRow);
     auto *walkNote=new QLabel(tr("Preview: the capture stays and the floor slides back under it, with a finer grid; at the right speed a planted foot stays on the grid. Export does not move the capture: VGS/PGS mark it as walking at this speed along +Z in the header, for players to carry it. Rotate the capture to choose the direction."));walkNote->setWordWrap(true);walkForm->addRow(walkNote);side->addWidget(walkProperties_);
+    // Bake anti-aliasing: prepares a capture trained with anti-aliasing for renderers that
+    // do not compensate, for a viewing distance and screen.
+    bakeProperties_=new QGroupBox(tr("Bake anti-aliasing"));bakeProperties_->setObjectName("bakeModifierProperties");auto *bakeForm=new QFormLayout(bakeProperties_);
+    bakeProperties_->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Minimum);
+    bakeDistance_=new QDoubleSpinBox;bakeDistance_->setObjectName("bakeDistance");bakeDistance_->setRange(.01,1000);bakeDistance_->setDecimals(2);bakeDistance_->setSingleStep(.1);bakeDistance_->setSuffix(" m");bakeDistance_->setValue(2.5);
+    bakeDistance_->setToolTip(tr("How far the capture is usually seen from. Closer than this it looks slightly softer; much farther away some aliasing comes back, as in any plain capture."));
+    bakeScreenHeight_=new QSpinBox;bakeScreenHeight_->setObjectName("bakeScreenHeight");bakeScreenHeight_->setRange(16,16384);bakeScreenHeight_->setSingleStep(120);bakeScreenHeight_->setSuffix(" px");bakeScreenHeight_->setValue(1080);
+    bakeScreenHeight_->setToolTip(tr("Vertical resolution of the screen it is seen on, at a 45 degree vertical field of view."));
+    bakeForm->addRow(tr("Viewing distance"),bakeDistance_);bakeForm->addRow(tr("Screen height"),bakeScreenHeight_);
+    bakeSizeLabel_=new QLabel;bakeSizeLabel_->setObjectName("bakeSize");bakeForm->addRow(tr("Minimum size"),bakeSizeLabel_);
+    auto *bakeNote=new QLabel(tr("For captures trained with anti-aliasing (every Gracia .mint). Each splat grows to at least about a pixel at that distance and its opacity falls by as much, so needle splats fade instead of drawing as solid lines in renderers that do not compensate. Exports drop the anti-aliasing hint; .vgs/.pgs keep the per-splat opacity factor in an optional attribute."));
+    bakeNote->setWordWrap(true);bakeForm->addRow(bakeNote);side->addWidget(bakeProperties_);
+    SpinScrubber::attachFormLabel(bakeDistance_,0.01);
+    auto bakeChanged=[this] {
+        if (syncing_ || !project_.modifier() || project_.modifier()->type!=ModifierType::BakeAntialiasing) return;
+        project_.modifier()->bakeDistance=bakeDistance_->value();project_.modifier()->bakeScreenHeight=bakeScreenHeight_->value();
+        bakeSizeLabel_->setText(tr("%1 mm").arg(project_.modifier()->bakeSize()*1000,0,'f',2));syncModifiers();dirty();
+    };
+    connect(bakeDistance_,&QDoubleSpinBox::valueChanged,this,[bakeChanged](double) {bakeChanged();});
+    connect(bakeScreenHeight_,&QSpinBox::valueChanged,this,[bakeChanged](int) {bakeChanged();});
     connect(walkUnits_,&QToolButton::toggled,this,[this](bool kmh) {
         auto *m=project_.modifier();if (syncing_ || !m || m->type!=ModifierType::Walk) return;
         m->walkKmh=kmh;showWalkSpeed(*m);syncModifiers();dirty();
@@ -855,7 +876,7 @@ void MainWindow::showWalkSpeed(const Modifier &m) {
 void MainWindow::revealModifierProperties() {
     QTimer::singleShot(0,this,[this] {
         const auto *m=project_.modifier();auto *scroll=findChild<QScrollArea *>("toolsScrollArea");if (!m || !scroll) return;
-        QWidget *panel=m->type==ModifierType::AnimateTransform ? static_cast<QWidget *>(animationProperties_) : m->type==ModifierType::PurgeIsolated ? isolationProperties_ : m->type==ModifierType::Walk ? walkProperties_ : m->type==ModifierType::Crop ? cropProperties_ : greenProperties_;
+        QWidget *panel=m->type==ModifierType::AnimateTransform ? static_cast<QWidget *>(animationProperties_) : m->type==ModifierType::PurgeIsolated ? isolationProperties_ : m->type==ModifierType::Walk ? walkProperties_ : m->type==ModifierType::BakeAntialiasing ? bakeProperties_ : m->type==ModifierType::Crop ? cropProperties_ : greenProperties_;
         scroll->ensureWidgetVisible(panel,0,12);
     });
 }
@@ -916,6 +937,9 @@ void MainWindow::syncUi() {
     const bool animation=selected && selected->type==ModifierType::AnimateTransform,isolation=selected && selected->type==ModifierType::PurgeIsolated;
     animationProperties_->setVisible(animation);isolationProperties_->setVisible(isolation);
     const bool walk=selected && selected->type==ModifierType::Walk;walkProperties_->setVisible(walk);
+    const bool bake=selected && selected->type==ModifierType::BakeAntialiasing;bakeProperties_->setVisible(bake);
+    if (bake) {bakeProperties_->setTitle(tr("Bake anti-aliasing: %1").arg(selected->name));bakeDistance_->setValue(selected->bakeDistance);bakeScreenHeight_->setValue(selected->bakeScreenHeight);
+        bakeSizeLabel_->setText(tr("%1 mm").arg(selected->bakeSize()*1000,0,'f',2));}
     if (walk) {walkProperties_->setTitle(tr("Walk: %1").arg(selected->name));showWalkSpeed(*selected);}
     if (animation) {animationProperties_->setTitle(tr("Animate transform: %1").arg(selected->name));animationProperties_->setAnimation(selected->animation,int(std::round(project_.time*info_.fps)),std::max(0,info_.frames-1));}
     if (isolation) {isolationProperties_->setTitle(tr("Purge Isolated: %1").arg(selected->name));isolationNeighbour_->setValue(selected->isolation.neighbour);isolationPercent_->setValue(selected->isolation.medianPercent);}

@@ -214,6 +214,10 @@ bool Project::fromJson(const QJsonObject &root,const QString &baseDirectory,Proj
             } else if (item["type"]=="purge-isolated") {
                 m.type=ModifierType::PurgeIsolated;
                 if (item.contains("isolation")) {const auto p=item["isolation"].toObject();const double n=number(p,"neighbour",1,256);valid &= n==std::floor(n);m.isolation.neighbour=int(n);m.isolation.medianPercent=number(p,"medianPercent",0,1000000);}
+            } else if (item["type"]=="bake-antialiasing") {
+                m.type=ModifierType::BakeAntialiasing;const auto b=item["bake"].toObject();
+                m.bakeDistance=number(b,"distance",.01,1000);const double height=number(b,"screenHeight",16,16384);
+                valid &= height==std::floor(height) && (!b.contains("verticalFov") || b["verticalFov"].toDouble()==45);m.bakeScreenHeight=int(height);
             } else if (item["type"]=="walk") {
                 m.type=ModifierType::Walk;const auto w=item["walk"].toObject();valid &= w["axis"]=="+z";m.walkSpeed=number(w,"speed",0,100);
                 valid &= !w.contains("display") || w["display"]=="m/s" || w["display"]=="km/h";m.walkKmh=w["display"]=="km/h";

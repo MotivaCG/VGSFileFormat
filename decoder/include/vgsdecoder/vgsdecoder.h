@@ -316,6 +316,15 @@ enum class PlaybackMode { Once = 0, Loop = 1, PingPong = 2 };
  */
 enum class MotionType { InPlace = 0, Walking = 1 };
 
+/**
+ * How the splats are meant to be drawn, as bits; a renderer honours the ones it can and
+ * ignores the rest. AntialiasedSplats: the capture was trained with anti-aliasing
+ * (Mip-Splatting's screen-space filter). Where a renderer widens a sub-pixel splat to a
+ * pixel, it lowers that splat's opacity by the same factor - PlayCanvas' gsplat antiAlias,
+ * for one - or the needle splats such training leaves show as solid lines.
+ */
+enum RenderHint : uint32_t { AntialiasedSplats = 1 };
+
 enum class Detail {
   Positions,
   Base,
@@ -449,6 +458,10 @@ public:
   MotionType motionType() const;
   /** Reserved: how fast a walking capture moves, in its own units per second; 0 in place. */
   float movingSpeed() const;
+  /** How the splats are meant to be drawn: RenderHint bits. */
+  uint32_t renderHints() const;
+  /** Whether to draw with anti-aliasing compensation: the AntialiasedSplats hint. */
+  bool antialiased() const { return renderHints() & AntialiasedSplats; }
   uint32_t shDegree() const;
   uint64_t maxSplatsPerFrame() const;
   uint64_t fileSize() const;

@@ -641,6 +641,8 @@ MotionType Capture::motionType() const {
 
 float Capture::movingSpeed() const { return state->header.movingSpeed; }
 
+uint32_t Capture::renderHints() const { return state->header.renderHints; }
+
 uint32_t Capture::shDegree() const { return state->header.shDegree; }
 uint64_t Capture::maxSplatsPerFrame() const { return state->header.maxSplatsPerFrame; }
 const double *Capture::bounds() const { return state->header.bounds.data(); }

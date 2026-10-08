@@ -86,6 +86,7 @@ void CaptureWorker::open(const QString &path, quint64 generation, bool sh) {
             if (!candidate.mint_->open(path, &error)) throw std::runtime_error(error.toStdString());
             candidate.info_.duration = candidate.mint_->duration(); candidate.info_.fps = candidate.mint_->frameRate();
             bounds = candidate.mint_->boundingBox();
+            candidate.info_.antialiased = true;
         } else if (ext == "vgs" || ext == "pgs") {
             candidate.source_ = std::make_unique<FileSource>(path);
             candidate.vgs_ = std::make_unique<vgsdec::Capture>(vgsdec::Capture::openStream(*candidate.source_));
@@ -93,6 +94,7 @@ void CaptureWorker::open(const QString &path, quint64 generation, bool sh) {
             candidate.info_.duration = candidate.vgs_->duration(); candidate.info_.fps = candidate.vgs_->frameRate();
             if (!candidate.vgs_->metadata().title.empty()) candidate.info_.title = QString::fromStdString(candidate.vgs_->metadata().title);
             bounds = candidate.vgs_->bounds();
+            candidate.info_.antialiased = candidate.vgs_->antialiased();
         } else throw std::runtime_error("Unsupported format. Open a .vgs, .pgs or .mint file.");
         if (!std::isfinite(candidate.info_.duration) || candidate.info_.duration <= 0 ||
             !std::isfinite(candidate.info_.fps) || candidate.info_.fps <= 0 ||

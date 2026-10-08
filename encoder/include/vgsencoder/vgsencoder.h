@@ -53,6 +53,11 @@ enum class PlaybackMode { Once = 0, Loop = 1, PingPong = 2 };
  * moving speed says how fast a player should carry it along.
  */
 enum class MotionType { InPlace = 0, Walking = 1 };
+/**
+ * How the splats are meant to be drawn, as bits. AntialiasedSplats: trained with
+ * anti-aliasing, so a renderer lowers a sub-pixel splat's opacity as it widens it.
+ */
+enum RenderHint : uint32_t { AntialiasedSplats = 1 };
 
 /** What a thumbnail is. */
 enum class ImageFormat { Png = 1, Jpeg = 2, Webp = 3 };
@@ -99,6 +104,8 @@ public:
   void setMotionType(MotionType);
   /** Reserved: how fast a walking capture moves, in its own units per second. 0 unless set. */
   void setMovingSpeed(float);
+  /** How the splats are meant to be drawn: RenderHint bits. 0 unless set. */
+  void setRenderHints(uint32_t);
   /** Target rows per page, rounded to complete coding blocks. Default 65536;
    *  accepted range 1024 to 1048576. */
   void setPageRows(uint32_t);

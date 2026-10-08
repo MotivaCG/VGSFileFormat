@@ -208,6 +208,58 @@ private slots:
         std::vector<float> xs;for (size_t i=0;i<frame.count;++i) if (frame.active[i]) xs.push_back(frame.position[i*3]);
         QCOMPARE(xs.size(),size_t(1));QVERIFY(std::abs(xs[0]-3)<1e-4f);
     }
+    void antialiasingHintTravelsWithTheSplats() {
+        // A plain source has no hint; a .vgs keeps the one it carries; a Gracia .mint is
+        // trained with anti-aliasing, so what is exported from it says so.
+        QTemporaryDir dir;const auto plain=dir.filePath("plain.pgs");sourceFile(plain,3);
+        Project project;project.asset=plain;project.in=0;project.out=2.0/25;project.modifiers.clear();
+        auto hinted=[](const QString &path) {return vgsdec::Capture::openFile(path.toStdString()).antialiased();};
+        QVERIFY(!hinted(plain));
+        const auto fromPlain=dir.filePath("from_plain.vgs");exportCaptureFile(project,fromPlain);QVERIFY(!hinted(fromPlain));
+        const auto mint=dir.filePath("source.mint");exportCaptureFile(project,mint);
+        Project fromMint=project;fromMint.asset=mint;const auto viaMint=dir.filePath("via_mint.vgs");exportCaptureFile(fromMint,viaMint);QVERIFY(hinted(viaMint));
+        Project again=project;again.asset=viaMint;const auto kept=dir.filePath("kept.pgs");exportCaptureFile(again,kept);QVERIFY(hinted(kept));
+        // The editor reads it when it opens a capture: that is what its Gaussian view draws with.
+        auto opened=[](const QString &path) {CaptureWorker worker;CaptureInfo info;bool done=false;
+            QObject::connect(&worker,&CaptureWorker::opened,[&](CaptureInfo i,FramePtr,quint64) {info=i;done=true;});worker.open(path,1,false);return done ? int(info.antialiased) : -1;};
+        QCOMPARE(opened(fromPlain),0);QCOMPARE(opened(viaMint),1);QCOMPARE(opened(kept),1);QCOMPARE(opened(mint),1);
+        if (!qEnvironmentVariable("CHECK_VGS").isEmpty()) for (const auto &path:qEnvironmentVariable("CHECK_VGS").split(';')) qInfo("%s: antialiased %d",qPrintable(QFileInfo(path).fileName()),opened(path));
+    }
+    void bakedAntialiasingWidensSplatsAndFadesThem() {
+        // From a Gracia source (anti-aliased), unbaked and baked: every axis grows to
+        // sqrt(s^2+b^2) and the opacity falls by s/s' of the two largest, native and sampled.
+        QTemporaryDir dir;const auto plain=dir.filePath("plain.pgs");sourceFile(plain,3);
+        Project base;base.asset=plain;base.in=0;base.out=2.0/25;base.modifiers.clear();
+        const auto mint=dir.filePath("source.mint");exportCaptureFile(base,mint);base.asset=mint;
+        Project baked=base;Modifier bake;bake.id=Project::newId();bake.name="Bake";bake.type=ModifierType::BakeAntialiasing;bake.bakeDistance=300;bake.bakeScreenHeight=1080;
+        baked.modifiers.append(bake);const double b=baked.antialiasingBake();QVERIFY(b>.1 && b<.2);
+        const auto reference=dir.filePath("reference.vgs"),nativeOut=dir.filePath("baked.vgs"),sampled=dir.filePath("baked.mint");
+        exportCaptureFile(base,reference);const auto result=exportCaptureFile(baked,nativeOut);exportCaptureFile(baked,sampled);
+        auto before=vgsdec::Capture::openFile(reference.toStdString()),after=vgsdec::Capture::openFile(nativeOut.toStdString());
+        QVERIFY(before.antialiased());QVERIFY(!after.antialiased());
+        // The factor travels as an optional attribute: readers that predate it may skip it.
+        QFile file(nativeOut);QVERIFY(file.open(QIODevice::ReadOnly));const auto bytes=file.read(1<<20);
+        const auto header=vgs::readHeader(reinterpret_cast<const uint8_t *>(bytes.constData()),size_t(bytes.size()));
+        bool optional=false;for (const auto &policy:header.policies) if (policy.attribute==vgs::OpacityScales) optional=(policy.flags & vgs::OptionalAttribute)!=0;
+        QVERIFY(optional);
+        MintFile sampledMint;QString error;QVERIFY2(sampledMint.open(sampled,&error),qPrintable(error));MintFrame mintFrame;QVERIFY(sampledMint.decode(0,&mintFrame,false,&error));
+        const auto &f0=before.setTime(0,false);std::vector<float> s0(f0.scales,f0.scales+3*f0.splatCount),o0(f0.opacities,f0.opacities+f0.splatCount);std::vector<uint8_t> a0(f0.active,f0.active+f0.splatCount);
+        const auto &f1=after.setTime(0,false);QCOMPARE(f1.splatCount,f0.splatCount);
+        int checked=0;
+        for (size_t i=0;i<f0.splatCount;++i) if (a0[i]) {
+            float ratios[3];
+            for (int c=0;c<3;++c) {const float s=s0[i*3+c],grown=std::sqrt(s*s+float(b*b));ratios[c]=s/grown;
+                QVERIFY2(std::abs(f1.scales[i*3+c]-grown)<grown*.01f,qPrintable(QString("%1 vs %2").arg(f1.scales[i*3+c]).arg(grown)));}
+            // The two largest axes' growth: here the smallest is 0.1 m, so it is left out.
+            const float expected=o0[i]*ratios[1]*ratios[2];
+            QVERIFY2(std::abs(f1.opacities[i]-expected)<=expected*.03f+1e-4f,qPrintable(QString("%1 vs %2").arg(f1.opacities[i]).arg(expected)));
+            ++checked;
+        }
+        QVERIFY(checked>0);
+        // The sampled MINT carries the same splats, baked into its own tables.
+        int live=0;for (int i=0;i<int(mintFrame.count);++i) if (mintFrame.active[i]) {++live;QVERIFY(mintFrame.opacity[i]<=o0[0]+1e-3f);}
+        QCOMPARE(live,checked);QVERIFY(!result.notes.isEmpty());
+    }
     void currentFrameIsWrittenAsAnEditedPly() {
         // Frame 0 has live splats at x=0 and x=3; the capture moves 1 m along X and keeps SH1.
         QTemporaryDir dir;const auto source=dir.filePath("source.pgs");sourceFile(source,3);

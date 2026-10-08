@@ -3,7 +3,9 @@
 
 #include "mgscodec.h"
 #include "vgscrypto.h"
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <functional>
 #include <memory>
 #include <string>
@@ -13,11 +15,15 @@ using Bytes = mgs::Bytes;
 using Error = mgs::Error;
 using Spec = mgs::AttributeSpec;
 constexpr uint32_t Magic = 0x53474656; // VFGS
-// Version 2 signs the structure and carries capture metadata in the header. Nothing
-// reads a version 1 file: the layout changed where it mattered and the format had not
-// shipped, so there is no fallback path to keep honest.
-constexpr uint32_t Version = 2;
-constexpr uint32_t FixedHeaderSize = 192;
+// Version 2 signed the structure and carried capture metadata in the header; version 3
+// adds render hints and grows the fixed header to 256 bytes, the last 64 reserved for
+// fields still to come. Nothing reads an older version: the format had not shipped, so
+// there is no fallback path to keep honest.
+constexpr uint32_t Version = 3;
+constexpr uint32_t FixedHeaderSize = 256;
+// Bytes at the end of the fixed header kept for later fields: written as zero, and a
+// reader refuses anything else rather than guess what a newer writer meant.
+constexpr uint32_t ReservedHeaderBytes = 64;
 // How a player runs the capture unless told otherwise, as its author meant it: once and
 // hold the last frame, over and over, or there and back. Carried in the fixed header, so
 // every player starts a capture the same way from the first bytes it reads; a player may
@@ -29,6 +35,15 @@ constexpr uint32_t MaxPlaybackMode = 2;
 // along. More kinds may follow; a reader refuses one it does not know.
 enum class MotionType : uint32_t { InPlace = 0, Walking = 1 };
 constexpr uint32_t MaxMotionType = 1;
+// How the splats are meant to be drawn, as bits a renderer honours where it can. They
+// change how a capture looks, never what it holds, so a reader ignores bits it does not
+// know rather than refusing the capture; later hints cost older readers nothing.
+enum RenderHint : uint32_t {
+  // Trained with anti-aliasing (Mip-Splatting's screen-space filter): a renderer that
+  // widens a sub-pixel splat to a pixel lowers its opacity by the same factor, or the
+  // needle splats such training leaves show as solid lines.
+  AntialiasedSplats = 1,
+};
 // Signature block: algorithm, key id, length, reserved, then the signature itself. It
 // sits immediately after the signed region, so [0, signedSize) is what was signed and
 // [signedSize, signedSize + SignatureBlockSize) is the proof - no overlap, nothing to
@@ -129,8 +144,20 @@ enum Attribute : uint32_t {
   RotationRanks,
   PositionBase,
   PositionTerms,
-  PositionRanks
+  PositionRanks,
+  // Optional: one byte per splat, constant over the chunk, that scales its opacity by
+  // 2^(-code/16) - 1 at code 0, 2^-15.9 at 255. Written when a capture trained with
+  // anti-aliasing is baked for plain renderers: shared opacity tables cannot lower one
+  // splat's opacity, so the factor travels per splat. A reader that predates it skips it
+  // and draws the needle splats it was meant to fade. See FORMAT.md.
+  OpacityScales
 };
+inline float opacityScale(uint8_t code) { return std::exp2(-float(code) / 16.0f); }
+inline uint8_t opacityScaleCode(float factor) {
+  if (!(factor > 0)) return 255;
+  const float code = std::round(-16.0f * std::log2(std::min(factor, 1.0f)));
+  return uint8_t(std::min(255.0f, std::max(0.0f, code)));
+}
 enum Codec : uint32_t { Raw = 0, Rans = 1 };
 // An optional attribute may be skipped by a reader that does not know its ID, which is
 // how this format grows without breaking readers already in the field. Attributes a
@@ -184,6 +211,8 @@ struct Header {
   // How fast a walking capture moves, in the capture's units per second. 0 for one
   // that stays in place.
   float movingSpeed = 0;
+  // RenderHint bits; 0 draws the capture as plain 3D Gaussian splats.
+  uint32_t renderHints = 0;
   std::array<double, 6> bounds{};
   // shDegree 0..3; 0 means base colour only, with no higher-order SH layers.
   uint32_t shDegree = 3, shBasis = 1, coordinates = 1, pageRows = 65536;
@@ -246,6 +275,7 @@ struct EncodeOptions {
   PlaybackMode playbackMode = PlaybackMode::Loop;
   MotionType motionType = MotionType::InPlace;
   float movingSpeed = 0;
+  uint32_t renderHints = 0; // RenderHint bits
   uint32_t pageRows = 65536;
   // Highest spherical harmonic degree to keep, 0..3. The source carries degree 3;
   // writing less drops whole planes of three coefficients, which is where a third

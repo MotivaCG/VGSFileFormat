@@ -48,10 +48,11 @@ const char *attributeName(uint32_t id) {
                                 "rotation_rank_boundaries",
                                 "position_base",
                                 "position_rq_coefficients",
-                                "position_rank_boundaries"};
+                                "position_rank_boundaries",
+                                "opacity_scales"};
   if (id >= 1 && id <= MotionSamples)
     return shared[id - 1];
-  if (id >= 32 && id <= 46)
+  if (id >= 32 && id <= OpacityScales)
     return group[id - 32];
   return "unknown";
 }
@@ -151,7 +152,11 @@ Header readHeader(const uint8_t *data, size_t size) {
   const uint32_t playbackMode = r.u32();
   const uint32_t motionType = r.u32();
   const float movingSpeed = r.f32();
-  const uint32_t reserved = r.u32();
+  // Hints only change how the capture looks: unknown bits are kept and ignored.
+  const uint32_t renderHints = r.u32();
+  uint64_t reserved = 0;
+  for (uint32_t i = 0; i < ReservedHeaderBytes / 8; ++i)
+    reserved |= r.u64();
   // Before anything is checked for sense, the structure is checked for provenance: an
   // edited header must answer "invalid 4dgs capture" whether or not the edit also broke
   // an invariant, and a reader has no business explaining which field looked wrong in a
@@ -182,6 +187,7 @@ Header readHeader(const uint8_t *data, size_t size) {
   h.playbackMode = PlaybackMode(playbackMode);
   h.motionType = MotionType(motionType);
   h.movingSpeed = movingSpeed;
+  h.renderHints = renderHints;
   for (int i = 0; i < 3; ++i)
     if (h.bounds[i] > h.bounds[i + 3])
       throw Error("invalid VGS bounds");
@@ -198,8 +204,7 @@ Header readHeader(const uint8_t *data, size_t size) {
     // An unknown attribute is only acceptable when its policy says a reader may skip
     // it; anything else would mean silently dropping data a frame needs.
     if (r.u32() || p.flags > OptionalAttribute ||
-        (std::string(attributeName(p.attribute)) == "unknown" &&
-         (!optional || p.attribute < VendorAttributeBase)) ||
+        (std::string(attributeName(p.attribute)) == "unknown" && !optional) ||
         !seen.insert(p.attribute).second || p.codec > Rans || p.family > 9 ||
         p.model > (p.family == 9   ? 3u
                    : p.family == 0 ? 0u

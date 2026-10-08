@@ -62,6 +62,17 @@ private slots:
         auto legacy=json;auto mods=legacy["modifiers"].toArray();auto item=mods[0].toObject();auto crop=item["crop"].toObject();crop.remove("animation");item["crop"]=crop;mods[0]=item;legacy["modifiers"]=mods;
         QVERIFY(Project::fromJson(legacy,dir.path(),&restored,&error));QVERIFY(!restored.modifiers[0].cropAnimation.animated);QVERIFY(restored.modifiers[0].cropAnimation.keys.isEmpty());
     }
+    void bakeAntialiasingSizeAndPersistence() {
+        // The renderer's 0.3 px^2 low-pass as a distance: at 2.5 m on a 1080 px screen with a
+        // 45 degree field of view a pixel is about 1.9 mm, and the size about 1.05 mm.
+        Project project;project.modifiers.clear();Modifier bake;bake.id=Project::newId();bake.name="Bake";bake.type=ModifierType::BakeAntialiasing;
+        project.modifiers={bake};QVERIFY(std::abs(project.antialiasingBake()-0.00105)<0.00002);
+        project.modifiers[0].bakeDistance=5;project.modifiers[0].bakeScreenHeight=2160;QVERIFY(std::abs(project.antialiasingBake()-0.00105)<0.00002);
+        project.modifiers[0].enabled=false;QCOMPARE(project.antialiasingBake(),0.);project.modifiers[0].enabled=true;
+        QTemporaryDir dir;project.asset=dir.filePath("source.mint");Project restored;QString error;
+        QVERIFY2(Project::fromJson(project.json(dir.filePath("scene.vgsproj")),dir.path(),&restored,&error),qPrintable(error));
+        QCOMPARE(restored.modifiers[0].type,ModifierType::BakeAntialiasing);QCOMPARE(restored.modifiers[0].bakeDistance,5.);QCOMPARE(restored.modifiers[0].bakeScreenHeight,2160);
+    }
     void isolationMatchesNthNeighbourMedianAndEdgeCases() {
         std::vector<QVector3D> points;for (int y=0;y<5;++y) for (int x=0;x<5;++x) points.push_back({x*.01f,y*.01f,0});points.push_back({100,100,100});points.push_back({101,100,100});
         IsolationFilter filter{4,300};std::vector<uint8_t> keep(points.size(),1);std::vector<float> expectedDistances;

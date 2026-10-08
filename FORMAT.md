@@ -1,4 +1,4 @@
-# VFGS version 2: the `.vgs` and `.pgs` container
+# VFGS version 3: the `.vgs` and `.pgs` container
 
 A capture is a 4D Gaussian splat recording: a timeline of frames, each a few hundred
 thousand splats, laid out so a player fetches and decodes one chunk of time at a time
@@ -201,12 +201,12 @@ derivation: it is neither random nor the SHA-1 name-based scheme of version 5.
 The two JSON metadata extras stay as they were, for whatever a project wants to carry
 that these fields do not describe.
 
-### Fixed header: 192 bytes
+### Fixed header: 256 bytes
 
 | Offset | Type | Field |
 |---:|---|---|
 | 0 | u32 | magic `VFGS` = `0x53474656` |
-| 4 | u32 | version = 2 |
+| 4 | u32 | version = 3 |
 | 8 | u64 | headerSize: the fixed header and the four tables |
 | 16 | u64 | signedSize: headerSize plus the metadata block; where the signature starts |
 | 24 | u64 | fileSize |
@@ -231,15 +231,18 @@ that these fields do not describe.
 | 176 | u32 | playbackMode: 0 once, 1 loop, 2 ping-pong (see below) |
 | 180 | u32 | motionType: 0 in place, 1 walking (reserved, see below) |
 | 184 | f32 | movingSpeed: units per second (reserved, see below) |
-| 188 | u32 | reserved = 0 |
+| 188 | u32 | renderHints: how the splats are meant to be drawn, as bits (see below) |
+| 192 | u8 × 64 | reserved = 0, for fields still to come |
 
-`headerSize = 192 + 24 * policyCount + 16 * layerCount + 40 * extraCount + 80 * chunkCount`,
+`headerSize = 256 + 24 * policyCount + 16 * layerCount + 40 * extraCount + 80 * chunkCount`,
 and `signedSize = headerSize + metadataSize`. The header block holds the policies, then
 the layer table, then the extras table, then the chunk index, then the metadata.
 
-Version 1 files are not readable by this version and are not meant to be: the format had
-not shipped, so the layout changed where it needed to rather than growing a compatibility
-path nobody would exercise.
+Older versions are not readable by this one and are not meant to be: the format had not
+shipped, so the layout changed where it needed to rather than growing a compatibility path
+nobody would exercise. Version 3 added `renderHints` and grew the fixed header from 192 to
+256 bytes, so the next fields have somewhere to go; the 64 reserved bytes are written as
+zero and a reader refuses anything else.
 
 **When it was written.** `createdMillis` is inside the signed region, so it is the
 capture's own statement rather than a filesystem timestamp that copying, uploading or
@@ -262,6 +265,18 @@ timeline. To walk another way, the capture is rotated before it is written. Enco
 write `0` and `0.0` unless told otherwise. More
 motion types may follow; a reader refuses one it does not know, and a speed that is not
 a finite number.
+
+**How it is drawn.** `renderHints` is a set of bits about how the splats are meant to be
+drawn. Bit 0, *anti-aliased splats*: the capture was trained with anti-aliasing
+(Mip-Splatting's screen-space filter). A renderer that widens a splat smaller than a
+pixel to a pixel lowers its opacity by the same factor, the square root of the
+footprint's determinant before over after the widening - PlayCanvas' gsplat `antiAlias`,
+for one. Such training leaves needle splats far thinner than a pixel; drawn at full
+opacity they show as solid coloured lines. Captures converted from Gracia `.mint` carry
+it. Hints change how a capture looks, never what it holds, so unlike every other field a
+reader ignores bits it does not know instead of refusing the capture, and later hints
+cost older readers nothing. They are inside the signed region like the rest of the
+header: switching one afterwards is an edit, and the capture stops verifying.
 
 **Timebase.** A tick lasts `timeNumerator / timeDenominator` seconds, so 24, 25, 30, 50,
 60 and 30000/1001 are all expressible; readers accept 1 to 1000 ticks per second. Frames
@@ -290,10 +305,12 @@ simultaneously alive. Consumers must not use the frame maximum to size chunk sto
 
 Each **policy** is six u32: attribute ID, codec (0 raw / 1 rANS), model, model family,
 flags and a zero. Flag bit 0 marks the attribute **optional**: a reader that cannot name
-the attribute may skip its pages and still reconstruct a frame. An attribute ID this
-specification does not define is accepted only when it is both optional and at or above
-0x8000 (the vendor range); anything else is refused rather than silently dropped. This is
-how the format grows without breaking readers already in the field.
+the attribute may skip its pages and still reconstruct a frame. An attribute ID a reader
+does not know is accepted when it is optional, whichever range it is in, and refused when
+it is not, rather than silently dropped. IDs at or above 0x8000 are for vendors; below
+that, for this specification. This is how the format grows without breaking readers
+already in the field: a later revision's optional attribute reaches older readers as one
+they skip.
 
 Each **layer** is four u32: id, kind, dependsOn, flags(0). Layer 0 is always the base
 layer and depends on nothing; later layers have increasing ids and depend on a layer
@@ -403,6 +420,22 @@ quantized field widths, quaternion ordering and reconstruction arithmetic are de
 by the source format, whose semantics this import profile retains unchanged. The
 normative statement of them here is `core/src/vgsframe.cpp`, which is the code every
 reader runs; a reader does not parse a .mint and does not need that format's document.
+
+### Opacity scales
+
+Attribute 47, `opacity_scales`, optional: one byte per splat in its group, constant over
+the chunk, that multiplies the splat's opacity (after the residual stages are summed and
+clamped) by `2^(-code/16)` - 1 at code 0, about 1.6e-5 at 255, in steps of 4.4%. Opacity is
+otherwise a sum of entries in tables shared by many splats, so this is how one splat's
+opacity is lowered alone.
+
+It is written when a capture trained with anti-aliasing is baked for renderers that do not
+compensate: every splat's scales grow to `sqrt(s^2 + b^2)` for a world size `b` (about the
+renderer's 0.3 px^2 low-pass at a chosen viewing distance), which the scale table takes
+exactly, and its opacity falls by the growth of its two largest axes, which this attribute
+carries. Such a capture no longer has the anti-aliasing render hint. A reader that does not
+know the attribute skips it and draws the capture as it was before baking: thin splats at
+full opacity.
 
 ### Motion samples
 

@@ -362,6 +362,25 @@ private slots:
         viewport.setFrame(make(0,1,0.5f)); const auto faint = footprint(); QVERIFY(faint[2]<along[2]-60);
         viewport.setSplatRendering(false); const auto back = footprint(); QVERIFY(back[0]<20 && back[1]<20);
     }
+    void needleSplatsFadeWithTheirFootprint() {
+        // A red needle far thinner than a pixel, on black: with the anti-aliasing compensation
+        // it is a faint trace, not the solid line it would be at full opacity.
+        Viewport viewport; viewport.resize(400,400); viewport.setGrid(false);
+        Camera camera; camera.target = {0,0,0}; camera.yaw = camera.pitch = 0; camera.distance = 3; viewport.setCamera(camera);
+        auto frame = std::make_shared<RenderFrame>(); frame->total = 1;
+        frame->records = {Splat{{0,0,0},{0,0,0,1},{0.0001f,0.4f,0.0001f},{1,0,0,1},0}}; frame->active = {1}; frame->points = {{{0,0,0},{1,0,0},0}};
+        viewport.setFrame(frame); viewport.setSplatRendering(true); viewport.show(); QVERIFY(QTest::qWaitForWindowExposed(&viewport));
+        auto peak = [&] { const auto image = viewport.grabFramebuffer(); int best = 0;
+            for (int y=0;y<image.height();++y) for (int x=0;x<image.width();++x) best = std::max(best,image.pixelColor(x,y).red()-image.pixelColor(x,y).green());
+            return best; };
+        // A capture without the hint is plain 3DGS: the needle is drawn at full strength.
+        QVERIFY(!viewport.splatAntialiasing()); const int plain = peak(); QVERIFY2(plain>150, qPrintable(QString::number(plain)));
+        viewport.setSplatAntialiasing(true); const int faint = peak(); QVERIFY2(faint>0 && faint<80, qPrintable(QString::number(faint)));
+        // Baked for plain renderers, the needle fades by itself and the compensation is off.
+        Modifier bake; bake.id = Project::newId(); bake.type = ModifierType::BakeAntialiasing; bake.bakeDistance = 3; bake.bakeScreenHeight = 400;
+        viewport.setModifiers({bake}); const int baked = peak(); QVERIFY2(baked>0 && baked<80, qPrintable(QString::number(baked)));
+        viewport.setSplatAntialiasing(false); QCOMPARE(peak(), baked);
+    }
     void splatOrderFollowsTheCameraFromTheSortingThread() {
         // Red in front of blue seen from one side; from the other, blue must end up in front once
         // the background sort lands. Every paint in between draws a valid (older) order.

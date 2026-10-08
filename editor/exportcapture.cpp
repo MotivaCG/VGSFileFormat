@@ -114,8 +114,9 @@ class Baker {
     Matrix a; ShMatrix sh;
     const Project &project;
     int coefficients;
+    float bakeSize; // Bake anti-aliasing, world units; 0 for none
 public:
-    Baker(const Project &p,int degree) : model(p.transform.matrix()),modifiers(p),a(linear(model)),project(p),coefficients((degree+1)*(degree+1)-1) {
+    Baker(const Project &p,int degree) : model(p.transform.matrix()),modifiers(p),a(linear(model)),project(p),coefficients((degree+1)*(degree+1)-1),bakeSize(float(p.antialiasingBake())) {
         if (!a.allFinite() || std::abs(a.determinant())<1e-15) throw std::runtime_error("Cannot export a singular capture transform.");
         sh=angularBake(a);
     }
@@ -139,9 +140,15 @@ public:
             if (eigen.info()!=Eigen::Success) throw std::runtime_error("Gaussian covariance decomposition failed.");
             Matrix orientation=eigen.eigenvectors(); if (orientation.determinant()<0) orientation.col(0)*=-1;
             Eigen::Quaterniond rotation(orientation);rotation.normalize();
-            for (int c=0;c<3;++c) { out.position.push_back(world[c]);out.scale.push_back(float(std::sqrt(std::max(0.,eigen.eigenvalues()[c])))); }
+            float scales[3];for (int c=0;c<3;++c) scales[c]=float(std::sqrt(std::max(0.,eigen.eigenvalues()[c])));
+            // Bake anti-aliasing: each axis widened, the opacity lowered by the growth of the
+            // two largest (bakedOpacityFactor in nativeexport.h says why).
+            float opacityFactor=1;
+            if (bakeSize>0) {float ratios[3];for (int c=0;c<3;++c) {const float grown=std::sqrt(scales[c]*scales[c]+bakeSize*bakeSize);ratios[c]=grown>0 ? scales[c]/grown : 0;scales[c]=grown;}
+                opacityFactor=bakedOpacityFactor(ratios);}
+            for (int c=0;c<3;++c) { out.position.push_back(world[c]);out.scale.push_back(scales[c]); }
             for (int c=0;c<4;++c) out.rotation.push_back(float(rotation.coeffs()[c]));
-            out.opacity.push_back(input.opacity[i]);out.active.push_back(1);
+            out.opacity.push_back(input.opacity[i]*opacityFactor);out.active.push_back(1);
             Eigen::Matrix<double,16,3> colours=Eigen::Matrix<double,16,3>::Zero();
             for (int c=0;c<3;++c) colours(0,c)=(input.colorDc[3*i+c]-.5)/C0;
             for (int k=0;k<input.shCoefficients;++k) for (int c=0;c<3;++c) colours(k+1,c)=input.shRest[(i*input.shCoefficients+k)*3+c];
@@ -409,6 +416,8 @@ ExportResult exportCaptureFile(const Project &inputProject,const QString &destin
         native=supportsNativeTransform(project) && (!mint || mint->frameRateProblem().isEmpty());
         if (!native) throw std::runtime_error("Animated export needs a transform without non-uniform scale or shear at the first exported frame, and a source with a constant frame rate.");
     }
+    // MINT has no per-splat opacity factor, which a native baked block needs: sampled.
+    if (mintOutput && project.antialiasingBake()>0 && native) {native=false;result.notes << QStringLiteral("Bake anti-aliasing into MINT: frames are resampled, since MINT cannot hold a per-splat opacity factor.");}
     const QMatrix4x4 unbake=project.transform.matrix().inverted();
     if (native && mint) {
         const auto &bytes=mint->bytes();report(progress,0,QStringLiteral("Reading native temporal dictionaries"));nativeMint=std::make_unique<vgs::MintLogicalSource>(reinterpret_cast<const uint8_t *>(bytes.constData()),size_t(bytes.size()),degree);
@@ -422,6 +431,11 @@ ExportResult exportCaptureFile(const Project &inputProject,const QString &destin
     options.shDegree=degree;options.signer=vgs::authoringSigner();options.compression=project.captureSettings.plain ? vgs::Compression::None : vgs::Compression::Auto;
     options.playbackMode=project.captureSettings.playbackMode<0 ? (capture ? vgs::PlaybackMode(capture->playbackMode()) : vgs::PlaybackMode::Loop) : vgs::PlaybackMode(project.captureSettings.playbackMode);
     options.motionType=header.motionType;options.movingSpeed=header.movingSpeed;
+    // How the splats are meant to be drawn travels with them: Gracia trains with
+    // anti-aliasing, and a .vgs/.pgs source says so (or not) in its own header.
+    options.renderHints=mint ? uint32_t(vgs::AntialiasedSplats) : sourceHeader.renderHints;
+    // Baked for plain renderers: the result no longer wants the compensation.
+    if (project.antialiasingBake()>0) options.renderHints&=~uint32_t(vgs::AntialiasedSplats);
     // A Walk modifier is not baked: the capture stays where it is and the header tells
     // players it walks, at this speed along +Z, for them to carry it.
     if (project.walkSpeed()>0) {options.motionType=vgs::MotionType::Walking;options.movingSpeed=float(project.walkSpeed());}
