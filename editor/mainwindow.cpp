@@ -544,12 +544,12 @@ void MainWindow::buildUi() {
     auto *density=viewMenu->addAction(tr("Compact controls on smaller screens"));density->setObjectName("compactInterfaceDensity");density->setCheckable(true);density->setChecked(settings_.value("Interface/CompactDensity",true).toBool());
     density->setToolTip(tr("Reduce control sizes and spacing on smaller screens while preserving readable text and native Windows DPI. Changes apply at the next launch."));
     connect(density,&QAction::toggled,this,[this](bool compact) {settings_.setValue("Interface/CompactDensity",compact);statusBar()->showMessage(tr("Interface density preference saved. Restart the editor to apply it."),7000);});
-    auto *frameAction = viewMenu->addAction(tr("Focus visible"),this,&MainWindow::fitCurrentTarget);
-    frameAction->setShortcuts({QKeySequence(Qt::KeypadModifier|Qt::Key_Delete),QKeySequence(Qt::KeypadModifier|Qt::Key_Period),QKeySequence(Qt::KeypadModifier|Qt::Key_Comma),QKeySequence("F")});
-    frameAction->setToolTip(tr("Focus visible capture and ghost points (Numpad decimal / Numpad Del / F)."));
     gridAction_ = viewMenu->addAction(tr("Grid and axes")); gridAction_->setObjectName("gridAndAxes"); gridAction_->setCheckable(true);
     gridAction_->setShortcut(QKeySequence("Shift+G")); gridAction_->setToolTip(tr("Toggle the world grid and reference axes (Shift+G)."));
     connect(gridAction_, &QAction::toggled, this, [this](bool value) { if (!syncing_) { project_.grid = value; settings_.setValue("Display/Grid",value); viewport_->setGrid(value); dirty(); } });
+    auto *frameAction = viewMenu->addAction(tr("Focus visible"),this,&MainWindow::fitCurrentTarget);
+    frameAction->setShortcuts({QKeySequence(Qt::KeypadModifier|Qt::Key_Delete),QKeySequence(Qt::KeypadModifier|Qt::Key_Period),QKeySequence(Qt::KeypadModifier|Qt::Key_Comma),QKeySequence("F")});
+    frameAction->setToolTip(tr("Focus visible capture and ghost points (Numpad decimal / Numpad Del / F)."));
     auto *standardViews = viewMenu->addMenu(tr("Standard views"));
     const QString viewNames[] = {tr("Perspective"),tr("Front (Numpad 1)"),tr("Back (Ctrl+Numpad 1)"),tr("Left (Ctrl+Numpad 3)"),tr("Right (Numpad 3)"),tr("Top (Numpad 7)"),tr("Bottom (Ctrl+Numpad 7)")};
     for (int i=0; i<7; ++i) standardViews->addAction(viewNames[i],this,[this,i] { viewport_->setViewPreset(ViewPreset(i)); viewport_->setFocus(); });
@@ -560,8 +560,8 @@ void MainWindow::buildUi() {
         dialog.setIconPixmap(QPixmap(":/icons/logo.png").scaled(64,64,Qt::KeepAspectRatio,Qt::SmoothTransformation));
         dialog.setTextFormat(Qt::RichText);
         dialog.setText(tr("<h2>VGS Editor</h2><p>4D Gaussian capture editor</p>"
-                          "<p>Opaque point preview · Qt / OpenGL</p>"
-                          "<p>THE4DSCANNER · ScanMeNow</p>"));
+                          "<p>Víctor M. Feliz</p>"
+                          "<p>The4DScanner · ScanMeNow</p>"));
         dialog.exec();
     });
     helpMenu->addAction(tr("About Qt"), qApp, &QApplication::aboutQt);
