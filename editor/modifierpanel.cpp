@@ -47,12 +47,12 @@ QString typeName(const Modifier &modifier) {
 // What each kind of modifier does, for its tooltips: the type list, the add menu and the rows.
 QString typeDescription(ModifierType type) {
     switch (type) {
-    case ModifierType::Crop: return ModifierPanel::tr("Keeps the splats inside a cylinder or box, or removes them in Remove mode. Several Keep crops add up; Remove wins where they overlap. Can follow keys on the timeline when animated.");
-    case ModifierType::RemoveGreen: return ModifierPanel::tr("Removes splats whose base colour is green-screen spill: saturated colours within a hue range around green.");
-    case ModifierType::AnimateTransform: return ModifierPanel::tr("Moves, rotates and scales the whole capture over time with keys. VGS/PGS exports store the movement as motion samples; MINT cannot.");
-    case ModifierType::PurgeIsolated: return ModifierPanel::tr("Removes stray splats: those whose Nth nearest neighbour is farther than a multiple of the frame's median distance.");
-    case ModifierType::Walk: return ModifierPanel::tr("Marks the capture as walking at a speed along +Z. Previewed on a sliding floor; exports write the speed to the header and leave the data in place.");
-    case ModifierType::BakeAntialiasing: return ModifierPanel::tr("Prepares a capture trained with anti-aliasing (every Gracia .mint) for renderers that do not compensate: thin splats grow to about a pixel at a chosen viewing distance and fade by as much, instead of drawing as solid lines.");
+    case ModifierType::Crop: return ModifierPanel::tr("Keeps the splats inside a cylinder or box, or removes them in Remove mode.\nSeveral Keep crops add up, and Remove wins where they overlap.\nWhen animated, it follows keys on the timeline.");
+    case ModifierType::RemoveGreen: return ModifierPanel::tr("Removes splats whose base colour is green-screen spill:\nsaturated colours within a hue range around green.");
+    case ModifierType::AnimateTransform: return ModifierPanel::tr("Moves, rotates and scales the whole capture over time with keys.\nVGS/PGS exports store the movement as motion samples. MINT cannot hold it.");
+    case ModifierType::PurgeIsolated: return ModifierPanel::tr("Removes stray splats: those whose Nth nearest neighbour\nis farther than a multiple of the frame's median distance.");
+    case ModifierType::Walk: return ModifierPanel::tr("Marks the capture as walking at a speed along +Z.\nThe preview slides the floor under it.\nExports write the speed to the header and leave the data in place.");
+    case ModifierType::BakeAntialiasing: return ModifierPanel::tr("Prepares a capture trained with anti-aliasing (every Gracia .mint)\nfor renderers that do not compensate for it.\nThin splats grow to about a pixel at a chosen viewing distance and fade by as much,\nso they no longer draw as solid lines.");
     }
     return {};
 }
@@ -63,7 +63,7 @@ QColor modifierColour(ModifierType type) {
     case ModifierType::AnimateTransform: return {67,147,214};
     case ModifierType::PurgeIsolated: return {219,181,76};
     case ModifierType::Walk: return {160,110,214};
-    case ModifierType::BakeAntialiasing: return {70,178,186};
+    case ModifierType::BakeAntialiasing: return {185,133,114}; // #B98572
     }
     return {75,80,86};
 }
@@ -176,7 +176,7 @@ ModifierPanel::ModifierPanel(QWidget *parent):QWidget(parent) {
         const ModifierType kinds[]={ModifierType::Crop,ModifierType::RemoveGreen,ModifierType::AnimateTransform,ModifierType::PurgeIsolated,ModifierType::Walk,ModifierType::BakeAntialiasing};
         for (int i=0;i<type_->count();++i) type_->setItemData(i,typeDescription(kinds[i]),Qt::ToolTipRole);
     }
-    type_->setToolTip(tr("Choose a modifier to add; hover a kind to see what it does."));
+    type_->setToolTip(tr("Choose a modifier to add.\nHover a kind to see what it does."));
     addModifier_=button(tr("+ Modifier"),"addModifier",tr("Add the selected modifier type to the stack. Modifiers affect the full capture timeline."),[this] {addModifier();});
     duplicate_=button(tr("Duplicate"),"duplicateModifier",tr("Duplicate the selected modifier."),[this] {duplicateSelection();});
     up_=button(tr("Up"),"moveModifierUp",tr("Move the selected modifier up."),[this] {moveSelection(-1);});
@@ -202,7 +202,7 @@ ModifierPanel::ModifierPanel(QWidget *parent):QWidget(parent) {
     connect(tree_->header(),&QHeaderView::geometriesChanged,this,&ModifierPanel::trackMoved);
     auto *delegate=new CoverageDelegate(tree_);delegate->seek=[this](int frame) {emit seekFrame(frame);};
     // Measured while painting: refit and realign afterwards, not in the middle of a paint.
-    delegate->textMoved=[this] {QMetaObject::invokeMethod(this,[this] {fitNames();emit trackMoved();},Qt::QueuedConnection);};tree_->setItemDelegate(delegate);tree_->setToolTip(tr("Click the eye to enable or disable a modifier. Select a modifier to edit its properties in Tools. Click a keyframe diamond to seek. Ctrl+wheel zooms the timeline; Shift+wheel or a middle drag pans it."));layout->addWidget(tree_);
+    delegate->textMoved=[this] {QMetaObject::invokeMethod(this,[this] {fitNames();emit trackMoved();},Qt::QueuedConnection);};tree_->setItemDelegate(delegate);tree_->setToolTip(tr("Click the eye to enable or disable a modifier.\nSelect a modifier to edit its properties in Tools.\nClick a keyframe diamond to seek.\nCtrl+wheel zooms the timeline, Shift+wheel or a middle drag pans it."));layout->addWidget(tree_);
     connect(tree_,&QTreeWidget::currentItemChanged,this,[this](QTreeWidgetItem *item) {
         if (updating_ || !item) return;project_.selectedModifier=item->data(0,ModifierRole).toString();emit selectionChanged();
     });

@@ -29,6 +29,7 @@
 #include <QFormLayout>
 #include <QSlider>
 #include <QWheelEvent>
+#include <QPainter>
 #include <QtTest>
 
 class MainWindowTests : public QObject {
@@ -117,7 +118,7 @@ private slots:
         // A tick each second in a light green, one per frame halfway to the track's green, and
         // neither while they would sit closer than a few pixels.
         RangeSlider slider;slider.resize(640,38);slider.setTrackInsets(20,20);slider.setFrameRate(30);
-        const QColor second(198,236,180),frame(131,206,102);
+        const QColor second(198,236,180),frame(165,222,140);
         auto count=[&](const QColor &colour) {
             const QImage image=slider.grab().toImage();const qreal ratio=image.devicePixelRatio();const int y=qRound(slider.trackRect().center().y()*ratio);
             int columns=0;bool inside=false;
@@ -127,7 +128,14 @@ private slots:
         slider.setFrameRange(0,299);slider.setRangeValues(0,299);slider.setPlayheadValue(15); // off the ticks
         QCOMPARE(count(second),10);QCOMPARE(count(frame),0);          // 10 s: seconds only
         slider.zoomAt(4,slider.trackRect().left());QVERIFY(count(frame)>40);QVERIFY(count(second)>=2); // zoomed: frames too
+        // Seconds named under them: a regular step, apart enough to read, none at the ends.
+        slider.resetView();auto labels=slider.labelledSeconds();QVERIFY(labels.size()>=2);
+        const int step=labels[1]-labels[0];for (int i=1;i<labels.size();++i) QCOMPARE(labels[i]-labels[i-1],step);
+        QVERIFY((QList<int>{1,2,5,10,15,30,60}).contains(step));QVERIFY(labels.first()>0);QVERIFY(labels.last()<10);
+        QCOMPARE(slider.secondLabel(2),QString("60"));slider.setLabelsInSeconds(true);QCOMPARE(slider.secondLabel(2),QString("2 s"));QCOMPARE(slider.secondLabel(75),QString("1:15"));
+        slider.zoomAt(4,slider.trackRect().left());const auto zoomed=slider.labelledSeconds();QVERIFY(zoomed.size()>=2);QVERIFY(zoomed[1]-zoomed[0]<=step);
         slider.setFrameRange(0,29999);QCOMPARE(count(second),0);QCOMPARE(count(frame),0);        // 1000 s: too dense for either
+        QVERIFY(slider.labelledSeconds().isEmpty());
     }
     void tabTogglesCropFromViewportAndFields() {
         QTemporaryDir dir;QVERIFY(dir.isValid());

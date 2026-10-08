@@ -1,4 +1,5 @@
 #pragma once
+#include <QVector>
 #include <QWidget>
 // Adapted from Gracia Converter frame range control.
 class RangeSlider : public QWidget
@@ -11,6 +12,13 @@ public:
     void setFrameRange(int minimum, int maximum);
     // Frames per second, for the second and frame ticks.
     void setFrameRate(double fps);
+    // Whether the second labels under the track read as times or as frame numbers.
+    void setLabelsInSeconds(bool seconds);
+    // The seconds labelled under the track: a regular step (1, 2, 5, 10, 15, 30 s, minutes...)
+    // wide enough apart to read, none cut off at the track's ends; empty when the second
+    // ticks themselves are too dense to draw.
+    QVector<int> labelledSeconds() const;
+    QString secondLabel(int second) const;
     void setRangeValues(int start, int end);
     void setPlayheadValue(int value);
     int startValue() const { return m_start; }
@@ -66,6 +74,7 @@ private:
     QString m_label;
     double m_viewFirst = 0, m_viewLast = 0;
     double m_frameRate = 0;
+    bool m_labelsInSeconds = false;
     bool m_panning = false;
     double m_panX = 0;
     int m_labelX = 0;

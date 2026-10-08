@@ -484,7 +484,7 @@ void MainWindow::buildUi() {
     const QString shortcuts[] = {"G", "R", "S"};
     const QString modeIcons[] = {":/icons/move.png",":/icons/rotate.png",":/icons/scale.png"};
     const QString accessibleModes[] = {tr("Move"),tr("Rotate"),tr("Scale")};
-    const QString modeNames[] = {tr("Click to toggle Move. G activates Move; repeat G to switch Global/Local. Esc exits all modes."),tr("Click to toggle Rotate. R activates Rotate; repeat R to switch Global/Local. Esc exits all modes."),tr("Click to toggle Scale. S activates Scale; repeat S to switch Global/Local. Crop scaling stays anchored at its base. Esc exits all modes.")};
+    const QString modeNames[] = {tr("Click to toggle Move.\nG activates Move, and repeating G switches Global/Local.\nEsc exits all modes."),tr("Click to toggle Rotate.\nR activates Rotate, and repeating R switches Global/Local.\nEsc exits all modes."),tr("Click to toggle Scale.\nS activates Scale, and repeating S switches Global/Local.\nCrop scaling stays anchored at its base.\nEsc exits all modes.")};
     transformModes_ = new QButtonGroup(this); transformModes_->setExclusive(true);
     auto *transformBox=new QGroupBox(tr("Transform · Capture"));transformBox_=transformBox;transformBox->setObjectName("transformProperties");transformBox->setProperty("transformGroup",true);
     transformBox->setStyleSheet("QDoubleSpinBox {padding: 3px; min-height: 18px; font-size: 9pt;}");
@@ -534,7 +534,7 @@ void MainWindow::buildUi() {
     auto *cropBox = new QGroupBox(tr("Crop modifier")); cropProperties_=cropBox; auto *cropForm = new QFormLayout(cropBox); cropForm_ = cropForm;
     cropBox->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Maximum);
     cropShapeCombo_ = new QComboBox; cropShapeCombo_->addItem(tr("Cylinder"),int(CropShape::Cylinder)); cropShapeCombo_->addItem(tr("Box"),int(CropShape::Box));
-    cropShapeCombo_->setObjectName("cropShape"); cropShapeCombo_->setToolTip(tr("Choose Cylinder or Box. Both share the same base pivot and transform; their dimensions are retained separately."));
+    cropShapeCombo_->setObjectName("cropShape"); cropShapeCombo_->setToolTip(tr("Choose Cylinder or Box.\nBoth share the same base pivot and transform, and each keeps its own dimensions."));
     connect(cropShapeCombo_,&QComboBox::activated,this,[this](int) {
         if (syncing_ || !loaded_ || loading_ || !project_.modifier() || project_.modifier()->type!=ModifierType::Crop) return;
         project_.crop().shape = CropShape(cropShapeCombo_->currentData().toInt()); viewport_->setCrop(project_.crop()); syncUi(); dirty(); viewport_->setFocus();
@@ -563,10 +563,10 @@ void MainWindow::buildUi() {
         setCropAnimated(cropAnimationCombo_->currentData().toInt()==1);viewport_->setFocus();
     });
     cropModeCombo_=new QComboBox;cropModeCombo_->setObjectName("cropMode");cropModeCombo_->addItem(tr("Keep inside"),0);cropModeCombo_->addItem(tr("Remove inside"),1);
-    cropModeCombo_->setToolTip(tr("Keep preserves what is inside; Remove deletes it. Where they overlap, Remove wins. With only Remove crops, everything outside them is kept."));
+    cropModeCombo_->setToolTip(tr("Keep preserves what is inside, Remove deletes it.\nWhere they overlap, Remove wins.\nWith only Remove crops, everything outside them is kept."));
     cropForm->addRow(tr("Mode"),cropModeCombo_);
     cropPreviewCombo_=new QComboBox;cropPreviewCombo_->setObjectName("cropEditPreview");cropPreviewCombo_->addItem(tr("Colour code"),1);cropPreviewCombo_->addItem(tr("Hide removed"),0);
-    cropPreviewCombo_->setToolTip(tr("While this crop is edited: Colour code lightens what the crops keep and shows what they delete in red; Hide removed hides what they delete. Editing only: the normal view and the export are unaffected."));
+    cropPreviewCombo_->setToolTip(tr("While this crop is edited:\nColour code lightens what the crops keep and shows what they delete in red.\nHide removed hides what they delete.\nEditing only: the normal view and the export are unaffected."));
     cropForm->addRow(tr("While editing"),cropPreviewCombo_);
     connect(cropModeCombo_,&QComboBox::activated,this,[this](int) {
         if (syncing_ || !project_.modifier() || project_.modifier()->type!=ModifierType::Crop) return;
@@ -662,7 +662,7 @@ void MainWindow::buildUi() {
     isolationNeighbour_=new QSpinBox;isolationNeighbour_->setObjectName("isolationNeighbour");isolationNeighbour_->setRange(1,256);isolationNeighbour_->setValue(4);
     isolationPercent_=new QDoubleSpinBox;isolationPercent_->setObjectName("isolationMedianPercent");isolationPercent_->setRange(0,1000000);isolationPercent_->setDecimals(1);isolationPercent_->setSuffix(" %");isolationPercent_->setValue(700);
     isolationForm->addRow(tr("Nth neighbour"),isolationNeighbour_);isolationForm->addRow(tr("Distance / median"),isolationPercent_);
-    auto *isolationNote=new QLabel(tr("Removes points whose distance to neighbour N exceeds this percentage of the frame's median Nth-neighbour distance, after crop and colour filtering. 100% = median; 700% = 7 times median."));isolationNote->setWordWrap(true);isolationForm->addRow(isolationNote);side->addWidget(isolationProperties_);
+    auto *isolationNote=new QLabel(tr("Removes points whose distance to neighbour N exceeds this percentage\nof the frame's median Nth-neighbour distance, after crop and colour filtering.\n100% is the median, 700% is 7 times the median."));isolationNote->setWordWrap(true);isolationForm->addRow(isolationNote);side->addWidget(isolationProperties_);
     walkProperties_=new QGroupBox(tr("Walk"));walkProperties_->setObjectName("walkModifierProperties");auto *walkForm=new QFormLayout(walkProperties_);
     walkProperties_->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Minimum);
     walkSpeed_=new QDoubleSpinBox;walkSpeed_->setObjectName("walkSpeed");walkSpeed_->setRange(0,100);walkSpeed_->setDecimals(2);walkSpeed_->setSingleStep(.1);walkSpeed_->setSuffix(" m/s");walkSpeed_->setValue(1);
@@ -682,18 +682,18 @@ void MainWindow::buildUi() {
     walkUnits_->setToolTip(tr("Show the speed in km/h instead of m/s. It is always stored in m/s."));
     auto *walkRow=new QWidget;auto *walkRowLayout=new QHBoxLayout(walkRow);walkRowLayout->setContentsMargins(0,0,0,0);walkRowLayout->setSpacing(4);
     walkRowLayout->addWidget(walkSpeed_,1);walkRowLayout->addWidget(walkUnits_);walkForm->addRow(tr("Speed"),walkRow);
-    auto *walkNote=new QLabel(tr("Preview: the capture stays and the floor slides back under it, with a finer grid; at the right speed a planted foot stays on the grid. Export does not move the capture: VGS/PGS mark it as walking at this speed along +Z in the header, for players to carry it. Rotate the capture to choose the direction."));walkNote->setWordWrap(true);walkForm->addRow(walkNote);side->addWidget(walkProperties_);
+    auto *walkNote=new QLabel(tr("Preview: the capture stays and the floor slides back under it, with a finer grid. At the right speed a planted foot stays on the grid. Export does not move the capture: VGS/PGS mark it as walking at this speed along +Z in the header, for players to carry it. Rotate the capture to choose the direction."));walkNote->setWordWrap(true);walkForm->addRow(walkNote);side->addWidget(walkProperties_);
     // Bake anti-aliasing: prepares a capture trained with anti-aliasing for renderers that
     // do not compensate, for a viewing distance and screen.
     bakeProperties_=new QGroupBox(tr("Bake anti-aliasing"));bakeProperties_->setObjectName("bakeModifierProperties");auto *bakeForm=new QFormLayout(bakeProperties_);
     bakeProperties_->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Minimum);
     bakeDistance_=new QDoubleSpinBox;bakeDistance_->setObjectName("bakeDistance");bakeDistance_->setRange(.01,1000);bakeDistance_->setDecimals(2);bakeDistance_->setSingleStep(.1);bakeDistance_->setSuffix(" m");bakeDistance_->setValue(2.5);
-    bakeDistance_->setToolTip(tr("How far the capture is usually seen from. Closer than this it looks slightly softer; much farther away some aliasing comes back, as in any plain capture."));
+    bakeDistance_->setToolTip(tr("How far the capture is usually seen from.\nCloser than this it looks slightly softer.\nMuch farther away some aliasing comes back, as in any plain capture."));
     bakeScreenHeight_=new QSpinBox;bakeScreenHeight_->setObjectName("bakeScreenHeight");bakeScreenHeight_->setRange(16,16384);bakeScreenHeight_->setSingleStep(120);bakeScreenHeight_->setSuffix(" px");bakeScreenHeight_->setValue(1080);
     bakeScreenHeight_->setToolTip(tr("Vertical resolution of the screen it is seen on, at a 45 degree vertical field of view."));
     bakeForm->addRow(tr("Viewing distance"),bakeDistance_);bakeForm->addRow(tr("Screen height"),bakeScreenHeight_);
     bakeSizeLabel_=new QLabel;bakeSizeLabel_->setObjectName("bakeSize");bakeForm->addRow(tr("Minimum size"),bakeSizeLabel_);
-    auto *bakeNote=new QLabel(tr("For captures trained with anti-aliasing (every Gracia .mint). Each splat grows to at least about a pixel at that distance and its opacity falls by as much, so needle splats fade instead of drawing as solid lines in renderers that do not compensate. Exports drop the anti-aliasing hint; .vgs/.pgs keep the per-splat opacity factor in an optional attribute."));
+    auto *bakeNote=new QLabel(tr("For captures trained with anti-aliasing (every Gracia .mint). Each splat grows to at least about a pixel at that distance and its opacity falls by as much, so needle splats fade instead of drawing as solid lines in renderers that do not compensate. Exports drop the anti-aliasing hint, and .vgs/.pgs keep the per-splat opacity factor in an optional attribute."));
     bakeNote->setWordWrap(true);bakeForm->addRow(bakeNote);side->addWidget(bakeProperties_);
     SpinScrubber::attachFormLabel(bakeDistance_,0.01);
     auto bakeChanged=[this] {
@@ -738,7 +738,7 @@ void MainWindow::buildUi() {
     // Points or Gaussian splats; a display preference kept in the settings, not in projects.
     renderStyle_=new PrefixedComboBox(tr("Render"));renderStyle_->setObjectName("displayRenderStyle");
     renderStyle_->addItem(tr("3D points"));renderStyle_->addItem(tr("Gaussian"));
-    renderStyle_->setToolTip(tr("Draw each record as an opaque point (1), or as its Gaussian (2): sized, oriented and blended back to front as a splat viewer shows it. Display only; exports are unaffected."));
+    renderStyle_->setToolTip(tr("Draw each record as an opaque point (1), or as its Gaussian (2):\nsized, oriented and blended back to front as a splat viewer shows it.\nDisplay only. Exports are unaffected."));
     renderStyle_->setMinimumWidth(0);renderStyle_->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Fixed);
     displayLayout->addWidget(renderStyle_);
     displayLayout->addWidget(pointSize_); // same edges and height as the painted Background button
@@ -749,7 +749,7 @@ void MainWindow::buildUi() {
         splatSh_->setItemData(degree,degree ? QString::number(degree) : tr("0 (base colour)"),PrefixedComboBox::ClosedTextRole);
     }
     splatSh_->addItem(tr("All"),-1);
-    splatSh_->setToolTip(tr("Spherical-harmonic bands evaluated for the splats' view-dependent colour. All uses every band the capture has. Display only; the export settings decide what is written."));
+    splatSh_->setToolTip(tr("Spherical-harmonic bands evaluated for the splats' view-dependent colour.\nAll uses every band the capture has.\nDisplay only. The export settings decide what is written."));
     splatSh_->setMinimumWidth(0);splatSh_->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Fixed);
     displayLayout->addWidget(splatSh_);
     auto showRenderStyle=[this] {const bool splats=renderStyle_->currentIndex()==1;pointSize_->setVisible(!splats);splatSh_->setVisible(splats);viewport_->setSplatRendering(splats);};
@@ -922,7 +922,7 @@ void MainWindow::showCropKeys(const Modifier &m) {
     }
     // An animated crop keeps one key at least; Static is how it stops animating.
     cropRemoveKey_->setEnabled(keys.size()>1);
-    cropRemoveKey_->setToolTip(keys.size()>1 ? tr("Remove the selected key, or the key at the current frame.") : tr("An animated crop keeps at least one key. Choose Static to stop animating it; the keys are kept."));
+    cropRemoveKey_->setToolTip(keys.size()>1 ? tr("Remove the selected key, or the key at the current frame.") : tr("An animated crop keeps at least one key.\nChoose Static to stop animating it. The keys are kept."));
     cropKeyTable_->setFixedHeight(std::clamp(cropKeyTable_->horizontalHeader()->height()+4+28*std::max(1,int(keys.size())),100,220));
 }
 void MainWindow::syncUi() {
@@ -965,7 +965,7 @@ void MainWindow::syncUi() {
     const QVector3D vectors[] = {target.position,target.rotation,target.scale};
     for (int g=0; g<3; ++g) for (int a=0; a<3; ++a) transform_[g][a]->setValue(vectors[g][a]);
     const int maximum = std::max(0, info_.frames-1);
-    slider_->setFrameRange(0,maximum); slider_->setFrameRate(info_.fps); slider_->setRangeValues(int(std::round(project_.in*info_.fps)),int(std::round(project_.out*info_.fps)));
+    slider_->setFrameRange(0,maximum); slider_->setFrameRate(info_.fps); slider_->setLabelsInSeconds(timelineSecondsButton_->isChecked()); slider_->setRangeValues(int(std::round(project_.in*info_.fps)),int(std::round(project_.out*info_.fps)));
     const bool seconds=timelineSecondsButton_->isChecked();const double divisor=seconds ? info_.fps : 1.0;
     const int decimals=seconds ? std::max(3,int(std::ceil(std::log10(std::max(1.0,info_.fps))))+1) : 0;
     for (auto *field:{frameSpin_,inFrame_,outFrame_}) {field->setDecimals(decimals);field->setRange(0,maximum/divisor);field->setSingleStep(1.0/divisor);field->setSuffix(seconds ? tr(" s") : QString());}
@@ -1014,9 +1014,9 @@ void MainWindow::syncUi() {
     cropForm_->setRowVisible(cropWidth_,project_.crop().shape==CropShape::Box); cropForm_->setRowVisible(cropDepth_,project_.crop().shape==CropShape::Box);
     cropWidth_->setEnabled(selectedCrop); cropDepth_->setEnabled(selectedCrop);
     cropRadius_->setEnabled(selectedCrop); cropRadiusZ_->setEnabled(selectedCrop); cropHeight_->setEnabled(selectedCrop); cropClearButton_->setEnabled(project_.crop().enabled);
-    cropStatus_->setText(!project_.crop().enabled ? tr("Modifier disabled. Settings are retained; Edit adjusts this volume.") : viewport_->cropEditing()
+    cropStatus_->setText(!project_.crop().enabled ? tr("Modifier disabled. Its settings are kept, and Edit adjusts this volume.") : viewport_->cropEditing()
         ? (project_.crop().showRemovedInRed ? tr("Editing the selected crop, colour coded: kept points lightened, deleted points red.") : tr("Editing the selected crop: what the crops would delete is hidden."))
-        : tr("Keep crops preserve what is inside any of them; Remove crops delete what is inside them and win where they overlap, over the full timeline."));
+        : tr("Keep crops preserve what is inside any of them. Remove crops delete what is inside them and win where they overlap, over the full timeline."));
     pointSize_->setValue(project_.pointSize); viewport_->setPointSize(float(project_.pointSize)); viewport_->setGrid(project_.grid);
     syncing_ = false;
 }

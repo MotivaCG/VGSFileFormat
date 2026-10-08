@@ -7,7 +7,7 @@
 RangeSlider::RangeSlider(QWidget* parent)
     : QWidget(parent)
 {
-    setMinimumHeight(34);
+    setMinimumHeight(40);
     setMouseTracking(true);
 }
 
@@ -31,6 +31,56 @@ void RangeSlider::setFrameRate(double fps)
         return;
     m_frameRate = fps;
     update();
+}
+
+void RangeSlider::setLabelsInSeconds(bool seconds)
+{
+    if (m_labelsInSeconds == seconds)
+        return;
+    m_labelsInSeconds = seconds;
+    update();
+}
+
+QString RangeSlider::secondLabel(int second) const
+{
+    if (!m_labelsInSeconds)
+        return QString::number(qRound(second * m_frameRate));
+    if (second < 60)
+        return QString("%1 s").arg(second);
+    return QString("%1:%2").arg(second / 60).arg(second % 60, 2, 10, QChar('0'));
+}
+
+QVector<int> RangeSlider::labelledSeconds() const
+{
+    QVector<int> seconds;
+    const QRect track = trackRect();
+    const double span = m_viewLast - m_viewFirst;
+    if (m_frameRate <= 0 || span <= 0)
+        return seconds;
+    const double perSecond = track.width() / span * m_frameRate;
+    if (perSecond < 8)
+        return seconds; // no second ticks to label
+    QFont small = font(); small.setPointSizeF(std::max(6.0, small.pointSizeF() - 1));
+    const QFontMetrics metrics(small);
+    // As wide as the longest label in view, plus air on both sides.
+    const int widest = metrics.horizontalAdvance(secondLabel(int(m_viewLast / m_frameRate) + 1));
+    const double wanted = widest + 36.0;
+    static const int steps[] = {1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200};
+    int step = 0;
+    for (int candidate : steps)
+        if (candidate * perSecond >= wanted) { step = candidate; break; }
+    if (!step)
+        return seconds;
+    for (int second = int(std::ceil(m_viewFirst / m_frameRate / step)) * step; second * m_frameRate <= m_viewLast; second += step) {
+        const double x = frameX(second * m_frameRate);
+        const int half = metrics.horizontalAdvance(secondLabel(second)) / 2 + 2;
+        if (x - half < track.left() || x + half > track.right())
+            continue; // it would hang past an end of the track
+        if (std::abs(x - frameX(m_end)) < half + 10)
+            continue; // the End marker hangs at the same height
+        seconds.append(second);
+    }
+    return seconds;
 }
 
 void RangeSlider::setRangeValues(int start, int end)
@@ -105,7 +155,7 @@ void RangeSlider::panByPixels(double pixels)
 
 QSize RangeSlider::sizeHint() const
 {
-    return QSize(640, 38);
+    return QSize(640, 40);
 }
 
 void RangeSlider::setTrackInsets(int left, int right)
@@ -126,9 +176,11 @@ void RangeSlider::setLabel(const QString &text, int x)
     update();
 }
 
+// The track sits near the top: the Start marker above it, the End marker just below, and
+// the row of second labels under that.
 QRect RangeSlider::trackRect() const
 {
-    const int y = height() / 2 - 3;
+    const int y = 14;
     return QRect(m_leftInset, y, std::max(1, width() - m_leftInset - m_rightInset), 4);
 }
 
@@ -162,7 +214,8 @@ QRect RangeSlider::triangleHandleRect(int value, bool top) const
     constexpr int halfWidth = 8;
     constexpr int heightPx = 8;
     const int x = valueToX(value);
-    const int y = top ? 2 : height() - heightPx - 2;
+    const QRect track = trackRect();
+    const int y = top ? track.top() - heightPx - 4 : track.bottom() + 3;
     return QRect(x - halfWidth, y, halfWidth * 2, heightPx);
 }
 
@@ -219,13 +272,26 @@ void RangeSlider::paintEvent(QPaintEvent*)
                 const double second = frame / m_frameRate;
                 if (seconds && std::abs(second - std::round(second)) * m_frameRate < 0.5)
                     continue; // a second tick goes here
-                tick(frame, 0, QColor(131, 206, 102));
+                tick(frame, 1, QColor(165, 222, 140)); // drawn alongside the seconds: a touch brighter
             }
         }
         if (seconds)
             for (int second = int(std::ceil(m_viewFirst / m_frameRate)); second * m_frameRate <= m_viewLast; ++second)
                 tick(second * m_frameRate, 2, QColor(198, 236, 180));
         painter.restore();
+        // Some of the seconds, named: time or frame, as the timeline counts.
+        const auto labelled = labelledSeconds();
+        if (!labelled.isEmpty()) {
+            painter.save();
+            QFont small = font(); small.setPointSizeF(std::max(6.0, small.pointSizeF() - 1)); painter.setFont(small);
+            QColor colour = palette().color(QPalette::Text); colour.setAlpha(150); painter.setPen(colour);
+            const int top = track.bottom() + 7, height = QFontMetrics(small).height();
+            for (int second : labelled) {
+                const int x = qRound(frameX(second * m_frameRate));
+                painter.drawText(QRect(x - 60, top, 120, height), Qt::AlignHCenter | Qt::AlignTop, secondLabel(second));
+            }
+            painter.restore();
+        }
     }
 
     // Only what lies in the view is drawn; the markers still reach just past the track ends.
@@ -233,7 +299,7 @@ void RangeSlider::paintEvent(QPaintEvent*)
     const int playheadX = valueToX(m_playhead);
     painter.setPen(QPen(Qt::white, 2));
     if (visible(m_playhead))
-        painter.drawLine(playheadX, 10, playheadX, height() - 10);
+        painter.drawLine(playheadX, track.top() - 7, playheadX, track.bottom() + 11);
 
     auto drawTriangle = [&](int value, bool top, const QColor& fill) {
         const QRect rect = triangleHandleRect(value, top);
