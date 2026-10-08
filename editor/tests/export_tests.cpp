@@ -130,6 +130,23 @@ private slots:
             }
         }
     }
+    void realMintAtLowerShDegrees() {
+        // Reading a MINT at a lower degree once handed over five SH index planes against
+        // codebooks rebuilt for fewer, so exporting at degree 2 or 1 failed or read past them.
+        const QString asset=qEnvironmentVariable("EDITOR_TEST_CAPTURE");if (asset.isEmpty()) QSKIP("Set EDITOR_TEST_CAPTURE to exercise a real MINT capture.");
+        QTemporaryDir dir;std::map<int,QString> outputs;
+        for (int degree:{3,2,1,0}) {
+            Project project;project.asset=asset;project.in=0;project.out=.5;project.captureSettings.shDegree=degree;
+            outputs[degree]=dir.filePath(QString("sh%1.vgs").arg(degree));exportCaptureFile(project,outputs[degree]);
+            exportCaptureFile(project,dir.filePath(QString("sh%1.mint").arg(degree)));
+        }
+        auto full=vgsdec::Capture::openFile(outputs[3].toStdString());const auto reference=copy(full.setTime(.25,true));
+        for (int degree:{2,1}) {
+            auto lower=vgsdec::Capture::openFile(outputs[degree].toStdString());const auto frame=copy(lower.setTime(.25,true));
+            const int kept=degree==2 ? 8 : 3;QCOMPARE(frame.shCoefficients,kept);QCOMPARE(frame.count,reference.count);
+            for (size_t i=0;i<frame.count;++i) for (int k=0;k<kept*3;++k) QCOMPARE(frame.shRest[i*kept*3+k],reference.shRest[i*45+k]);
+        }
+    }
     void animatedMotionIsStoredAsSamples() {
         QTemporaryDir dir;const auto source=dir.filePath("source.pgs");sourceFile(source,5);
         Project project;project.asset=source;project.in=.08;project.out=.16;project.transform.position={1,2,3};project.transform.rotation={0,20,0};project.modifiers.clear();

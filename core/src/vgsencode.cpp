@@ -1023,9 +1023,15 @@ DecodedChunk MintLogicalSource::chunk(size_t index) const {
   for (const auto &array : source.arrays) {
     DecodedPage page;page.descriptor.attribute=array.attribute;page.descriptor.group=array.group;
     page.descriptor.layer=detail::layer(array.attribute);page.descriptor.spec=array.spec;
-    page.descriptor.totalRows=array.spec.rows;page.descriptor.decodedSize=array.size;
-    if (!array.data.empty()) page.bytes=array.data;
-    else page.bytes.assign(state->bytes+array.offset,state->bytes+array.offset+array.size);
+    // An SH index array read at a lower degree keeps the source's planes and says how many
+    // it means in its descriptor (the page builder reads it plane by plane). Planes are
+    // stored one after another, so the ones kept are a prefix: hand over exactly those,
+    // or the indices describe five planes against codebooks rebuilt for fewer.
+    uint64_t size=array.size;
+    if (array.spec.kind==3) size=std::min<uint64_t>(size,array.spec.rows*(array.spec.width ? array.spec.width : 5)*4);
+    page.descriptor.totalRows=array.spec.rows;page.descriptor.decodedSize=size;
+    if (!array.data.empty()) page.bytes.assign(array.data.begin(),array.data.begin()+size);
+    else page.bytes.assign(state->bytes+array.offset,state->bytes+array.offset+size);
     result.pages.push_back(std::move(page));
   }
   return result;
