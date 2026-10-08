@@ -185,6 +185,18 @@ bool Project::fromJson(const QJsonObject &root,const QString &baseDirectory,Proj
                 // Older projects have neither: keep, shown in red while editing.
                 valid &= !c.contains("mode") || c["mode"]=="keep" || c["mode"]=="remove";m.crop.remove=c["mode"]=="remove";
                 valid &= !c.contains("editPreview") || c["editPreview"]=="red" || c["editPreview"]=="hide";m.crop.showRemovedInRed=c["editPreview"]!="hide";
+                // Optional: an animated crop's keys, kept even while it is static.
+                m.cropAnimation.still=m.crop;
+                if (c.contains("animation")) {
+                    const auto a=c["animation"].toObject();valid &= (a["mode"]=="static" || a["mode"]=="animated") && a["interpolation"]=="linear-slerp" && a["keys"].isArray();QSet<int> frames;
+                    for (const auto &value:a["keys"].toArray()) {
+                        if (!value.isObject()) return fail();const auto key=value.toObject();const double frame=number(key,"frame",0,1000000);valid &= frame==std::floor(frame) && !frames.contains(int(frame));frames.insert(int(frame));
+                        CropVolume pose;pose.transform.position=vector(key,"position",-1e6,1e6);pose.transform.rotation=vector(key,"rotation",-36000,36000);pose.transform.scale=vector(key,"scale",.0001,10000);pose.transform.shear=vector(key,"shear",-1e6,1e6);
+                        pose.radius=float(number(key,"radius",.0001,1e6));pose.radiusZ=float(number(key,"radiusZ",.0001,1e6));pose.height=float(number(key,"height",.0001,1e6));pose.width=float(number(key,"width",.0001,1e6));pose.depth=float(number(key,"depth",.0001,1e6));
+                        m.cropAnimation.setKey(int(frame),pose);
+                    }
+                    m.cropAnimation.animated=a["mode"]=="animated" && !m.cropAnimation.keys.isEmpty();
+                }
             } else if (item["type"]=="remove-green") {
                 m.type=ModifierType::RemoveGreen;const auto g=item["green"].toObject();
                 m.green.minimumSaturation=float(number(g,"minimumSaturation",0,1));m.green.hueTolerance=float(number(g,"hueTolerance",0,180));valid &= g["targetHue"].toDouble()==120 && g["colourSource"]=="dc";

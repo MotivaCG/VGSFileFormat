@@ -62,6 +62,23 @@ struct TransformAnimation {
     void removeKey(int frame);
     QJsonArray json() const;
 };
+// A crop's pose and size at one frame. Its shape, Keep/Remove mode and edit preview are
+// not animated: those stay the modifier's own.
+struct CropKeyframe {int frame=0;Transform transform;float radius=1,radiusZ=1,height=2,width=2,depth=2;};
+struct CropAnimation {
+    // Static ignores the keys without losing them; either mode can be chosen at any time.
+    bool animated=false;
+    QVector<CropKeyframe> keys;
+    // The static pose and size, kept aside while the crop is animated.
+    CropVolume still;
+    bool active() const {return animated && !keys.isEmpty();}
+    // `base` supplies what is not animated. Pose and size interpolate linearly, rotation
+    // along the shortest path; before the first key and after the last they hold.
+    CropVolume evaluate(const CropVolume &base,double frame) const;
+    void setKey(int frame,const CropVolume &crop);
+    void removeKey(int frame);
+    QJsonArray json() const;
+};
 struct IsolationFilter {
     int neighbour=4;
     double medianPercent=700;
@@ -73,6 +90,10 @@ struct Modifier {
     CropVolume crop;
     GreenFilter green;
     TransformAnimation animation;
+    // Crop only. While animated, `crop` holds the pose shown at the current frame.
+    CropAnimation cropAnimation;
+    // The crop as it is when static: what is saved as its fixed pose and size.
+    CropVolume staticCrop() const;
     IsolationFilter isolation;
     // Walk: metres per second along +Z of the exported capture. Preview only; export
     // writes it to the header as a walking capture instead of moving the data.
@@ -98,6 +119,11 @@ struct Project {
     void setAnimatedPose(int frame,const Transform &pose);
     bool hasAnimation() const;
     bool hasAnimatedMotion() const;
+    // The stack with every animated crop evaluated at a frame: what preview and export apply.
+    QVector<Modifier> modifiersAtFrame(double frame) const;
+    bool hasAnimatedCrop() const;
+    // Refreshes the pose each animated crop shows to the one at this frame.
+    void showCropsAtFrame(double frame);
     // The summed speed of the active Walk modifiers, and how far the capture has walked
     // at a time along +Z, from the start of the export range.
     double walkSpeed() const;

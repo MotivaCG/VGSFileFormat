@@ -536,7 +536,7 @@ void setNativeShDegree(vgs::DecodedChunk &c,int sourceDegree,int targetDegree) {
     }
     normalizeSchemas(c);
 }
-vgs::DecodedChunk editNativeChunk(vgs::DecodedChunk chunk,const NativeChunkPlan &plan,const Project &project,ExportResult *statistics,const ExportProgress &progress,const vgs::DecodedChunk *classificationSource,const std::vector<QMatrix4x4> *sampleModels) {
+vgs::DecodedChunk editNativeChunk(vgs::DecodedChunk chunk,const NativeChunkPlan &plan,const Project &project,ExportResult *statistics,const ExportProgress &progress,const vgs::DecodedChunk *classificationSource,const std::vector<QMatrix4x4> *sampleModels,int sourceStartFrame) {
     if (sampleModels && sampleModels->size()!=size_t(plan.intervals)+1) throw std::runtime_error("Motion export needs one world model per sample.");
     report(progress,QStringLiteral("Filtering native Gaussian lifetimes"));
     normalizeSchemas(chunk);const size_t T=chunk.groups[0].intervals;
@@ -545,7 +545,7 @@ vgs::DecodedChunk editNativeChunk(vgs::DecodedChunk chunk,const NativeChunkPlan 
     for (size_t group=1;group<chunk.groups.size();++group) offsets[group+1]=offsets[group]+chunk.groups[group].splats;
     std::vector<std::vector<Span>> kept(chunk.groups.size());std::vector<std::vector<int>> starts(chunk.groups.size());
     for (size_t group=1;group<chunk.groups.size();++group) starts[group].assign(size_t(chunk.groups[group].splats),-1);
-    const auto model=project.transform.matrix();CompiledModifiers modifiers(project);
+    const auto model=project.transform.matrix();CompiledModifiers modifiers(project);const bool animatedCrops=project.hasAnimatedCrop();
     std::unique_ptr<vgs::FrameDecoder> colourDecoder;vgs::Frame colourFrame;
     if (!modifiers.greens.isEmpty()) colourDecoder=std::make_unique<vgs::FrameDecoder>(classificationSource ? *classificationSource : chunk);
     std::vector<float> positions;
@@ -556,11 +556,13 @@ vgs::DecodedChunk editNativeChunk(vgs::DecodedChunk chunk,const NativeChunkPlan 
             const double normalized=std::min((plan.first+sample)/double(T),1.-1e-9);
             decoder.evaluatePositions(normalized,&positions);
             const QMatrix4x4 &world=sampleModels ? (*sampleModels)[size_t(sample)] : model;
+            // An animated crop only changes which splats are kept at each sample.
+            const CompiledModifiers sampleModifiers=animatedCrops ? CompiledModifiers(project.modifiersAtFrame(sourceStartFrame+sample)) : modifiers;
             if (colourDecoder) colourDecoder->evaluateInto(normalized,false,&colourFrame);
             for (size_t group=1;group<chunk.groups.size();++group) {
                 const auto &life=get(chunk,vgs::Lifetimes,uint32_t(group)).bytes;
                 for (size_t row=0;row<chunk.groups[group].splats;++row) {const size_t record=offsets[group]+row,index=record*3;worldPositions[record]=world.map({positions[index],positions[index+1],positions[index+2]});
-                    visibility[record]=plan.first+sample>=life[2*row] && plan.first+sample+1<=life[2*row+1] && modifiers.keepsPosition(worldPositions[record]) && (!colourDecoder || !modifiers.removesColour({colourFrame.colorDc[index],colourFrame.colorDc[index+1],colourFrame.colorDc[index+2]}));}
+                    visibility[record]=plan.first+sample>=life[2*row] && plan.first+sample+1<=life[2*row+1] && sampleModifiers.keepsPosition(worldPositions[record]) && (!colourDecoder || !modifiers.removesColour({colourFrame.colorDc[index],colourFrame.colorDc[index+1],colourFrame.colorDc[index+2]}));}
             }
             applyIsolation(worldPositions,visibility,modifiers.isolations,[&] {report(progress,QStringLiteral("Purge Isolated: searching neighbours"));return false;});
         }

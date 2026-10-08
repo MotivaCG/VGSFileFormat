@@ -22,8 +22,15 @@
 
 namespace {
 constexpr int ModifierRole=Qt::UserRole+1;
+// The keys drawn on a modifier's timeline: its transform keys, or an animated crop's.
+QVariantList keyFrames(const Modifier &m) {
+    QVariantList frames;
+    if (m.type==ModifierType::Crop) {if (m.cropAnimation.animated) for (const auto &key:m.cropAnimation.keys) frames.append(key.frame);}
+    else for (const auto &key:m.animation.keys) frames.append(key.frame);
+    return frames;
+}
 QJsonArray visualState(const Project &project) {
-    QJsonArray items;for (const auto &m:project.modifiers) items.append(QJsonObject{{"id",m.id},{"name",m.name},{"active",m.active()},{"type",int(m.type)},{"shape",int(m.crop.shape)},{"keys",m.animation.json()}});return items;
+    QJsonArray items;for (const auto &m:project.modifiers) items.append(QJsonObject{{"id",m.id},{"name",m.name},{"active",m.active()},{"type",int(m.type)},{"shape",int(m.crop.shape)},{"keys",QJsonArray::fromVariantList(keyFrames(m))}});return items;
 }
 QString typeName(const Modifier &modifier) {
     switch (modifier.type) {
@@ -193,7 +200,7 @@ void ModifierPanel::setProject(const Project &project) {
                 auto *item=tree_->topLevelItem(i);const auto &m=project_.modifiers[i];
                 item->setText(0,m.name);item->setText(1,typeName(m));item->setToolTip(0,typeName(m));
                 item->setCheckState(0,m.active() ? Qt::Checked : Qt::Unchecked);item->setData(2,Qt::UserRole+2,m.active());item->setData(2,Qt::UserRole+3,int(m.type));
-                QVariantList keys;for (const auto &key:m.animation.keys) keys.append(key.frame);item->setData(2,Qt::UserRole+4,keys);
+                item->setData(2,Qt::UserRole+4,keyFrames(m));
             }
             renderedModifiers_=visualState(project_);updating_=false;tree_->viewport()->update();
         }
@@ -208,7 +215,7 @@ void ModifierPanel::rebuild() {
         const QString type=typeName(m);
         auto *item=new QTreeWidgetItem(tree_,{m.name,type,QString()});item->setFlags(item->flags()|Qt::ItemIsEditable|Qt::ItemIsUserCheckable);item->setCheckState(0,m.active() ? Qt::Checked : Qt::Unchecked);
         item->setToolTip(0,type);
-        QVariantList keys;for (const auto &key:m.animation.keys) keys.append(key.frame);item->setData(2,Qt::UserRole+4,keys);item->setData(2,Qt::UserRole+5,maximum_);item->setData(2,Qt::UserRole+6,frame_);
+        item->setData(2,Qt::UserRole+4,keyFrames(m));item->setData(2,Qt::UserRole+5,maximum_);item->setData(2,Qt::UserRole+6,frame_);
         item->setData(0,ModifierRole,m.id);item->setData(2,Qt::UserRole+2,m.active());item->setData(2,Qt::UserRole+3,int(m.type));item->setToolTip(2,tr("Applies over the full capture timeline."));
         if (project_.selectedModifier==m.id) selected=item;
     }

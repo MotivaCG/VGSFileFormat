@@ -353,7 +353,8 @@ std::array<double,256> exportShTransform(const Transform &transform) {
 
 vgs::Frame bakeExportFrame(const vgs::Frame &frame,const Project &project,int degree,const ExportProgress &progress,double frameRate) {
     if (degree<0 || degree>3) throw std::runtime_error("Invalid export SH degree.");
-    Project pose=project;pose.transform=project.transformAtFrame(frame.seconds*frameRate);return Baker(pose,degree).bake(frame,progress);
+    Project pose=project;pose.transform=project.transformAtFrame(frame.seconds*frameRate);pose.modifiers=project.modifiersAtFrame(std::round(frame.seconds*frameRate));
+    return Baker(pose,degree).bake(frame,progress);
 }
 
 ExportResult exportCaptureFile(const Project &inputProject,const QString &destination,const ExportProgress &progress) {
@@ -433,7 +434,7 @@ ExportResult exportCaptureFile(const Project &inputProject,const QString &destin
     options.extras.erase(std::remove_if(options.extras.begin(),options.extras.end(),[](const auto &e) {return e.type==vgs::MetadataExtra2;}),options.extras.end());
     const auto json=QJsonDocument(provenance).toJson(QJsonDocument::Compact);options.extras.push_back({vgs::MetadataExtra2,vgs::JsonUtf8,vgs::Bytes(json.begin(),json.end())});
     QTemporaryFile temporary(QFileInfo(destination).absolutePath()+"/.vgs-export-XXXXXX");if (!temporary.open()) throw std::runtime_error(temporary.errorString().toStdString());
-    const Baker baker(project,degree);int currentPercent=0;bool writing=false;
+    const Baker baker(project,degree);int currentPercent=0;bool writing=false;const bool animatedCrops=project.hasAnimatedCrop();
     auto innerProgress=[&](int,const QString &message) {report(progress,currentPercent,message);return true;};
     auto provider=[&](size_t index) {
         report(progress,currentPercent,QStringLiteral("%1 %2 %3 / %4").arg(writing ? "Writing" : "Preparing",native ? "native block" : "frame").arg(index+1).arg(native ? header.chunks.size() : size_t(result.frames)));
@@ -466,14 +467,18 @@ ExportResult exportCaptureFile(const Project &inputProject,const QString &destin
                 report(progress,currentPercent,QStringLiteral("Processing native colour dictionaries"));
                 if (!MintFile::despillLogical(&chunk,1/rate,processing,innerProgress,&error)) throw std::runtime_error(error.toStdString());
             }
-            auto edited=editNativeChunk(std::move(chunk),plan,project,writing ? nullptr : &result,innerProgress,classification ? &*classification : nullptr,moving ? &models : nullptr);
+            auto edited=editNativeChunk(std::move(chunk),plan,project,writing ? nullptr : &result,innerProgress,classification ? &*classification : nullptr,moving ? &models : nullptr,
+                                        int(sourceHeader.chunks[plan.sourceIndex].startTick)+plan.first);
             if (moving) edited.pages.push_back(motionPage(samples));
             return edited;
         }
         const double seconds=std::min(double(first+int(index))/rate,duration-1e-7);vgs::Frame frame;
         if (mint) {MintFrame decoded;if (!mint->decode(seconds,&decoded,true,&error)) throw std::runtime_error(error.toStdString());frame=copyFrame(decoded);}
         else frame=copyFrame(capture->setTime(seconds,true));
-        auto baked=[&] {if (!animated) return baker.bake(frame,innerProgress);Project pose=project;pose.transform=inputProject.transformAtFrame(first+int(index));return Baker(pose,degree).bake(frame,innerProgress);}();
+        auto baked=[&] {
+            if (!animated && !animatedCrops) return baker.bake(frame,innerProgress);
+            Project pose=project;if (animated) pose.transform=inputProject.transformAtFrame(first+int(index));
+            pose.modifiers=inputProject.modifiersAtFrame(first+int(index));return Baker(pose,degree).bake(frame,innerProgress);}();
         if (!writing) {result.kept+=baked.count;result.removed+=std::count(frame.active.begin(),frame.active.end(),uint8_t(1))-baked.count;}
         return packFrame(std::move(baked),degree);
     };

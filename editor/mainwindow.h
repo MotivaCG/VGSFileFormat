@@ -18,6 +18,7 @@ class RangeSlider;
 class QLabel;
 class QPushButton;
 class QCheckBox;
+class QTableWidget;
 class QAction;
 class QCloseEvent;
 class QMenu;
@@ -114,7 +115,16 @@ private:
     QDoubleSpinBox *transform_[3][3], *speed_, *pointSize_;
     QDoubleSpinBox *cropRadius_, *cropRadiusZ_, *cropHeight_;
     QDoubleSpinBox *cropWidth_, *cropDepth_;
-    QComboBox *cropShapeCombo_;
+    QComboBox *cropShapeCombo_, *cropAnimationCombo_;
+    QWidget *cropKeys_;
+    QTableWidget *cropKeyTable_;
+    QPushButton *cropRemoveKey_;
+    int currentFrame() const;
+    // While the selected crop is animated, an edit of its pose or size is a key at this frame.
+    void keyCrop();
+    void setCropAnimated(bool animated);
+    void showCropKeys(const Modifier &m);
+    QComboBox *renderStyle_ = nullptr, *splatSh_ = nullptr;
     QFormLayout *cropForm_;
     QDoubleSpinBox *frameSpin_, *inFrame_, *outFrame_;
     RangeSlider *slider_;

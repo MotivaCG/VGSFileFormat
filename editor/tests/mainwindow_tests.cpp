@@ -31,6 +31,56 @@
 class MainWindowTests : public QObject {
     Q_OBJECT
 private slots:
+    void cropSwitchesBetweenStaticAndAnimatedKeepingKeys() {
+        QTemporaryDir dir;QVERIFY(dir.isValid());
+        QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());
+        QString capture=dir.filePath("source.pgs");
+        vgs::Frame f;f.count=1;f.active={1};f.position={0,1,0};f.rotation={0,0,0,1};f.scale={.01f,.02f,.03f};f.colorDc={.5f,.5f,.5f};f.opacity={1};
+        vgs::Header h;h.shDegree=0;h.frameCount=h.durationTicks=5;h.chunks.resize(5);
+        for (size_t i=0;i<5;++i) {h.chunks[i].startTick=i;h.chunks[i].intervals=1;}
+        vgs::EncodeOptions options;options.signer=vgs::authoringSigner();options.shDegree=0;options.compression=vgs::Compression::None;
+        QFile file(capture);QVERIFY(file.open(QIODevice::WriteOnly));
+        vgs::encodeSequence(h,[&](size_t) {return packExportFrame(f,0);},[&](uint64_t offset,const uint8_t *data,size_t count) {
+            if (!file.seek(qint64(offset)) || file.write(reinterpret_cast<const char *>(data),qint64(count))!=qint64(count)) throw std::runtime_error("Cannot create fixture.");
+        },options);file.close();
+        MainWindow window(nullptr,dir.filePath("presets"));window.show();QVERIFY(QTest::qWaitForWindowExposed(&window));
+        window.openPath(capture);
+        auto *edit=window.findChild<QPushButton *>("editCropVolume");QVERIFY(edit);QTRY_VERIFY_WITH_TIMEOUT(edit->isEnabled(),5000);
+        auto *animation=window.findChild<QComboBox *>("cropAnimation");auto *keys=window.findChild<QWidget *>("cropKeys");auto *table=window.findChild<QTableWidget *>("cropKeyTable");
+        auto *radius=window.findChild<QDoubleSpinBox *>("cropRadiusX");auto *slider=window.findChild<RangeSlider *>();auto *tree=window.findChild<QTreeWidget *>("modifierTree");
+        QVERIFY(animation && keys && table && radius && slider && tree);
+        auto choose=[&](int mode) {animation->setCurrentIndex(animation->findData(mode));QVERIFY(QMetaObject::invokeMethod(animation,"activated",Qt::DirectConnection,Q_ARG(int,animation->currentIndex())));};
+        auto treeKeys=[&] {return tree->topLevelItem(0)->data(2,Qt::UserRole+4).toList().size();};
+        QCOMPARE(animation->currentData().toInt(),0);QVERIFY(!keys->isVisible());QCOMPARE(treeKeys(),0);
+        const double still=radius->value();
+        // Animated starts from where the crop is, with a key at the current frame.
+        choose(1);QVERIFY(keys->isVisible());QCOMPARE(table->rowCount(),1);QCOMPARE(treeKeys(),1);
+        // Editing at another frame sets a key there; going back shows the first pose.
+        emit slider->playheadChanged(4);radius->setValue(still+0.5);QCOMPARE(table->rowCount(),2);QCOMPARE(table->item(1,0)->text(),QString("4"));QCOMPARE(treeKeys(),2);
+        emit slider->playheadChanged(0);QCOMPARE(radius->value(),still);
+        emit slider->playheadChanged(2);QVERIFY(std::abs(radius->value()-(still+0.25))<1e-4);
+        // Static hides the keys and restores the static size, at any frame; the keys survive.
+        choose(0);QVERIFY(!keys->isVisible());QCOMPARE(radius->value(),still);QCOMPARE(treeKeys(),0);
+        radius->setValue(still+2);emit slider->playheadChanged(4);QCOMPARE(radius->value(),still+2);
+        choose(1);QVERIFY(keys->isVisible());QCOMPARE(table->rowCount(),2);QCOMPARE(radius->value(),still+0.5);
+        choose(0);QCOMPARE(radius->value(),still+2);
+        // 1 and 2 on the main keyboard pick 3D points / Gaussian; the numpad keeps its views,
+        // and a digit typed into a field stays in the field.
+        auto *style=window.findChild<QComboBox *>("displayRenderStyle");auto *sh=window.findChild<QComboBox *>("displaySplatSh");auto *viewport=window.findChild<Viewport *>();
+        QVERIFY(style && sh && viewport);QCOMPARE(style->itemText(0),QString("3D points"));QCOMPARE(style->itemText(1),QString("Gaussian"));
+        QCOMPARE(sh->itemText(sh->count()-1),QString("All"));QCOMPARE(sh->currentText(),QString("All"));QCOMPARE(style->currentText(),QString("Gaussian"));QVERIFY(viewport->splatRendering());QCOMPARE(viewport->splatShDegree(),-1);
+        sh->setCurrentIndex(sh->findData(2));QCOMPARE(viewport->splatShDegree(),2);sh->setCurrentIndex(sh->findData(-1));
+        // Closed, each reads "Label: value" (also its accessible name); the open list keeps the plain choices.
+        QCOMPARE(sh->accessibleName(),QString("SH: All"));QCOMPARE(sh->itemText(2),QString("SH2"));
+        sh->setCurrentIndex(sh->findData(2));QCOMPARE(sh->accessibleName(),QString("SH: 2"));sh->setCurrentIndex(sh->findData(-1));
+        QCOMPARE(style->accessibleName(),QString("Render: ")+style->currentText());
+        viewport->setFocus();QTRY_VERIFY(viewport->hasFocus());
+        QTest::keyClick(viewport,Qt::Key_2);QCOMPARE(style->currentIndex(),1);QVERIFY(viewport->splatRendering());
+        QTest::keyClick(viewport,Qt::Key_1,Qt::KeypadModifier);QCOMPARE(style->currentIndex(),1);QCOMPARE(viewport->camera().preset,ViewPreset::Front);
+        QTest::keyClick(viewport,Qt::Key_1);QCOMPARE(style->currentIndex(),0);QVERIFY(!viewport->splatRendering());
+        radius->setFocus();QTRY_VERIFY(radius->hasFocus());radius->selectAll();QTest::keyClick(radius,Qt::Key_2);QCOMPARE(style->currentIndex(),0);
+        QTest::keyClick(radius,Qt::Key_2,Qt::KeypadModifier);QCOMPARE(style->currentIndex(),0);
+    }
     void tabTogglesCropFromViewportAndFields() {
         QTemporaryDir dir;QVERIFY(dir.isValid());
         QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());

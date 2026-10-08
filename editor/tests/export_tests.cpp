@@ -397,6 +397,28 @@ private slots:
             QVERIFY(edited.groups[1].splats<source.groups[1].splats);QCOMPARE(edited.groups[1].intervals,uint64_t(plan.intervals));
         }
     }
+    void nativeAnimatedCropKeepsWhatItContainsAtEachSample() {
+        auto source=temporalFixture(true);vgs::FrameDecoder reference(source);Project project;
+        auto &m=*project.modifier();m.crop.enabled=true;CropVolume a=m.crop,b=m.crop;
+        // The fixture's splats sit at x=0 and x=3: the crop travels from one group to the other.
+        a.transform.position={0,0,0};a.radius=a.radiusZ=1;a.height=2;b=a;b.transform.position={3,0,0};
+        m.cropAnimation.setKey(0,a);m.cropAnimation.setKey(5,b);m.cropAnimation.animated=true;
+        for (auto plan:{NativeChunkPlan{0,0,6},NativeChunkPlan{0,1,4}}) {
+            ExportResult result;auto edited=editNativeChunk(source,plan,project,&result,{},nullptr,nullptr,plan.first);vgs::FrameDecoder output(edited);
+            std::vector<size_t> firstKept,lastKept;
+            for (int tick=0;tick<plan.intervals;++tick) {
+                auto original=reference.evaluate((plan.first+tick)/6.,true),actual=output.evaluate(tick/double(plan.intervals),true);
+                const CompiledModifiers at(project.modifiersAtFrame(plan.first+tick));std::vector<size_t> expected;size_t actualCount=0;
+                for (size_t row=0;row<original.count;++row) if (original.active[row] && at.keepsPosition({original.position[row*3],original.position[row*3+1],original.position[row*3+2]})) expected.push_back(row);
+                for (size_t row=0;row<actual.count;++row) if (actual.active[row]) ++actualCount;
+                QCOMPARE(actualCount,expected.size());
+                if (tick==0) firstKept=expected;
+                lastKept=expected;
+            }
+            // The crop really moved: what it keeps at the first and last sample differs.
+            QVERIFY(firstKept!=lastKept);
+        }
+    }
     void reportedProjectStaysSmallerThanMint() {
         const QString path=qEnvironmentVariable("EDITOR_TEST_PROJECT");if (path.isEmpty()) QSKIP("Set EDITOR_TEST_PROJECT to verify a reported export-size regression.");
         Project project;QString error;QVERIFY2(Project::read(path,&project,&error),qPrintable(error));QVERIFY(supportsNativeTransform(project));

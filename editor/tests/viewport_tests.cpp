@@ -8,6 +8,7 @@
 #include <QSurfaceFormat>
 #include <QtTest>
 #include <cmath>
+#include <memory>
 
 class ViewportTests : public QObject {
     Q_OBJECT
@@ -339,6 +340,47 @@ private slots:
         QTest::keyClick(&viewport,Qt::Key_Escape);
         QCOMPARE(viewport.transformMode(),TransformMode::None); QCOMPARE(viewport.transform().position,QVector3D());
         QTest::mouseRelease(&viewport,Qt::LeftButton,Qt::NoModifier,handle+outward);
+    }
+    void splatsFollowTheirCovarianceAndOpacity() {
+        Viewport viewport; viewport.resize(500,500); viewport.setGrid(false);
+        Camera camera; camera.target = {0,0,0}; camera.yaw = camera.pitch = 0; camera.distance = 3; viewport.setCamera(camera);
+        auto make = [&](float qz,float qw,float opacity) {
+            auto frame = std::make_shared<RenderFrame>(); frame->total = 1;
+            Splat s{{0,0,0},{0,0,qz,qw},{0.3f,0.02f,0.02f},{1,0,0,opacity},0};
+            frame->records = {s}; frame->active = {1}; frame->points = {{{0,0,0},{1,0,0},0}}; return frame; };
+        // Width and height of the reddish footprint, and its brightest red.
+        auto footprint = [&] { const auto image = viewport.grabFramebuffer(); int left=image.width(),right=-1,top=image.height(),bottom=-1,peak=0;
+            for (int y=0;y<image.height();++y) for (int x=0;x<image.width();++x) { const auto c = image.pixelColor(x,y);
+                if (c.red()>c.green()+40) {left=std::min(left,x);right=std::max(right,x);top=std::min(top,y);bottom=std::max(bottom,y);peak=std::max(peak,c.red());} }
+            return std::array<int,3>{right-left+1,bottom-top+1,peak}; };
+        viewport.setFrame(make(0,1,1)); viewport.show(); QVERIFY(QTest::qWaitForWindowExposed(&viewport));
+        const auto point = footprint(); QVERIFY(point[0]<20 && point[1]<20);
+        viewport.setSplatRendering(true); QVERIFY(viewport.splatRendering());
+        const auto along = footprint(); QVERIFY2(along[0]>8*along[1], qPrintable(QString("%1x%2").arg(along[0]).arg(along[1]))); QVERIFY(along[2]>200);
+        // A quarter turn about Z stands it up; half the opacity halves its strength.
+        viewport.setFrame(make(std::sqrt(0.5f),std::sqrt(0.5f),1)); const auto upright = footprint(); QVERIFY(upright[1]>8*upright[0]);
+        viewport.setFrame(make(0,1,0.5f)); const auto faint = footprint(); QVERIFY(faint[2]<along[2]-60);
+        viewport.setSplatRendering(false); const auto back = footprint(); QVERIFY(back[0]<20 && back[1]<20);
+    }
+    void splatOrderFollowsTheCameraFromTheSortingThread() {
+        // Red in front of blue seen from one side; from the other, blue must end up in front once
+        // the background sort lands. Every paint in between draws a valid (older) order.
+        auto viewport = std::make_unique<Viewport>(); viewport->resize(300,300); viewport->setGrid(false);
+        Camera camera; camera.target = {0,0,0}; camera.yaw = camera.pitch = 0; camera.distance = 4; viewport->setCamera(camera);
+        // Along the line of sight: red nearer the camera, blue behind it.
+        const auto v = camera.viewMatrix(); const QVector3D near = QVector3D(v(2,0),v(2,1),v(2,2)).normalized()*0.3f;
+        auto frame = std::make_shared<RenderFrame>(); frame->total = 2;
+        const Splat red{{near.x(),near.y(),near.z()},{0,0,0,1},{0.2f,0.2f,0.2f},{1,0,0,0.95f},0}, blue{{-near.x(),-near.y(),-near.z()},{0,0,0,1},{0.2f,0.2f,0.2f},{0,0,1,0.95f},1};
+        frame->records = {red,blue}; frame->active = {1,1};
+        frame->points = {{{red.position[0],red.position[1],red.position[2]},{1,0,0},0},{{blue.position[0],blue.position[1],blue.position[2]},{0,0,1},1}};
+        viewport->setSplatRendering(true); viewport->setFrame(frame); viewport->show(); QVERIFY(QTest::qWaitForWindowExposed(viewport.get()));
+        auto centre = [&] { const auto image = viewport->grabFramebuffer(); return image.pixelColor(image.width()/2,image.height()/2); };
+        const auto first = centre(); const bool redFirst = first.red()>first.blue(); QVERIFY(redFirst);
+        QVERIFY(std::abs(first.red()-first.blue())>100);
+        camera.yaw = 180; viewport->setCamera(camera);
+        QTRY_VERIFY_WITH_TIMEOUT([&] { const auto c = centre(); return (c.red()>c.blue())!=redFirst && std::abs(c.red()-c.blue())>100; }(), 3000);
+        // Destroying it with a sort just requested must neither crash nor hang.
+        camera.yaw = 90; viewport->setCamera(camera); centre(); viewport.reset();
     }
     void opaquePointsAndFixedSize() {
         Viewport viewport; viewport.resize(400,400); viewport.setGrid(false); viewport.setPointSize(10);

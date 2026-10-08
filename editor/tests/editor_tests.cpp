@@ -33,6 +33,35 @@ private slots:
         auto invalid=json;auto mods=invalid["modifiers"].toArray();auto m=mods[0].toObject();auto animation=m["animation"].toObject();auto keys=animation["keys"].toArray();keys.append(keys[0]);animation["keys"]=keys;m["animation"]=animation;mods[0]=m;invalid["modifiers"]=mods;QVERIFY(!Project::fromJson(invalid,dir.path(),&restored,&error));
         project.modifiers[0].enabled=false;project.modifiers[1].enabled=false;QCOMPARE(project.transformAtFrame(5).position,reference.position);
     }
+    void animatedCropInterpolatesSwitchesAndPersists() {
+        Project project;auto &m=*project.modifier();QCOMPARE(m.type,ModifierType::Crop);m.crop.enabled=true;
+        m.crop.radius=1;m.crop.remove=true;const auto still=m.crop;
+        CropVolume a=m.crop,b=m.crop;a.transform.position={-1,0,0};a.height=2;b.transform.position={1,0,0};b.transform.rotation={0,90,0};b.height=4;b.radiusZ=3;
+        m.cropAnimation.setKey(0,a);m.cropAnimation.setKey(10,b);
+        // Static ignores the keys without losing them.
+        QCOMPARE(project.modifiersAtFrame(5)[0].crop.transform.position,still.transform.position);QVERIFY(!project.hasAnimatedCrop());
+        m.cropAnimation.still=m.crop;m.cropAnimation.animated=true;QVERIFY(project.hasAnimatedCrop());
+        const auto mid=project.modifiersAtFrame(5)[0].crop;
+        QVERIFY((mid.transform.position-QVector3D(0,0,0)).length()<1e-5f);QVERIFY(std::abs(mid.transform.rotation.y()-45)<1e-3f);
+        QVERIFY(std::abs(mid.height-3)<1e-5f);QVERIFY(std::abs(mid.radiusZ-2)<1e-5f);
+        // Mode and shape are the modifier's own, never animated; outside the keys the ends hold.
+        QVERIFY(mid.remove);QCOMPARE(project.modifiersAtFrame(-4)[0].crop.transform.position,a.transform.position);QCOMPARE(project.modifiersAtFrame(40)[0].crop.height,4.f);
+        // A Remove crop: what it deletes follows it over time.
+        QVERIFY(CompiledModifiers(project.modifiersAtFrame(0)).keepsPosition({1,1,0}));QVERIFY(!CompiledModifiers(project.modifiersAtFrame(10)).keepsPosition({1,1,0}));
+        // The shown pose tracks the frame; the static pose is what is saved as the crop.
+        project.showCropsAtFrame(10);QCOMPARE(m.crop.transform.position,b.transform.position);QCOMPARE(m.staticCrop().transform.position,still.transform.position);
+        QTemporaryDir dir;project.asset=dir.filePath("source.mint");const auto json=project.json(dir.filePath("scene.vgsproj"));Project restored;QString error;
+        QVERIFY2(Project::fromJson(json,dir.path(),&restored,&error),qPrintable(error));QCOMPARE(restored.modifierJson(),project.modifierJson());
+        QVERIFY(restored.modifiers[0].cropAnimation.animated);QCOMPARE(restored.modifiers[0].cropAnimation.keys.size(),2);
+        QVERIFY((restored.modifiersAtFrame(5)[0].crop.transform.position-mid.transform.position).length()<1e-5f);
+        // Saved while static, the keys come back too.
+        project.modifiers[0].crop=project.modifiers[0].staticCrop();project.modifiers[0].cropAnimation.animated=false;
+        QVERIFY(Project::fromJson(project.json(dir.filePath("scene.vgsproj")),dir.path(),&restored,&error));
+        QVERIFY(!restored.modifiers[0].cropAnimation.animated);QCOMPARE(restored.modifiers[0].cropAnimation.keys.size(),2);
+        // Older projects have no animation at all.
+        auto legacy=json;auto mods=legacy["modifiers"].toArray();auto item=mods[0].toObject();auto crop=item["crop"].toObject();crop.remove("animation");item["crop"]=crop;mods[0]=item;legacy["modifiers"]=mods;
+        QVERIFY(Project::fromJson(legacy,dir.path(),&restored,&error));QVERIFY(!restored.modifiers[0].cropAnimation.animated);QVERIFY(restored.modifiers[0].cropAnimation.keys.isEmpty());
+    }
     void isolationMatchesNthNeighbourMedianAndEdgeCases() {
         std::vector<QVector3D> points;for (int y=0;y<5;++y) for (int x=0;x<5;++x) points.push_back({x*.01f,y*.01f,0});points.push_back({100,100,100});points.push_back({101,100,100});
         IsolationFilter filter{4,300};std::vector<uint8_t> keep(points.size(),1);std::vector<float> expectedDistances;

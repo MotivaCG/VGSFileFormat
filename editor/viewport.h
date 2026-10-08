@@ -8,6 +8,7 @@
 class ViewCube;
 class QLabel;
 class QOpenGLFramebufferObject;
+class SplatSorter;
 
 class Viewport : public QOpenGLWidget, protected QOpenGLFunctions_3_3_Core {
     Q_OBJECT
@@ -38,6 +39,13 @@ public:
     // What the scene chose, before a crop being edited forces Scale to Local.
     CoordinateSpace chosenCoordinateSpace(TransformMode mode) const;
     void setPointSize(float size);
+    // Display only: draw each record as its Gaussian (sorted, blended) instead of a point.
+    void setSplatRendering(bool splats);
+    bool splatRendering() const { return splats_; }
+    // Spherical-harmonic bands the splats evaluate, 0 (base colour) to 3, or -1 for all the
+    // capture has; points use them all.
+    void setSplatShDegree(int degree);
+    int splatShDegree() const { return splatShDegree_; }
     void setDisplayControls(QWidget *controls);
     void setPlaybackTime(double seconds,double duration);
     void setGrid(bool enabled);
@@ -118,7 +126,17 @@ private:
     GLuint gridVao_ = 0, gridBuffer_ = 0, fineVao_ = 0, fineBuffer_ = 0;
     int fineVertices_ = 0;
     int gridVertices_ = 0, shCoefficients_ = 0;
-    std::unique_ptr<QOpenGLShaderProgram> pointShader_, gridShader_;
+    std::unique_ptr<QOpenGLShaderProgram> pointShader_, gridShader_, splatShader_;
+    bool splats_ = false, splatsDirty_ = true, splatLimitReported_ = false;
+    int splatShDegree_ = -1;
+    GLuint splatVao_ = 0, cornerBuffer_ = 0, orderBuffer_ = 0, splatBuffer_ = 0, splatTexture_ = 0;
+    std::vector<uint32_t> splatOrder_;
+    std::vector<float> splatDepths_;
+    // The order drawn and what it was sorted for; frames are told apart by serial, not pointer.
+    QMatrix4x4 sortedView_, requestedView_;
+    quint64 frameSerial_ = 0, sortedSerial_ = 0, requestedSerial_ = 0;
+    bool orderComplete_ = false; // every splat of its frame, none filtered out
+    std::unique_ptr<SplatSorter> sorter_;
     QString error_;
     double uploadMs_ = 0;
     float pointSize_ = 5;

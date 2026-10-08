@@ -23,6 +23,10 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
+#include <QStyleOptionComboBox>
+#include <QStylePainter>
+#include <QHeaderView>
+#include <QTableWidget>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QGridLayout>
@@ -110,6 +114,40 @@ static QIcon timelineClockIcon() {
 // Drag horizontally on an axis label to scrub its spin box (Shift fine, Ctrl coarse, Esc cancels).
 // A click without dragging focuses the field for typing. The cursor is hidden and warped back
 // to the press point so the drag never runs into a screen edge.
+// Qt also fires a "1" shortcut from the numpad's 1 when that key finds no shortcut of its
+// own. Numpad digits are the viewport's views, so they go to the focused widget as keys.
+// A combo that reads "Label: value" while closed, like the Background button and the Point
+// size field beside it; the open list shows the plain choices. An item may carry a shorter
+// closed form in ClosedTextRole ("2" rather than "SH2").
+class PrefixedComboBox : public QComboBox {
+public:
+    static constexpr int ClosedTextRole = Qt::UserRole+1;
+    explicit PrefixedComboBox(const QString &prefix,QWidget *parent=nullptr) : QComboBox(parent),prefix_(prefix) {
+        connect(this,&QComboBox::currentIndexChanged,this,[this] {setAccessibleName(closedText());});
+    }
+    QString closedText() const {
+        const auto closed = currentData(ClosedTextRole).toString();
+        return prefix_+": "+(closed.isEmpty() ? currentText() : closed);
+    }
+protected:
+    void paintEvent(QPaintEvent *) override {
+        QStylePainter painter(this);QStyleOptionComboBox option;initStyleOption(&option);option.currentText=closedText();
+        painter.drawComplexControl(QStyle::CC_ComboBox,option);painter.drawControl(QStyle::CE_ComboBoxLabel,option);
+    }
+private:
+    QString prefix_;
+};
+class NumpadDigitsAreNotShortcuts : public QObject {
+public:
+    using QObject::QObject;
+    bool eventFilter(QObject *watched,QEvent *event) override {
+        if (event->type()==QEvent::ShortcutOverride) {
+            const auto *key=static_cast<QKeyEvent *>(event);
+            if ((key->modifiers() & Qt::KeypadModifier) && key->key()>=Qt::Key_0 && key->key()<=Qt::Key_9) {event->accept();return true;}
+        }
+        return QObject::eventFilter(watched,event);
+    }
+};
 class SpinScrubber final : public QObject {
 public:
     static void attach(QWidget *label,QDoubleSpinBox *spin,double pixelStep) {
@@ -273,7 +311,7 @@ MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory) : QMainWi
     });
     connect(viewport_,&Viewport::cropEdited,this,[this](const CropVolume &crop) {
         if (!project_.modifier() || project_.modifier()->type!=ModifierType::Crop) return;
-        const bool enabled=project_.crop().enabled;project_.crop() = crop;project_.crop().enabled=enabled;syncUi();dirty();
+        const bool enabled=project_.crop().enabled;project_.crop() = crop;project_.crop().enabled=enabled;keyCrop();syncUi();dirty();
     });
     connect(viewport_,&Viewport::frameRequested,this,&MainWindow::fitCurrentTarget);
     playback_.setInterval(16); playback_.setTimerType(Qt::PreciseTimer);
@@ -483,6 +521,14 @@ void MainWindow::buildUi() {
     }
     cropForm->addRow(presets);
     cropForm->addRow(tr("Shape"),cropShapeCombo_);
+    // Static or Animated, switchable at any time: each keeps its own pose and the keys survive.
+    cropAnimationCombo_=new QComboBox;cropAnimationCombo_->setObjectName("cropAnimation");cropAnimationCombo_->addItem(tr("Static"),0);cropAnimationCombo_->addItem(tr("Animated"),1);
+    cropAnimationCombo_->setToolTip(tr("Static: one pose and size for the whole capture. Animated: position, rotation, scale and size follow keys on the timeline, and editing the crop sets a key at the current frame. Switching keeps both the static pose and the keys. Shape, mode and the editing preview are never animated."));
+    cropForm->addRow(tr("Animation"),cropAnimationCombo_);
+    connect(cropAnimationCombo_,&QComboBox::activated,this,[this](int) {
+        if (syncing_ || !project_.modifier() || project_.modifier()->type!=ModifierType::Crop) return;
+        setCropAnimated(cropAnimationCombo_->currentData().toInt()==1);viewport_->setFocus();
+    });
     cropModeCombo_=new QComboBox;cropModeCombo_->setObjectName("cropMode");cropModeCombo_->addItem(tr("Keep inside"),0);cropModeCombo_->addItem(tr("Remove inside"),1);
     cropModeCombo_->setToolTip(tr("Keep preserves what is inside; Remove deletes it. Where they overlap, Remove wins. With only Remove crops, everything outside them is kept."));
     cropForm->addRow(tr("Mode"),cropModeCombo_);
@@ -504,6 +550,40 @@ void MainWindow::buildUi() {
     cropRadius_->setObjectName("cropRadiusX"); cropRadiusZ_->setObjectName("cropRadiusZ");
     cropForm->addRow(tr("Radius X"),cropRadius_); cropForm->addRow(tr("Radius Z"),cropRadiusZ_); cropForm->addRow(tr("Height"),cropHeight_);
     cropForm->addRow(tr("Width"),cropWidth_); cropForm->addRow(tr("Depth"),cropDepth_);
+    // An animated crop's keys; hidden while it is static, which keeps them.
+    cropKeys_=new QWidget;cropKeys_->setObjectName("cropKeys");auto *keysLayout=new QVBoxLayout(cropKeys_);keysLayout->setContentsMargins(0,0,0,0);
+    auto *keyButtons=new QHBoxLayout;auto *setCropKey=new QPushButton(tr("Set key"));setCropKey->setObjectName("setCropKey");
+    setCropKey->setToolTip(tr("Add or update a key at the current frame with the crop as it is now. Editing the crop also sets one."));
+    cropRemoveKey_=new QPushButton(tr("Remove key"));cropRemoveKey_->setObjectName("removeCropKey");
+    keyButtons->addWidget(setCropKey);keyButtons->addWidget(cropRemoveKey_);keysLayout->addLayout(keyButtons);
+    cropKeyTable_=new QTableWidget;cropKeyTable_->setObjectName("cropKeyTable");cropKeyTable_->setColumnCount(4);cropKeyTable_->setHorizontalHeaderLabels({tr("Frame"),tr("Position"),tr("Rotation"),tr("Size")});
+    cropKeyTable_->setSelectionBehavior(QAbstractItemView::SelectRows);cropKeyTable_->setSelectionMode(QAbstractItemView::SingleSelection);cropKeyTable_->setAlternatingRowColors(true);
+    cropKeyTable_->verticalHeader()->hide();cropKeyTable_->verticalHeader()->setDefaultSectionSize(28);
+    {auto palette=cropKeyTable_->palette();palette.setColor(QPalette::Highlight,QColor(73,73,73));palette.setColor(QPalette::HighlightedText,Qt::white);cropKeyTable_->setPalette(palette);}
+    cropKeyTable_->setStyleSheet("QTableWidget::item:selected { background: #494949; color: #ffffff; }");
+    cropKeyTable_->horizontalHeader()->setSectionResizeMode(0,QHeaderView::ResizeToContents);for (int col=1;col<4;++col) cropKeyTable_->horizontalHeader()->setSectionResizeMode(col,QHeaderView::Stretch);
+    cropKeyTable_->setToolTip(tr("Click a key to go to its frame. Double-click a frame to move the key. Edit the crop at a frame to change or add its key."));
+    keysLayout->addWidget(cropKeyTable_);cropForm->addRow(cropKeys_);
+    connect(setCropKey,&QPushButton::clicked,this,[this] {
+        auto *m=project_.modifier();if (!m || m->type!=ModifierType::Crop || !m->cropAnimation.animated) return;keyCrop();syncUi();dirty();
+    });
+    connect(cropRemoveKey_,&QPushButton::clicked,this,[this] {
+        auto *m=project_.modifier();if (!m || m->type!=ModifierType::Crop || m->cropAnimation.keys.size()<2) return;
+        const int row=cropKeyTable_->currentRow();const auto &keys=m->cropAnimation.keys;
+        m->cropAnimation.removeKey(row>=0 && row<keys.size() ? keys[row].frame : currentFrame());syncUi();dirty();
+    });
+    connect(cropKeyTable_,&QTableWidget::cellClicked,this,[this](int row,int) {
+        const auto *m=project_.modifier();if (syncing_ || !m || m->type!=ModifierType::Crop || row>=m->cropAnimation.keys.size()) return;
+        play(false);setTime(m->cropAnimation.keys[row].frame/info_.fps,true);
+    });
+    connect(cropKeyTable_,&QTableWidget::itemChanged,this,[this](QTableWidgetItem *item) {
+        auto *m=project_.modifier();if (syncing_ || item->column()!=0 || !m || m->type!=ModifierType::Crop || item->row()>=m->cropAnimation.keys.size()) return;
+        auto &keys=m->cropAnimation.keys;bool ok;const int frame=item->text().toInt(&ok);
+        bool valid=ok && frame>=0 && frame<=std::max(0,info_.frames-1);
+        for (int i=0;i<keys.size();++i) if (i!=item->row() && keys[i].frame==frame) valid=false;
+        if (valid) {keys[item->row()].frame=frame;std::sort(keys.begin(),keys.end(),[](const auto &a,const auto &b) {return a.frame<b.frame;});}
+        syncUi();if (valid) dirty();
+    });
     auto *cropButtons = new QWidget; auto *cropRow = new QHBoxLayout(cropButtons); cropRow->setContentsMargins(0,0,0,0);
     cropFitButton_ = new QPushButton(tr("Fit capture")); cropClearButton_ = new QPushButton(tr("Disable crop"));
     cropFitButton_->setToolTip(tr("Fit the crop volume to the capture bounds and enter Move mode (Ctrl+F)."));
@@ -514,16 +594,16 @@ void MainWindow::buildUi() {
     connect(cropFitButton_,&QPushButton::clicked,this,&MainWindow::fitCrop);
     connect(cropClearButton_,&QPushButton::clicked,this,&MainWindow::clearCrop);
     connect(cropRadius_,&QDoubleSpinBox::valueChanged,this,[this](double value) {
-        if (syncing_) return; project_.crop().radius = float(value); viewport_->setCrop(project_.crop()); syncModifiers(); dirty();
+        if (syncing_) return; project_.crop().radius = float(value); keyCrop(); viewport_->setCrop(project_.crop()); syncModifiers(); dirty();
     });
     connect(cropRadiusZ_,&QDoubleSpinBox::valueChanged,this,[this](double value) {
-        if (syncing_) return; project_.crop().radiusZ = float(value); viewport_->setCrop(project_.crop()); syncModifiers(); dirty();
+        if (syncing_) return; project_.crop().radiusZ = float(value); keyCrop(); viewport_->setCrop(project_.crop()); syncModifiers(); dirty();
     });
     connect(cropHeight_,&QDoubleSpinBox::valueChanged,this,[this](double value) {
-        if (syncing_) return; project_.crop().height = float(value); viewport_->setCrop(project_.crop()); syncModifiers(); dirty();
+        if (syncing_) return; project_.crop().height = float(value); keyCrop(); viewport_->setCrop(project_.crop()); syncModifiers(); dirty();
     });
-    connect(cropWidth_,&QDoubleSpinBox::valueChanged,this,[this](double value) { if (!syncing_) { project_.crop().width = float(value); viewport_->setCrop(project_.crop()); syncModifiers(); dirty(); } });
-    connect(cropDepth_,&QDoubleSpinBox::valueChanged,this,[this](double value) { if (!syncing_) { project_.crop().depth = float(value); viewport_->setCrop(project_.crop()); syncModifiers(); dirty(); } });
+    connect(cropWidth_,&QDoubleSpinBox::valueChanged,this,[this](double value) { if (!syncing_) { project_.crop().width = float(value); keyCrop(); viewport_->setCrop(project_.crop()); syncModifiers(); dirty(); } });
+    connect(cropDepth_,&QDoubleSpinBox::valueChanged,this,[this](double value) { if (!syncing_) { project_.crop().depth = float(value); keyCrop(); viewport_->setCrop(project_.crop()); syncModifiers(); dirty(); } });
     greenProperties_=new QGroupBox(tr("Remove green points"));greenProperties_->setObjectName("greenModifierProperties");auto *greenForm=new QFormLayout(greenProperties_);
     greenProperties_->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Maximum);
     greenSaturation_=new QDoubleSpinBox;greenSaturation_->setObjectName("greenMinimumSaturation");greenSaturation_->setRange(0,100);greenSaturation_->setDecimals(1);greenSaturation_->setSuffix(" %");greenSaturation_->setValue(50);
@@ -596,12 +676,39 @@ void MainWindow::buildUi() {
     displayControls_=new QWidget;displayControls_->setObjectName("viewportDisplayControls");
     // QSS heights exclude the 1 px border, so the field matches the painted Background button exactly.
     displayControls_->setStyleSheet(QString("QWidget#viewportDisplayControls QLabel { color: #dddddd; font-size: 9pt; }"
-        "QWidget#viewportDisplayControls QDoubleSpinBox { padding: 0 16px 0 7px; min-height: %1px; max-height: %1px; font-size: 9pt; border-radius: 4px; }").arg(ViewCube::rowHeight-2));
+        "QWidget#viewportDisplayControls QDoubleSpinBox { padding: 0 16px 0 7px; min-height: %1px; max-height: %1px; font-size: 9pt; border-radius: 4px; }"
+        "QWidget#viewportDisplayControls QComboBox { padding: 0 7px; min-height: %1px; max-height: %1px; font-size: 9pt; border-radius: 4px; }").arg(ViewCube::rowHeight-2));
     auto *displayLayout=new QVBoxLayout(displayControls_);displayLayout->setContentsMargins(0,0,0,0);displayLayout->setSpacing(4);
     pointSize_ = new QDoubleSpinBox;pointSize_->setObjectName("displayPointSize");pointSize_->setDecimals(1);pointSize_->setRange(1,12); pointSize_->setSingleStep(0.5); pointSize_->setPrefix(tr("Point size  "));pointSize_->setSuffix(" px");pointSize_->setValue(5);
     pointSize_->setToolTip(tr("Opaque point diameter in viewport pixels. Default: 5 px."));
     pointSize_->setMinimumWidth(0);pointSize_->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Fixed);
+    // Points or Gaussian splats; a display preference kept in the settings, not in projects.
+    renderStyle_=new PrefixedComboBox(tr("Render"));renderStyle_->setObjectName("displayRenderStyle");
+    renderStyle_->addItem(tr("3D points"));renderStyle_->addItem(tr("Gaussian"));
+    renderStyle_->setToolTip(tr("Draw each record as an opaque point (1), or as its Gaussian (2): sized, oriented and blended back to front as a splat viewer shows it. Display only; exports are unaffected."));
+    renderStyle_->setMinimumWidth(0);renderStyle_->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Fixed);
+    displayLayout->addWidget(renderStyle_);
     displayLayout->addWidget(pointSize_); // same edges and height as the painted Background button
+    // Splats take the point size's place with the spherical-harmonic bands they evaluate.
+    splatSh_=new PrefixedComboBox(tr("SH"));splatSh_->setObjectName("displaySplatSh");
+    for (int degree=0;degree<=3;++degree) {
+        splatSh_->addItem(degree ? tr("SH%1").arg(degree) : tr("SH0 (base colour)"),degree);
+        splatSh_->setItemData(degree,degree ? QString::number(degree) : tr("0 (base colour)"),PrefixedComboBox::ClosedTextRole);
+    }
+    splatSh_->addItem(tr("All"),-1);
+    splatSh_->setToolTip(tr("Spherical-harmonic bands evaluated for the splats' view-dependent colour. All uses every band the capture has. Display only; the export settings decide what is written."));
+    splatSh_->setMinimumWidth(0);splatSh_->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Fixed);
+    displayLayout->addWidget(splatSh_);
+    auto showRenderStyle=[this] {const bool splats=renderStyle_->currentIndex()==1;pointSize_->setVisible(!splats);splatSh_->setVisible(splats);viewport_->setSplatRendering(splats);};
+    {
+        QSignalBlocker a(renderStyle_),b(splatSh_);
+        renderStyle_->setCurrentIndex(settings_.value("Display/Splats",true).toBool() ? 1 : 0);
+        splatSh_->setCurrentIndex(std::clamp(settings_.value("Display/SplatSh",4).toInt(),0,4));
+        viewport_->setSplatShDegree(splatSh_->currentData().toInt()); showRenderStyle();
+        for (auto *combo:{renderStyle_,splatSh_}) combo->setAccessibleName(static_cast<PrefixedComboBox *>(combo)->closedText());
+    }
+    connect(renderStyle_,&QComboBox::currentIndexChanged,this,[this,showRenderStyle](int index) {settings_.setValue("Display/Splats",index==1);showRenderStyle();viewport_->setFocus();});
+    connect(splatSh_,&QComboBox::currentIndexChanged,this,[this](int index) {settings_.setValue("Display/SplatSh",index);viewport_->setSplatShDegree(splatSh_->currentData().toInt());viewport_->setFocus();});
     ghostButton_=new QToolButton;ghostButton_->setObjectName("ghostComparison");ghostButton_->setCheckable(true);ghostButton_->setChecked(false);ghostButton_->setIcon(editorButtonIcon(":/icons/ghost.png",true,":/icons/ghost_off.png"));ghostButton_->setIconSize({24,24});ghostButton_->setFixedSize(30,30);ghostButton_->setAccessibleName(tr("Ghost comparison"));
     ghostButton_->setProperty("neutralToggle",true);
     ghostButton_->setToolTip(tr("Freeze currently visible points as a faint white ghost with a soft outline. Timeline and transform changes leave the copy fixed. Switch off to remove it."));displayLayout->addWidget(ghostButton_,0,Qt::AlignHCenter);
@@ -682,6 +789,10 @@ void MainWindow::buildUi() {
     shortcut("Ctrl+End",[this] { play(false); setTime(project_.out,true); });
     shortcut("Alt+Home",[this] { resetTransform(); });
     shortcut("Tab",[this] { editCrop(!viewport_->cropEditing()); viewport_->setFocus(); });
+    // 1 and 2 on the main keyboard switch 3D points / Gaussian; the numpad keeps its views.
+    shortcut("1",[this] { renderStyle_->setCurrentIndex(0); });
+    shortcut("2",[this] { renderStyle_->setCurrentIndex(1); });
+    qApp->installEventFilter(new NumpadDigitsAreNotShortcuts(this));
     shortcut("C",[this] { editCrop(!viewport_->cropEditing()); });
     shortcut("Ctrl+F",[this] { fitCrop(); });
     shortcut("Ctrl+Shift+C",[this] { clearCrop(); });
@@ -696,7 +807,7 @@ void MainWindow::buildUi() {
 }
 
 void MainWindow::syncModifiers() {
-    viewport_->setModifiers(project_.modifiers);modifierPanel_->setProject(project_);
+    viewport_->setModifiers(project_.modifiersAtFrame(currentFrame()));modifierPanel_->setProject(project_);
     const bool purge=!CompiledModifiers(project_).isolations.isEmpty();
     QJsonObject state;if (purge) state={{"modifiers",project_.modifierJson()},{"transform",project_.json({})["transform"]},{"cropEditing",viewport_->cropEditing()}};
     if (state!=processingState_) {processingState_=state;if (purge) requestFrame();}
@@ -716,8 +827,49 @@ void MainWindow::revealModifierProperties() {
         scroll->ensureWidgetVisible(panel,0,12);
     });
 }
+int MainWindow::currentFrame() const {return int(std::round(project_.time*info_.fps));}
+void MainWindow::keyCrop() {
+    auto *m=project_.modifier();
+    if (!m || m->type!=ModifierType::Crop || !m->cropAnimation.animated) return;
+    m->cropAnimation.setKey(currentFrame(),m->crop);showCropKeys(*m);
+}
+void MainWindow::setCropAnimated(bool animated) {
+    auto *m=project_.modifier();if (!m || m->type!=ModifierType::Crop || m->cropAnimation.animated==animated) return;
+    auto &a=m->cropAnimation;
+    if (animated) {
+        // The static pose is set aside; a first key starts the animation where the crop is.
+        a.still=m->crop;a.animated=true;
+        if (a.keys.isEmpty()) a.setKey(currentFrame(),m->crop);
+        m->crop=a.evaluate(m->crop,currentFrame());
+    } else {m->crop=m->staticCrop();a.animated=false;}
+    viewport_->setCrop(m->crop);syncUi();dirty();
+}
+void MainWindow::showCropKeys(const Modifier &m) {
+    auto text=[](QVector3D v) {return QString("%1, %2, %3").arg(v.x(),0,'g',5).arg(v.y(),0,'g',5).arg(v.z(),0,'g',5);};
+    const auto &keys=m.cropAnimation.keys;const bool box=m.crop.shape==CropShape::Box;const int frame=currentFrame();
+    QSignalBlocker blocker(cropKeyTable_);cropKeyTable_->setRowCount(int(keys.size()));
+    for (int row=0;row<keys.size();++row) {
+        const auto &key=keys[row];
+        const QString size=box ? tr("W %1 · D %2 · H %3").arg(key.width,0,'g',4).arg(key.depth,0,'g',4).arg(key.height,0,'g',4)
+                               : tr("Rx %1 · Rz %2 · H %3").arg(key.radius,0,'g',4).arg(key.radiusZ,0,'g',4).arg(key.height,0,'g',4);
+        const QString values[]={QString::number(key.frame),text(key.transform.position),text(key.transform.rotation),size};
+        for (int col=0;col<4;++col) {
+            auto *item=cropKeyTable_->item(row,col);if (!item) {item=new QTableWidgetItem;cropKeyTable_->setItem(row,col,item);}
+            if (item->text()!=values[col]) item->setText(values[col]);
+            item->setFlags(col==0 ? (item->flags()|Qt::ItemIsEditable) : (item->flags()&~Qt::ItemIsEditable));
+        }
+        if (key.frame==frame) cropKeyTable_->setCurrentCell(row,0);
+    }
+    // An animated crop keeps one key at least; Static is how it stops animating.
+    cropRemoveKey_->setEnabled(keys.size()>1);
+    cropRemoveKey_->setToolTip(keys.size()>1 ? tr("Remove the selected key, or the key at the current frame.") : tr("An animated crop keeps at least one key. Choose Static to stop animating it; the keys are kept."));
+    cropKeyTable_->setFixedHeight(std::clamp(cropKeyTable_->horizontalHeader()->height()+4+28*std::max(1,int(keys.size())),100,220));
+}
 void MainWindow::syncUi() {
     syncing_ = true;
+    // Animated crops show their pose at this frame. Edits are keyed before they get here.
+    project_.showCropsAtFrame(currentFrame());
+    if (project_.modifier() && project_.modifier()->type==ModifierType::Crop && project_.modifier()->cropAnimation.active()) viewport_->setCrop(project_.crop());
     syncModifiers();
     const auto *selected=project_.modifier();const bool selectedCrop=selected && selected->type==ModifierType::Crop;
     parametersHeading_->setVisible(selected!=nullptr);
@@ -788,6 +940,11 @@ void MainWindow::syncUi() {
     cropRadius_->setValue(project_.crop().radius); cropRadiusZ_->setValue(project_.crop().radiusZ); cropHeight_->setValue(project_.crop().height);
     cropShapeCombo_->setCurrentIndex(cropShapeCombo_->findData(int(project_.crop().shape)));
     cropModeCombo_->setCurrentIndex(cropModeCombo_->findData(project_.crop().remove ? 1 : 0));
+    {
+        const auto *m=project_.modifier();const bool animatedCrop=m && m->type==ModifierType::Crop && m->cropAnimation.animated;
+        cropAnimationCombo_->setCurrentIndex(animatedCrop ? 1 : 0);cropForm_->setRowVisible(cropKeys_,animatedCrop);
+        if (animatedCrop) showCropKeys(*m);
+    }
     cropPreviewCombo_->setCurrentIndex(cropPreviewCombo_->findData(project_.crop().showRemovedInRed ? 1 : 0));
     cropWidth_->setValue(project_.crop().width); cropDepth_->setValue(project_.crop().depth);
     cropForm_->setRowVisible(cropRadius_,project_.crop().shape==CropShape::Cylinder); cropForm_->setRowVisible(cropRadiusZ_,project_.crop().shape==CropShape::Cylinder);
@@ -1109,7 +1266,7 @@ void MainWindow::resetTransform() {
     if (!loaded_ || loading_) return;
     if (project_.modifier() && project_.modifier()->type==ModifierType::AnimateTransform && !project_.modifier()->enabled) return;
     viewport_->setTransformMode(TransformMode::None);
-    if (viewport_->cropEditing()) { project_.crop().transform = {}; viewport_->setCrop(project_.crop()); }
+    if (viewport_->cropEditing()) { project_.crop().transform = {}; keyCrop(); viewport_->setCrop(project_.crop()); }
     else if (project_.modifier() && project_.modifier()->type==ModifierType::AnimateTransform) project_.modifier()->animation.setKey(int(std::round(project_.time*info_.fps)),{});
     else { project_.transform = {}; viewport_->setTransform(project_.transform); }
     syncUi(); dirty(); viewport_->setFocus(Qt::OtherFocusReason);
@@ -1183,7 +1340,7 @@ void MainWindow::applyCropPreset(float radius) {
     const auto shape = project_.crop().shape;
     project_.crop() = {}; project_.crop().shape = shape; project_.crop().enabled = true; project_.crop().radius = project_.crop().radiusZ = radius; project_.crop().height = 2.5f;
     project_.crop().width = project_.crop().depth = 2*radius;
-    viewport_->setCrop(project_.crop()); viewport_->setCropEditing(true); viewport_->setTransformMode(TransformMode::Move);
+    keyCrop(); viewport_->setCrop(project_.crop()); viewport_->setCropEditing(true); viewport_->setTransformMode(TransformMode::Move);
     syncUi(); dirty(); viewport_->setFocus(Qt::OtherFocusReason);
 }
 void MainWindow::syncTransformFields() {
@@ -1212,7 +1369,7 @@ void MainWindow::fitCrop() {
     project_.crop().radiusZ = std::clamp(extent.z()*0.5f*std::sqrt(2.0f)*1.02f,0.0001f,1e6f);
     project_.crop().height = std::clamp(extent.y()*1.02f,0.0001f,1e6f);
     project_.crop().width = std::clamp(extent.x()*1.02f,0.0001f,1e6f); project_.crop().depth = std::clamp(extent.z()*1.02f,0.0001f,1e6f);
-    viewport_->setCrop(project_.crop()); viewport_->setCropEditing(true); viewport_->setTransformMode(TransformMode::Move);
+    keyCrop(); viewport_->setCrop(project_.crop()); viewport_->setCropEditing(true); viewport_->setTransformMode(TransformMode::Move);
     syncUi(); dirty(); viewport_->setFocus(Qt::OtherFocusReason);
 }
 void MainWindow::editCrop(bool editing) {

@@ -6,15 +6,58 @@
 #include <stdexcept>
 #include <QQuaternion>
 
+// Position, scale and shear linearly; rotation along the shortest quaternion path.
+static Transform interpolate(const Transform &a,const Transform &b,float alpha) {
+    Transform result;result.position=a.position*(1-alpha)+b.position*alpha;result.scale=a.scale*(1-alpha)+b.scale*alpha;result.shear=a.shear*(1-alpha)+b.shear*alpha;
+    const auto rotation=QQuaternion::slerp(QQuaternion::fromRotationMatrix(a.rotationMatrix().normalMatrix()),QQuaternion::fromRotationMatrix(b.rotationMatrix().normalMatrix()),alpha);
+    QMatrix4x4 matrix;matrix.rotate(rotation);result.rotation=Transform::fromMatrix(matrix).rotation;return result;
+}
 Transform TransformAnimation::evaluate(double frame) const {
     if (keys.isEmpty()) return {};
     if (frame<=keys.front().frame) return keys.front().offset;
     if (frame>=keys.back().frame) return keys.back().offset;
     const auto after=std::upper_bound(keys.begin(),keys.end(),frame,[](double time,const TransformKeyframe &key) {return time<key.frame;});
-    const auto &a=(after-1)->offset,&b=after->offset;const float alpha=float((frame-(after-1)->frame)/(after->frame-(after-1)->frame));
-    Transform result;result.position=a.position*(1-alpha)+b.position*alpha;result.scale=a.scale*(1-alpha)+b.scale*alpha;result.shear=a.shear*(1-alpha)+b.shear*alpha;
-    const auto rotation=QQuaternion::slerp(QQuaternion::fromRotationMatrix(a.rotationMatrix().normalMatrix()),QQuaternion::fromRotationMatrix(b.rotationMatrix().normalMatrix()),alpha);
-    QMatrix4x4 matrix;matrix.rotate(rotation);result.rotation=Transform::fromMatrix(matrix).rotation;return result;
+    const float alpha=float((frame-(after-1)->frame)/(after->frame-(after-1)->frame));
+    return interpolate((after-1)->offset,after->offset,alpha);
+}
+CropVolume CropAnimation::evaluate(const CropVolume &base,double frame) const {
+    if (keys.isEmpty()) return base;
+    auto pose=[&](const CropKeyframe &key) {CropVolume c=base;c.transform=key.transform;c.radius=key.radius;c.radiusZ=key.radiusZ;c.height=key.height;c.width=key.width;c.depth=key.depth;return c;};
+    if (frame<=keys.front().frame) return pose(keys.front());
+    if (frame>=keys.back().frame) return pose(keys.back());
+    const auto after=std::upper_bound(keys.begin(),keys.end(),frame,[](double time,const CropKeyframe &key) {return time<key.frame;});
+    const auto &a=*(after-1),&b=*after;const float alpha=float((frame-a.frame)/(b.frame-a.frame));
+    auto mix=[&](float x,float y) {return x*(1-alpha)+y*alpha;};
+    CropVolume c=base;c.transform=interpolate(a.transform,b.transform,alpha);
+    c.radius=mix(a.radius,b.radius);c.radiusZ=mix(a.radiusZ,b.radiusZ);c.height=mix(a.height,b.height);c.width=mix(a.width,b.width);c.depth=mix(a.depth,b.depth);
+    return c;
+}
+void CropAnimation::setKey(int frame,const CropVolume &crop) {
+    const CropKeyframe value{frame,crop.transform,crop.radius,crop.radiusZ,crop.height,crop.width,crop.depth};
+    auto key=std::lower_bound(keys.begin(),keys.end(),frame,[](const CropKeyframe &key,int f) {return key.frame<f;});
+    if (key!=keys.end() && key->frame==frame) *key=value;
+    else keys.insert(key,value);
+}
+void CropAnimation::removeKey(int frame) {keys.erase(std::remove_if(keys.begin(),keys.end(),[&](const auto &key) {return key.frame==frame;}),keys.end());}
+QJsonArray CropAnimation::json() const {
+    auto vector=[](QVector3D v) {return QJsonArray{v.x(),v.y(),v.z()};};QJsonArray result;
+    for (const auto &key:keys) result.append(QJsonObject{{"frame",key.frame},{"position",vector(key.transform.position)},{"rotation",vector(key.transform.rotation)},
+        {"scale",vector(key.transform.scale)},{"shear",vector(key.transform.shear)},{"radius",key.radius},{"radiusZ",key.radiusZ},{"height",key.height},{"width",key.width},{"depth",key.depth}});
+    return result;
+}
+CropVolume Modifier::staticCrop() const {
+    if (!cropAnimation.animated) return crop;
+    CropVolume c=crop;const auto &s=cropAnimation.still;c.transform=s.transform;
+    c.radius=s.radius;c.radiusZ=s.radiusZ;c.height=s.height;c.width=s.width;c.depth=s.depth;return c;
+}
+QVector<Modifier> Project::modifiersAtFrame(double frame) const {
+    auto result=modifiers;
+    for (auto &m:result) if (m.type==ModifierType::Crop && m.cropAnimation.active()) m.crop=m.cropAnimation.evaluate(m.crop,frame);
+    return result;
+}
+bool Project::hasAnimatedCrop() const {for (const auto &m:modifiers) if (m.active() && m.type==ModifierType::Crop && m.cropAnimation.active()) return true;return false;}
+void Project::showCropsAtFrame(double frame) {
+    for (auto &m:modifiers) if (m.type==ModifierType::Crop && m.cropAnimation.active()) m.crop=m.cropAnimation.evaluate(m.crop,frame);
 }
 void TransformAnimation::setKey(int frame,const Transform &offset) {
     auto key=std::lower_bound(keys.begin(),keys.end(),frame,[](const TransformKeyframe &key,int f) {return key.frame<f;});
@@ -106,10 +149,13 @@ QJsonArray Project::modifierJson() const {
             case ModifierType::Walk: type="walk";break;
             }
             QJsonObject item{{"id",m.id},{"name",m.name},{"enabled",m.active()},{"type",type},{"timeline","full"}};
-            if (m.type==ModifierType::Crop) {const auto &c=m.crop;item["crop"]=QJsonObject{{"space","world"},{"shape",c.shape==CropShape::Box ? "box" : "cylinder"},
+            if (m.type==ModifierType::Crop) {const auto c=m.staticCrop();item["crop"]=QJsonObject{{"space","world"},{"shape",c.shape==CropShape::Box ? "box" : "cylinder"},
                 {"radius",c.radius},{"radiusZ",c.radiusZ},{"height",c.height},{"width",c.width},{"depth",c.depth},{"position",vector(c.transform.position)},
                 {"rotation",vector(c.transform.rotation)},{"scale",vector(c.transform.scale)},{"shear",vector(c.transform.shear)},
-                {"mode",c.remove ? "remove" : "keep"},{"editPreview",c.showRemovedInRed ? "red" : "hide"}};}
+                {"mode",c.remove ? "remove" : "keep"},{"editPreview",c.showRemovedInRed ? "red" : "hide"}};
+                // Kept while static too, so switching back to animated loses nothing.
+                if (m.cropAnimation.animated || !m.cropAnimation.keys.isEmpty()) {auto crop=item["crop"].toObject();
+                    crop["animation"]=QJsonObject{{"mode",m.cropAnimation.animated ? "animated" : "static"},{"interpolation","linear-slerp"},{"keys",m.cropAnimation.json()}};item["crop"]=crop;}}
             else if (m.type==ModifierType::RemoveGreen) item["green"]=QJsonObject{{"minimumSaturation",m.green.minimumSaturation},{"hueTolerance",m.green.hueTolerance},{"targetHue",120},{"colourSource","dc"},{"colourSpace",m.green.linearRgb ? "linear-rgb" : "srgb"}};
             else if (m.type==ModifierType::AnimateTransform) item["animation"]=QJsonObject{{"space","reference-offset"},{"interpolation","linear-slerp"},{"keys",m.animation.json()}};
             else if (m.type==ModifierType::Walk) item["walk"]=QJsonObject{{"speed",m.walkSpeed},{"axis","+z"},{"units","m/s"},{"display",m.walkKmh ? "km/h" : "m/s"}};
