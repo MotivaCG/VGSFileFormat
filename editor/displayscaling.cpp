@@ -27,6 +27,7 @@ public:
         for (auto *widget:window_->findChildren<QWidget *>()) {
             const auto name=widget->objectName();
             if (name=="viewCube" || name=="viewportDisplayControls" || name=="modifierTree" || name=="transformKeyTable") continue;
+            if (widget->parentWidget() && widget->parentWidget()->objectName()=="viewportDisplayControls") continue;
             WidgetSize size;size.widget=widget;size.minimum=widget->minimumSize();size.maximum=widget->maximumSize();
             size.fixedWidth=size.minimum.width()==size.maximum.width();size.fixedHeight=size.minimum.height()==size.maximum.height();
             size.minimumWidth=qobject_cast<QDockWidget *>(widget)!=nullptr;

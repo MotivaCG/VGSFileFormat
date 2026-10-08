@@ -38,6 +38,9 @@ public:
     void setDisplayControls(QWidget *controls);
     void setPlaybackTime(double seconds,double duration);
     void setGrid(bool enabled);
+    // Display-only viewport contrast (Dark by default); never stored in projects or presets.
+    void setLightBackground(bool light);
+    bool lightBackground() const { return lightBackground_; }
     void fit(const QVector3D &minimum, const QVector3D &maximum);
     bool focusVisible();
     bool setGhost(bool enabled);
@@ -101,7 +104,8 @@ private:
     GLuint modifierBuffer_ = 0, modifierTexture_ = 0;
     bool cropEditing_ = false;
     QPoint lastMouse_;
-    bool grid_ = true, frameDirty_ = true, initialized_ = false;
+    bool grid_ = true, frameDirty_ = true, initialized_ = false, lightBackground_ = false;
+    QColor overlayText() const;
     GLuint vao_ = 0, buffer_ = 0, shBuffer_ = 0, shTexture_ = 0;
     GLuint gridVao_ = 0, gridBuffer_ = 0;
     int gridVertices_ = 0, shCoefficients_ = 0;

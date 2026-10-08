@@ -104,8 +104,9 @@ void main() { gl_Position=mvp*vec4(position,1); rgb=color; }
 static const char *gridFragment = R"GLSL(
 #version 330 core
 in vec3 rgb;
+uniform vec2 greyMap; // scale, offset for neutral grid lines; coloured axes and gizmos pass through
 out vec4 fragColor;
-void main() { fragColor=vec4(rgb,1); }
+void main() { vec3 c=rgb; if (c.r==c.g && c.g==c.b) c=vec3(greyMap.y+c.r*greyMap.x); fragColor=vec4(c,1); }
 )GLSL";
 
 static const char *ghostVertex=R"GLSL(
@@ -150,8 +151,9 @@ Viewport::Viewport(QWidget *parent) : QOpenGLWidget(parent) {
     setMouseTracking(true);
     viewCube_ = new ViewCube(this); viewCube_->move(width()-viewCube_->width()-12,12);
     statistics_=new QLabel(this);statistics_->setObjectName("viewportStatistics");statistics_->move(18,12);
-    statistics_->setAttribute(Qt::WA_TransparentForMouseEvents);statistics_->setStyleSheet(QString("color: %1; font-family: 'Segoe UI'; font-size: 9pt; background: transparent;").arg(EditorTheme::mutedText().name()));
+    statistics_->setAttribute(Qt::WA_TransparentForMouseEvents);statistics_->setStyleSheet(QString("color: %1; font-family: 'Segoe UI'; font-size: 9pt; background: transparent;").arg(overlayText().name()));
     connect(viewCube_,&ViewCube::viewSelected,this,[this](ViewPreset preset) { setViewPreset(preset); setFocus(); });
+    connect(viewCube_,&ViewCube::lightBackgroundSelected,this,[this](bool light) { setLightBackground(light); setFocus(); });
 }
 Viewport::~Viewport() { cleanup(); }
 bool Viewport::event(QEvent *event) {
@@ -189,6 +191,7 @@ void Viewport::initializeGL() {
         return true;
     };
     if (!build(pointShader_, pointVertex, pointFragment) || !build(gridShader_, gridVertex, gridFragment)) return;
+    gridShader_->bind(); gridShader_->setUniformValue("greyMap",QVector2D(1,0)); gridShader_->release();
     if (!build(ghostShader_,ghostVertex,pointFragment) || !build(ghostCompositeShader_,ghostCompositeVertex,ghostCompositeFragment)) return;
     glGenVertexArrays(1,&ghostVao_);glGenBuffers(1,&ghostBuffer_);glGenVertexArrays(1,&ghostCompositeVao_);
     glBindVertexArray(ghostVao_);glBindBuffer(GL_ARRAY_BUFFER,ghostBuffer_);glEnableVertexAttribArray(0);glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,sizeof(GhostPoint),nullptr);ghostDirty_=true;
@@ -258,7 +261,7 @@ void Viewport::paintGL() {
     if (!initialized_) return;
     QPainter painter(this);
     painter.beginNativePainting();
-    const auto background=EditorTheme::viewportBackground();glClearColor(float(background.redF()),float(background.greenF()),float(background.blueF()),1);
+    const auto background=lightBackground_ ? QColor(204,206,209) : EditorTheme::viewportBackground();glClearColor(float(background.redF()),float(background.greenF()),float(background.blueF()),1);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     if (!error_.isEmpty()) {
         painter.endNativePainting(); painter.setPen(Qt::white);
@@ -274,6 +277,8 @@ void Viewport::paintGL() {
     glEnable(GL_DEPTH_TEST); glDepthMask(GL_TRUE);
     if (grid_) {
         gridShader_->bind(); gridShader_->setUniformValue("mvp", projection * view);
+        // On the light background darker greys stand out: minor lines ~0.71, major ~0.58.
+        gridShader_->setUniformValue("greyMap",lightBackground_ ? QVector2D(-1.6f,0.93f) : QVector2D(1,0));
         glBindVertexArray(gridVao_); glDrawArrays(GL_LINES, 0, gridVertices_-10);
         if (camera_.orthographic) {
             glDrawArrays(GL_LINES,gridVertices_-10,4);
@@ -281,6 +286,7 @@ void Viewport::paintGL() {
             // No grid segment runs beneath X/Z; equal depth also covers crossings.
             glDepthFunc(GL_LEQUAL);glDrawArrays(GL_LINES,gridVertices_-6,6);glDepthFunc(GL_LESS);
         }
+        gridShader_->setUniformValue("greyMap",QVector2D(1,0)); // crop and gizmo lines share this shader
         gridShader_->release();
     }
     if (frame_ && !frame_->points.empty()) {
@@ -345,7 +351,7 @@ void Viewport::paintGL() {
     glBindVertexArray(0);
     glDisable(GL_DEPTH_TEST); glDisable(GL_PROGRAM_POINT_SIZE);
     painter.endNativePainting();
-    painter.setPen(EditorTheme::mutedText()); painter.setFont(QFont("Segoe UI", 9));
+    painter.setPen(overlayText()); painter.setFont(QFont("Segoe UI", 9));
     painter.drawText(18, height()-18, mode_ == TransformMode::None
         ? tr("Drag: orbit   ·   Right drag: pan   ·   Wheel: zoom   ·   G/R/S: transform")
         : tr("Drag a gizmo handle to transform   ·   Repeat G/R/S: Global/Local   ·   Esc: exit mode"));
@@ -357,7 +363,7 @@ void Viewport::paintGL() {
         statistics_->adjustSize();
     } else {
         statistics_->clear();
-        painter.setPen(QColor("#ddd")); painter.setFont(QFont("Segoe UI", 18));
+        painter.setPen(lightBackground_ ? QColor("#333") : QColor("#ddd")); painter.setFont(QFont("Segoe UI", 18));
         painter.drawText(rect().adjusted(30,30,-30,-30), Qt::AlignCenter, tr("Open a .vgs or .mint capture\n\nCtrl+O"));
     }
 }
@@ -380,6 +386,13 @@ void Viewport::setDisplayControls(QWidget *controls) {
     displayControls_=controls;viewCube_->setDisplayControls(controls);
 }
 void Viewport::setGrid(bool enabled) { if (grid_ != enabled) { grid_ = enabled; update(); } }
+QColor Viewport::overlayText() const { return lightBackground_ ? QColor(64,66,70) : EditorTheme::mutedText(); }
+void Viewport::setLightBackground(bool light) {
+    if (lightBackground_==light) return;
+    lightBackground_ = light; viewCube_->setLightBackground(light);
+    statistics_->setStyleSheet(QString("color: %1; font-family: 'Segoe UI'; font-size: 9pt; background: transparent;").arg(overlayText().name()));
+    update();
+}
 void Viewport::fit(const QVector3D &minimum, const QVector3D &maximum) {
     const auto m = transform_.matrix();
     camera_.target = m.map((minimum+maximum)*0.5f);

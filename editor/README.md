@@ -15,9 +15,9 @@ scale transforms the entire capture without changing point size.
 - Drag: orbit; right/middle drag or Shift+drag: pan; wheel: zoom.
 - `Numpad decimal` / `Numpad Del` / `F`: Focus visible. `Ctrl+E`: export the edited capture. `Ctrl+Shift+E`: export the viewport as PNG.
 - `G` / `R` / `S`: activate Move / Rotate / Scale. Repeat the active mode's key to switch Global/Local. `Esc`: leave all transform modes.
-- `Shift+G`: toggle the world grid and reference axes.
+- `Shift+G` or **View > Grid and axes**: toggle the world grid and reference axes.
 
-The timeline uses Gracia Converter's range control: drag the upper In marker, lower Out marker, or white playhead. Above it, the clock toggle comes first, followed by In/Frame/Out on the left; transport buttons are centred and Loop/Speed sit on the right. The frame field reads **Frame X of Y**, with a zero-based index and the full capture frame count. The clock switches all three fields to seconds; typed values snap to the nearest valid frame. In and Out are inclusive and define the export range. Current time / full duration appears below decode statistics in the viewport. The unit preference is remembered without changing the project range.
+The timeline uses Gracia Converter's range control: drag the upper Start marker, lower End marker, or white playhead. Above it, the clock toggle comes first, followed by Start/Frame/End on the left; transport buttons are centred and Loop/Speed sit on the right. The frame field reads **Frame X of Y**, with a zero-based index and the full capture frame count. The clock switches all three fields to seconds; typed values snap to the nearest valid frame. Start and End are inclusive and define the export range. Current time / full duration appears below decode statistics in the viewport. The unit preference is remembered without changing the project range.
 The single **Transform** group provides Position, Rotation (XYZ Euler degrees)
 and Scale on three compact rows, plus reset. X/Y/Z labels use the red, green and
 blue modifier colours. Numeric values remain fully editable without stepper
@@ -49,8 +49,9 @@ manipulation, and scene transforms leave source Gaussian attributes intact.
 
 ## View cube and keyboard views
 
-The top-right view cube has clickable faces and buttons for Front, Back, Left,
-Right, Top and Bottom. Standard views default to orthographic; orbiting with the
+The top-right view cube has clickable faces for Front, Back, Left, Right, Top
+and Bottom; the same views are in **View > Standard views** and on the numeric
+keypad. Standard views default to orthographic; orbiting with the
 mouse or numeric keypad returns immediately to free perspective. Pan and zoom
 preserve a fixed orthographic view. Free orthographic views are intentionally
 unsupported. The capture coordinate system remains Y-up.
@@ -223,7 +224,7 @@ Loading a metadata preset does not modify capture or crop transforms.
 These options are applied during **File > Export capture…** (Ctrl+E); preview
 colours continue to use source data. Export writes signed encoding-0 VGS (compressed)
 or PGS (plain), with baked positions, full affine covariance, SH colour and the world
-crop, for the inclusive In/Out range. It runs off the UI thread with progress/cancel,
+crop, for the inclusive Start/End range. It runs off the UI thread with progress/cancel,
 checks every output frame with the decoder and atomically publishes the verified file.
 
 For constant-rate sources, translation, rotation, reflection and uniform scale use
@@ -283,11 +284,15 @@ opened captures/projects or saved projects, most recent first. Entries persist
 across restarts and are deduplicated; **Clear recent** clears the list while
 preserving dialog folders. Missing files produce a message when selected.
 
-Point size and Grid and axes controls share the viewport view-cube group below
-the view buttons and stay enabled before opening a capture. Point size starts at
-**5 px**; projects and user settings
-retain overrides. The top-left viewport statistics remain unobstructed.
-The small **Ghost comparison** toggle below Grid and axes starts off. Turning it
+Below the cube, the view-cube group holds a full-width **Background**
+button that flips the viewport between Dark (default) and Light. It only changes
+the viewport background, grid contrast and overlay text; the rest of the
+interface is unchanged and the choice is never saved in projects, presets or
+settings. The full-width Point size field follows and stays enabled before
+opening a capture. Point size starts at **5 px**; projects and user settings
+retain overrides. The world grid and reference axes are toggled from
+**View > Grid and axes** (`Shift+G`). The top-left viewport statistics remain unobstructed.
+The small **Ghost comparison** toggle below Point size starts off. Turning it
 on freezes the currently visible points in world space as a white reference with
 a 15%-opacity interior by default and a soft, brighter outline. The unlabelled,
 full-width slider below the ghost icon adjusts opacity and is disabled without
@@ -297,7 +302,7 @@ separate Ghost/Ghost off icons, with the off state in grey.
 Time, transforms and modifier edits do not alter the snapshot; camera
 navigation still works. Turning it off or opening another capture removes it.
 The ghost is a transient preview overlay and is not saved/exported as capture data.
-Ghost state, opacity, Point size and Grid and axes are excluded from reusable
+Ghost state, opacity, background, Point size and Grid and axes are excluded from reusable
 presets; loading older presets ignores their preview settings as well. Capture
 Tools preset version 6 no longer stores viewport camera or display fields.
 Focus visible uses the points surviving current crop/colour/isolation filters,

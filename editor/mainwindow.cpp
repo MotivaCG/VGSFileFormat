@@ -1,6 +1,7 @@
 #include "mainwindow.h"
 #include "displayscaling.h"
 #include "viewport.h"
+#include "viewcube.h"
 #include "modifierpanel.h"
 #include "animationpanel.h"
 #include "capturesettingsdialog.h"
@@ -12,6 +13,7 @@
 #include <QCheckBox>
 #include <QButtonGroup>
 #include <QComboBox>
+#include <QCursor>
 #include <QDesktopServices>
 #include <QCloseEvent>
 #include <QDockWidget>
@@ -35,6 +37,7 @@
 #include <QMessageBox>
 #include <QMimeData>
 #include <QMouseEvent>
+#include <QKeyEvent>
 #include <QAbstractItemView>
 #include <QHelpEvent>
 #include <QToolTip>
@@ -102,6 +105,65 @@ static QIcon timelineClockIcon() {
     }
     return result;
 }
+
+// Drag horizontally on an axis label to scrub its spin box (Shift fine, Ctrl coarse, Esc cancels).
+// A click without dragging focuses the field for typing. The cursor is hidden and warped back
+// to the press point so the drag never runs into a screen edge.
+class SpinScrubber final : public QObject {
+public:
+    static void attach(QLabel *label,QDoubleSpinBox *spin,double pixelStep) {new SpinScrubber(label,spin,pixelStep);}
+protected:
+    bool eventFilter(QObject *watched,QEvent *event) override {
+        auto *label=static_cast<QLabel *>(watched);
+        switch (event->type()) {
+        case QEvent::MouseButtonPress: {
+            auto *e=static_cast<QMouseEvent *>(event);
+            if (e->button()!=Qt::LeftButton || !spin_->isEnabled()) return false;
+            pressed_=true;dragging_=false;accumulated_=0;startValue_=spin_->value();
+            pressPos_=lastPos_=e->globalPosition().toPoint();label->grabKeyboard();
+            return true;
+        }
+        case QEvent::MouseMove: {
+            if (!pressed_) return false;
+            auto *e=static_cast<QMouseEvent *>(event);const QPoint pos=e->globalPosition().toPoint();
+            if (!dragging_) {
+                if (std::abs(pos.x()-pressPos_.x())<3) return true;
+                dragging_=true;label->setCursor(Qt::BlankCursor);
+            }
+            const double factor=e->modifiers()&Qt::ShiftModifier ? 0.1 : e->modifiers()&Qt::ControlModifier ? 10.0 : 1.0;
+            accumulated_+=(pos.x()-lastPos_.x())*pixelStep_*factor;
+            spin_->setValue(startValue_+accumulated_);
+            QCursor::setPos(pressPos_);lastPos_=pressPos_;
+            return true;
+        }
+        case QEvent::MouseButtonRelease: {
+            if (!pressed_ || static_cast<QMouseEvent *>(event)->button()!=Qt::LeftButton) return false;
+            const bool clicked=!dragging_;finish(label);
+            if (clicked) {spin_->setFocus(Qt::MouseFocusReason);spin_->selectAll();}
+            return true;
+        }
+        case QEvent::ShortcutOverride:
+            // Keep the window's Esc shortcut from swallowing the cancel key mid-drag.
+            if (pressed_ && static_cast<QKeyEvent *>(event)->key()==Qt::Key_Escape) {event->accept();return true;}
+            return false;
+        case QEvent::KeyPress:
+            if (pressed_ && static_cast<QKeyEvent *>(event)->key()==Qt::Key_Escape) {spin_->setValue(startValue_);finish(label);return true;}
+            return false;
+        default: return false;
+        }
+    }
+private:
+    SpinScrubber(QLabel *label,QDoubleSpinBox *spin,double pixelStep) : QObject(label),spin_(spin),pixelStep_(pixelStep) {
+        label->setCursor(Qt::SizeHorCursor);label->installEventFilter(this);
+    }
+    void finish(QLabel *label) {
+        pressed_=dragging_=false;label->releaseKeyboard();label->setCursor(Qt::SizeHorCursor);
+    }
+    QDoubleSpinBox *spin_;
+    double pixelStep_,startValue_=0,accumulated_=0;
+    QPoint pressPos_,lastPos_;
+    bool pressed_=false,dragging_=false;
+};
 
 class CenteredPlaybackLayout final : public QHBoxLayout {
 public:
@@ -230,7 +292,7 @@ void MainWindow::buildUi() {
     saveAction_ = file->addAction(tr("Save project"), QKeySequence::Save, this, [this] { save(); });
     saveAsAction_ = file->addAction(tr("Save project as…"), QKeySequence::SaveAs, this, [this] { save(true); });
     exportAction_ = file->addAction(tr("Export capture\u2026"), QKeySequence("Ctrl+E"), this, &MainWindow::exportCapture);
-    exportAction_->setToolTip(tr("Export the selected In/Out range to VGS, PGS or MINT, baking capture transforms and active modifiers (Ctrl+E). MINT omits capture metadata."));
+    exportAction_->setToolTip(tr("Export the selected Start/End range to VGS, PGS or MINT, baking capture transforms and active modifiers (Ctrl+E). MINT omits capture metadata."));
     imageAction_ = file->addAction(tr("Export viewport image…"), QKeySequence("Ctrl+Shift+E"), this, &MainWindow::exportImage);
     file->addSeparator(); file->addAction(tr("Exit"), QKeySequence::Quit, this, &QWidget::close);
     newAction->setIcon(style()->standardIcon(QStyle::SP_FileIcon));
@@ -247,7 +309,7 @@ void MainWindow::buildUi() {
     timeline_ = new QWidget; timeline_->setObjectName("timeline");
     auto *tl = new QVBoxLayout(timeline_); tl->setContentsMargins(18,8,18,12);tl->setSpacing(6);
     slider_ = new RangeSlider; slider_->setObjectName("captureRangeSlider");
-    slider_->setToolTip(tr("Drag the upper marker to set In, the lower marker to set Out, or the white playhead to seek. The selected range is exported."));
+    slider_->setToolTip(tr("Drag the upper marker to set Start, the lower marker to set End, or the white playhead to seek. The selected range is exported."));
     auto *controls = new CenteredPlaybackLayout;controls->setSpacing(8);
     auto *frameControls=new QWidget;frameControls->setObjectName("timelineFrameControls");frameControls->setSizePolicy(QSizePolicy::Maximum,QSizePolicy::Fixed);
     frameControls->setStyleSheet("QDoubleSpinBox { padding: 3px; min-height: 20px; font-size: 9pt; }");
@@ -325,7 +387,6 @@ void MainWindow::buildUi() {
     captureSettingsButton_->setToolTip(tr("Prepare metadata and processing options, including despill, before exporting (Ctrl+M).")); side->addWidget(captureSettingsButton_);
     connect(captureSettingsButton_,&QPushButton::clicked,this,&MainWindow::editCaptureSettings);
     side->addWidget(presetBox_);
-    transformTarget_ = new QLabel(tr("Transform target: Capture (local)")); side->addWidget(transformTarget_);
     const QString groups[] = {tr("Position"), tr("Rotation"), tr("Scale")};
     const QString axes[] = {"X", "Y", "Z"};
     const QString shortcuts[] = {"G", "R", "S"};
@@ -333,7 +394,7 @@ void MainWindow::buildUi() {
     const QString accessibleModes[] = {tr("Move"),tr("Rotate"),tr("Scale")};
     const QString modeNames[] = {tr("Click to toggle Move. G activates Move; repeat G to switch Global/Local. Esc exits all modes."),tr("Click to toggle Rotate. R activates Rotate; repeat R to switch Global/Local. Esc exits all modes."),tr("Click to toggle Scale. S activates Scale; repeat S to switch Global/Local. Crop scaling stays anchored at its base. Esc exits all modes.")};
     transformModes_ = new QButtonGroup(this); transformModes_->setExclusive(true);
-    auto *transformBox=new QGroupBox(tr("Transform"));transformBox->setObjectName("transformProperties");transformBox->setProperty("transformGroup",true);
+    auto *transformBox=new QGroupBox(tr("Transform · Capture"));transformBox_=transformBox;transformBox->setObjectName("transformProperties");transformBox->setProperty("transformGroup",true);
     transformBox->setStyleSheet("QDoubleSpinBox {padding: 3px; min-height: 18px; font-size: 9pt;}");
     auto *transformLayout=new QGridLayout(transformBox);transformLayout->setHorizontalSpacing(5);transformLayout->setVerticalSpacing(6);
     const QColor axisColours[]={{240,60,90},{85,185,105},{67,147,214}};
@@ -362,6 +423,8 @@ void MainWindow::buildUi() {
             spin->setToolTip(groups[g] + " " + axes[axis] + (g==1 ? tr(" (degrees)") : QString()));
             auto *label = new QLabel(axes[axis]); label->setBuddy(spin);
             label->setObjectName(QString("transformAxis_%1_%2").arg(g).arg(axis));label->setStyleSheet(QString("color: %1; font-weight: 600;").arg(axisColours[axis].name()));
+            SpinScrubber::attach(label,spin,g==1 ? 0.5 : 0.005);
+            spin->setToolTip(spin->toolTip()+tr("\nDrag the axis label to scrub: Shift fine, Ctrl coarse, Esc cancels."));
             transformLayout->addWidget(label,g,3+axis*2);transformLayout->addWidget(spin,g,4+axis*2);transformLayout->setColumnStretch(4+axis*2,1);
             connect(spin, &QDoubleSpinBox::valueChanged, this, [this, g, axis](double v) {
                 if (syncing_) return;
@@ -370,7 +433,7 @@ void MainWindow::buildUi() {
         }
     }
     side->addWidget(transformBox);
-    auto *reset = new QPushButton(tr("Reset transform")); side->addWidget(reset);
+    auto *reset = new QPushButton(tr("Reset transform")); transformLayout->addWidget(reset,3,0,1,transformLayout->columnCount());
     resetTransformButton_ = reset;
     reset->setToolTip(tr("Reset the current target's position, rotation and scale (Alt+Home)."));
     connect(reset, &QPushButton::clicked, this, &MainWindow::resetTransform);
@@ -380,7 +443,6 @@ void MainWindow::buildUi() {
     cropBox->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Maximum);
     cropShapeCombo_ = new QComboBox; cropShapeCombo_->addItem(tr("Cylinder"),int(CropShape::Cylinder)); cropShapeCombo_->addItem(tr("Box"),int(CropShape::Box));
     cropShapeCombo_->setObjectName("cropShape"); cropShapeCombo_->setToolTip(tr("Choose Cylinder or Box. Both share the same base pivot and transform; their dimensions are retained separately."));
-    cropForm->addRow(tr("Shape"),cropShapeCombo_);
     connect(cropShapeCombo_,&QComboBox::activated,this,[this](int) {
         if (syncing_ || !loaded_ || loading_ || !project_.modifier() || project_.modifier()->type!=ModifierType::Crop) return;
         project_.crop().shape = CropShape(cropShapeCombo_->currentData().toInt()); viewport_->setCrop(project_.crop()); syncUi(); dirty(); viewport_->setFocus();
@@ -399,6 +461,7 @@ void MainWindow::buildUi() {
         button->setMinimumWidth(presetMinimumWidth); button->setFixedHeight(presetHeight); presetRow->addWidget(button,1);
     }
     cropForm->addRow(presets);
+    cropForm->addRow(tr("Shape"),cropShapeCombo_);
     connect(t4dsPresetButton_,&QPushButton::clicked,this,[this] { applyCropPreset(1.5f); });
     connect(smnPresetButton_,&QPushButton::clicked,this,[this] { applyCropPreset(1.0f); });
     cropRadius_ = new QDoubleSpinBox; cropHeight_ = new QDoubleSpinBox; cropWidth_ = new QDoubleSpinBox; cropDepth_ = new QDoubleSpinBox;
@@ -452,16 +515,14 @@ void MainWindow::buildUi() {
     auto isolationChanged=[this] {if (syncing_ || !project_.modifier() || project_.modifier()->type!=ModifierType::PurgeIsolated) return;project_.modifier()->isolation={isolationNeighbour_->value(),isolationPercent_->value()};syncModifiers();dirty();};
     connect(isolationNeighbour_,&QSpinBox::valueChanged,this,[isolationChanged](int) {isolationChanged();});connect(isolationPercent_,&QDoubleSpinBox::valueChanged,this,[isolationChanged](double) {isolationChanged();});
     displayControls_=new QWidget;displayControls_->setObjectName("viewportDisplayControls");
-    displayControls_->setStyleSheet("QWidget#viewportDisplayControls QLabel { color: #dddddd; font-size: 9pt; }"
-        "QWidget#viewportDisplayControls QDoubleSpinBox { padding: 2px; min-height: 18px; }");
-    auto *displayLayout=new QVBoxLayout(displayControls_);displayLayout->setContentsMargins(6,0,6,0);displayLayout->setSpacing(4);
-    auto *viewForm = new QFormLayout;displayLayout->addLayout(viewForm);
-    pointSize_ = new QDoubleSpinBox;pointSize_->setObjectName("displayPointSize");pointSize_->setDecimals(1);pointSize_->setRange(1,12); pointSize_->setSingleStep(0.5); pointSize_->setSuffix(" px");pointSize_->setValue(5);
+    // QSS heights exclude the 1 px border, so the field matches the painted Background button exactly.
+    displayControls_->setStyleSheet(QString("QWidget#viewportDisplayControls QLabel { color: #dddddd; font-size: 9pt; }"
+        "QWidget#viewportDisplayControls QDoubleSpinBox { padding: 0 16px 0 7px; min-height: %1px; max-height: %1px; font-size: 9pt; border-radius: 3px; }").arg(ViewCube::rowHeight-2));
+    auto *displayLayout=new QVBoxLayout(displayControls_);displayLayout->setContentsMargins(0,0,0,0);displayLayout->setSpacing(4);
+    pointSize_ = new QDoubleSpinBox;pointSize_->setObjectName("displayPointSize");pointSize_->setDecimals(1);pointSize_->setRange(1,12); pointSize_->setSingleStep(0.5); pointSize_->setPrefix(tr("Point size  "));pointSize_->setSuffix(" px");pointSize_->setValue(5);
     pointSize_->setToolTip(tr("Opaque point diameter in viewport pixels. Default: 5 px."));
     pointSize_->setMinimumWidth(0);pointSize_->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Fixed);
-    viewForm->addRow(tr("Point size"), pointSize_);
-    grid_ = new QCheckBox(tr("Grid and axes")); viewForm->addRow(grid_);
-    grid_->setToolTip(tr("Toggle the world grid and reference axes (Shift+G)."));
+    displayLayout->addWidget(pointSize_); // same edges and height as the painted Background button
     ghostButton_=new QToolButton;ghostButton_->setObjectName("ghostComparison");ghostButton_->setCheckable(true);ghostButton_->setChecked(false);ghostButton_->setIcon(editorButtonIcon(":/icons/ghost.png",true,":/icons/ghost_off.png"));ghostButton_->setIconSize({24,24});ghostButton_->setFixedSize(30,30);ghostButton_->setAccessibleName(tr("Ghost comparison"));
     ghostButton_->setProperty("neutralToggle",true);
     ghostButton_->setToolTip(tr("Freeze currently visible points as a faint white ghost with a soft outline. Timeline and transform changes leave the copy fixed. Switch off to remove it."));displayLayout->addWidget(ghostButton_,0,Qt::AlignHCenter);
@@ -486,6 +547,9 @@ void MainWindow::buildUi() {
     auto *frameAction = viewMenu->addAction(tr("Focus visible"),this,&MainWindow::fitCurrentTarget);
     frameAction->setShortcuts({QKeySequence(Qt::KeypadModifier|Qt::Key_Delete),QKeySequence(Qt::KeypadModifier|Qt::Key_Period),QKeySequence(Qt::KeypadModifier|Qt::Key_Comma),QKeySequence("F")});
     frameAction->setToolTip(tr("Focus visible capture and ghost points (Numpad decimal / Numpad Del / F)."));
+    gridAction_ = viewMenu->addAction(tr("Grid and axes")); gridAction_->setObjectName("gridAndAxes"); gridAction_->setCheckable(true);
+    gridAction_->setShortcut(QKeySequence("Shift+G")); gridAction_->setToolTip(tr("Toggle the world grid and reference axes (Shift+G)."));
+    connect(gridAction_, &QAction::toggled, this, [this](bool value) { if (!syncing_) { project_.grid = value; settings_.setValue("Display/Grid",value); viewport_->setGrid(value); dirty(); } });
     auto *standardViews = viewMenu->addMenu(tr("Standard views"));
     const QString viewNames[] = {tr("Perspective"),tr("Front (Numpad 1)"),tr("Back (Ctrl+Numpad 1)"),tr("Left (Ctrl+Numpad 3)"),tr("Right (Numpad 3)"),tr("Top (Numpad 7)"),tr("Bottom (Ctrl+Numpad 7)")};
     for (int i=0; i<7; ++i) standardViews->addAction(viewNames[i],this,[this,i] { viewport_->setViewPreset(ViewPreset(i)); viewport_->setFocus(); });
@@ -517,7 +581,6 @@ void MainWindow::buildUi() {
         setTime(std::min(project_.time, project_.out), true); syncUi(); dirty();
     });
     connect(loop_, &QCheckBox::toggled, this, [this](bool value) { if (!syncing_) { project_.loop = value; settings_.setValue("Playback/Loop",value); dirty(); } });
-    connect(grid_, &QCheckBox::toggled, this, [this](bool value) { if (!syncing_) { project_.grid = value; settings_.setValue("Display/Grid",value); viewport_->setGrid(value); dirty(); } });
     connect(pointSize_, &QDoubleSpinBox::valueChanged, this, [this](double value) {
         if (!syncing_) { project_.pointSize = value; settings_.setValue("Display/PointSize",value); viewport_->setPointSize(float(value)); dirty(); }
     });
@@ -548,7 +611,6 @@ void MainWindow::buildUi() {
     shortcut("Ctrl+Shift+P",[this] { savePreset(); });
     shortcut("Ctrl+Alt+P",[this] { openPresetFolder(); });
     shortcut("Ctrl+M",[this] { editCaptureSettings(); });
-    shortcut("Shift+G",[this] {grid_->toggle();});
     shortcut("L",[this] { if (loaded_ && !loading_) loop_->toggle(); });
     for (int g=0; g<3; ++g) shortcut(QString("F%1").arg(g+6),[this,g] { toggleCoordinateSpace(g); });
     statusBar()->showMessage(tr("Open a capture to begin."));
@@ -603,7 +665,7 @@ void MainWindow::syncUi() {
     for (auto *field:{frameSpin_,inFrame_,outFrame_}) {field->setDecimals(decimals);field->setRange(0,maximum/divisor);field->setSingleStep(1.0/divisor);field->setSuffix(seconds ? tr(" s") : QString());}
     frameSpin_->setPrefix(seconds ? tr("Time ") : tr("Frame "));
     frameSpin_->setSuffix(seconds ? tr(" of %1 s").arg(info_.duration,0,'f',decimals) : tr(" of %1").arg(info_.frames));
-    inFrame_->setPrefix(tr("In "));outFrame_->setPrefix(tr("Out "));
+    inFrame_->setPrefix(tr("Start "));outFrame_->setPrefix(tr("End "));
     inFrame_->setValue(std::round(project_.in*info_.fps)/divisor);outFrame_->setValue(std::round(project_.out*info_.fps)/divisor);
     const int frame = int(std::round(project_.time*info_.fps)); slider_->setPlayheadValue(frame); frameSpin_->setValue(frame/divisor);
     bool timelineWidthChanged=false;
@@ -612,14 +674,15 @@ void MainWindow::syncUi() {
         if (field->minimumWidth()!=width) {field->setMinimumWidth(width);timelineWidthChanged=true;}
     }
     if (timelineWidthChanged) {frameSpin_->parentWidget()->layout()->activate();timeline_->layout()->invalidate();timeline_->layout()->activate();}
-    frameSpin_->setToolTip(seconds ? tr("Current time of the full capture duration. Entered seconds snap to the nearest valid frame within In/Out.") : tr("Current zero-based frame index of %1 total frames. Seeking stays within In/Out.").arg(info_.frames));
+    frameSpin_->setToolTip(seconds ? tr("Current time of the full capture duration. Entered seconds snap to the nearest valid frame within Start/End.") : tr("Current zero-based frame index of %1 total frames. Seeking stays within Start/End.").arg(info_.frames));
     inFrame_->setToolTip(tr("First included frame of the playback/export range. Seconds snap to the nearest valid frame."));outFrame_->setToolTip(tr("Last included frame of the playback/export range. Seconds snap to the nearest valid frame."));
     timelineSecondsButton_->setToolTip(seconds ? tr("Display time in seconds. Click to display frame indices. Entries snap to the nearest valid frame.") : tr("Display frame indices. Click to display time in seconds. Entries snap to the nearest valid frame."));
     modifierPanel_->setTimeline(frame,maximum);
     viewport_->setPlaybackTime(project_.time,info_.duration);
-    speed_->setValue(project_.speed); loop_->setChecked(project_.loop); grid_->setChecked(project_.grid);
+    speed_->setValue(project_.speed); loop_->setChecked(project_.loop); gridAction_->setChecked(project_.grid);
     syncTransformButtons();
-    transformTarget_->setText(viewport_->cropEditing() || animation ? tr("Transform target: %1").arg(selected ? selected->name : tr("Crop")) : tr("Transform target: Capture reference"));
+    // The group title names what the fields edit: the capture, or the selected crop/animation modifier.
+    transformBox_->setTitle(tr("Transform · %1").arg(viewport_->cropEditing() || animation ? (selected ? selected->name : tr("Crop")) : tr("Capture")));
     for (int g=0; g<3; ++g) {
         const bool local = project_.spaces[g]==CoordinateSpace::Local;
         spaceButtons_[g]->setText(local ? tr("Local") : tr("Global"));

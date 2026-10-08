@@ -116,14 +116,15 @@ private:
     QDoubleSpinBox *frameSpin_, *inFrame_, *outFrame_;
     RangeSlider *slider_;
     QLabel *assetLabel_, *metadata_;
-    QLabel *transformTarget_, *cropStatus_;
+    QLabel *cropStatus_;
+    QGroupBox *transformBox_;
     QPushButton *playButton_;
     QPushButton *resetTransformButton_, *savePresetButton_;
     QPushButton *captureSettingsButton_;
     QComboBox *presetCombo_ = nullptr;
     QGroupBox *presetBox_;
     QToolButton *presetFolderButton_;
-    QCheckBox *loop_, *grid_;
+    QCheckBox *loop_;
     QToolButton *ghostButton_, *timelineSecondsButton_;
     QSlider *ghostOpacitySlider_;
     QButtonGroup *transformModes_;
@@ -132,7 +133,7 @@ private:
     QPushButton *cropEditButton_;
     QPushButton *t4dsPresetButton_, *smnPresetButton_;
     QPushButton *cropFitButton_, *cropClearButton_;
-    QAction *saveAction_, *saveAsAction_, *imageAction_, *exportAction_;
+    QAction *saveAction_, *saveAsAction_, *imageAction_, *exportAction_, *gridAction_;
     QMenu *recentMenu_;
     QString smokeOutput_;
     int smokeStage_ = 0;

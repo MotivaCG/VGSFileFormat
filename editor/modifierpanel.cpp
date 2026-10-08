@@ -18,6 +18,7 @@
 #include <QPersistentModelIndex>
 #include <functional>
 #include <QIcon>
+#include <algorithm>
 
 namespace {
 constexpr int ModifierRole=Qt::UserRole+1;
@@ -121,7 +122,7 @@ ModifierPanel::ModifierPanel(QWidget *parent):QWidget(parent) {
     auto button=[&](const QString &text,const QString &id,const QString &tip,auto action) {
         auto *b=new QToolButton;b->setText(text);b->setObjectName(id);b->setToolTip(tip);toolbar->addWidget(b);connect(b,&QToolButton::clicked,this,action);return b;
     };
-    type_=new QComboBox;type_->setObjectName("newModifierType");type_->addItem(tr("Crop cylinder"),0);type_->addItem(tr("Crop box"),1);type_->addItem(tr("Remove green points"),2);
+    type_=new QComboBox;type_->setObjectName("newModifierType");type_->addItem(tr("Crop"),0);type_->addItem(tr("Remove green points"),2);
     type_->addItem(tr("Animate transform"),3);type_->addItem(tr("Purge Isolated"),4);toolbar->addWidget(type_);
     type_->setToolTip(tr("Choose a modifier to add: crop union, green colour removal, animated transform offsets or Nth-neighbour isolation filtering."));
     addModifier_=button(tr("+ Modifier"),"addModifier",tr("Add the selected modifier type to the stack. Modifiers affect the full capture timeline."),[this] {addModifier();});
@@ -219,8 +220,11 @@ void ModifierPanel::setTimeline(int frame,int maximum) {
 void ModifierPanel::addModifier() {
     Modifier m;m.id=Project::newId();const int type=type_->currentData().toInt();
     m.type=type==2 ? ModifierType::RemoveGreen : type==3 ? ModifierType::AnimateTransform : type==4 ? ModifierType::PurgeIsolated : ModifierType::Crop;
-    m.crop.enabled=true;m.crop.shape=type==1 ? CropShape::Box : CropShape::Cylinder;
-    m.name=m.type==ModifierType::Crop ? tr("Crop %1").arg(project_.modifiers.size()+1) : tr("%1 %2").arg(typeName(m)).arg(project_.modifiers.size()+1);
+    m.crop.enabled=true;m.crop.shape=CropShape::Cylinder; // Shape is chosen afterwards in the crop parameters.
+    // The first of a kind keeps the bare name ("Crop"); later ones take the next free number ("Crop 2", "Crop 3"...).
+    const QString base=m.type==ModifierType::Crop ? tr("Crop") : typeName(m);
+    auto taken=[this](const QString &name) {return std::any_of(project_.modifiers.cbegin(),project_.modifiers.cend(),[&](const Modifier &other) {return other.name==name;});};
+    m.name=base;for (int number=2;taken(m.name);++number) m.name=QString("%1 %2").arg(base).arg(number);
     project_.modifiers.append(m);project_.selectedModifier=m.id;emit stackChanged();if (m.type==ModifierType::Crop) emit cropAdded();
 }
 void ModifierPanel::removeSelection() {

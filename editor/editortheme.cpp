@@ -64,8 +64,9 @@ QWidget {font-family: 'Segoe UI'; font-size: 10pt; color: %TEXT%;}
 QMainWindow, QDialog {background: %WINDOW%;}
 QWidget:disabled {color: %DISABLED%;}
 QDockWidget::title {background: %PANEL%; color: %MUTED%; padding: 7px; border-bottom: 1px solid %PANEL_BORDER%;}
-QGroupBox {background: %PANEL%; border: 1px solid %PANEL_BORDER%; border-radius: 4px; margin-top: 16px; padding: 12px 4px 4px 4px;}
-QGroupBox::title {subcontrol-origin: margin; left: 10px; padding: 0 4px; color: %MUTED%;}
+QGroupBox {background: %PANEL%; border: 1px solid %PANEL_BORDER%; border-radius: 4px; margin-top: 22px; padding: 6px 4px 4px 4px;}
+/* The title sits in the top margin above the frame, so the border never crosses its glyphs. */
+QGroupBox::title {subcontrol-origin: margin; subcontrol-position: top left; left: 4px; top: 0; padding: 0 2px; color: %MUTED%;}
 QGroupBox:disabled {background: %WINDOW%;}
 QLabel#assetTitle {font-size: 14pt; font-weight: 600;}
 QLabel#sectionTitle {color: %ACCENT%; font-size: 12pt; font-weight: 600;}
@@ -85,7 +86,7 @@ QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {image: url(:/icons/spin_down.p
 QSpinBox::up-arrow:disabled, QDoubleSpinBox::up-arrow:disabled, QSpinBox::up-arrow:off, QDoubleSpinBox::up-arrow:off {image: url(:/icons/spin_up_disabled.png);}
 QSpinBox::down-arrow:disabled, QDoubleSpinBox::down-arrow:disabled, QSpinBox::down-arrow:off, QDoubleSpinBox::down-arrow:off {image: url(:/icons/spin_down_disabled.png);}
 QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover, QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {background: %PANEL%;}
-QComboBox {background: %FIELD%; border: 1px solid %FIELD_BORDER%; border-radius: 3px; padding: 4px 22px 4px 8px;}
+QComboBox {background: %FIELD%; border: 1px solid %FIELD_BORDER%; border-radius: 3px; padding: 4px 22px 4px 8px; combobox-popup: 0;}
 QComboBox:hover {border-color: %HOVER%;} QComboBox:focus, QComboBox:on {border-color: %ACCENT%;}
 QComboBox:disabled {border-color: %PANEL_BORDER%; color: %DISABLED%;}
 QComboBox::drop-down {subcontrol-origin: padding; subcontrol-position: center right; width: 18px; border: none; background: transparent;}
@@ -124,7 +125,7 @@ QScrollBar::add-page, QScrollBar::sub-page {background: none;}
 QToolTip {background: %PANEL%; color: %TEXT%; border: 1px solid %HOVER%; border-radius: 4px; padding: 6px 8px;}
 QStatusBar {background: %WINDOW%; color: %MUTED%;}
 /* Compact geometry on smaller screens; fonts and native DPI stay unchanged. */
-QWidget[compactControls="true"] QGroupBox {margin-top: 14px; padding: 10px 4px 4px 4px;}
+QWidget[compactControls="true"] QGroupBox {margin-top: 20px; padding: 4px 4px 4px 4px;}
 QWidget[compactControls="true"] QPushButton, QWidget[compactControls="true"] QPushButton:hover {padding: 6px 9px;}
 QWidget[compactControls="true"] QToolButton, QWidget[compactControls="true"] QToolButton:hover {padding: 2px;}
 QWidget[compactControls="true"] QLineEdit, QWidget[compactControls="true"] QSpinBox, QWidget[compactControls="true"] QDoubleSpinBox {padding: 3px 6px;}

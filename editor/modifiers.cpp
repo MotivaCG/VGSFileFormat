@@ -49,7 +49,7 @@ void Project::setAnimatedPose(int frame,const Transform &pose) {
 
 QString Project::newId() {return QUuid::createUuid().toString(QUuid::WithoutBraces);}
 Project::Project() {
-    Modifier m;m.id=newId();m.name="Crop 1";modifiers.append(m);selectedModifier=m.id;
+    Modifier m;m.id=newId();m.name="Crop";modifiers.append(m);selectedModifier=m.id;
 }
 Modifier *Project::modifier() {
     for (auto &m:modifiers) if (m.id==selectedModifier) return &m;return nullptr;

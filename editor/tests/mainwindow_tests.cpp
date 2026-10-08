@@ -1,5 +1,6 @@
 #include "mainwindow.h"
 #include "viewport.h"
+#include "viewcube.h"
 #include "rangeslider.h"
 #include "exportcapture.h"
 #include "vgssign.h"
@@ -48,6 +49,7 @@ private slots:
         const auto inactiveColour=emptyImage.pixelColor(qRound(emptyTree->viewport()->width()*.8*emptyImage.devicePixelRatio()),qRound(rowRect.center().y()*emptyImage.devicePixelRatio()));
         QVERIFY(std::max({inactiveColour.red(),inactiveColour.green(),inactiveColour.blue()})-std::min({inactiveColour.red(),inactiveColour.green(),inactiveColour.blue()})<20);
         window.openPath(capture);
+        auto *transformGroup=window.findChild<QGroupBox *>("transformProperties");QVERIFY(transformGroup);QCOMPARE(transformGroup->title(),QString::fromUtf8("Transform · Capture"));
         auto *button=window.findChild<QPushButton *>("editCropVolume");QVERIFY(button);
         QTRY_VERIFY_WITH_TIMEOUT(button->isEnabled(),5000);
         auto *modifiers=window.findChild<QTreeWidget *>("modifierTree");QVERIFY(modifiers);QCOMPARE(modifiers->topLevelItemCount(),1);QCOMPARE(modifiers->topLevelItem(0)->childCount(),0);
@@ -57,8 +59,16 @@ private slots:
         QTest::mouseClick(modifiers->viewport(),Qt::LeftButton,Qt::NoModifier,firstEye);QCOMPARE(modifiers->topLevelItem(0)->checkState(0),Qt::Checked);
         QCOMPARE(modifiers->topLevelItem(0)->text(2),QString());
         auto *add=window.findChild<QToolButton *>("addModifier"),*remove=window.findChild<QToolButton *>("removeModifier"),*duplicate=window.findChild<QToolButton *>("duplicateModifier");QVERIFY(add);QVERIFY(remove);QVERIFY(duplicate);
-        auto *newType=window.findChild<QComboBox *>("newModifierType");QVERIFY(newType);newType->setCurrentIndex(newType->findData(1));add->click();
-        QCOMPARE(modifiers->topLevelItemCount(),2);QCOMPARE(modifiers->currentItem()->text(1),QString("Crop box"));
+        auto *newType=window.findChild<QComboBox *>("newModifierType");QVERIFY(newType);QCOMPARE(newType->findData(1),-1);newType->setCurrentIndex(newType->findData(0));QCOMPARE(newType->currentText(),QString("Crop"));add->click();
+        QCOMPARE(modifiers->topLevelItem(0)->text(0),QString("Crop"));QCOMPARE(modifiers->topLevelItemCount(),2);QCOMPARE(modifiers->currentItem()->text(1),QString("Crop cylinder"));QCOMPARE(modifiers->currentItem()->text(0),QString("Crop 2"));
+        auto *shape=window.findChild<QComboBox *>("cropShape");QVERIFY(shape);shape->setCurrentIndex(shape->findData(int(CropShape::Box)));
+        QVERIFY(QMetaObject::invokeMethod(shape,"activated",Qt::DirectConnection,Q_ARG(int,shape->currentIndex())));QCOMPARE(modifiers->currentItem()->text(1),QString("Crop box"));
+        window.activateWindow();QApplication::setActiveWindow(&window);QVERIFY(QTest::qWaitForWindowActive(&window)); // popups only open in the active window
+        for (auto *combo:{shape,newType}) { // Popups must show every item uncut despite the themed item padding.
+            combo->showPopup();auto *view=combo->view();QTRY_VERIFY(view->isVisible());QTest::qWait(300); // let the popup settle its final size
+            for (int row=0;row<combo->count();++row) {const auto r=view->visualRect(view->model()->index(row,0));QVERIFY2(r.isValid() && view->viewport()->rect().contains(r),qPrintable(combo->objectName()+" row "+QString::number(row)));}
+            combo->hidePopup();
+        }
         duplicate->click();QCOMPARE(modifiers->topLevelItemCount(),3);remove->click();QCOMPARE(modifiers->topLevelItemCount(),2);
         const auto rowPosition=modifiers->visualItemRect(modifiers->currentItem()).center();bool menuSeen=false;
         QTimer::singleShot(0,&window,[&] {
@@ -72,7 +82,7 @@ private slots:
         auto *viewport=window.findChild<Viewport *>();QVERIFY(viewport);viewport->setFocus();
         auto *display=window.findChild<QWidget *>("viewportDisplayControls");QVERIFY(display);
         auto *cube=window.findChild<QWidget *>("viewCube");QVERIFY(cube);QCOMPARE(display->parentWidget(),cube);QVERIFY(cube->rect().contains(display->geometry()));
-        auto *pointSize=window.findChild<QDoubleSpinBox *>("displayPointSize");QVERIFY(pointSize);QCOMPARE(pointSize->value(),5.);
+        auto *pointSize=window.findChild<QDoubleSpinBox *>("displayPointSize");QVERIFY(pointSize);QCOMPARE(pointSize->value(),5.);QCOMPARE(pointSize->prefix(),QString("Point size  "));QTRY_COMPARE(pointSize->height(),ViewCube::rowHeight);
         auto *ghost=window.findChild<QToolButton *>("ghostComparison");QVERIFY(ghost);QVERIFY(!ghost->isChecked());QVERIFY(!viewport->ghostEnabled());
         auto *opacity=window.findChild<QSlider *>("ghostOpacity");QVERIFY(opacity);QCOMPARE(opacity->value(),15);QVERIFY(!opacity->isEnabled());QVERIFY(std::abs(viewport->ghostOpacity()-.15f)<1e-6);
         QVERIFY(std::abs(ghost->mapTo(display,QPoint(ghost->width()/2,0)).x()-display->width()/2)<=1);
@@ -121,7 +131,8 @@ private slots:
             QTest::keyClick(viewport,key);QVERIFY(modeButton->isChecked());QCOMPARE(viewport->coordinateSpace(TransformMode(mode+1)),CoordinateSpace::Local);QCOMPARE(referenceSpace->accessibleName(),QString("Local reference space"));
             QTest::keyClick(viewport,Qt::Key_Escape);QVERIFY(!modeButton->isChecked());QVERIFY(!referenceSpace->isEnabled());
         }
-        auto *grid=display->findChild<QCheckBox *>();QVERIFY(grid);const bool gridBefore=grid->isChecked();
+        QVERIFY(!display->findChild<QCheckBox *>()); // the grid toggle lives in the View menu, not the view-cube panel
+        auto *grid=window.findChild<QAction *>("gridAndAxes");QVERIFY(grid);QVERIFY(grid->isCheckable());const bool gridBefore=grid->isChecked();
         QTest::keyClick(viewport,Qt::Key_G);QCOMPARE(grid->isChecked(),gridBefore);QTest::keyClick(viewport,Qt::Key_Escape);
         QTest::keyClick(viewport,Qt::Key_G,Qt::ShiftModifier);QCOMPARE(grid->isChecked(),!gridBefore);QTest::keyClick(viewport,Qt::Key_G,Qt::ShiftModifier);QCOMPARE(grid->isChecked(),gridBefore);
         QTest::keyClick(viewport,Qt::Key_Tab);QVERIFY(viewport->cropEditing());const auto sourceBefore=viewport->transform();const auto cropBefore=viewport->crop();
@@ -130,7 +141,19 @@ private slots:
         QTest::keyClick(viewport,Qt::Key_Tab);QVERIFY(button->isChecked());duplicate->click();QCOMPARE(modifiers->topLevelItemCount(),2);QVERIFY(!button->isChecked());QVERIFY(!viewport->cropEditing());QCOMPARE(viewport->transformMode(),TransformMode::None);
         QTest::keyClick(viewport,Qt::Key_Tab);QVERIFY(button->isChecked());modifiers->setCurrentItem(modifiers->topLevelItem(0));QVERIFY(!button->isChecked());QVERIFY(!viewport->cropEditing());
         modifiers->setCurrentItem(modifiers->topLevelItem(1));remove->click();
-        auto *position=window.findChild<QDoubleSpinBox *>("transform_0_0");QVERIFY(position);position->setFocus();
+        auto *position=window.findChild<QDoubleSpinBox *>("transform_0_0");QVERIFY(position);
+        auto *axisLabel=window.findChild<QLabel *>("transformAxis_0_0");QVERIFY(axisLabel);QCOMPARE(axisLabel->cursor().shape(),Qt::SizeHorCursor);
+        {
+            const double before=position->value();const QPoint start=axisLabel->rect().center();
+            QTest::mousePress(axisLabel,Qt::LeftButton,{},start);QTest::mouseMove(axisLabel,start+QPoint(20,0));
+            QTest::mouseRelease(axisLabel,Qt::LeftButton,{},start+QPoint(20,0));
+            QVERIFY(std::abs(position->value()-(before+0.1))<1e-6);
+            QTest::mousePress(axisLabel,Qt::LeftButton,{},start);QTest::mouseMove(axisLabel,start+QPoint(40,0));
+            QTest::keyClick(axisLabel,Qt::Key_Escape);QVERIFY(std::abs(position->value()-(before+0.1))<1e-6);
+            QTest::mouseRelease(axisLabel,Qt::LeftButton,{},start+QPoint(40,0));
+            position->setValue(before);
+        }
+        position->setFocus();
         QTest::keyClick(position,Qt::Key_Tab);QTRY_VERIFY(button->isChecked());QVERIFY(viewport->cropEditing());
         auto *slider=window.findChild<RangeSlider *>("captureRangeSlider");QVERIFY(slider);slider->setRangeValues(1,3);
         QCOMPARE(slider->startValue(),1);QCOMPARE(slider->endValue(),3);

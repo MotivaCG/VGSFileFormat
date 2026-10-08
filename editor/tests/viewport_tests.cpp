@@ -114,8 +114,13 @@ private slots:
         Viewport viewport; viewport.resize(600,500); viewport.show(); QVERIFY(QTest::qWaitForWindowExposed(&viewport));
         auto *cube = viewport.findChild<ViewCube *>(); QVERIFY(cube);
         const ViewPreset presets[] = {ViewPreset::Front,ViewPreset::Back,ViewPreset::Left,ViewPreset::Right,ViewPreset::Top,ViewPreset::Bottom};
+        // Aim a free camera at each face, then click the cube centre: that face is the one under it.
+        const float aims[][2] = {{0,0},{180,0},{-90,0},{90,0},{0,80},{0,-80}};
+        const QPoint centre(cube->width()/2,45);
         for (int i=0; i<6; ++i) {
-            QTest::mouseClick(cube,Qt::LeftButton,Qt::NoModifier,{20+(i%2)*73,97+(i/2)*23});
+            Camera camera = viewport.camera(); camera.preset = ViewPreset::Free; camera.orthographic = false;
+            camera.yaw = aims[i][0]; camera.pitch = aims[i][1]; viewport.setCamera(camera);
+            QTest::mouseClick(cube,Qt::LeftButton,Qt::NoModifier,centre);
             QCOMPARE(viewport.camera().preset,presets[i]); QVERIFY(viewport.camera().orthographic);
             const auto view = viewport.camera().viewMatrix();
             for (int row=0; row<4; ++row) for (int col=0; col<4; ++col) QVERIFY(std::isfinite(view(row,col)));
@@ -134,19 +139,29 @@ private slots:
         QTest::keyClick(&viewport,Qt::Key_6,Qt::KeypadModifier); QCOMPARE(viewport.camera().preset,ViewPreset::Free); QVERIFY(!viewport.camera().orthographic);
         QVERIFY(!viewport.handleViewKey(Qt::Key_1,Qt::NoModifier));
     }
+    void backgroundToggleIsDisplayOnly() {
+        Viewport viewport; viewport.resize(600,500); viewport.show(); QVERIFY(QTest::qWaitForWindowExposed(&viewport));
+        auto *cube = viewport.findChild<ViewCube *>(); QVERIFY(cube); QVERIFY(!viewport.lightBackground());
+        auto corner = [&] { return viewport.grabFramebuffer().pixelColor(4,viewport.height()/2).lightness(); };
+        QVERIFY(corner()<60);
+        QTest::mouseClick(cube,Qt::LeftButton,Qt::NoModifier,{120,100}); QVERIFY(viewport.lightBackground()); QVERIFY(corner()>150);
+        QTest::mouseClick(cube,Qt::LeftButton,Qt::NoModifier,{40,100}); QVERIFY(!viewport.lightBackground()); QVERIFY(corner()<60);
+    }
     void viewCubeHoverClearsWhenOrbitingAway() {
         Viewport viewport; viewport.resize(600,500); viewport.show(); QVERIFY(QTest::qWaitForWindowExposed(&viewport));
         auto *cube = viewport.findChild<ViewCube *>(); QVERIFY(cube);
-        auto background = [&] { const auto image = cube->grab().toImage(); const double dpr = cube->devicePixelRatioF(); return image.pixelColor(qRound(14*dpr),qRound(96*dpr)); };
+        // Sample the front face below its label.
+        const QPoint face(cube->width()/2,60);
+        auto background = [&] { const auto image = cube->grab().toImage(); const double dpr = cube->devicePixelRatioF(); return image.pixelColor(qRound(face.x()*dpr),qRound(face.y()*dpr)); };
         viewport.setViewPreset(ViewPreset::Front);
-        QTest::mouseMove(cube,{20,97}); auto selected = background(); QVERIFY(selected.green()>selected.red()+20);
+        QTest::mouseMove(cube,face); auto selected = background(); QVERIFY(selected.green()>selected.red()+20);
         QEvent leave(QEvent::Leave); QApplication::sendEvent(cube,&leave);
         drag(viewport,{20,220},{50,240}); QCOMPARE(viewport.camera().preset,ViewPreset::Free);
-        auto free = background(); QCOMPARE(free,EditorTheme::field());
-        QMouseEvent hover(QEvent::MouseMove,QPointF(20,97),QPointF(cube->mapToGlobal(QPoint(20,97))),Qt::NoButton,Qt::NoButton,Qt::NoModifier);
+        auto free = background(); QCOMPARE(free,EditorTheme::panelBorder());
+        QMouseEvent hover(QEvent::MouseMove,QPointF(face),QPointF(cube->mapToGlobal(face)),Qt::NoButton,Qt::NoButton,Qt::NoModifier);
         QApplication::sendEvent(cube,&hover); auto hovered = background(); QVERIFY(hovered.green()>hovered.red());
         QCOMPARE(viewport.camera().preset,ViewPreset::Free); QApplication::sendEvent(cube,&leave);
-        free = background(); QCOMPARE(free,EditorTheme::field());
+        free = background(); QCOMPARE(free,EditorTheme::panelBorder());
     }
     void localMoveAndCropTargetIsolation() {
         Viewport viewport; viewport.resize(500,500); viewport.setGrid(false); viewport.setFrame(std::make_shared<RenderFrame>());
