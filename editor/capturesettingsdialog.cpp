@@ -44,7 +44,6 @@ CaptureSettingsDialog::CaptureSettingsDialog(const Project &project,PresetStore 
     extraJson_ = new QPlainTextEdit; extraJson_->setPlaceholderText(tr("Optional JSON metadata")); extraJson_->setMinimumHeight(110); form->addRow(tr("Extra JSON"),extraJson_);
     columns->addWidget(metadata,1);
     auto *processing = new QGroupBox(tr("Processing and output")); auto *options = new QFormLayout(processing);
-    format_ = new QComboBox; format_->addItem(tr("VGS (compressed)"),false); format_->addItem(tr("PGS (plain)"),true); options->addRow(tr("Format"),format_);
     shDegree_ = new QComboBox; shDegree_->addItem(tr("Keep source"),-1); for (int i=0; i<=3; ++i) shDegree_->addItem(tr("Degree %1").arg(i),i); options->addRow(tr("SH degree"),shDegree_);
     playback_ = new QComboBox; playback_->addItem(tr("Keep source"),-1); playback_->addItem(tr("Once"),0); playback_->addItem(tr("Loop"),1); playback_->addItem(tr("Ping-pong"),2); options->addRow(tr("Playback"),playback_);
     despill_ = new QCheckBox(tr("Apply despill")); options->addRow(despill_);
@@ -77,13 +76,13 @@ CaptureSettings CaptureSettingsDialog::settings() const {
     CaptureSettings s; QString *values[] = {&s.title,&s.catalogueId,&s.author,&s.projectName,&s.takeName,&s.studio,&s.copyright,&s.softwareName,&s.softwareVersion};
     for (int i=0; i<9; ++i) *values[i] = fields_[i]->text().trimmed();
     for (const auto &tag : tags_->text().split(',',Qt::SkipEmptyParts)) if (!tag.trimmed().isEmpty()) s.tags.append(tag.trimmed());
-    s.extraJson = extraJson_->toPlainText(); s.plain = format_->currentData().toBool(); s.shDegree = shDegree_->currentData().toInt(); s.playbackMode = playback_->currentData().toInt();
+    s.extraJson = extraJson_->toPlainText(); s.shDegree = shDegree_->currentData().toInt(); s.playbackMode = playback_->currentData().toInt();
     s.despill = despill_->isChecked(); s.despillStrength = strength_->value(); s.greenGain = gain_->value(); s.viewChromaScale = chroma_->value(); s.recoverSkin = recoverSkin_->isChecked(); return s;
 }
 void CaptureSettingsDialog::setSettings(const CaptureSettings &s) {
     const QString values[] = {s.title,s.catalogueId,s.author,s.projectName,s.takeName,s.studio,s.copyright,s.softwareName,s.softwareVersion};
     for (int i=0; i<9; ++i) fields_[i]->setText(values[i]); tags_->setText(s.tags.join(", ")); extraJson_->setPlainText(s.extraJson);
-    format_->setCurrentIndex(format_->findData(s.plain)); shDegree_->setCurrentIndex(shDegree_->findData(s.shDegree)); playback_->setCurrentIndex(playback_->findData(s.playbackMode));
+    shDegree_->setCurrentIndex(shDegree_->findData(s.shDegree)); playback_->setCurrentIndex(playback_->findData(s.playbackMode));
     despill_->setChecked(s.despill); strength_->setValue(s.despillStrength); gain_->setValue(s.greenGain); chroma_->setValue(s.viewChromaScale); recoverSkin_->setChecked(s.recoverSkin);
     for (auto *spin : {strength_,gain_,chroma_}) spin->setEnabled(s.despill); recoverSkin_->setEnabled(s.despill);
 }

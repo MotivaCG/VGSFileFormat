@@ -76,6 +76,15 @@ static QIcon transportIcon(QStyle *style,QStyle::StandardPixmap symbol,const QCo
     }
     return icon;
 }
+// A system theme icon (the same set as the modifier toolbar), tinted to the editor's greys.
+static QIcon themeIcon(QIcon::ThemeIcon name,const QIcon &fallback) {
+    const QIcon source=QIcon::fromTheme(name,fallback);QIcon icon;
+    for (auto mode:{QIcon::Normal,QIcon::Disabled}) {
+        QPixmap pixmap=source.pixmap(20,20);QPainter tint(&pixmap);tint.setCompositionMode(QPainter::CompositionMode_SourceIn);
+        tint.fillRect(pixmap.rect(),mode==QIcon::Disabled ? QColor("#666666") : QColor("#e6e6e6"));tint.end();icon.addPixmap(pixmap,mode);
+    }
+    return icon;
+}
 static QIcon editorButtonIcon(const QString &resource,bool checkedOnly,const QString &offResource={}) {
     // State variants are generated at runtime; the supplied PNGs remain untouched.
     static QHash<QString,QIcon> cache;
@@ -250,7 +259,7 @@ MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory) : QMainWi
         if (gen != openingGeneration_) return;
         loading_ = false; loaded_ = true; decoding_ = pendingDecode_ = false;
         generation_ = gen; info_ = info;
-        viewport_->setGhost(false);
+        viewport_->setGhost(false); slider_->resetView(); // a newly opened capture is seen whole
         processingState_={};
         project_ = pendingProject_.value_or(defaultProject()); project_.asset = info.path;
         if (project_.captureSettings.title.isEmpty()) project_.captureSettings.title = info.title;
@@ -350,13 +359,26 @@ void MainWindow::buildUi() {
     file->addSeparator();
     saveAction_ = file->addAction(tr("Save project"), QKeySequence::Save, this, [this] { save(); });
     saveAsAction_ = file->addAction(tr("Save project as…"), QKeySequence::SaveAs, this, [this] { save(true); });
-    exportAction_ = file->addAction(tr("Export capture\u2026"), QKeySequence("Ctrl+E"), this, &MainWindow::exportCapture);
+    file->addSeparator(); auto *exitAction = file->addAction(tr("Exit"), QKeySequence::Quit, this, &QWidget::close);
+    // Everything that writes something other than the project.
+    auto *exportMenu = menuBar()->addMenu(tr("Export")); exportMenu->setToolTipsVisible(true);
+    exportAction_ = exportMenu->addAction(tr("Export capture\u2026"), QKeySequence("Ctrl+E"), this, &MainWindow::exportCapture);
     exportAction_->setToolTip(tr("Export the selected Start/End range to VGS, PGS or MINT, baking capture transforms and active modifiers (Ctrl+E). MINT omits capture metadata."));
-    imageAction_ = file->addAction(tr("Export viewport image…"), QKeySequence("Ctrl+Shift+E"), this, &MainWindow::exportImage);
-    file->addSeparator(); file->addAction(tr("Exit"), QKeySequence::Quit, this, &QWidget::close);
-    newAction->setIcon(style()->standardIcon(QStyle::SP_FileIcon));
-    openAction->setIcon(style()->standardIcon(QStyle::SP_DirOpenIcon));
-    saveAction_->setIcon(style()->standardIcon(QStyle::SP_DialogSaveButton));
+    plyAction_ = exportMenu->addAction(tr("Export current frame as PLY\u2026"), QKeySequence("Ctrl+Alt+E"), this, &MainWindow::exportFrame);
+    plyAction_->setToolTip(tr("Write the frame on screen as a 3D Gaussian Splatting .ply, edited as Export capture would write it: transform, modifiers, colour processing and SH degree (Ctrl+Alt+E)."));
+    imageAction_ = exportMenu->addAction(tr("Export viewport image\u2026"), QKeySequence("Ctrl+Shift+E"), this, &MainWindow::exportImage);
+    imageAction_->setToolTip(tr("Save the viewport as it looks now as a PNG (Ctrl+Shift+E)."));
+    newAction->setIcon(themeIcon(QIcon::ThemeIcon::DocumentNew,style()->standardIcon(QStyle::SP_FileIcon)));
+    openAction->setIcon(themeIcon(QIcon::ThemeIcon::DocumentOpen,style()->standardIcon(QStyle::SP_DirOpenIcon)));
+    saveAction_->setIcon(themeIcon(QIcon::ThemeIcon::DocumentSave,style()->standardIcon(QStyle::SP_DialogSaveButton)));
+    // Every entry carries an icon from the same set, so the labels line up.
+    openProject->setIcon(themeIcon(QIcon::ThemeIcon::FolderOpen,style()->standardIcon(QStyle::SP_DirIcon)));
+    recentMenu_->setIcon(themeIcon(QIcon::ThemeIcon::DocumentOpenRecent,style()->standardIcon(QStyle::SP_FileDialogDetailedView)));
+    saveAsAction_->setIcon(themeIcon(QIcon::ThemeIcon::DocumentSaveAs,style()->standardIcon(QStyle::SP_DialogSaveButton)));
+    exitAction->setIcon(themeIcon(QIcon::ThemeIcon::ApplicationExit,style()->standardIcon(QStyle::SP_DialogCloseButton)));
+    exportAction_->setIcon(themeIcon(QIcon::ThemeIcon::CameraVideo,style()->standardIcon(QStyle::SP_MediaPlay)));
+    plyAction_->setIcon(themeIcon(QIcon::ThemeIcon::DocumentSend,style()->standardIcon(QStyle::SP_FileIcon)));
+    imageAction_->setIcon(themeIcon(QIcon::ThemeIcon::CameraPhoto,style()->standardIcon(QStyle::SP_DesktopIcon)));
     updateRecentMenu();
     newAction->setToolTip(tr("Create an empty project (Ctrl+N)."));
     openAction->setToolTip(tr("Open a VGS, PGS or MINT capture (Ctrl+O)."));
@@ -368,7 +390,8 @@ void MainWindow::buildUi() {
     timeline_ = new QWidget; timeline_->setObjectName("timeline");
     auto *tl = new QVBoxLayout(timeline_); tl->setContentsMargins(18,8,18,12);tl->setSpacing(6);
     slider_ = new RangeSlider; slider_->setObjectName("captureRangeSlider");
-    slider_->setToolTip(tr("Drag the upper marker to set Start, the lower marker to set End, or the white playhead to seek. The selected range is exported."));
+    slider_->setToolTip(tr("Drag the upper marker to set Start, the lower marker to set End, or the white playhead to seek. The selected range is exported.\n"
+        "Wheel: zoom · Shift+wheel or middle drag: pan · Double-click Capture: whole capture."));
     auto *controls = new CenteredPlaybackLayout;controls->setSpacing(8);
     auto *frameControls=new QWidget;frameControls->setObjectName("timelineFrameControls");frameControls->setSizePolicy(QSizePolicy::Maximum,QSizePolicy::Fixed);
     frameControls->setStyleSheet("QDoubleSpinBox { padding: 3px; min-height: 20px; font-size: 9pt; }");
@@ -398,6 +421,15 @@ void MainWindow::buildUi() {
     controls->addWidget(speedControls);tl->addLayout(controls);tl->addWidget(slider_);
     loop_->setToolTip(tr("Toggle looping within the playback range (L)."));
     modifierPanel_=new ModifierPanel;tl->addWidget(modifierPanel_);
+    // The timeline's track runs exactly over the modifier bars, so a frame sits at the same x
+    // in both; the space to its left heads the names column below. Queued: both settle first.
+    connect(modifierPanel_,&ModifierPanel::trackMoved,this,&MainWindow::alignTimeline,Qt::QueuedConnection);
+    modifierPanel_->setMinimumNameWidth(slider_->fontMetrics().horizontalAdvance(tr("Capture")));
+    // One zoom and pan for the timeline and the bars: the timeline owns it.
+    connect(slider_,&RangeSlider::viewChanged,modifierPanel_,&ModifierPanel::setView);
+    connect(modifierPanel_,&ModifierPanel::zoomRequested,this,[this](double factor,int globalX) {slider_->zoomAt(factor,slider_->mapFromGlobal(QPoint(globalX,0)).x());});
+    connect(modifierPanel_,&ModifierPanel::panRequested,slider_,&RangeSlider::panByPixels);
+    connect(modifierPanel_,&ModifierPanel::resetViewRequested,slider_,&RangeSlider::resetView);
     connect(modifierPanel_,&ModifierPanel::selectionChanged,this,[this] {
         const auto modifier=modifierPanel_->project().selectedModifier;
         viewport_->setTransformMode(TransformMode::None);
@@ -827,6 +859,13 @@ void MainWindow::revealModifierProperties() {
         scroll->ensureWidgetVisible(panel,0,12);
     });
 }
+void MainWindow::alignTimeline() {
+    const auto [left,width]=modifierPanel_->trackSpan();
+    const int start=left-slider_->mapToGlobal(QPoint(0,0)).x();
+    slider_->setTrackInsets(start,slider_->width()-start-width);
+    // The timeline reads as the first row of the list below: the capture's own track.
+    slider_->setLabel(tr("Capture"),modifierPanel_->nameLeft()-slider_->mapToGlobal(QPoint(0,0)).x());
+}
 int MainWindow::currentFrame() const {return int(std::round(project_.time*info_.fps));}
 void MainWindow::keyCrop() {
     auto *m=project_.modifier();
@@ -894,7 +933,7 @@ void MainWindow::syncUi() {
     captureSettingsButton_->setEnabled(loaded_ && !loading_);
     savePresetButton_->setEnabled(loaded_ && !loading_); presetCombo_->setEnabled(loaded_ && !loading_ && presetCombo_->count()>1);
     presetFolderButton_->setEnabled(loaded_ && !loading_);
-    saveAction_->setEnabled(loaded_ && !loading_); saveAsAction_->setEnabled(loaded_ && !loading_); imageAction_->setEnabled(loaded_ && !loading_); exportAction_->setEnabled(loaded_ && !loading_);
+    saveAction_->setEnabled(loaded_ && !loading_); saveAsAction_->setEnabled(loaded_ && !loading_); imageAction_->setEnabled(loaded_ && !loading_); exportAction_->setEnabled(loaded_ && !loading_); plyAction_->setEnabled(loaded_ && !loading_);
     assetLabel_->setText(loaded_ ? info_.title : tr("No capture"));
     assetLabel_->setToolTip(project_.asset);
     metadata_->setText(loaded_ ? tr("%1 · %2 fps\n%3 s · %4 frames").arg(info_.format).arg(info_.fps,0,'f',2).arg(info_.duration,0,'f',3).arg(info_.frames) : QString());
@@ -902,7 +941,7 @@ void MainWindow::syncUi() {
     const QVector3D vectors[] = {target.position,target.rotation,target.scale};
     for (int g=0; g<3; ++g) for (int a=0; a<3; ++a) transform_[g][a]->setValue(vectors[g][a]);
     const int maximum = std::max(0, info_.frames-1);
-    slider_->setFrameRange(0,maximum); slider_->setRangeValues(int(std::round(project_.in*info_.fps)),int(std::round(project_.out*info_.fps)));
+    slider_->setFrameRange(0,maximum); slider_->setFrameRate(info_.fps); slider_->setRangeValues(int(std::round(project_.in*info_.fps)),int(std::round(project_.out*info_.fps)));
     const bool seconds=timelineSecondsButton_->isChecked();const double divisor=seconds ? info_.fps : 1.0;
     const int decimals=seconds ? std::max(3,int(std::ceil(std::log10(std::max(1.0,info_.fps))))+1) : 0;
     for (auto *field:{frameSpin_,inFrame_,outFrame_}) {field->setDecimals(decimals);field->setRange(0,maximum/divisor);field->setSingleStep(1.0/divisor);field->setSuffix(seconds ? tr(" s") : QString());}
@@ -1163,9 +1202,11 @@ void MainWindow::receiveFrame(FramePtr frame) {
 void MainWindow::exportCapture() {
     if (!loaded_ || loading_) return;
     play(false);
-    const QString extension=project_.captureSettings.plain ? "pgs" : "vgs";
+    // The format is the extension chosen here; the dialog offers the last one used.
+    const QString last=QFileInfo(settings_.value("Export/LastFile").toString()).suffix().toLower();
+    const QString extension=last=="pgs" || last=="mint" ? last : "vgs";
     const QString suggested=QDir(settings_.value("Export/Directory",QFileInfo(project_.asset).absolutePath()).toString()).filePath(QFileInfo(project_.asset).completeBaseName()+"_edited."+extension);
-    QString selectedFilter=project_.captureSettings.plain ? tr("Plain Gaussian capture (*.pgs)") : tr("Compressed Gaussian capture (*.vgs)");
+    QString selectedFilter=extension=="pgs" ? tr("Plain Gaussian capture (*.pgs)") : extension=="mint" ? tr("Gracia MINT capture (*.mint)") : tr("Compressed Gaussian capture (*.vgs)");
     QString destination=QFileDialog::getSaveFileName(this,tr("Export capture"),suggested,
         tr("Compressed Gaussian capture (*.vgs);;Plain Gaussian capture (*.pgs);;Gracia MINT capture (*.mint)"),&selectedFilter);
     if (destination.isEmpty()) return;
@@ -1201,6 +1242,34 @@ void MainWindow::exportCapture() {
         .arg(result.frames).arg(result.kept).arg(result.removed).arg(result.notes.join("\n")));
 }
 
+void MainWindow::exportFrame() {
+    if (!loaded_ || loading_) return;
+    play(false);
+    const int frame=currentFrame();
+    const QString suggested=QDir(settings_.value("Export/PlyDirectory",settings_.value("Export/Directory",QFileInfo(project_.asset).absolutePath())).toString())
+        .filePath(QString("%1_%2.ply").arg(QFileInfo(project_.asset).completeBaseName()).arg(frame,6,10,QChar('0')));
+    QString destination=QFileDialog::getSaveFileName(this,tr("Export current frame as PLY"),suggested,tr("Gaussian splat (*.ply)"));
+    if (destination.isEmpty()) return;
+    if (QFileInfo(destination).suffix().compare("ply",Qt::CaseInsensitive)!=0) destination+=".ply";
+    const Project snapshot=project_;const double seconds=project_.time;
+    QProgressDialog progress(tr("Preparing export"),tr("Cancel"),0,100,this);
+    progress.setWindowTitle(tr("Export current frame"));progress.setWindowModality(Qt::ApplicationModal);
+    progress.setAutoClose(false);progress.setAutoReset(false);progress.setMinimumDuration(400);
+    std::atomic_bool cancelled{false};QString failure;ExportResult result;
+    connect(&progress,&QProgressDialog::canceled,&progress,[&] {cancelled=true;});
+    auto *job=QThread::create([&] {
+        try { result=exportFramePly(snapshot,seconds,destination,[&](int value,const QString &message) {
+            QMetaObject::invokeMethod(&progress,[&,value,message] {progress.setValue(value);progress.setLabelText(message);},Qt::QueuedConnection);
+            return !cancelled.load();
+        }); }
+        catch (const std::exception &e) {failure=QString::fromUtf8(e.what());}
+    });
+    connect(job,&QThread::finished,&progress,&QDialog::accept);
+    job->start();progress.exec();cancelled = cancelled || progress.wasCanceled();job->wait();delete job;
+    if (!failure.isEmpty()) {if (!cancelled) showError(failure);return;}
+    settings_.setValue("Export/PlyDirectory",QFileInfo(destination).absolutePath());
+    statusBar()->showMessage(tr("Frame %1 saved to %2: %3 Gaussians, %4 removed by modifiers.").arg(frame).arg(destination).arg(result.kept).arg(result.removed),15000);
+}
 void MainWindow::exportImage() {
     QString path = QFileDialog::getSaveFileName(this,tr("Export image"),history_.savePath("Image",QFileInfo(project_.asset).completeBaseName()+".png"),tr("PNG image (*.png)"));
     if (path.isEmpty()) return;

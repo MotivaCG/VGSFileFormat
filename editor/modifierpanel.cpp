@@ -14,6 +14,7 @@
 #include <QApplication>
 #include <QMenu>
 #include <QMouseEvent>
+#include <QWheelEvent>
 #include <QKeyEvent>
 #include <QPersistentModelIndex>
 #include <functional>
@@ -61,6 +62,11 @@ class CoverageDelegate : public QStyledItemDelegate {
 public:
     using QStyledItemDelegate::QStyledItemDelegate;
     std::function<void(int)> seek;
+    std::function<void()> textMoved;
+    double viewFirst=0,viewLast=0; // the frames the bars show
+    double frameX(const QRect &bar,double frame) const {return bar.left()+bar.width()*(frame-viewFirst)/std::max(1e-9,viewLast-viewFirst);}
+    bool inView(double frame) const {return frame>=viewFirst-1e-6 && frame<=viewLast+1e-6;}
+    mutable int textOffset=-1; // unknown until a row has been painted
     bool editorEvent(QEvent *event,QAbstractItemModel *model,const QStyleOptionViewItem &option,const QModelIndex &index) override {
         if (index.column()==0) {
             if (!(option.state & QStyle::State_Enabled) || !(index.flags() & Qt::ItemIsUserCheckable)) return false;
@@ -84,11 +90,18 @@ public:
         }
         if (index.column()==2 && event->type()==QEvent::MouseButtonRelease && (option.state & QStyle::State_Enabled)) {
             const auto *mouse=static_cast<QMouseEvent *>(event);if (mouse->button()==Qt::LeftButton) {
-                const auto keys=index.data(Qt::UserRole+4).toList();const int maximum=std::max(1,index.data(Qt::UserRole+5).toInt());const auto rect=barRect(option.rect);
-                for (const auto &key:keys) if (std::abs(mouse->position().x()-(rect.left()+rect.width()*key.toInt()/double(maximum)))<7) {if (seek) seek(key.toInt());return true;}
+                const auto keys=index.data(Qt::UserRole+4).toList();const auto rect=barRect(option.rect);
+                for (const auto &key:keys) if (inView(key.toInt()) && std::abs(mouse->position().x()-frameX(rect,key.toInt()))<7) {if (seek) seek(key.toInt());return true;}
             }
         }
         return QStyledItemDelegate::editorEvent(event,model,option,index);
+    }
+    // Where a name's text starts in a row, as paint() lays it out with the eye beside it.
+    QRect textRect(QStyleOptionViewItem option,const QModelIndex &index) const {
+        initStyleOption(&option,index);const auto *style=option.widget ? option.widget->style() : QApplication::style();
+        // Qt draws the text inside that rect, past a focus-frame margin of its own.
+        const int margin=style->pixelMetric(QStyle::PM_FocusFrameHMargin,&option,option.widget)+1;
+        return style->subElementRect(QStyle::SE_ItemViewItemText,&option,option.widget).adjusted(margin,0,-margin,0);
     }
     // Thin, centred range bar; keyframe hits use the same horizontal extent.
     static QRect barRect(const QRect &cell) {const int height=13;return {cell.left()+8,cell.center().y()-height/2,cell.width()-16,height};}
@@ -99,16 +112,26 @@ public:
         return index.column()==0 ? QStyledItemDelegate::createEditor(parent,option,index) : nullptr;
     }
     void paint(QPainter *painter,const QStyleOptionViewItem &option,const QModelIndex &index) const override {
+        if (index.column()==0) {
+            // Where a name's text really starts within its row, as painted: the timeline's
+            // name lines up with it.
+            const int offset=textRect(option,index).left()-option.rect.left();
+            if (offset!=textOffset) {textOffset=offset;if (textMoved) textMoved();}
+        }
         if (index.column()!=2) {QStyledItemDelegate::paint(painter,option,index);return;}
         QStyleOptionViewItem copy(option);initStyleOption(&copy,index);copy.text.clear();
         const QWidget *widget=option.widget;(widget ? widget->style() : QApplication::style())->drawControl(QStyle::CE_ItemViewItem,&copy,painter,widget);
         const bool active=index.data(Qt::UserRole+2).toBool() && (option.state & QStyle::State_Enabled);const auto type=ModifierType(index.data(Qt::UserRole+3).toInt());
         painter->save();const auto rect=barRect(option.rect);painter->setPen(Qt::NoPen);
         painter->setBrush(!active ? QColor(75,80,86) : modifierColour(type));painter->drawRoundedRect(rect,3,3);
-        const int maximum=std::max(1,index.data(Qt::UserRole+5).toInt()),current=index.data(Qt::UserRole+6).toInt();
+        const int current=index.data(Qt::UserRole+6).toInt();
         painter->setRenderHint(QPainter::Antialiasing,true);
+        // The current time, read only: the timeline's playhead carried down through every bar.
+        if (inView(current)) {const double x=frameX(rect,current);
+            painter->setPen(QPen(QColor(0,0,0,90),3));painter->drawLine(QPointF(x,rect.top()-3),QPointF(x,rect.bottom()+4));
+            painter->setPen(QPen(Qt::white,2));painter->drawLine(QPointF(x,rect.top()-3),QPointF(x,rect.bottom()+4));}
         for (const auto &key:index.data(Qt::UserRole+4).toList()) {
-            const int frame=key.toInt();if (frame>maximum) continue;const double x=rect.left()+rect.width()*frame/double(maximum),y=rect.center().y();
+            const int frame=key.toInt();if (!inView(frame)) continue;const double x=frameX(rect,frame),y=rect.center().y();
             painter->setPen(QPen(active ? QColor("#325777") : QColor("#555b61"),1));painter->setBrush(active ? frame==current ? Qt::white : QColor("#dcebf7") : QColor("#888888"));painter->drawPolygon(QPolygonF{{x,y-5},{x+4,y},{x,y+5},{x-4,y}});
         }
         painter->restore();
@@ -155,8 +178,13 @@ ModifierPanel::ModifierPanel(QWidget *parent):QWidget(parent) {
     palette.setColor(QPalette::Highlight,QColor("#333a40"));palette.setColor(QPalette::HighlightedText,EditorTheme::text());tree_->setPalette(palette);
     tree_->setStyleSheet("QTreeWidget {border-radius: 4px;} QTreeWidget::item {padding: 2px 5px; border-bottom: 1px solid #23262a;}"
         "QTreeWidget::item:selected {background: #333a40; color: #e7eaeb;} QTreeWidget::item:hover:!selected {background: #1b1e21;}");
-    tree_->header()->setSectionResizeMode(0,QHeaderView::ResizeToContents);tree_->header()->setSectionResizeMode(1,QHeaderView::ResizeToContents);tree_->header()->setSectionResizeMode(2,QHeaderView::Stretch);
-    auto *delegate=new CoverageDelegate(tree_);delegate->seek=[this](int frame) {emit seekFrame(frame);};tree_->setItemDelegate(delegate);tree_->setToolTip(tr("Click the eye to enable or disable a modifier. Select a modifier to edit its properties in Tools. Click a keyframe diamond to seek."));layout->addWidget(tree_);
+    tree_->header()->setSectionResizeMode(0,QHeaderView::Fixed);tree_->header()->setSectionResizeMode(1,QHeaderView::ResizeToContents);tree_->header()->setSectionResizeMode(2,QHeaderView::Stretch);
+    tree_->viewport()->installEventFilter(this);
+    connect(tree_->header(),&QHeaderView::sectionResized,this,&ModifierPanel::trackMoved);
+    connect(tree_->header(),&QHeaderView::geometriesChanged,this,&ModifierPanel::trackMoved);
+    auto *delegate=new CoverageDelegate(tree_);delegate->seek=[this](int frame) {emit seekFrame(frame);};
+    // Measured while painting: refit and realign afterwards, not in the middle of a paint.
+    delegate->textMoved=[this] {QMetaObject::invokeMethod(this,[this] {fitNames();emit trackMoved();},Qt::QueuedConnection);};tree_->setItemDelegate(delegate);tree_->setToolTip(tr("Click the eye to enable or disable a modifier. Select a modifier to edit its properties in Tools. Click a keyframe diamond to seek. Ctrl+wheel zooms the timeline; Shift+wheel or a middle drag pans it."));layout->addWidget(tree_);
     connect(tree_,&QTreeWidget::currentItemChanged,this,[this](QTreeWidgetItem *item) {
         if (updating_ || !item) return;project_.selectedModifier=item->data(0,ModifierRole).toString();emit selectionChanged();
     });
@@ -202,7 +230,7 @@ void ModifierPanel::setProject(const Project &project) {
                 item->setCheckState(0,m.active() ? Qt::Checked : Qt::Unchecked);item->setData(2,Qt::UserRole+2,m.active());item->setData(2,Qt::UserRole+3,int(m.type));
                 item->setData(2,Qt::UserRole+4,keyFrames(m));
             }
-            renderedModifiers_=visualState(project_);updating_=false;tree_->viewport()->update();
+            renderedModifiers_=visualState(project_);updating_=false;fitNames();tree_->viewport()->update();
         }
     }
     if (selected) {
@@ -221,8 +249,61 @@ void ModifierPanel::rebuild() {
     }
     if (selected) tree_->setCurrentItem(selected);addModifier_->setEnabled(true);duplicate_->setEnabled(selected);remove_->setEnabled(selected);up_->setEnabled(selected);down_->setEnabled(selected);
     tree_->setFixedHeight(std::min(250,30*std::max(4,int(project_.modifiers.size()))+tree_->header()->height()+4));
-    renderedModifiers_=visualState(project_);updating_=false;
+    renderedModifiers_=visualState(project_);updating_=false;fitNames();
 }
+// As wide as the longest name, and never narrower than the minimum asked for.
+void ModifierPanel::fitNames() {
+    const int offset=textOffset();
+    const int width=std::max(static_cast<QAbstractItemView *>(tree_)->sizeHintForColumn(0),offset+minimumNameWidth_+16);
+    if (tree_->columnWidth(0)!=width) tree_->setColumnWidth(0,width);
+}
+void ModifierPanel::setMinimumNameWidth(int pixels) {if (minimumNameWidth_!=pixels) {minimumNameWidth_=pixels;fitNames();}}
+QPair<int,int> ModifierPanel::trackSpan() const {
+    // Column 2's bar, as the delegate draws it, in the tree viewport's coordinates.
+    const auto *header=tree_->header();const int x=header->sectionViewportPosition(2);
+    const QRect bar=CoverageDelegate::barRect(QRect(x,0,header->sectionSize(2),30));
+    return {tree_->viewport()->mapToGlobal(QPoint(bar.left(),0)).x(),bar.width()};
+}
+int ModifierPanel::textOffset() const {
+    const int painted=static_cast<CoverageDelegate *>(tree_->itemDelegate())->textOffset;
+    return painted>=0 ? painted : 30; // before any row is painted: the eye and its spacing
+}
+int ModifierPanel::nameLeft() const {
+    return tree_->viewport()->mapToGlobal(QPoint(tree_->header()->sectionViewportPosition(0)+textOffset(),0)).x();
+}
+QPair<double,double> ModifierPanel::view() const {const auto *delegate=static_cast<CoverageDelegate *>(tree_->itemDelegate());return {delegate->viewFirst,delegate->viewLast};}
+void ModifierPanel::setView(double first,double last) {
+    auto *delegate=static_cast<CoverageDelegate *>(tree_->itemDelegate());
+    if (delegate->viewFirst==first && delegate->viewLast==last) return;
+    delegate->viewFirst=first;delegate->viewLast=last;tree_->viewport()->update();
+}
+// Over the bars, Ctrl+wheel zooms the timeline and Shift+wheel, a horizontal wheel or a
+// middle drag pans it; the plain wheel still scrolls the list.
+bool ModifierPanel::eventFilter(QObject *watched,QEvent *event) {
+    if (watched!=tree_->viewport()) return QWidget::eventFilter(watched,event);
+    switch (event->type()) {
+    case QEvent::Wheel: {
+        auto *wheel=static_cast<QWheelEvent *>(event);const auto delta=wheel->angleDelta();
+        if (delta.x()!=0 || (wheel->modifiers() & Qt::ShiftModifier)) {emit panRequested((delta.x()!=0 ? delta.x() : delta.y())/120.0*CoverageDelegate::barRect(QRect(0,0,tree_->header()->sectionSize(2),30)).width()*0.1);return true;}
+        if (wheel->modifiers() & Qt::ControlModifier) {emit zoomRequested(std::pow(1.25,delta.y()/120.0),qRound(wheel->globalPosition().x()));return true;}
+        break;
+    }
+    case QEvent::MouseButtonPress: case QEvent::MouseButtonDblClick: {
+        auto *mouse=static_cast<QMouseEvent *>(event);if (mouse->button()!=Qt::MiddleButton) break;
+        if (event->type()==QEvent::MouseButtonDblClick) {emit resetViewRequested();return true;}
+        panning_=true;panX_=mouse->position().x();tree_->viewport()->setCursor(Qt::ClosedHandCursor);return true;
+    }
+    case QEvent::MouseMove:
+        if (panning_) {auto *mouse=static_cast<QMouseEvent *>(event);emit panRequested(mouse->position().x()-panX_);panX_=mouse->position().x();return true;}
+        break;
+    case QEvent::MouseButtonRelease:
+        if (panning_ && static_cast<QMouseEvent *>(event)->button()==Qt::MiddleButton) {panning_=false;tree_->viewport()->unsetCursor();return true;}
+        break;
+    default: break;
+    }
+    return QWidget::eventFilter(watched,event);
+}
+void ModifierPanel::resizeEvent(QResizeEvent *event) {QWidget::resizeEvent(event);emit trackMoved();}
 void ModifierPanel::setTimeline(int frame,int maximum) {
     if (frame_==frame && maximum_==maximum) return;frame_=frame;maximum_=maximum;QSignalBlocker blocker(tree_);
     for (int row=0;row<tree_->topLevelItemCount();++row) {auto *item=tree_->topLevelItem(row);item->setData(2,Qt::UserRole+5,maximum);item->setData(2,Qt::UserRole+6,frame);}

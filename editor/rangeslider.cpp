@@ -1,6 +1,7 @@
 #include "rangeslider.h"
 #include <QPainter>
 #include <QMouseEvent>
+#include <QWheelEvent>
 #include <algorithm>
 #include <cmath>
 RangeSlider::RangeSlider(QWidget* parent)
@@ -12,11 +13,23 @@ RangeSlider::RangeSlider(QWidget* parent)
 
 void RangeSlider::setFrameRange(int minimum, int maximum)
 {
+    maximum = std::max(minimum, maximum);
+    const bool changed = minimum != m_minimum || maximum != m_maximum;
     m_minimum = minimum;
-    m_maximum = std::max(minimum, maximum);
+    m_maximum = maximum;
+    if (changed)
+        resetView();
     m_start = std::clamp(m_start, m_minimum, m_maximum);
     m_end = std::clamp(m_end, m_start, m_maximum);
     m_playhead = std::clamp(m_playhead, m_minimum, m_maximum);
+    update();
+}
+
+void RangeSlider::setFrameRate(double fps)
+{
+    if (m_frameRate == fps)
+        return;
+    m_frameRate = fps;
     update();
 }
 
@@ -41,7 +54,53 @@ void RangeSlider::setPlayheadValue(int value)
         return;
 
     m_playhead = clamped;
+    // Zoomed in, the view pages along to keep the playhead in sight (playback, stepping).
+    const double span = m_viewLast - m_viewFirst;
+    if (m_playhead > m_viewLast)
+        setView(m_playhead - span * 0.1, span);
+    else if (m_playhead < m_viewFirst)
+        setView(m_playhead - span * 0.9, span);
     update();
+}
+
+double RangeSlider::zoom() const
+{
+    const double span = m_viewLast - m_viewFirst;
+    return span > 0 ? (m_maximum - m_minimum) / span : 1;
+}
+
+void RangeSlider::resetView()
+{
+    setView(m_minimum, m_maximum - m_minimum);
+}
+
+// The view keeps inside the capture and never narrower than two frames.
+void RangeSlider::setView(double first, double span)
+{
+    const double full = m_maximum - m_minimum;
+    span = std::clamp(span, std::min(full, 2.0), full);
+    first = std::clamp(first, double(m_minimum), m_maximum - span);
+    if (first == m_viewFirst && first + span == m_viewLast)
+        return;
+    m_viewFirst = first;
+    m_viewLast = first + span;
+    update();
+    emit viewChanged(m_viewFirst, m_viewLast);
+}
+
+void RangeSlider::zoomAt(double factor, int x)
+{
+    const QRect track = trackRect();
+    const double t = std::clamp((x - track.left()) / double(track.width()), 0.0, 1.0);
+    const double span = m_viewLast - m_viewFirst, anchor = m_viewFirst + t * span;
+    const double next = std::clamp(span / factor, std::min(double(m_maximum - m_minimum), 2.0), double(m_maximum - m_minimum));
+    setView(anchor - t * next, next);
+}
+
+void RangeSlider::panByPixels(double pixels)
+{
+    const double span = m_viewLast - m_viewFirst;
+    setView(m_viewFirst - pixels / std::max(1, trackRect().width()) * span, span);
 }
 
 QSize RangeSlider::sizeHint() const
@@ -49,21 +108,42 @@ QSize RangeSlider::sizeHint() const
     return QSize(640, 38);
 }
 
+void RangeSlider::setTrackInsets(int left, int right)
+{
+    // The end markers reach 8 px past the track on either side.
+    left = std::max(9, left); right = std::max(9, right);
+    if (m_leftInset == left && m_rightInset == right)
+        return;
+    m_leftInset = left; m_rightInset = right;
+    update();
+}
+
+void RangeSlider::setLabel(const QString &text, int x)
+{
+    if (m_label == text && m_labelX == x)
+        return;
+    m_label = text; m_labelX = x;
+    update();
+}
+
 QRect RangeSlider::trackRect() const
 {
-    constexpr int margin = 10;
     const int y = height() / 2 - 3;
-    return QRect(margin, y, std::max(1,width() - margin * 2), 4);
+    return QRect(m_leftInset, y, std::max(1, width() - m_leftInset - m_rightInset), 4);
+}
+
+double RangeSlider::frameX(double value) const
+{
+    const QRect track = trackRect();
+    const double span = m_viewLast - m_viewFirst;
+    if (span <= 0)
+        return track.left();
+    return track.left() + (value - m_viewFirst) / span * track.width();
 }
 
 int RangeSlider::valueToX(int value) const
 {
-    const QRect track = trackRect();
-    if (m_maximum <= m_minimum)
-        return track.left();
-
-    const double t = static_cast<double>(value - m_minimum) / static_cast<double>(m_maximum - m_minimum);
-    return track.left() + qRound(t * track.width());
+    return qRound(frameX(value));
 }
 
 int RangeSlider::xToValue(int x) const
@@ -74,7 +154,7 @@ int RangeSlider::xToValue(int x) const
 
     const int clampedX = std::clamp(x, track.left(), track.right());
     const double t = static_cast<double>(clampedX - track.left()) / static_cast<double>(track.width());
-    return m_minimum + qRound(t * (m_maximum - m_minimum));
+    return std::clamp(int(std::lround(m_viewFirst + t * (m_viewLast - m_viewFirst))), m_minimum, m_maximum);
 }
 
 QRect RangeSlider::triangleHandleRect(int value, bool top) const
@@ -98,19 +178,62 @@ void RangeSlider::paintEvent(QPaintEvent*)
     painter.setRenderHint(QPainter::Antialiasing);
 
     const QRect track = trackRect();
+    if (!m_label.isEmpty()) {
+        // Centred on the track; elided rather than reaching the Start marker.
+        const QRect area(m_labelX, track.center().y() - height() / 2, track.left() - 12 - m_labelX, height());
+        if (area.width() > 0) {
+            painter.setPen(palette().color(isEnabled() ? QPalette::Active : QPalette::Disabled, QPalette::Text));
+            painter.drawText(area, Qt::AlignLeft | Qt::AlignVCenter, fontMetrics().elidedText(m_label, Qt::ElideRight, area.width()));
+            // Zoomed in, the level sits just left of the name, in its font but muted.
+            if (zoom() > 1.001) {
+                painter.setPen(palette().color(QPalette::Disabled, QPalette::Text));
+                const QRect before(0, area.top(), std::max(0, m_labelX - 6), area.height());
+                painter.drawText(before, Qt::AlignRight | Qt::AlignVCenter, QString(QChar(0x00d7)) + QString::number(zoom(), 'f', zoom() < 10 ? 1 : 0));
+            }
+        }
+    }
     painter.setPen(Qt::NoPen);
     painter.setBrush(QColor(70, 70, 70));
     painter.drawRoundedRect(track, 2, 2);
 
     QRect selected = track;
-    selected.setLeft(valueToX(m_start));
-    selected.setRight(valueToX(m_end));
+    selected.setLeft(std::max(track.left(), valueToX(m_start)));
+    selected.setRight(std::min(track.right(), valueToX(m_end)));
     painter.setBrush(QColor(65, 176, 24));
-    painter.drawRoundedRect(selected, 2, 2);
+    if (selected.width() > 0)
+        painter.drawRoundedRect(selected, 2, 2);
 
+    // A tick every second, in a much lighter green, and one per frame halfway between that and
+    // the track's green - each only while they stay apart; packed closer they would smear.
+    const double span = m_viewLast - m_viewFirst;
+    if (m_frameRate > 0 && span > 0) {
+        const double perFrame = track.width() / span, perSecond = perFrame * m_frameRate;
+        const bool seconds = perSecond >= 8, frames = perFrame >= 6;
+        painter.save(); painter.setRenderHint(QPainter::Antialiasing, false);
+        auto tick = [&](double frame, int reach, const QColor &colour) {
+            const int x = qRound(frameX(frame));
+            painter.setPen(QPen(colour, 1)); painter.drawLine(x, track.top() - reach, x, track.bottom() + reach);
+        };
+        if (frames) {
+            for (int frame = int(std::ceil(m_viewFirst)); frame <= m_viewLast; ++frame) {
+                const double second = frame / m_frameRate;
+                if (seconds && std::abs(second - std::round(second)) * m_frameRate < 0.5)
+                    continue; // a second tick goes here
+                tick(frame, 0, QColor(131, 206, 102));
+            }
+        }
+        if (seconds)
+            for (int second = int(std::ceil(m_viewFirst / m_frameRate)); second * m_frameRate <= m_viewLast; ++second)
+                tick(second * m_frameRate, 2, QColor(198, 236, 180));
+        painter.restore();
+    }
+
+    // Only what lies in the view is drawn; the markers still reach just past the track ends.
+    auto visible = [&](int value) { return value >= m_viewFirst - 1e-6 && value <= m_viewLast + 1e-6; };
     const int playheadX = valueToX(m_playhead);
     painter.setPen(QPen(Qt::white, 2));
-    painter.drawLine(playheadX, 10, playheadX, height() - 10);
+    if (visible(m_playhead))
+        painter.drawLine(playheadX, 10, playheadX, height() - 10);
 
     auto drawTriangle = [&](int value, bool top, const QColor& fill) {
         const QRect rect = triangleHandleRect(value, top);
@@ -131,13 +254,18 @@ void RangeSlider::paintEvent(QPaintEvent*)
         painter.drawPolygon(polygon);
     };
 
-    drawTriangle(m_start, true, QColor(245, 245, 245));
-    drawTriangle(m_end, false, QColor(245, 245, 245));
+    if (visible(m_start))
+        drawTriangle(m_start, true, QColor(245, 245, 245));
+    if (visible(m_end))
+        drawTriangle(m_end, false, QColor(245, 245, 245));
 }
 
 void RangeSlider::mousePressEvent(QMouseEvent* event)
 {
+    if (event->button()==Qt::MiddleButton) {m_panning=true;m_panX=event->position().x();setCursor(Qt::ClosedHandCursor);return;}
     if (event->button()!=Qt::LeftButton) {event->ignore();return;}
+    // The name to the left is not part of the track.
+    if (event->position().x() < trackRect().left() - 10) {event->ignore();return;}
     const int clickValue = xToValue(event->position().x());
     const QPoint pos = event->position().toPoint();
 
@@ -164,15 +292,37 @@ void RangeSlider::mousePressEvent(QMouseEvent* event)
 
 void RangeSlider::mouseMoveEvent(QMouseEvent* event)
 {
+    if (m_panning) {panByPixels(event->position().x()-m_panX);m_panX=event->position().x();return;}
     if (m_dragHandle == DragHandle::None)
         return;
 
     setDraggedValue(xToValue(event->position().x()));
 }
 
-void RangeSlider::mouseReleaseEvent(QMouseEvent*)
+void RangeSlider::mouseReleaseEvent(QMouseEvent* event)
 {
+    if (event->button()==Qt::MiddleButton && m_panning) {m_panning=false;unsetCursor();return;}
     m_dragHandle = DragHandle::None;
+}
+
+// Double-click the name (or the middle button anywhere): back to the whole capture.
+void RangeSlider::mouseDoubleClickEvent(QMouseEvent* event)
+{
+    if (event->button()==Qt::MiddleButton || (event->button()==Qt::LeftButton && event->position().x() < trackRect().left() - 10)) {resetView();return;}
+    mousePressEvent(event);
+}
+
+// Wheel zooms about the pointer; Shift+wheel or a horizontal wheel pans.
+void RangeSlider::wheelEvent(QWheelEvent* event)
+{
+    const QPoint delta = event->angleDelta();
+    if (delta.x() != 0 || (event->modifiers() & Qt::ShiftModifier)) {
+        const int steps = delta.x() != 0 ? delta.x() : delta.y();
+        panByPixels(steps / 120.0 * trackRect().width() * 0.1);
+    } else if (delta.y() != 0) {
+        zoomAt(std::pow(1.25, delta.y() / 120.0), qRound(event->position().x()));
+    }
+    event->accept();
 }
 
 void RangeSlider::setDraggedValue(int value)

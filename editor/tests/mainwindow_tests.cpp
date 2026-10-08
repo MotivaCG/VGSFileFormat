@@ -2,6 +2,7 @@
 #include "viewport.h"
 #include "viewcube.h"
 #include "rangeslider.h"
+#include "modifierpanel.h"
 #include "exportcapture.h"
 #include "vgssign.h"
 #include "editortheme.h"
@@ -20,12 +21,14 @@
 #include <QTreeWidget>
 #include <QToolButton>
 #include <QMenu>
+#include <QMenuBar>
 #include <QGroupBox>
 #include <QCheckBox>
 #include <QTableWidget>
 #include <QLabel>
 #include <QFormLayout>
 #include <QSlider>
+#include <QWheelEvent>
 #include <QtTest>
 
 class MainWindowTests : public QObject {
@@ -64,6 +67,32 @@ private slots:
         radius->setValue(still+2);emit slider->playheadChanged(4);QCOMPARE(radius->value(),still+2);
         choose(1);QVERIFY(keys->isVisible());QCOMPARE(table->rowCount(),2);QCOMPARE(radius->value(),still+0.5);
         choose(0);QCOMPARE(radius->value(),still+2);
+        // The timeline's track lies exactly over the modifier bars, also after a resize.
+        auto *panel=window.findChild<ModifierPanel *>();QVERIFY(panel);
+        auto aligned=[&] {const auto span=panel->trackSpan();const auto track=slider->trackRect();
+            return slider->mapToGlobal(track.topLeft()).x()==span.first && track.width()==span.second;};
+        QTRY_VERIFY(aligned());window.resize(window.width()-120,window.height());QTRY_VERIFY(aligned());
+        // Its name, Capture, starts where the modifier names do.
+        QCOMPARE(slider->label(),QString("Capture"));QCOMPARE(slider->mapToGlobal(QPoint(slider->labelX(),0)).x(),panel->nameLeft());
+        QVERIFY(slider->labelX()>0 && slider->labelX()<slider->trackRect().left());
+        // Whole, not elided, even when every modifier name is shorter.
+        QVERIFY(slider->trackRect().left()-12-slider->labelX()>=slider->fontMetrics().horizontalAdvance("Capture"));
+        // Zoom and pan: one view for the timeline and the bars, never past the capture.
+        QCOMPARE(slider->zoom(),1.);QCOMPARE(panel->view(),qMakePair(0.,4.));
+        slider->zoomAt(10,slider->trackRect().left());QCOMPARE(slider->zoom(),2.);QCOMPARE(panel->view(),qMakePair(0.,2.));
+        slider->panByPixels(-slider->trackRect().width()/2.);QCOMPARE(panel->view(),qMakePair(1.,3.));
+        slider->panByPixels(-10000);QCOMPARE(panel->view(),qMakePair(2.,4.));
+        // Over the bars Ctrl+wheel zooms, the plain wheel does not.
+        auto wheel=[&](Qt::KeyboardModifiers modifiers,int delta) {auto *target=tree->viewport();const QPointF at=target->rect().center();
+            QWheelEvent event(at,target->mapToGlobal(at),{},{0,delta},Qt::NoButton,modifiers,Qt::NoScrollPhase,false);QApplication::sendEvent(target,&event);};
+        wheel(Qt::NoModifier,-120);QCOMPARE(slider->zoom(),2.);wheel(Qt::ControlModifier,-120*4);QVERIFY(slider->zoom()<2.);
+        // The view pages to keep the playhead in sight; a double-click on Capture, or reopening, shows it whole.
+        slider->zoomAt(10,slider->trackRect().left());QCOMPARE(panel->view(),qMakePair(0.,2.));
+        emit slider->playheadChanged(1);QCOMPARE(panel->view(),qMakePair(0.,2.));emit slider->playheadChanged(4);QVERIFY(panel->view().second>=4.);
+        QTest::mouseDClick(slider,Qt::LeftButton,{},QPoint(slider->labelX()+2,slider->height()/2));QCOMPARE(slider->zoom(),1.);
+        slider->zoomAt(10,slider->trackRect().left());QCOMPARE(slider->zoom(),2.);
+        choose(1);emit slider->playheadChanged(2);
+        choose(0);
         // 1 and 2 on the main keyboard pick 3D points / Gaussian; the numpad keeps its views,
         // and a digit typed into a field stays in the field.
         auto *style=window.findChild<QComboBox *>("displayRenderStyle");auto *sh=window.findChild<QComboBox *>("displaySplatSh");auto *viewport=window.findChild<Viewport *>();
@@ -80,6 +109,25 @@ private slots:
         QTest::keyClick(viewport,Qt::Key_1);QCOMPARE(style->currentIndex(),0);QVERIFY(!viewport->splatRendering());
         radius->setFocus();QTRY_VERIFY(radius->hasFocus());radius->selectAll();QTest::keyClick(radius,Qt::Key_2);QCOMPARE(style->currentIndex(),0);
         QTest::keyClick(radius,Qt::Key_2,Qt::KeypadModifier);QCOMPARE(style->currentIndex(),0);
+        // Reopening shows the timeline whole again: the zoom is not saved.
+        slider->zoomAt(10,slider->trackRect().left());QCOMPARE(slider->zoom(),2.);window.setWindowModified(false);
+        window.openPath(capture);QTRY_COMPARE(slider->zoom(),1.);QTRY_VERIFY(edit->isEnabled());QCOMPARE(panel->view(),qMakePair(0.,4.));
+    }
+    void timelineTicksFollowDurationAndZoom() {
+        // A tick each second in a light green, one per frame halfway to the track's green, and
+        // neither while they would sit closer than a few pixels.
+        RangeSlider slider;slider.resize(640,38);slider.setTrackInsets(20,20);slider.setFrameRate(30);
+        const QColor second(198,236,180),frame(131,206,102);
+        auto count=[&](const QColor &colour) {
+            const QImage image=slider.grab().toImage();const qreal ratio=image.devicePixelRatio();const int y=qRound(slider.trackRect().center().y()*ratio);
+            int columns=0;bool inside=false;
+            for (int x=0;x<image.width();++x) {const bool match=image.pixelColor(x,y)==colour;if (match && !inside) ++columns;inside=match;}
+            return columns;
+        };
+        slider.setFrameRange(0,299);slider.setRangeValues(0,299);slider.setPlayheadValue(15); // off the ticks
+        QCOMPARE(count(second),10);QCOMPARE(count(frame),0);          // 10 s: seconds only
+        slider.zoomAt(4,slider.trackRect().left());QVERIFY(count(frame)>40);QVERIFY(count(second)>=2); // zoomed: frames too
+        slider.setFrameRange(0,29999);QCOMPARE(count(second),0);QCOMPARE(count(frame),0);        // 1000 s: too dense for either
     }
     void tabTogglesCropFromViewportAndFields() {
         QTemporaryDir dir;QVERIFY(dir.isValid());

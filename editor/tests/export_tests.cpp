@@ -208,6 +208,31 @@ private slots:
         std::vector<float> xs;for (size_t i=0;i<frame.count;++i) if (frame.active[i]) xs.push_back(frame.position[i*3]);
         QCOMPARE(xs.size(),size_t(1));QVERIFY(std::abs(xs[0]-3)<1e-4f);
     }
+    void currentFrameIsWrittenAsAnEditedPly() {
+        // Frame 0 has live splats at x=0 and x=3; the capture moves 1 m along X and keeps SH1.
+        QTemporaryDir dir;const auto source=dir.filePath("source.pgs");sourceFile(source,3);
+        Project project;project.asset=source;project.in=0;project.out=2.0/25;project.modifiers.clear();
+        project.transform.position={1,0,0};project.captureSettings.shDegree=1;
+        const auto path=dir.filePath("frame.ply");const auto result=exportFramePly(project,0,path);
+        QCOMPARE(result.kept,quint64(2));QCOMPARE(result.removed,quint64(0));
+        QFile file(path);QVERIFY(file.open(QIODevice::ReadOnly));const auto bytes=file.readAll();
+        const int end=bytes.indexOf("end_header\n");QVERIFY(end>0);const QString header=QString::fromLatin1(bytes.left(end));
+        QVERIFY(header.startsWith("ply\nformat binary_little_endian 1.0\nelement vertex 2\n"));
+        QCOMPARE(header.count("f_rest_"),9);QCOMPARE(header.count("property float"),3+3+3+9+1+3+4);
+        const auto *v=reinterpret_cast<const float *>(bytes.constData()+end+11);const int stride=26;
+        QCOMPARE(qsizetype(end+11+2*stride*4),bytes.size());
+        auto near=[](float a,float b,float tolerance) {return std::abs(a-b)<=tolerance;};
+        QVERIFY(near(v[0],1,1e-4f) && near(v[1],1,1e-4f) && near(v[stride],4,1e-4f));          // x+1
+        QVERIFY(near(v[6],float((.8-.5)/0.28209479177387814),.02f));                             // f_dc from rgb
+        QVERIFY(near(v[18],std::log(.7f/.3f),.02f));                                              // logit opacity
+        QVERIFY(near(v[19],std::log(.1f),.02f) && near(v[21],std::log(.3f),.02f));               // log scale
+        // wxyz: any orientation that rebuilds the same covariance (the axes of diag(.1, .2, .3)).
+        const float xyzw[4]={v[23],v[24],v[25],v[22]},scale[3]={std::exp(v[19]),std::exp(v[20]),std::exp(v[21])};
+        const auto rebuilt=covariance(xyzw,scale);QVERIFY((rebuilt-Eigen::Vector3d(.01,.04,.09).asDiagonal().toDenseMatrix()).norm()<2e-3);
+        // A frame where nothing is alive has nothing to write.
+        bool threw=false;try {exportFramePly(project,1.0/25,dir.filePath("empty.ply"));} catch (const std::exception &) {threw=true;}
+        QVERIFY(threw);QVERIFY(!QFile::exists(dir.filePath("empty.ply")));
+    }
     void walkMarksTheHeaderAndLeavesTheDataInPlace() {
         QTemporaryDir dir;const auto source=dir.filePath("source.pgs");sourceFile(source,5);
         Project project;project.asset=source;project.in=.08;project.out=.16;project.modifiers.clear();
@@ -486,7 +511,7 @@ private slots:
         QTemporaryDir dir;QString source=dir.filePath("source.pgs");sourceFile(source);
         Project p;p.asset=source;p.in=1./25;p.out=2./25;p.crop().enabled=true;p.crop().radius=1;p.crop().height=2;
         p.transform.position={.25f,0,0};p.transform.rotation={0,25,0};p.transform.scale={2,1,.5f};
-        p.captureSettings.title="Edited metadata";p.captureSettings.extraJson="[1,2,3]";p.captureSettings.plain=true;
+        p.captureSettings.title="Edited metadata";p.captureSettings.extraJson="[1,2,3]";p.captureSettings.plain=false; // the extension decides, not this
         auto destination=dir.filePath("edited.pgs");auto result=exportCaptureFile(p,destination);QCOMPARE(result.frames,2);QCOMPARE(result.kept,1ull);QCOMPARE(result.removed,1ull);
         auto decoded=vgsdec::Capture::openFile(destination.toStdString());QCOMPARE(decoded.frameCount(),2ull);QCOMPARE(decoded.frameRate(),25.);QCOMPARE(decoded.metadata().title,std::string("Edited metadata"));QVERIFY(decoded.hasMetadataJson2());
         QVERIFY(decoded.metadataJson2().find("[1,2,3]")!=std::string::npos);QCOMPARE(decoded.playbackMode(),vgsdec::PlaybackMode::PingPong);
@@ -498,7 +523,7 @@ private slots:
         for (int k=0;k<45;++k) QVERIFY(std::abs(frame.sphericalHarmonics[k]-expected.shRest[k])<.0001f);
         QFile file(destination);QVERIFY(file.open(QIODevice::ReadOnly));auto bytes=file.readAll();auto header=vgs::readHeader(reinterpret_cast<const uint8_t *>(bytes.constData()),size_t(bytes.size()));
         QCOMPARE(header.encoding,0u);for (const auto &policy : header.policies) QCOMPARE(policy.codec,uint32_t(vgs::Raw));file.close();
-        p.captureSettings.plain=false;p.captureSettings.shDegree=1;auto compressed=dir.filePath("edited.vgs");exportCaptureFile(p,compressed);
+        p.captureSettings.plain=true;p.captureSettings.shDegree=1;auto compressed=dir.filePath("edited.vgs");exportCaptureFile(p,compressed);
         auto compressedCapture=vgsdec::Capture::openFile(compressed.toStdString());QCOMPARE(compressedCapture.shDegree(),1u);QCOMPARE(compressedCapture.setTime(.04,true).shCoefficients,3);
         QVERIFY(QFileInfo(compressed).size()<QFileInfo(destination).size());
     }

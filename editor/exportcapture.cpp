@@ -360,6 +360,8 @@ vgs::Frame bakeExportFrame(const vgs::Frame &frame,const Project &project,int de
 ExportResult exportCaptureFile(const Project &inputProject,const QString &destination,const ExportProgress &progress) {
     Project project=inputProject;const bool animated=project.hasAnimatedMotion();if (!animated) project.transform=inputProject.transformAtFrame(0);
     const bool mintOutput=QFileInfo(destination).suffix().compare("mint",Qt::CaseInsensitive)==0;
+    // .pgs is the plain container and .vgs the compressed one: the extension decides.
+    project.captureSettings.plain=QFileInfo(destination).suffix().compare("pgs",Qt::CaseInsensitive)==0;
     if (animated && mintOutput) throw std::runtime_error("MINT cannot store an animated transform. Export to .vgs or .pgs, which carry it as motion samples, or remove the animation.");
     QString error;if (!project.captureSettings.validate(&error)) throw std::runtime_error(error.toStdString());
     if (QFileInfo(project.asset).absoluteFilePath().compare(QFileInfo(destination).absoluteFilePath(),Qt::CaseInsensitive)==0)
@@ -512,5 +514,54 @@ ExportResult exportCaptureFile(const Project &inputProject,const QString &destin
     const Matrix a=linear(project.transform.matrix()),metric=a.transpose()*a;
     if (!metric.isApprox(Matrix::Identity()*metric.trace()/3,1e-5)) result.notes << QStringLiteral("SH under nonuniform scale or shear is projected to the selected SH degree.");
     if (capture && (capture->hasAudio() || capture->hasThumbnail())) result.notes << QStringLiteral("Source audio and thumbnail are omitted because timeline and framing may have changed.");
+    return result;
+}
+
+void writePly(const vgs::Frame &frame,const QString &destination) {
+    QSaveFile file(destination);if (!file.open(QIODevice::WriteOnly)) throw std::runtime_error(file.errorString().toStdString());
+    const size_t n=size_t(frame.count),bands=size_t(frame.shCoefficients);
+    QByteArray header="ply\nformat binary_little_endian 1.0\nelement vertex "+QByteArray::number(qulonglong(n))+"\n";
+    for (const char *name:{"x","y","z","nx","ny","nz","f_dc_0","f_dc_1","f_dc_2"}) header+=QByteArray("property float ")+name+"\n";
+    for (size_t i=0;i<bands*3;++i) header+="property float f_rest_"+QByteArray::number(qulonglong(i))+"\n";
+    for (const char *name:{"opacity","scale_0","scale_1","scale_2","rot_0","rot_1","rot_2","rot_3"}) header+=QByteArray("property float ")+name+"\n";
+    header+="end_header\n";
+    if (file.write(header)!=header.size()) throw std::runtime_error(file.errorString().toStdString());
+    std::vector<float> row;QByteArray block;
+    for (size_t i=0;i<n;++i) {
+        row.clear();
+        for (int c=0;c<3;++c) row.push_back(frame.position[3*i+c]);
+        row.insert(row.end(),{0,0,0}); // normals are unused
+        for (int c=0;c<3;++c) row.push_back(float((frame.colorDc[3*i+c]-.5)/C0));
+        // f_rest is channel-major: every band's red, then green, then blue.
+        for (int c=0;c<3;++c) for (size_t k=0;k<bands;++k) row.push_back(frame.shRest[(i*bands+k)*3+c]);
+        // The PLY stores what comes before activation: logit opacity, log scale; and wxyz.
+        const float opacity=std::clamp(frame.opacity[i],1e-6f,1-1e-6f);row.push_back(std::log(opacity/(1-opacity)));
+        for (int c=0;c<3;++c) row.push_back(std::log(std::max(1e-12f,frame.scale[3*i+c])));
+        row.insert(row.end(),{frame.rotation[4*i+3],frame.rotation[4*i],frame.rotation[4*i+1],frame.rotation[4*i+2]});
+        block.append(reinterpret_cast<const char *>(row.data()),qsizetype(row.size()*sizeof(float)));
+        if (block.size()>(1<<22)) {if (file.write(block)!=block.size()) throw std::runtime_error(file.errorString().toStdString());block.clear();}
+    }
+    if (file.write(block)!=block.size() || !file.commit()) throw std::runtime_error(file.errorString().toStdString());
+}
+
+ExportResult exportFramePly(const Project &project,double seconds,const QString &destination,const ExportProgress &progress) {
+    QString error;if (!project.captureSettings.validate(&error)) throw std::runtime_error(error.toStdString());
+    report(progress,0,QStringLiteral("Decoding the frame"));
+    vgs::Frame frame;double rate;int sourceDegree=3;
+    if (QFileInfo(project.asset).suffix().compare("mint",Qt::CaseInsensitive)==0) {
+        MintFile mint;if (!mint.open(project.asset,&error)) throw std::runtime_error(error.toStdString());
+        rate=mint.frameRate();MintFrame decoded;
+        if (!mint.decode(std::min(seconds,mint.duration()-1e-7),&decoded,true,&error)) throw std::runtime_error(error.toStdString());
+        frame=copyFrame(decoded);
+    } else {
+        FileSource source(project.asset);auto capture=vgsdec::Capture::openStream(source);
+        rate=capture.frameRate();sourceDegree=capture.shDegree();frame=copyFrame(capture.setTime(std::min(seconds,capture.duration()-1e-7),true));
+    }
+    const int degree=project.captureSettings.shDegree<0 ? sourceDegree : project.captureSettings.shDegree;
+    const auto baked=bakeExportFrame(frame,project,degree,progress,rate);
+    if (!baked.count) throw std::runtime_error("No Gaussian records remain at this frame after applying active modifiers.");
+    report(progress,90,QStringLiteral("Writing the .ply"));writePly(baked,destination);
+    ExportResult result;result.frames=1;result.kept=baked.count;
+    result.removed=quint64(std::count(frame.active.begin(),frame.active.end(),uint8_t(1)))-baked.count;
     return result;
 }

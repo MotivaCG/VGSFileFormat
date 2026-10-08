@@ -59,6 +59,8 @@ private:
     void receiveFrame(FramePtr frame);
     void exportImage();
     void exportCapture();
+    // The frame on screen, edited, as a 3D Gaussian Splatting .ply.
+    void exportFrame();
     void showError(const QString &message);
     void updateRecentMenu();
     void setTransformMode(TransformMode mode);
@@ -120,6 +122,7 @@ private:
     QTableWidget *cropKeyTable_;
     QPushButton *cropRemoveKey_;
     int currentFrame() const;
+    void alignTimeline();
     // While the selected crop is animated, an edit of its pose or size is a key at this frame.
     void keyCrop();
     void setCropAnimated(bool animated);
@@ -146,7 +149,7 @@ private:
     QPushButton *cropEditButton_;
     QPushButton *t4dsPresetButton_, *smnPresetButton_;
     QPushButton *cropFitButton_, *cropClearButton_;
-    QAction *saveAction_, *saveAsAction_, *imageAction_, *exportAction_, *gridAction_;
+    QAction *saveAction_, *saveAsAction_, *imageAction_, *exportAction_, *gridAction_, *plyAction_ = nullptr;
     QMenu *recentMenu_;
     QString smokeOutput_;
     int smokeStage_ = 0;
