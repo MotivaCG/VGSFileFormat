@@ -1,6 +1,7 @@
 #pragma once
 #include "captureworker.h"
 #include "project.h"
+#include <array>
 #include <QOpenGLFunctions_3_3_Core>
 #include <QOpenGLShaderProgram>
 #include <QOpenGLWidget>
@@ -34,6 +35,8 @@ public:
     void setDisplayedComponent(int group,int axis,float value);
     void setCoordinateSpace(TransformMode mode,CoordinateSpace space);
     CoordinateSpace coordinateSpace(TransformMode mode) const;
+    // What the scene chose, before a crop being edited forces Scale to Local.
+    CoordinateSpace chosenCoordinateSpace(TransformMode mode) const;
     void setPointSize(float size);
     void setDisplayControls(QWidget *controls);
     void setPlaybackTime(double seconds,double duration);
@@ -130,9 +133,11 @@ private:
     GLuint gizmoVao_ = 0, gizmoBuffer_ = 0;
     TransformMode mode_ = TransformMode::None;
     CoordinateSpace spaces_[3] = {CoordinateSpace::Global,CoordinateSpace::Global,CoordinateSpace::Global};
-    int hoverHandle_ = -1, dragHandle_ = -1;
+    int hoverHandle_ = -1, dragHandle_ = -1; // 0-2 axes, 3 centre, 4-6 Move planes by their normal axis
+    std::array<QVector3D,4> planeHandle(int normal,const QVector3D &pivot,float length) const;
     bool dragging_ = false, ignoreLeftUntilRelease_ = false, dragConstraintValid_ = false;
     Transform dragStart_;
+    CropVolume dragStartCrop_;
     QVector3D dragPivot_, dragAxis_, dragPlaneNormal_, dragPlaneStart_, dragRotationVector_;
     QPointF dragScreenStart_, dragScreenAxis_;
     float dragLength_ = 1, dragParameter_ = 0, dragRotationAngle_ = 0;

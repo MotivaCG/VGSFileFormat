@@ -188,7 +188,7 @@ private slots:
         QPoint outward = handle-QPoint(250,250); outward = QPoint(qRound(outward.x()*0.4),qRound(outward.y()*0.4));
         drag(viewport,handle,handle+outward);
         QVERIFY(viewport.transform().position.y()>0.01f); QVERIFY(std::abs(viewport.transform().position.x())<1e-5f);
-        viewport.setTransform({}); CropVolume crop; crop.enabled = true; crop.radius = 0.4f; crop.height = 1;
+        viewport.setTransform({}); CropVolume crop; crop.enabled = true; crop.radius = crop.radiusZ = 0.4f; crop.height = 1;
         viewport.setCrop(crop); viewport.setCropEditing(true);
         qRegisterMetaType<CropVolume>(); QSignalSpy edited(&viewport,&Viewport::cropEdited);
         handle = colouredHandle(viewport,0); outward = handle-QPoint(250,250); outward = QPoint(qRound(outward.x()*0.4),qRound(outward.y()*0.4));
@@ -196,49 +196,58 @@ private slots:
         QVERIFY(viewport.crop().transform.position.length()>0.01f); QCOMPARE(viewport.transform().position,QVector3D()); QVERIFY(!edited.isEmpty());
         viewport.setCropEditing(false); QCOMPARE(viewport.crop().enabled,true);
     }
-    void globalScalingAndRotationKeepCylinderBaseFixed() {
-        Viewport viewport;
+    void cropEditingIsLocalAndScalingResizes() {
+        Viewport viewport; viewport.resize(500,500); viewport.setGrid(false);
+        Camera camera; camera.yaw = 30; camera.pitch = 20; camera.distance = 4; viewport.setCamera(camera);
         Transform capture; capture.position = {0.5f,0.3f,-0.2f}; capture.rotation = {15,20,25}; capture.scale = {1.2f,0.9f,1.4f};
         viewport.setTransform(capture);
-        CropVolume crop; crop.enabled = true; crop.height = 2.5f;
-        crop.transform.position = {0.2f,0.1f,-0.1f}; crop.transform.rotation = {20,30,40};
+        auto frame = std::make_shared<RenderFrame>(); frame->records.push_back(Splat{}); viewport.setFrame(frame);
+        CropVolume crop; crop.enabled = true; crop.radius = 0.5f; crop.radiusZ = 0.8f; crop.height = 1.5f;
         viewport.setCrop(crop); viewport.setCropEditing(true);
-        const auto before = crop.transform.matrix(); const auto base = before.map(QVector3D());
-        QMatrix4x4 delta; delta.translate(base); delta.scale(1.8f,1,1); delta.translate(-base);
-        const auto expected = delta*before;
-        viewport.setDisplayedComponent(2,0,viewport.displayedTransform().scale.x()*1.8f);
-        const auto actual = viewport.crop().transform.matrix();
-        for (int i=0; i<4; ++i) for (int j=0; j<4; ++j) QVERIFY(std::abs(actual(i,j)-expected(i,j))<1e-4f);
-        QVERIFY((actual.map(QVector3D())-base).length()<1e-5f);
+        viewport.show(); QVERIFY(QTest::qWaitForWindowExposed(&viewport));
+        // Scale is always local while editing a crop, whatever the scene chose; Rotate keeps it.
+        viewport.setCoordinateSpace(TransformMode::Scale,CoordinateSpace::Global);
+        QCOMPARE(viewport.coordinateSpace(TransformMode::Scale),CoordinateSpace::Local);
+        QCOMPARE(viewport.chosenCoordinateSpace(TransformMode::Scale),CoordinateSpace::Global);
+        QCOMPARE(viewport.coordinateSpace(TransformMode::Rotate),CoordinateSpace::Global);
         viewport.setDisplayedComponent(1,0,36);
-        QVERIFY(std::abs(viewport.displayedTransform().rotation.x()-36)<0.001f);
-        QVERIFY((viewport.crop().transform.matrix().map(QVector3D())-base).length()<1e-5f);
-        viewport.setCoordinateSpace(TransformMode::Scale,CoordinateSpace::Local);
-        const auto local = viewport.crop().transform.scale;
-        viewport.setDisplayedComponent(2,1,local.y()*1.6f);
-        QVERIFY(std::abs(viewport.crop().transform.scale.y()-local.y()*1.6f)<1e-5f);
-        QCOMPARE(viewport.crop().transform.position,crop.transform.position);
+        QVERIFY(std::abs(viewport.crop().transform.rotation.x()-36)<0.001f);
+        QCOMPARE(viewport.crop().transform.position,crop.transform.position); // the base stays put
+        viewport.setDisplayedComponent(1,0,0);
+        // Scaling with the gizmo resizes the volume and leaves its scale at 1.
+        viewport.setTransformMode(TransformMode::Scale);
+        drag(viewport,{250,250},{285,220});
+        const auto resized = viewport.crop();
+        QVERIFY(resized.radius>crop.radius*1.5f);
+        QVERIFY(std::abs(resized.radiusZ/resized.radius-crop.radiusZ/crop.radius)<1e-4f);
+        QVERIFY(std::abs(resized.height/resized.radius-crop.height/crop.radius)<1e-4f);
+        QCOMPARE(resized.transform.scale,QVector3D(1,1,1));
         QCOMPARE(viewport.transform().position,capture.position); QCOMPARE(viewport.transform().scale,capture.scale);
     }
     void movingCaptureLeavesCropFixedAndChangesWorldMembership() {
         Viewport viewport; viewport.resize(600,400); viewport.setGrid(false); viewport.setPointSize(10);
         Camera camera; camera.yaw = camera.pitch = 0; viewport.setCamera(camera);
         auto frame = std::make_shared<RenderFrame>(); frame->points = {{{0,0.3f,0},{1,0,0},0}}; viewport.setFrame(frame);
-        CropVolume crop; crop.enabled = true; crop.radius = 0.4f; crop.height = 1; viewport.setCrop(crop);
+        CropVolume crop; crop.enabled = true; crop.radius = crop.radiusZ = 0.4f; crop.height = 1; viewport.setCrop(crop);
         viewport.show(); QVERIFY(QTest::qWaitForWindowExposed(&viewport));
         auto redPixels = [&] { const auto image = viewport.grabFramebuffer(); int count = 0;
             for (int y=0; y<image.height(); ++y) for (int x=0; x<image.width(); ++x) { const auto c = image.pixelColor(x,y); if (c.red()>240 && c.green()<10 && c.blue()<10) ++count; } return count;
         };
+        // Reddish: the red point itself, or what editing tints red because a crop removes it.
+        auto reddish = [&] { const auto image = viewport.grabFramebuffer(); int count = 0;
+            for (int y=0; y<image.height(); ++y) for (int x=0; x<image.width(); ++x) { const auto c = image.pixelColor(x,y); if (c.red()>220 && c.green()<60 && c.blue()<80) ++count; } return count;
+        };
         QVERIFY(redPixels()>30); Transform capture; capture.position = {1,0,0}; viewport.setTransform(capture);
-        QCOMPARE(viewport.crop().transform.position,crop.transform.position); QCOMPARE(redPixels(),0);
-        viewport.setCropEditing(true); QVERIFY(redPixels()>30); QCOMPARE(viewport.transform().position,capture.position);
+        QCOMPARE(viewport.crop().transform.position,crop.transform.position); QCOMPARE(reddish(),0);
+        // Editing shows what the crops would remove, in red, by default.
+        viewport.setCropEditing(true); QVERIFY(reddish()>30); QCOMPARE(redPixels(),0); QCOMPARE(viewport.transform().position,capture.position);
     }
     void cropClipsOnlyWhenNotEditing() {
         Viewport viewport; viewport.resize(600,400); viewport.setGrid(false); viewport.setPointSize(10);
         Camera camera; camera.yaw = camera.pitch = 0; viewport.setCamera(camera);
         auto frame = std::make_shared<RenderFrame>(); frame->total = 2;
         frame->points = {{{0,0,0},{0,1,0},0},{{0.9f,0,0},{1,0,0},1}}; viewport.setFrame(frame);
-        CropVolume crop; crop.enabled = true; crop.radius = 0.4f; crop.height = 1;
+        CropVolume crop; crop.enabled = true; crop.radius = crop.radiusZ = 0.4f; crop.height = 1;
         viewport.setCrop(crop); viewport.show(); QVERIFY(QTest::qWaitForWindowExposed(&viewport));
         auto countRed = [&] {
             const QImage image = viewport.grabFramebuffer(); int red = 0;
@@ -247,8 +256,15 @@ private slots:
             }
             return red;
         };
-        QCOMPARE(countRed(),0); viewport.setCropEditing(true); QVERIFY(countRed()>30);
-        viewport.setCropEditing(false); QCOMPARE(countRed(),0);
+        auto reddish = [&] { const auto image = viewport.grabFramebuffer(); int count = 0;
+            for (int y=0; y<image.height(); ++y) for (int x=0; x<image.width(); ++x) { const auto c = image.pixelColor(x,y); if (c.red()>220 && c.green()<60 && c.blue()<80) ++count; } return count;
+        };
+        // Outside editing what a crop removes is hidden; while editing it is shown in red, or
+        // hidden when the crop asks for that. The normal view never changes with it.
+        QCOMPARE(reddish(),0); viewport.setCropEditing(true); QVERIFY(reddish()>30);
+        crop.showRemovedInRed = false; viewport.setCrop(crop); QCOMPARE(reddish(),0);
+        viewport.setCropEditing(false); QCOMPARE(reddish(),0);
+        crop.showRemovedInRed = true; viewport.setCrop(crop); QCOMPARE(reddish(),0);
         crop.enabled = false; viewport.setCrop(crop); QVERIFY(countRed()>30);
         QCOMPARE(frame->points.size(),size_t(2)); // Crop preview never removes source points.
     }
@@ -256,13 +272,35 @@ private slots:
         Viewport viewport; viewport.resize(600,400); viewport.setGrid(false); viewport.setPointSize(10);
         Camera camera; camera.yaw = camera.pitch = 0; viewport.setCamera(camera);
         auto frame = std::make_shared<RenderFrame>(); frame->points = {{{0.35f,0,0.35f},{1,0,0},0}}; viewport.setFrame(frame);
-        CropVolume crop; crop.enabled = true; crop.radius = 0.4f; crop.height = 1; crop.width = crop.depth = 0.8f;
+        CropVolume crop; crop.enabled = true; crop.radius = crop.radiusZ = 0.4f; crop.height = 1; crop.width = crop.depth = 0.8f;
         viewport.setCrop(crop); viewport.show(); QVERIFY(QTest::qWaitForWindowExposed(&viewport));
         auto redPixels = [&] { const auto image = viewport.grabFramebuffer(); int count = 0;
             for (int y=0; y<image.height(); ++y) for (int x=0; x<image.width(); ++x) { const auto c = image.pixelColor(x,y); if (c.red()>240 && c.green()<10 && c.blue()<10) ++count; } return count;
         };
         QCOMPARE(redPixels(),0); crop.shape = CropShape::Box; viewport.setCrop(crop); QVERIFY(redPixels()>30);
-        viewport.setCropEditing(true); QVERIFY(redPixels()>30); QCOMPARE(frame->points.size(),size_t(1));
+        // While editing, the colour code lightens what is kept half way to white.
+        auto lightened = [&] { const auto image = viewport.grabFramebuffer(); int count = 0;
+            for (int y=0; y<image.height(); ++y) for (int x=0; x<image.width(); ++x) { const auto c = image.pixelColor(x,y); if (c.red()>240 && c.green()>100 && c.green()<160 && std::abs(c.green()-c.blue())<12) ++count; } return count; };
+        viewport.setCropEditing(true); QVERIFY(lightened()>30); QCOMPARE(redPixels(),0); QCOMPARE(frame->points.size(),size_t(1));
+    }
+    void movePlaneHandlesMoveAlongTwoAxes() {
+        Viewport viewport; viewport.resize(500,500); viewport.setGrid(false);
+        Camera camera; camera.yaw = 30; camera.pitch = 35; camera.distance = 4; viewport.setCamera(camera);
+        auto frame = std::make_shared<RenderFrame>(); frame->records.push_back(Splat{});
+        viewport.setFrame(frame); viewport.show(); QVERIFY(QTest::qWaitForWindowExposed(&viewport));
+        viewport.setTransformMode(TransformMode::Move);
+        // The square normal to Y is drawn in the Y arrow's green at 70%: find its middle.
+        const QImage image = viewport.grabFramebuffer(); const double dpr = viewport.devicePixelRatioF();
+        double sx = 0, sy = 0; int n = 0;
+        for (int y=0; y<image.height(); ++y) for (int x=0; x<image.width(); ++x) {
+            const auto c = image.pixelColor(x,y);
+            if (std::abs(c.red()-54)<6 && std::abs(c.green()-161)<6 && std::abs(c.blue()-54)<6) { sx += x; sy += y; ++n; }
+        }
+        QVERIFY(n>20);
+        const QPoint square(qRound(sx/n/dpr),qRound(sy/n/dpr));
+        drag(viewport,square,square+QPoint(40,25));
+        const auto p = viewport.transform().position;
+        QVERIFY(std::abs(p.x())>0.01f); QVERIFY(std::abs(p.z())>0.01f); QCOMPARE(p.y(),0.0f);
     }
     void gizmoChangesTransformsAndEscapeCancelsDrag() {
         qRegisterMetaType<Transform>();

@@ -81,13 +81,17 @@ CompiledModifiers::CompiledModifiers(const QVector<Modifier> &modifiers) {
         }
     }
 }
+// Kept when inside some Keep crop (or when there is none) and inside no Remove crop:
+// removing wins where the two overlap.
 bool CompiledModifiers::keepsPosition(const QVector3D &world) const {
-    if (crops.isEmpty()) return true;
+    bool anyKeep=false,insideKeep=false;
     for (const auto &crop:crops) {
         const auto p=crop.inverse.map(world);const auto &c=crop.volume;
-        if (p.y()>=0 && p.y()<=c.height && (c.shape==CropShape::Box ? std::abs(p.x())<=c.width*.5f && std::abs(p.z())<=c.depth*.5f : p.x()*p.x()+p.z()*p.z()<=c.radius*c.radius)) return true;
+        const bool inside=p.y()>=0 && p.y()<=c.height && (c.shape==CropShape::Box ? std::abs(p.x())<=c.width*.5f && std::abs(p.z())<=c.depth*.5f : c.insideEllipse(p.x(),p.z()));
+        if (c.remove) {if (inside) return false;}
+        else {anyKeep=true;insideKeep|=inside;}
     }
-    return false;
+    return !anyKeep || insideKeep;
 }
 bool CompiledModifiers::removesColour(const QVector3D &rgb) const {for (const auto &filter:greens) if (filter.matches(rgb)) return true;return false;}
 QJsonArray Project::modifierJson() const {
@@ -103,8 +107,9 @@ QJsonArray Project::modifierJson() const {
             }
             QJsonObject item{{"id",m.id},{"name",m.name},{"enabled",m.active()},{"type",type},{"timeline","full"}};
             if (m.type==ModifierType::Crop) {const auto &c=m.crop;item["crop"]=QJsonObject{{"space","world"},{"shape",c.shape==CropShape::Box ? "box" : "cylinder"},
-                {"radius",c.radius},{"height",c.height},{"width",c.width},{"depth",c.depth},{"position",vector(c.transform.position)},
-                {"rotation",vector(c.transform.rotation)},{"scale",vector(c.transform.scale)},{"shear",vector(c.transform.shear)}};}
+                {"radius",c.radius},{"radiusZ",c.radiusZ},{"height",c.height},{"width",c.width},{"depth",c.depth},{"position",vector(c.transform.position)},
+                {"rotation",vector(c.transform.rotation)},{"scale",vector(c.transform.scale)},{"shear",vector(c.transform.shear)},
+                {"mode",c.remove ? "remove" : "keep"},{"editPreview",c.showRemovedInRed ? "red" : "hide"}};}
             else if (m.type==ModifierType::RemoveGreen) item["green"]=QJsonObject{{"minimumSaturation",m.green.minimumSaturation},{"hueTolerance",m.green.hueTolerance},{"targetHue",120},{"colourSource","dc"},{"colourSpace",m.green.linearRgb ? "linear-rgb" : "srgb"}};
             else if (m.type==ModifierType::AnimateTransform) item["animation"]=QJsonObject{{"space","reference-offset"},{"interpolation","linear-slerp"},{"keys",m.animation.json()}};
             else if (m.type==ModifierType::Walk) item["walk"]=QJsonObject{{"speed",m.walkSpeed},{"axis","+z"},{"units","m/s"},{"display",m.walkKmh ? "km/h" : "m/s"}};

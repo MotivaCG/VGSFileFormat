@@ -190,6 +190,16 @@ its world-space placement or activation. Metadata presets still affect metadata 
 
 ## Crop volumes
 
+**Mode** chooses what a crop does: **Keep inside** preserves what is inside it, **Remove
+inside** deletes it. A point survives when it is inside some Keep crop (or there is no
+Keep crop) and inside no Remove crop, so Remove wins where they overlap. The volume is
+drawn green for Keep and red for Remove. **While editing** only affects the view while
+the crop is edited: what the crops would delete is shown in red, or hidden. Neither the
+normal view nor the export depends on it.
+
+The Move gizmo also has a square between each pair of axes, coloured by the axis it is
+normal to, for moving in that plane.
+
 Choose **Cylinder** or **Box** in the Shape dropdown. Both retain their own horizontal
 dimensions and share the same height and transform. **Edit** (C) creates a volume automatically fitted to the capture and activates
 editing. Its pivot is the centre of its base, with local Y running from 0 to its

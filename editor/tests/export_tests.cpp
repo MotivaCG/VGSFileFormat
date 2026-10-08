@@ -197,6 +197,17 @@ private slots:
         QVERIFY_EXCEPTION_THROWN(exportCaptureFile(again,dir.filePath("again.mint")),std::runtime_error);
         QVERIFY(!QFileInfo::exists(dir.filePath("moving.mint")));
     }
+    void removeCropDeletesWhatIsInsideIt() {
+        // The fixture's live splats sit at x=0 and x=3; a Remove cylinder at the origin takes the first.
+        QTemporaryDir dir;const auto source=dir.filePath("source.pgs");sourceFile(source,3);
+        Project project;project.asset=source;project.in=0;project.out=0;project.modifiers.clear();
+        Modifier remove;remove.id=Project::newId();remove.name="Remove";remove.crop.enabled=true;remove.crop.remove=true;remove.crop.radius=1;remove.crop.height=3;
+        project.modifiers.append(remove);project.selectedModifier=remove.id;
+        const auto path=dir.filePath("removed.vgs");exportCaptureFile(project,path);
+        auto capture=vgsdec::Capture::openFile(path.toStdString());const auto frame=copy(capture.setTime(0,false));
+        std::vector<float> xs;for (size_t i=0;i<frame.count;++i) if (frame.active[i]) xs.push_back(frame.position[i*3]);
+        QCOMPARE(xs.size(),size_t(1));QVERIFY(std::abs(xs[0]-3)<1e-4f);
+    }
     void walkMarksTheHeaderAndLeavesTheDataInPlace() {
         QTemporaryDir dir;const auto source=dir.filePath("source.pgs");sourceFile(source,5);
         Project project;project.asset=source;project.in=.08;project.out=.16;project.modifiers.clear();

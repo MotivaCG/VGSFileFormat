@@ -65,7 +65,7 @@ bool CropVolume::contains(const QVector3D &position) const {
     const QVector3D p = transform.matrix().inverted().map(position);
     if (p.y()<0 || p.y()>height) return false;
     return shape==CropShape::Box ? std::abs(p.x())<=width*0.5f && std::abs(p.z())<=depth*0.5f
-        : p.x()*p.x()+p.z()*p.z()<=radius*radius;
+        : insideEllipse(p.x(),p.z());
 }
 static QJsonArray vec(const QVector3D &v) { return {v.x(), v.y(), v.z()}; }
 QJsonObject Project::json(const QString &path) const {
@@ -141,7 +141,7 @@ bool Project::fromJson(const QJsonObject &root,const QString &baseDirectory,Proj
         if (version<7) {
         const auto crop = root["crop"].toObject();
         valid &= crop["enabled"].isBool(); p.crop().enabled = crop["enabled"].toBool();
-        p.crop().radius = float(number(crop,"radius",0.0001,1e6)); p.crop().height = float(number(crop,"height",0.0001,1e6));
+        p.crop().radius = p.crop().radiusZ = float(number(crop,"radius",0.0001,1e6)); p.crop().height = float(number(crop,"height",0.0001,1e6));
         p.crop().width = p.crop().depth = 2*p.crop().radius;
         if (root["version"].toInt()>=4) {
             if (crop["shape"]!="box" && crop["shape"]!="cylinder") return fail();
@@ -180,8 +180,11 @@ bool Project::fromJson(const QJsonObject &root,const QString &baseDirectory,Proj
             m.id=identity(item,"id",80);m.name=identity(item,"name",120);valid &= !ids.contains(m.id) && item["enabled"].isBool() && item["timeline"]=="full";ids.insert(m.id);m.enabled=item["enabled"].toBool();
             if (item["type"]=="crop") {
                 const auto c=item["crop"].toObject();valid &= c["space"]=="world" && (c["shape"]=="box" || c["shape"]=="cylinder");m.crop.enabled=m.enabled;m.crop.shape=c["shape"]=="box" ? CropShape::Box : CropShape::Cylinder;
-                m.crop.radius=float(number(c,"radius",.0001,1e6));m.crop.height=float(number(c,"height",.0001,1e6));m.crop.width=float(number(c,"width",.0001,1e6));m.crop.depth=float(number(c,"depth",.0001,1e6));
+                m.crop.radius=float(number(c,"radius",.0001,1e6));m.crop.radiusZ=c.contains("radiusZ") ? float(number(c,"radiusZ",.0001,1e6)) : m.crop.radius;m.crop.height=float(number(c,"height",.0001,1e6));m.crop.width=float(number(c,"width",.0001,1e6));m.crop.depth=float(number(c,"depth",.0001,1e6));
                 m.crop.transform.position=vector(c,"position",-1e6,1e6);m.crop.transform.rotation=vector(c,"rotation",-36000,36000);m.crop.transform.scale=vector(c,"scale",.0001,10000);m.crop.transform.shear=vector(c,"shear",-1e6,1e6);
+                // Older projects have neither: keep, shown in red while editing.
+                valid &= !c.contains("mode") || c["mode"]=="keep" || c["mode"]=="remove";m.crop.remove=c["mode"]=="remove";
+                valid &= !c.contains("editPreview") || c["editPreview"]=="red" || c["editPreview"]=="hide";m.crop.showRemovedInRed=c["editPreview"]!="hide";
             } else if (item["type"]=="remove-green") {
                 m.type=ModifierType::RemoveGreen;const auto g=item["green"].toObject();
                 m.green.minimumSaturation=float(number(g,"minimumSaturation",0,1));m.green.hueTolerance=float(number(g,"hueTolerance",0,180));valid &= g["targetHue"].toDouble()==120 && g["colourSource"]=="dc";

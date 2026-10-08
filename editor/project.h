@@ -36,8 +36,15 @@ struct CropVolume {
     bool enabled = false;
     CropShape shape = CropShape::Cylinder;
     Transform transform; // Independent world-space base pivot; local Y runs from 0 to height.
-    float radius = 1, height = 2;
+    // A cylinder is elliptic: radius along local X, radiusZ along local Z.
+    float radius = 1, radiusZ = 1, height = 2;
+    bool insideEllipse(float x,float z) const {return (x*x)/(radius*radius)+(z*z)/(radiusZ*radiusZ)<=1;}
     float width = 2, depth = 2;
+    // Keep preserves what is inside; Remove deletes it, and wins where the two overlap.
+    bool remove = false;
+    // While this crop is edited, what it would delete is shown in red rather than hidden.
+    // Editing preview only: it changes neither the normal view nor the export.
+    bool showRemovedInRed = true;
     bool contains(const QVector3D &worldPosition) const;
 };
 Q_DECLARE_METATYPE(CropVolume)

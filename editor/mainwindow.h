@@ -100,6 +100,7 @@ private:
     ModifierPanel *modifierPanel_;
     AnimationPanel *animationProperties_;
     QGroupBox *isolationProperties_, *walkProperties_;
+    QComboBox *cropModeCombo_, *cropPreviewCombo_;
     QToolButton *walkUnits_;
     void showWalkSpeed(const Modifier &);
     QSpinBox *isolationNeighbour_;
@@ -111,7 +112,7 @@ private:
     QCheckBox *greenLinearRgb_;
     QWidget *tools_, *timeline_, *displayControls_;
     QDoubleSpinBox *transform_[3][3], *speed_, *pointSize_;
-    QDoubleSpinBox *cropRadius_, *cropHeight_;
+    QDoubleSpinBox *cropRadius_, *cropRadiusZ_, *cropHeight_;
     QDoubleSpinBox *cropWidth_, *cropDepth_;
     QComboBox *cropShapeCombo_;
     QFormLayout *cropForm_;

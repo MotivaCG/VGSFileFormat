@@ -483,11 +483,26 @@ void MainWindow::buildUi() {
     }
     cropForm->addRow(presets);
     cropForm->addRow(tr("Shape"),cropShapeCombo_);
+    cropModeCombo_=new QComboBox;cropModeCombo_->setObjectName("cropMode");cropModeCombo_->addItem(tr("Keep inside"),0);cropModeCombo_->addItem(tr("Remove inside"),1);
+    cropModeCombo_->setToolTip(tr("Keep preserves what is inside; Remove deletes it. Where they overlap, Remove wins. With only Remove crops, everything outside them is kept."));
+    cropForm->addRow(tr("Mode"),cropModeCombo_);
+    cropPreviewCombo_=new QComboBox;cropPreviewCombo_->setObjectName("cropEditPreview");cropPreviewCombo_->addItem(tr("Colour code"),1);cropPreviewCombo_->addItem(tr("Hide removed"),0);
+    cropPreviewCombo_->setToolTip(tr("While this crop is edited: Colour code lightens what the crops keep and shows what they delete in red; Hide removed hides what they delete. Editing only: the normal view and the export are unaffected."));
+    cropForm->addRow(tr("While editing"),cropPreviewCombo_);
+    connect(cropModeCombo_,&QComboBox::activated,this,[this](int) {
+        if (syncing_ || !project_.modifier() || project_.modifier()->type!=ModifierType::Crop) return;
+        project_.crop().remove=cropModeCombo_->currentData().toInt()==1;viewport_->setCrop(project_.crop());syncModifiers();dirty();
+    });
+    connect(cropPreviewCombo_,&QComboBox::activated,this,[this](int) {
+        if (syncing_ || !project_.modifier() || project_.modifier()->type!=ModifierType::Crop) return;
+        project_.crop().showRemovedInRed=cropPreviewCombo_->currentData().toInt()==1;viewport_->setCrop(project_.crop());syncModifiers();dirty();
+    });
     connect(t4dsPresetButton_,&QPushButton::clicked,this,[this] { applyCropPreset(1.5f); });
     connect(smnPresetButton_,&QPushButton::clicked,this,[this] { applyCropPreset(1.0f); });
-    cropRadius_ = new QDoubleSpinBox; cropHeight_ = new QDoubleSpinBox; cropWidth_ = new QDoubleSpinBox; cropDepth_ = new QDoubleSpinBox;
-    for (auto *spin : {cropRadius_,cropHeight_,cropWidth_,cropDepth_}) { spin->setRange(0.0001,1e6); spin->setDecimals(4); spin->setSingleStep(0.05); spin->setSuffix(" m"); }
-    cropForm->addRow(tr("Radius"),cropRadius_); cropForm->addRow(tr("Height"),cropHeight_);
+    cropRadius_ = new QDoubleSpinBox; cropRadiusZ_ = new QDoubleSpinBox; cropHeight_ = new QDoubleSpinBox; cropWidth_ = new QDoubleSpinBox; cropDepth_ = new QDoubleSpinBox;
+    for (auto *spin : {cropRadius_,cropRadiusZ_,cropHeight_,cropWidth_,cropDepth_}) { spin->setRange(0.0001,1e6); spin->setDecimals(4); spin->setSingleStep(0.05); spin->setSuffix(" m"); }
+    cropRadius_->setObjectName("cropRadiusX"); cropRadiusZ_->setObjectName("cropRadiusZ");
+    cropForm->addRow(tr("Radius X"),cropRadius_); cropForm->addRow(tr("Radius Z"),cropRadiusZ_); cropForm->addRow(tr("Height"),cropHeight_);
     cropForm->addRow(tr("Width"),cropWidth_); cropForm->addRow(tr("Depth"),cropDepth_);
     auto *cropButtons = new QWidget; auto *cropRow = new QHBoxLayout(cropButtons); cropRow->setContentsMargins(0,0,0,0);
     cropFitButton_ = new QPushButton(tr("Fit capture")); cropClearButton_ = new QPushButton(tr("Disable crop"));
@@ -500,6 +515,9 @@ void MainWindow::buildUi() {
     connect(cropClearButton_,&QPushButton::clicked,this,&MainWindow::clearCrop);
     connect(cropRadius_,&QDoubleSpinBox::valueChanged,this,[this](double value) {
         if (syncing_) return; project_.crop().radius = float(value); viewport_->setCrop(project_.crop()); syncModifiers(); dirty();
+    });
+    connect(cropRadiusZ_,&QDoubleSpinBox::valueChanged,this,[this](double value) {
+        if (syncing_) return; project_.crop().radiusZ = float(value); viewport_->setCrop(project_.crop()); syncModifiers(); dirty();
     });
     connect(cropHeight_,&QDoubleSpinBox::valueChanged,this,[this](double value) {
         if (syncing_) return; project_.crop().height = float(value); viewport_->setCrop(project_.crop()); syncModifiers(); dirty();
@@ -562,7 +580,7 @@ void MainWindow::buildUi() {
     });
     // Modifier parameters scrub from their labels like the transform fields: per pixel, a
     // step that suits the unit (metres, percent, degrees, whole neighbours, m/s).
-    for (auto *spin:{cropRadius_,cropHeight_,cropWidth_,cropDepth_}) SpinScrubber::attachFormLabel(spin,0.005);
+    for (auto *spin:{cropRadius_,cropRadiusZ_,cropHeight_,cropWidth_,cropDepth_}) SpinScrubber::attachFormLabel(spin,0.005);
     SpinScrubber::attachFormLabel(greenSaturation_,0.25);SpinScrubber::attachFormLabel(greenHue_,0.25);
     SpinScrubber::attachFormLabel(isolationNeighbour_,0.05);SpinScrubber::attachFormLabel(isolationPercent_,1.0);
     // The speed's label belongs to its row (field and unit button), and it scrubs in m/s
@@ -719,6 +737,8 @@ void MainWindow::syncUi() {
     for (auto *group : tools_->findChildren<QGroupBox *>(QString(),Qt::FindDirectChildrenOnly))
         group->setEnabled(group==presetBox_ || (loaded_ && !loading_ && !(animation && !selected->enabled && group->property("transformGroup").toBool())));
     resetTransformButton_->setEnabled(loaded_ && !loading_ && !(animation && !selected->enabled));
+    // A crop's size is its radius, width, depth and height: scaling it is not a separate value.
+    for (int a=0; a<3; ++a) transform_[2][a]->setEnabled(!viewport_->cropEditing());
     captureSettingsButton_->setEnabled(loaded_ && !loading_);
     savePresetButton_->setEnabled(loaded_ && !loading_); presetCombo_->setEnabled(loaded_ && !loading_ && presetCombo_->count()>1);
     presetFolderButton_->setEnabled(loaded_ && !loading_);
@@ -756,7 +776,7 @@ void MainWindow::syncUi() {
     // The group title names what the fields edit: the capture, or the selected crop/animation modifier.
     transformBox_->setTitle(tr("Transform · %1").arg(viewport_->cropEditing() || animation ? (selected ? selected->name : tr("Crop")) : tr("Capture")));
     for (int g=0; g<3; ++g) {
-        const bool local = project_.spaces[g]==CoordinateSpace::Local;
+        const bool local = (g==2 && viewport_->cropEditing()) || project_.spaces[g]==CoordinateSpace::Local;
         spaceButtons_[g]->setText(local ? tr("Local") : tr("Global"));
         // This single button displays the chosen reference space; both choices are active selections.
         spaceButtons_[g]->setIcon(editorButtonIcon(local ? ":/icons/local.png" : ":/icons/global.png",false));
@@ -765,15 +785,18 @@ void MainWindow::syncUi() {
         spaceButtons_[g]->setToolTip(tr("Toggle Global/Local reference space (F%1 or repeat %2 in this mode). Current: %3.").arg(g+6).arg(modeKeys[g],local ? tr("Local") : tr("Global")));
     }
     cropEditButton_->setChecked(viewport_->cropEditing());
-    cropRadius_->setValue(project_.crop().radius); cropHeight_->setValue(project_.crop().height);
+    cropRadius_->setValue(project_.crop().radius); cropRadiusZ_->setValue(project_.crop().radiusZ); cropHeight_->setValue(project_.crop().height);
     cropShapeCombo_->setCurrentIndex(cropShapeCombo_->findData(int(project_.crop().shape)));
+    cropModeCombo_->setCurrentIndex(cropModeCombo_->findData(project_.crop().remove ? 1 : 0));
+    cropPreviewCombo_->setCurrentIndex(cropPreviewCombo_->findData(project_.crop().showRemovedInRed ? 1 : 0));
     cropWidth_->setValue(project_.crop().width); cropDepth_->setValue(project_.crop().depth);
-    cropForm_->setRowVisible(cropRadius_,project_.crop().shape==CropShape::Cylinder);
+    cropForm_->setRowVisible(cropRadius_,project_.crop().shape==CropShape::Cylinder); cropForm_->setRowVisible(cropRadiusZ_,project_.crop().shape==CropShape::Cylinder);
     cropForm_->setRowVisible(cropWidth_,project_.crop().shape==CropShape::Box); cropForm_->setRowVisible(cropDepth_,project_.crop().shape==CropShape::Box);
     cropWidth_->setEnabled(selectedCrop); cropDepth_->setEnabled(selectedCrop);
-    cropRadius_->setEnabled(selectedCrop); cropHeight_->setEnabled(selectedCrop); cropClearButton_->setEnabled(project_.crop().enabled);
+    cropRadius_->setEnabled(selectedCrop); cropRadiusZ_->setEnabled(selectedCrop); cropHeight_->setEnabled(selectedCrop); cropClearButton_->setEnabled(project_.crop().enabled);
     cropStatus_->setText(!project_.crop().enabled ? tr("Modifier disabled. Settings are retained; Edit adjusts this volume.") : viewport_->cropEditing()
-        ? tr("Editing the selected crop. Crop clipping is paused; colour filters remain active.") : tr("Enabled crop modifiers combine by union over the full timeline."));
+        ? (project_.crop().showRemovedInRed ? tr("Editing the selected crop, colour coded: kept points lightened, deleted points red.") : tr("Editing the selected crop: what the crops would delete is hidden."))
+        : tr("Keep crops preserve what is inside any of them; Remove crops delete what is inside them and win where they overlap, over the full timeline."));
     pointSize_->setValue(project_.pointSize); viewport_->setPointSize(float(project_.pointSize)); viewport_->setGrid(project_.grid);
     syncing_ = false;
 }
@@ -1071,12 +1094,12 @@ void MainWindow::toggleTransformMode(TransformMode mode) {
 void MainWindow::activateTransformShortcut(TransformMode mode) {
     if (!loaded_ || loading_ || mode==TransformMode::None) return;
     if (project_.modifier() && project_.modifier()->type==ModifierType::AnimateTransform && !project_.modifier()->enabled) return;
-    const auto previous=viewport_->coordinateSpace(mode);viewport_->activateTransformShortcut(mode);
-    const auto space=viewport_->coordinateSpace(mode);project_.spaces[int(mode)-1]=space;
+    const auto previous=viewport_->chosenCoordinateSpace(mode);viewport_->activateTransformShortcut(mode);
+    const auto space=viewport_->chosenCoordinateSpace(mode);project_.spaces[int(mode)-1]=space;
     syncUi();if (previous!=space) dirty();viewport_->setFocus(Qt::OtherFocusReason);
 }
 void MainWindow::toggleCoordinateSpace(int group) {
-    if (!loaded_ || loading_) return;
+    if (!loaded_ || loading_ || (group==2 && viewport_->cropEditing())) return;
     if (viewport_->transformMode()!=TransformMode(group+1)) return;
     const auto space = project_.spaces[group]==CoordinateSpace::Global ? CoordinateSpace::Local : CoordinateSpace::Global;
     viewport_->setCoordinateSpace(TransformMode(group+1),space); project_.spaces[group] = space;
@@ -1158,7 +1181,7 @@ void MainWindow::applyCropPreset(float radius) {
     project_.modifier()->enabled=true;
     viewport_->setTransformMode(TransformMode::None); viewport_->setCropEditing(false);
     const auto shape = project_.crop().shape;
-    project_.crop() = {}; project_.crop().shape = shape; project_.crop().enabled = true; project_.crop().radius = radius; project_.crop().height = 2.5f;
+    project_.crop() = {}; project_.crop().shape = shape; project_.crop().enabled = true; project_.crop().radius = project_.crop().radiusZ = radius; project_.crop().height = 2.5f;
     project_.crop().width = project_.crop().depth = 2*radius;
     viewport_->setCrop(project_.crop()); viewport_->setCropEditing(true); viewport_->setTransformMode(TransformMode::Move);
     syncUi(); dirty(); viewport_->setFocus(Qt::OtherFocusReason);
@@ -1183,7 +1206,10 @@ void MainWindow::fitCrop() {
     project_.crop().transform.position = (minimum+maximum)*0.5f;
     project_.crop().transform.position.setY(minimum.y());
     const auto extent = maximum-minimum;
-    project_.crop().radius = std::clamp(std::sqrt(extent.x()*extent.x()+extent.z()*extent.z())*0.51f,0.0001f,1e6f);
+    // The ellipse through the corners of the capture's footprint: each semi-axis is the
+    // half-extent times sqrt(2), with the same 2% margin as the other dimensions.
+    project_.crop().radius = std::clamp(extent.x()*0.5f*std::sqrt(2.0f)*1.02f,0.0001f,1e6f);
+    project_.crop().radiusZ = std::clamp(extent.z()*0.5f*std::sqrt(2.0f)*1.02f,0.0001f,1e6f);
     project_.crop().height = std::clamp(extent.y()*1.02f,0.0001f,1e6f);
     project_.crop().width = std::clamp(extent.x()*1.02f,0.0001f,1e6f); project_.crop().depth = std::clamp(extent.z()*1.02f,0.0001f,1e6f);
     viewport_->setCrop(project_.crop()); viewport_->setCropEditing(true); viewport_->setTransformMode(TransformMode::Move);
@@ -1208,7 +1234,8 @@ void MainWindow::syncTransformButtons() {
     for (int g=0; g<3; ++g) {
         const bool active = viewport_->transformMode()==TransformMode(g+1);
         QSignalBlocker modeBlocker(modeButtons_[g]);QSignalBlocker spaceBlocker(spaceButtons_[g]);
-        modeButtons_[g]->setChecked(active); spaceButtons_[g]->setEnabled(active && loaded_ && !loading_);
+        // A crop is scaled in its own axes only, so that reference space is not a choice.
+        modeButtons_[g]->setChecked(active); spaceButtons_[g]->setEnabled(active && loaded_ && !loading_ && !(g==2 && viewport_->cropEditing()));
     }
     transformModes_->setExclusive(true);
 }

@@ -65,6 +65,19 @@ private slots:
         QVERIFY(Project::fromJson(project.json(dir.filePath("scene.vgsproj")),dir.path(),&restored,&error));
         QCOMPARE(restored.modifierJson(),project.modifierJson());QCOMPARE(restored.selectedModifier,project.selectedModifier);
         CompiledModifiers filters(restored);QVERIFY(filters.crops.isEmpty());QVERIFY(filters.greens.isEmpty());QVERIFY(filters.keeps({100,100,100},{0,1,0}));
+        {   // Keep and Remove crops: inside a Keep and in no Remove survives, Remove wins where they overlap.
+            Project crops;crops.modifiers.clear();
+            Modifier keep;keep.id=Project::newId();keep.name="Keep";keep.crop.enabled=true;keep.crop.radius=2;keep.crop.height=2;
+            Modifier remove=keep;remove.id=Project::newId();remove.name="Remove";remove.crop.remove=true;remove.crop.radius=.5f;remove.crop.showRemovedInRed=false;
+            crops.modifiers={keep,remove};CompiledModifiers both(crops);
+            QVERIFY(both.keepsPosition({1.5f,1,0}));QVERIFY(!both.keepsPosition({.2f,1,0}));QVERIFY(!both.keepsPosition({3,1,0}));
+            crops.modifiers={remove};CompiledModifiers onlyRemove(crops);
+            QVERIFY(onlyRemove.keepsPosition({3,1,0}));QVERIFY(!onlyRemove.keepsPosition({.2f,1,0}));
+            crops.modifiers={keep,remove};crops.selectedModifier=remove.id;crops.asset=dir.filePath("source.mint");Project back;
+            QVERIFY(Project::fromJson(crops.json(dir.filePath("crops.vgsproj")),dir.path(),&back,&error));
+            QVERIFY(!back.modifiers[0].crop.remove && back.modifiers[0].crop.showRemovedInRed);
+            QVERIFY(back.modifiers[1].crop.remove && !back.modifiers[1].crop.showRemovedInRed);
+        }
         PresetStore presets(dir.filePath("presets"));QString path;EditorPreset preset;
         QVERIFY(presets.save("Placeholders",project,&path,&error,PresetScope::Editor));QVERIFY(presets.read(path,PresetScope::Editor,&preset,&error));
         QCOMPARE(preset.settings.modifierJson(),project.modifierJson());
@@ -207,8 +220,12 @@ private slots:
         QVERIFY2(CaptureSettings::fromJson(settings.json(),&restored,&error),qPrintable(error)); QCOMPARE(restored.json(),settings.json());
         auto invalid = settings.json(); invalid["extraJson"] = "invalid JSON";
         QVERIFY(!CaptureSettings::fromJson(invalid,&restored,&error)); QCOMPARE(restored.title,settings.title);
-        CropVolume crop; crop.enabled = true; crop.radius = 0.4f; crop.height = 1; crop.width = crop.depth = 0.8f;
-        QVERIFY(!crop.contains({0.35f,0.5f,0.35f})); crop.shape = CropShape::Box; QVERIFY(crop.contains({0.35f,0.5f,0.35f}));
+        CropVolume crop; crop.enabled = true; crop.radius = crop.radiusZ = 0.4f; crop.height = 1; crop.width = crop.depth = 0.8f;
+        QVERIFY(!crop.contains({0.35f,0.5f,0.35f}));
+        // Elliptic: radius X 0.4, radius Z 0.8.
+        crop.radiusZ = 0.8f; QVERIFY(crop.contains({0,0.5f,0.75f})); QVERIFY(!crop.contains({0.35f,0.5f,0.6f})); QVERIFY(!crop.contains({0.45f,0.5f,0}));
+        crop.radiusZ = 0.4f;
+        crop.shape = CropShape::Box; QVERIFY(crop.contains({0.35f,0.5f,0.35f}));
         QVERIFY(!crop.contains({0.41f,0.5f,0})); QVERIFY(!crop.contains({0,1.01f,0}));
     }
     void fileHistoryPersistsAndDeduplicates() {

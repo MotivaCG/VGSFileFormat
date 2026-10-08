@@ -156,9 +156,17 @@ private slots:
         auto *grid=window.findChild<QAction *>("gridAndAxes");QVERIFY(grid);QVERIFY(grid->isCheckable());const bool gridBefore=grid->isChecked();
         QTest::keyClick(viewport,Qt::Key_G);QCOMPARE(grid->isChecked(),gridBefore);QTest::keyClick(viewport,Qt::Key_Escape);
         QTest::keyClick(viewport,Qt::Key_G,Qt::ShiftModifier);QCOMPARE(grid->isChecked(),!gridBefore);QTest::keyClick(viewport,Qt::Key_G,Qt::ShiftModifier);QCOMPARE(grid->isChecked(),gridBefore);
+        const auto moveBefore=viewport->coordinateSpace(TransformMode::Move),scaleBefore=viewport->coordinateSpace(TransformMode::Scale);
         QTest::keyClick(viewport,Qt::Key_Tab);QVERIFY(viewport->cropEditing());const auto sourceBefore=viewport->transform();const auto cropBefore=viewport->crop();
-        QTest::keyClick(viewport,Qt::Key_G);QCOMPARE(viewport->transformMode(),TransformMode::Move);QVERIFY(viewport->cropEditing());QCOMPARE(viewport->coordinateSpace(TransformMode::Move),CoordinateSpace::Global);
-        QTest::keyClick(viewport,Qt::Key_G);QCOMPARE(viewport->coordinateSpace(TransformMode::Move),CoordinateSpace::Local);QCOMPARE(viewport->transform().position,sourceBefore.position);QCOMPARE(viewport->crop().transform.position,cropBefore.transform.position);QTest::keyClick(viewport,Qt::Key_Tab);
+        // Move and Rotate keep the capture's reference space while a crop is edited; Scale is
+        // always local there, with no space toggle and no scale fields (its size is its dimensions).
+        QTest::keyClick(viewport,Qt::Key_S);QVERIFY(viewport->cropEditing());QCOMPARE(viewport->coordinateSpace(TransformMode::Scale),CoordinateSpace::Local);
+        QVERIFY(!window.findChild<QToolButton *>("coordinateSpace_2")->isEnabled());QVERIFY(!window.findChild<QDoubleSpinBox *>("transform_2_0")->isEnabled());
+        QTest::keyClick(viewport,Qt::Key_S);QCOMPARE(viewport->coordinateSpace(TransformMode::Scale),CoordinateSpace::Local);
+        QTest::keyClick(viewport,Qt::Key_G);QCOMPARE(viewport->transformMode(),TransformMode::Move);QVERIFY(viewport->cropEditing());QCOMPARE(viewport->coordinateSpace(TransformMode::Move),moveBefore);
+        QTest::keyClick(viewport,Qt::Key_G);QVERIFY(viewport->coordinateSpace(TransformMode::Move)!=moveBefore);QCOMPARE(viewport->transform().position,sourceBefore.position);QCOMPARE(viewport->crop().transform.position,cropBefore.transform.position);QTest::keyClick(viewport,Qt::Key_Tab);
+        // Leaving the crop gives Scale back the capture's own space, untouched by the forced Local.
+        QCOMPARE(viewport->coordinateSpace(TransformMode::Scale),scaleBefore);
         QTest::keyClick(viewport,Qt::Key_Tab);QVERIFY(button->isChecked());duplicate->click();QCOMPARE(modifiers->topLevelItemCount(),2);QVERIFY(!button->isChecked());QVERIFY(!viewport->cropEditing());QCOMPARE(viewport->transformMode(),TransformMode::None);
         QTest::keyClick(viewport,Qt::Key_Tab);QVERIFY(button->isChecked());modifiers->setCurrentItem(modifiers->topLevelItem(0));QVERIFY(!button->isChecked());QVERIFY(!viewport->cropEditing());
         modifiers->setCurrentItem(modifiers->topLevelItem(1));remove->click();

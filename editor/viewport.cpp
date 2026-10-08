@@ -6,6 +6,7 @@
 #include <QKeyEvent>
 #include <QPainter>
 #include <QLabel>
+#include <QSurfaceFormat>
 #include <QOpenGLFramebufferObject>
 #include <QWheelEvent>
 #include <QtMath>
@@ -48,21 +49,26 @@ vec3 shadedColor() {
 uniform float pointSize;
 uniform samplerBuffer modifierData;
 uniform int cropCount, greenCount;
-uniform bool editingCrop;
-bool removedByModifiers() {
-    if(usePurgeMask && modifierVisibility<0.5) return true;
+uniform bool editingCrop, editShowsRed;
+// 0 drawn, 1 removed, 2 removed by a crop but shown in red while one is edited.
+int removedByModifiers() {
+    if(usePurgeMask && modifierVisibility<0.5) return 1;
     vec3 world=(model*vec4(position,1)).xyz;
-    if(cropCount>0 && !editingCrop) {
-        bool inside=false;
+    if(cropCount>0) {
+        // Inside some Keep crop (or there is none) and inside no Remove crop.
+        bool anyKeep=false,insideKeep=false,insideRemove=false;
         for(int i=0;i<cropCount;++i) {
             int base=i*6;
             mat4 inverse=mat4(texelFetch(modifierData,base),texelFetch(modifierData,base+1),texelFetch(modifierData,base+2),texelFetch(modifierData,base+3));
             vec4 dimensions=texelFetch(modifierData,base+4);vec4 extent=texelFetch(modifierData,base+5);
             vec3 p=(inverse*vec4(world,1)).xyz;
-            bool horizontal=dimensions.x>0.5 ? abs(p.x)<=extent.x && abs(p.z)<=extent.y : dot(p.xz,p.xz)<=dimensions.z*dimensions.z;
-            if(horizontal && p.y>=0.0 && p.y<=dimensions.y) {inside=true;break;}
+            bool horizontal=dimensions.x>0.5 ? abs(p.x)<=extent.x && abs(p.z)<=extent.y
+                : (p.x*p.x)/(dimensions.z*dimensions.z)+(p.z*p.z)/(extent.z*extent.z)<=1.0; // elliptic: radius X, radius Z
+            bool inside=horizontal && p.y>=0.0 && p.y<=dimensions.y;
+            if(dimensions.w>0.5) insideRemove=insideRemove||inside;
+            else {anyKeep=true;insideKeep=insideKeep||inside;}
         }
-        if(!inside) return true;
+        if(insideRemove || (anyKeep && !insideKeep)) return editingCrop && editShowsRed ? 2 : 1;
     }
     vec3 baseRgb=clamp(color,0.0,1.0);
     for(int i=0;i<greenCount;++i) {
@@ -72,13 +78,16 @@ bool removedByModifiers() {
         if(chroma<=0.0 || maximum<=0.0) continue;
         float hue=maximum==rgb.r ? (rgb.g-rgb.b)/chroma : maximum==rgb.g ? 2.0+(rgb.b-rgb.r)/chroma : 4.0+(rgb.r-rgb.g)/chroma;
         hue*=60.0;if(hue<0.0) hue+=360.0;float distance=abs(hue-120.0);distance=min(distance,360.0-distance);
-        if(chroma/maximum>=filter.x && distance<=filter.y) return true;
+        if(chroma/maximum>=filter.x && distance<=filter.y) return 1;
     }
-    return false;
+    return 0;
 }
 void main() {
-    if(removedByModifiers()) {rgba=vec4(0);gl_Position=vec4(2,2,2,1);gl_PointSize=pointSize;return;}
-    rgba=vec4(shadedColor(),1);
+    int removed=removedByModifiers();
+    if(removed==1) {rgba=vec4(0);gl_Position=vec4(2,2,2,1);gl_PointSize=pointSize;return;}
+    // Colour code while a crop is edited: what the crops delete in red, what they keep
+    // lightened half way to white so the two read apart.
+    rgba=vec4(removed==2 ? mix(shadedColor(),vec3(0.94,0.16,0.24),0.8) : editingCrop && editShowsRed && cropCount>0 ? mix(shadedColor(),vec3(1.0),0.5) : shadedColor(),1);
     gl_Position=projection*view*model*vec4(position,1);
     gl_PointSize=pointSize;
 }
@@ -157,6 +166,9 @@ void main() {
 }
 )GLSL";
 Viewport::Viewport(QWidget *parent) : QOpenGLWidget(parent) {
+    // Four samples per pixel: the gizmo's squares and arrows, crop wires and grid lines
+    // otherwise step visibly along every diagonal edge. Only this widget pays for it.
+    QSurfaceFormat surface = format(); surface.setSamples(4); setFormat(surface);
     setMinimumSize(400, 300); setFocusPolicy(Qt::StrongFocus);
     setMouseTracking(true);
     viewCube_ = new ViewCube(this); viewCube_->move(width()-viewCube_->width()-12,12);
@@ -290,6 +302,8 @@ void Viewport::paintGL() {
     if (!initialized_) return;
     QPainter painter(this);
     painter.beginNativePainting();
+    // QPainter turns multisampling off unless it antialiases itself; the scene wants it on.
+    glEnable(GL_MULTISAMPLE);
     const auto background=lightBackground_ ? QColor(204,206,209) : EditorTheme::viewportBackground();glClearColor(float(background.redF()),float(background.greenF()),float(background.blueF()),1);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     if (!error_.isEmpty()) {
@@ -368,22 +382,22 @@ void Viewport::paintGL() {
         pointShader_->setUniformValue("usePurgeMask",!modifiers.isolations.isEmpty());
         for (const auto &crop:modifiers.crops) {
             for (int col=0;col<4;++col) values.push_back(crop.inverse.column(col));
-            values.push_back({float(int(crop.volume.shape)),crop.volume.height,crop.volume.radius,0});
-            values.push_back({crop.volume.width*.5f,crop.volume.depth*.5f,0,0});
+            values.push_back({float(int(crop.volume.shape)),crop.volume.height,crop.volume.radius,crop.volume.remove ? 1.f : 0.f});
+            values.push_back({crop.volume.width*.5f,crop.volume.depth*.5f,crop.volume.radiusZ,0});
         }
         for (const auto &green:modifiers.greens) values.push_back({green.minimumSaturation,green.hueTolerance,120,green.linearRgb ? 1.f : 0.f});
         GLint maximum=0;glGetIntegerv(GL_MAX_TEXTURE_BUFFER_SIZE,&maximum);size_t drawCount=frame_->points.size();
         const bool cpuFiltering=values.size()>size_t(maximum);
         if (cpuFiltering) {
             std::vector<PointVertex> points;points.reserve(frame_->points.size());
-            for (const auto &p:frame_->points) if ((cropEditing_ || modifiers.keepsPosition(model.map({p.position[0],p.position[1],p.position[2]}))) && !modifiers.removesColour({p.color[0],p.color[1],p.color[2]})) points.push_back(p);
+            for (const auto &p:frame_->points) if (((cropEditing_ && crop_.showRemovedInRed) || modifiers.keepsPosition(model.map({p.position[0],p.position[1],p.position[2]}))) && !modifiers.removesColour({p.color[0],p.color[1],p.color[2]})) points.push_back(p);
             glBindBuffer(GL_ARRAY_BUFFER,buffer_);glBufferData(GL_ARRAY_BUFFER,GLsizeiptr(points.size()*sizeof(PointVertex)),points.data(),GL_STREAM_DRAW);drawCount=points.size();values.clear();
         }
         cpuFiltered_=cpuFiltering;
         if (values.empty()) values.push_back({0,0,0,0});
         glBindBuffer(GL_TEXTURE_BUFFER,modifierBuffer_);glBufferData(GL_TEXTURE_BUFFER,GLsizeiptr(values.size()*sizeof(QVector4D)),values.data(),GL_STREAM_DRAW);
         glActiveTexture(GL_TEXTURE1);glBindTexture(GL_TEXTURE_BUFFER,modifierTexture_);glTexBuffer(GL_TEXTURE_BUFFER,GL_RGBA32F,modifierBuffer_);
-        pointShader_->setUniformValue("modifierData",1);pointShader_->setUniformValue("cropCount",cpuFiltering ? 0 : int(modifiers.crops.size()));pointShader_->setUniformValue("greenCount",cpuFiltering ? 0 : int(modifiers.greens.size()));pointShader_->setUniformValue("editingCrop",cropEditing_);
+        pointShader_->setUniformValue("modifierData",1);pointShader_->setUniformValue("cropCount",cpuFiltering ? 0 : int(modifiers.crops.size()));pointShader_->setUniformValue("greenCount",cpuFiltering ? 0 : int(modifiers.greens.size()));pointShader_->setUniformValue("editingCrop",cropEditing_);pointShader_->setUniformValue("editShowsRed",crop_.showRemovedInRed);
         const auto eye = view.inverted().map(QVector3D(0,0,0));
         pointShader_->setUniformValue("eyeLocal", model.inverted().map(eye));
         pointShader_->setUniformValue("shCoefficients", shCoefficients_);
@@ -559,21 +573,29 @@ void Viewport::toggleTransformMode(TransformMode mode) { setTransformMode(mode_=
 void Viewport::activateTransformShortcut(TransformMode mode) {
     if (mode==TransformMode::None) return;
     if (mode_!=mode) setTransformMode(mode);
-    else setCoordinateSpace(mode,coordinateSpace(mode)==CoordinateSpace::Global ? CoordinateSpace::Local : CoordinateSpace::Global);
+    // Repeating the key toggles the scene's choice, unless the space is forced right now.
+    else if (!(cropEditing_ && mode==TransformMode::Scale))
+        setCoordinateSpace(mode,chosenCoordinateSpace(mode)==CoordinateSpace::Global ? CoordinateSpace::Local : CoordinateSpace::Global);
 }
 Transform Viewport::editableTransform() const { return cropEditing_ ? crop_.transform : transform_; }
 CoordinateSpace Viewport::coordinateSpace(TransformMode mode) const {
+    // A crop is always scaled in its own axes: that is what its dimensions are measured in.
+    // Move and Rotate keep the scene's choice.
+    if (cropEditing_ && mode==TransformMode::Scale) return CoordinateSpace::Local;
+    return mode==TransformMode::None ? CoordinateSpace::Global : spaces_[int(mode)-1];
+}
+CoordinateSpace Viewport::chosenCoordinateSpace(TransformMode mode) const {
     return mode==TransformMode::None ? CoordinateSpace::Global : spaces_[int(mode)-1];
 }
 void Viewport::setCoordinateSpace(TransformMode mode,CoordinateSpace space) {
-    if (mode==TransformMode::None || coordinateSpace(mode)==space) return;
+    if (mode==TransformMode::None || spaces_[int(mode)-1]==space) return;
     cancelManipulation(); spaces_[int(mode)-1] = space; hoverHandle_ = -1; update();
 }
 Transform Viewport::displayedTransform() const {
     Transform result = editableTransform(); const auto world = editableParent()*result.matrix();
-    if (spaces_[0]==CoordinateSpace::Global) result.position = world.column(3).toVector3D();
-    if (spaces_[1]==CoordinateSpace::Global) result.rotation = Transform::fromMatrix(world).rotation;
-    if (spaces_[2]==CoordinateSpace::Global) for (int i=0; i<3; ++i)
+    if (coordinateSpace(TransformMode::Move)==CoordinateSpace::Global) result.position = world.column(3).toVector3D();
+    if (coordinateSpace(TransformMode::Rotate)==CoordinateSpace::Global) result.rotation = Transform::fromMatrix(world).rotation;
+    if (coordinateSpace(TransformMode::Scale)==CoordinateSpace::Global) for (int i=0; i<3; ++i)
         result.scale[i] = QVector3D(world(i,0),world(i,1),world(i,2)).length();
     return result;
 }
@@ -586,7 +608,7 @@ Transform Viewport::worldTransformed(const Transform &start,const QMatrix4x4 &de
 }
 void Viewport::setDisplayedComponent(int group,int axis,float value) {
     cancelManipulation(); Transform target = editableTransform();
-    if (spaces_[group]==CoordinateSpace::Local) {
+    if (coordinateSpace(TransformMode(group+1))==CoordinateSpace::Local) {
         (group==0 ? target.position : group==1 ? target.rotation : target.scale)[axis] = value;
     } else if (group==0) {
         auto position = displayedTransform().position; position[axis] = value;
@@ -605,7 +627,18 @@ void Viewport::setDisplayedComponent(int group,int axis,float value) {
 QMatrix4x4 Viewport::editableParent() const { return QMatrix4x4(); }
 QVector3D Viewport::editablePivot() const { return editableParent().map(editableTransform().position); }
 void Viewport::applyEditableTransform(const Transform &transform) {
-    if (cropEditing_) { crop_.transform = transform; emit cropEdited(crop_); }
+    if (cropEditing_ && mode_==TransformMode::Scale && dragging_) {
+        // Scaling a crop changes its size, not its scale: the factor the drag produced goes
+        // into radius X / Z, width / depth and height, measured from where the drag began.
+        CropVolume crop = dragStartCrop_;
+        auto factor = [&](int axis) { return dragStart_.scale[axis] ? transform.scale[axis]/dragStart_.scale[axis] : 1.0f; };
+        auto scaled = [](float value,float f) { return std::clamp(value*f,0.0001f,1e6f); };
+        crop.height = scaled(crop.height,factor(1));
+        if (crop.shape==CropShape::Box) { crop.width = scaled(crop.width,factor(0)); crop.depth = scaled(crop.depth,factor(2)); }
+        else { crop.radius = scaled(crop.radius,factor(0)); crop.radiusZ = scaled(crop.radiusZ,factor(2)); }
+        crop.transform = transform; crop.transform.scale = dragStart_.scale;
+        crop_ = crop; emit cropEdited(crop_);
+    } else if (cropEditing_) { crop_.transform = transform; emit cropEdited(crop_); }
     else { transform_ = transform; emit transformEdited(transform); }
     update();
 }
@@ -622,7 +655,9 @@ QVector3D Viewport::axisDirection(int axis) const {
 }
 float Viewport::gizmoLength() const {
     const float depth = camera_.orthographic ? camera_.distance : -viewMatrix().map(editablePivot()).z();
-    return depth <= 0 ? 0 : 2*depth*std::tan(qDegreesToRadians(22.5f))*92/std::max(1,height());
+    // The Move gizmo is half as large again, arrows and plane squares alike.
+    const float pixels = mode_==TransformMode::Move ? 138 : 92;
+    return depth <= 0 ? 0 : 2*depth*std::tan(qDegreesToRadians(22.5f))*pixels/std::max(1,height());
 }
 bool Viewport::projectPoint(const QVector3D &world, QPointF *screen) const {
     const QVector4D clip = projectionMatrix()*viewMatrix()*QVector4D(world,1);
@@ -668,6 +703,12 @@ int Viewport::pickHandle(const QPointF &screen) const {
     QPointF center;
     if (!projectPoint(pivot,&center)) return -1;
     if (mode_!=TransformMode::Rotate && QLineF(screen,center).length()<9) return 3;
+    // Move also has a square for each pair of axes, handle 4 + the axis it is normal to.
+    if (mode_==TransformMode::Move) for (int normal=0; normal<3; ++normal) {
+        QPolygonF square;bool visible=true;
+        for (const auto &corner : planeHandle(normal,pivot,length)) {QPointF p;visible=visible && projectPoint(corner,&p);square << p;}
+        if (visible && square.containsPoint(screen,Qt::OddEvenFill)) return 4+normal;
+    }
     double bestDistance = 9; int best = -1;
     for (int axis=0; axis<3; ++axis) {
         const auto direction = axisDirection(axis);
@@ -689,6 +730,13 @@ int Viewport::pickHandle(const QPointF &screen) const {
         }
     }
     return best;
+}
+// The square for moving in the plane normal to `normal`: from a quarter to nearly half of
+// the gizmo along both of the other axes, clear of the arrows and of the centre box.
+std::array<QVector3D,4> Viewport::planeHandle(int normal,const QVector3D &pivot,float length) const {
+    const auto u = axisDirection((normal+1)%3)*length, v = axisDirection((normal+2)%3)*length;
+    const float a = 0.25f, b = 0.45f;
+    return {pivot+u*a+v*a,pivot+u*b+v*a,pivot+u*b+v*b,pivot+u*a+v*b};
 }
 void Viewport::drawGizmo(const QMatrix4x4 &viewProjection) {
     if (mode_==TransformMode::None || !frame_ || gizmoLength()<=0) return;
@@ -722,13 +770,22 @@ void Viewport::drawGizmo(const QMatrix4x4 &viewProjection) {
             if (mode_==TransformMode::Scale) box(pivot+direction*length,length*0.055f,colour);
             else for (int i=0; i<16; ++i) {
                 const float a = float(i)*float(2*M_PI/16), b = float(i+1)*float(2*M_PI/16);
-                const auto base = pivot+direction*length*0.8f;
-                triangle(pivot+direction*length,base+(u*std::cos(a)+v*std::sin(a))*length*0.055f,
-                    base+(u*std::cos(b)+v*std::sin(b))*length*0.055f,colour);
+                // The head is 70% of the gizmo's former proportion now that the Move gizmo grew.
+                const auto base = pivot+direction*length*0.86f;
+                triangle(pivot+direction*length,base+(u*std::cos(a)+v*std::sin(a))*length*0.0385f,
+                    base+(u*std::cos(b)+v*std::sin(b))*length*0.0385f,colour);
             }
         }
     }
     if (mode_!=TransformMode::Rotate) box(pivot,length*0.055f,selected==3 ? QVector3D(1,0.85f,0.15f) : QVector3D(0.9f,0.9f,0.9f));
+    if (mode_==TransformMode::Move) for (int normal=0; normal<3; ++normal) {
+        // Coloured by the axis it is normal to, a little darker than the arrows; outlined so
+        // the square reads against splats of the same colour.
+        const auto q = planeHandle(normal,pivot,length);
+        const QVector3D colour = selected==4+normal ? QVector3D(1,0.85f,0.15f) : colours[normal]*0.7f;
+        triangle(q[0],q[1],q[2],colour); triangle(q[0],q[2],q[3],colour);
+        for (int i=0; i<4; ++i) line(q[i],q[(i+1)%4],selected==4+normal ? QVector3D(1,0.85f,0.15f) : colours[normal]);
+    }
     glDisable(GL_DEPTH_TEST); glDisable(GL_BLEND);
     gridShader_->bind(); gridShader_->setUniformValue("mvp",viewProjection);
     glBindVertexArray(gizmoVao_); glBindBuffer(GL_ARRAY_BUFFER,gizmoBuffer_);
@@ -738,7 +795,7 @@ void Viewport::drawGizmo(const QMatrix4x4 &viewProjection) {
     gridShader_->release();
 }
 void Viewport::beginManipulation(int handle,const QPointF &screen) {
-    dragging_ = true; ignoreLeftUntilRelease_ = false; dragHandle_ = handle; dragStart_ = editableTransform();
+    dragging_ = true; ignoreLeftUntilRelease_ = false; dragHandle_ = handle; dragStart_ = editableTransform(); dragStartCrop_ = crop_;
     dragScreenStart_ = screen; dragPivot_ = editablePivot(); dragLength_ = gizmoLength(); dragRotationAngle_ = 0;
     if (handle<3) {
         dragAxis_ = axisDirection(handle);
@@ -748,7 +805,7 @@ void Viewport::beginManipulation(int handle,const QPointF &screen) {
             if (dragConstraintValid_) dragRotationVector_ = (point-dragPivot_).normalized();
         } else dragConstraintValid_ = axisParameter(screen,dragPivot_,dragAxis_,&dragParameter_);
     } else {
-        dragPlaneNormal_ = viewMatrix().inverted().mapVector({0,0,1}).normalized();
+        dragPlaneNormal_ = handle>=4 ? axisDirection(handle-4) : viewMatrix().inverted().mapVector({0,0,1}).normalized();
         dragConstraintValid_ = planePoint(screen,dragPivot_,dragPlaneNormal_,&dragPlaneStart_);
     }
     setCursor(Qt::CrossCursor); update();
@@ -765,7 +822,7 @@ void Viewport::updateManipulation(const QPointF &screen) {
         } else dragRotationAngle_ = float(screen.x()-dragScreenStart_.x()-screen.y()+dragScreenStart_.y())*0.5f;
         if (coordinateSpace(mode_)==CoordinateSpace::Local) result = dragStart_.rotatedLocal(dragHandle_,dragRotationAngle_);
         else { QMatrix4x4 delta; delta.rotate(dragRotationAngle_,dragAxis_); result = worldTransformed(dragStart_,delta); }
-    } else if (dragHandle_==3) {
+    } else if (dragHandle_>=3) {
         if (mode_==TransformMode::Move) {
             QVector3D point; if (!dragConstraintValid_ || !planePoint(screen,dragPivot_,dragPlaneNormal_,&point)) return;
             result.position += editableParent().inverted().mapVector(point-dragPlaneStart_);
@@ -886,7 +943,9 @@ void Viewport::drawCrop(const QMatrix4x4 &viewProjection) {
     struct Vertex { float p[3],c[3]; }; std::vector<Vertex> lines;
     const auto m = crop_.transform.matrix();
     auto line = [&](QVector3D a,QVector3D b) {
-        for (const auto &point : {a,b}) { const auto p = m.map(point); lines.push_back({{p.x(),p.y(),p.z()},{240.f/255,60.f/255,90.f/255}}); }
+        // Keep in the interface's green, Remove in its red.
+        const QVector3D colour = crop_.remove ? QVector3D(240.f/255,60.f/255,90.f/255) : QVector3D(65.f/255,176.f/255,24.f/255);
+        for (const auto &point : {a,b}) { const auto p = m.map(point); lines.push_back({{p.x(),p.y(),p.z()},{colour.x(),colour.y(),colour.z()}}); }
     };
     if (crop_.shape==CropShape::Box) {
         QVector3D corners[8];
@@ -894,8 +953,8 @@ void Viewport::drawCrop(const QMatrix4x4 &viewProjection) {
         for (int i=0; i<8; ++i) for (int bit : {1,2,4}) if (!(i&bit)) line(corners[i],corners[i|bit]);
     } else for (int i=0; i<96; ++i) {
         const float a = float(i)*float(2*M_PI/96), b = float(i+1)*float(2*M_PI/96);
-        const float x = crop_.radius*std::cos(a), z = crop_.radius*std::sin(a);
-        for (float y : {0.0f,crop_.height}) line({x,y,z},{crop_.radius*std::cos(b),y,crop_.radius*std::sin(b)});
+        const float x = crop_.radius*std::cos(a), z = crop_.radiusZ*std::sin(a);
+        for (float y : {0.0f,crop_.height}) line({x,y,z},{crop_.radius*std::cos(b),y,crop_.radiusZ*std::sin(b)});
         if (i%8==0) line({x,0,z},{x,crop_.height,z});
     }
     glDisable(GL_DEPTH_TEST); glDisable(GL_BLEND); gridShader_->bind(); gridShader_->setUniformValue("mvp",viewProjection);
