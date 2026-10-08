@@ -66,6 +66,9 @@ private slots:
         window.activateWindow();QApplication::setActiveWindow(&window);QVERIFY(QTest::qWaitForWindowActive(&window)); // popups only open in the active window
         for (auto *combo:{shape,newType}) { // Popups must show every item uncut despite the themed item padding.
             combo->showPopup();auto *view=combo->view();QTRY_VERIFY(view->isVisible());QTest::qWait(300); // let the popup settle its final size
+            {const QRect comboRect(combo->mapToGlobal(QPoint(0,0)),combo->size());const QRect popupRect=view->window()->frameGeometry();
+             QVERIFY2(!popupRect.intersects(comboRect),qPrintable(combo->objectName()+" popup covers the combo"));
+             QCOMPARE(popupRect.left(),comboRect.left());QCOMPARE(popupRect.width(),comboRect.width());}
             for (int row=0;row<combo->count();++row) {const auto r=view->visualRect(view->model()->index(row,0));QVERIFY2(r.isValid() && view->viewport()->rect().contains(r),qPrintable(combo->objectName()+" row "+QString::number(row)));}
             combo->hidePopup();
         }

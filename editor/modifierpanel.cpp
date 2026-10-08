@@ -75,12 +75,14 @@ public:
         }
         if (index.column()==2 && event->type()==QEvent::MouseButtonRelease && (option.state & QStyle::State_Enabled)) {
             const auto *mouse=static_cast<QMouseEvent *>(event);if (mouse->button()==Qt::LeftButton) {
-                const auto keys=index.data(Qt::UserRole+4).toList();const int maximum=std::max(1,index.data(Qt::UserRole+5).toInt());const auto rect=option.rect.adjusted(8,5,-8,-5);
+                const auto keys=index.data(Qt::UserRole+4).toList();const int maximum=std::max(1,index.data(Qt::UserRole+5).toInt());const auto rect=barRect(option.rect);
                 for (const auto &key:keys) if (std::abs(mouse->position().x()-(rect.left()+rect.width()*key.toInt()/double(maximum)))<7) {if (seek) seek(key.toInt());return true;}
             }
         }
         return QStyledItemDelegate::editorEvent(event,model,option,index);
     }
+    // Thin, centred range bar; keyframe hits use the same horizontal extent.
+    static QRect barRect(const QRect &cell) {const int height=13;return {cell.left()+8,cell.center().y()-height/2,cell.width()-16,height};}
     QSize sizeHint(const QStyleOptionViewItem &option,const QModelIndex &index) const override {
         auto size=QStyledItemDelegate::sizeHint(option,index);size.setHeight(std::max(30,size.height()));return size;
     }
@@ -92,7 +94,7 @@ public:
         QStyleOptionViewItem copy(option);initStyleOption(&copy,index);copy.text.clear();
         const QWidget *widget=option.widget;(widget ? widget->style() : QApplication::style())->drawControl(QStyle::CE_ItemViewItem,&copy,painter,widget);
         const bool active=index.data(Qt::UserRole+2).toBool() && (option.state & QStyle::State_Enabled);const auto type=ModifierType(index.data(Qt::UserRole+3).toInt());
-        painter->save();auto rect=option.rect.adjusted(8,5,-8,-5);painter->setPen(Qt::NoPen);
+        painter->save();const auto rect=barRect(option.rect);painter->setPen(Qt::NoPen);
         painter->setBrush(!active ? QColor(75,80,86) : modifierColour(type));painter->drawRoundedRect(rect,3,3);
         const int maximum=std::max(1,index.data(Qt::UserRole+5).toInt()),current=index.data(Qt::UserRole+6).toInt();
         painter->setRenderHint(QPainter::Antialiasing,true);
@@ -142,7 +144,7 @@ ModifierPanel::ModifierPanel(QWidget *parent):QWidget(parent) {
     tree_->setAlternatingRowColors(true);
     auto palette=tree_->palette();palette.setColor(QPalette::Base,EditorTheme::field());palette.setColor(QPalette::AlternateBase,EditorTheme::panel());
     palette.setColor(QPalette::Highlight,QColor("#333a40"));palette.setColor(QPalette::HighlightedText,EditorTheme::text());tree_->setPalette(palette);
-    tree_->setStyleSheet("QTreeWidget {border-radius: 3px;} QTreeWidget::item {padding: 2px 5px; border-bottom: 1px solid #23262a;}"
+    tree_->setStyleSheet("QTreeWidget {border-radius: 4px;} QTreeWidget::item {padding: 2px 5px; border-bottom: 1px solid #23262a;}"
         "QTreeWidget::item:selected {background: #333a40; color: #e7eaeb;} QTreeWidget::item:hover:!selected {background: #1b1e21;}");
     tree_->header()->setSectionResizeMode(0,QHeaderView::ResizeToContents);tree_->header()->setSectionResizeMode(1,QHeaderView::ResizeToContents);tree_->header()->setSectionResizeMode(2,QHeaderView::Stretch);
     auto *delegate=new CoverageDelegate(tree_);delegate->seek=[this](int frame) {emit seekFrame(frame);};tree_->setItemDelegate(delegate);tree_->setToolTip(tr("Click the eye to enable or disable a modifier. Select a modifier to edit its properties in Tools. Click a keyframe diamond to seek."));layout->addWidget(tree_);

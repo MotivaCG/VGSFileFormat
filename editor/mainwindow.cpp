@@ -517,7 +517,7 @@ void MainWindow::buildUi() {
     displayControls_=new QWidget;displayControls_->setObjectName("viewportDisplayControls");
     // QSS heights exclude the 1 px border, so the field matches the painted Background button exactly.
     displayControls_->setStyleSheet(QString("QWidget#viewportDisplayControls QLabel { color: #dddddd; font-size: 9pt; }"
-        "QWidget#viewportDisplayControls QDoubleSpinBox { padding: 0 16px 0 7px; min-height: %1px; max-height: %1px; font-size: 9pt; border-radius: 3px; }").arg(ViewCube::rowHeight-2));
+        "QWidget#viewportDisplayControls QDoubleSpinBox { padding: 0 16px 0 7px; min-height: %1px; max-height: %1px; font-size: 9pt; border-radius: 4px; }").arg(ViewCube::rowHeight-2));
     auto *displayLayout=new QVBoxLayout(displayControls_);displayLayout->setContentsMargins(0,0,0,0);displayLayout->setSpacing(4);
     pointSize_ = new QDoubleSpinBox;pointSize_->setObjectName("displayPointSize");pointSize_->setDecimals(1);pointSize_->setRange(1,12); pointSize_->setSingleStep(0.5); pointSize_->setPrefix(tr("Point size  "));pointSize_->setSuffix(" px");pointSize_->setValue(5);
     pointSize_->setToolTip(tr("Opaque point diameter in viewport pixels. Default: 5 px."));

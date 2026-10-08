@@ -56,7 +56,7 @@ ViewPreset ViewCube::hit(const QPointF &point) const {
 }
 void ViewCube::paintEvent(QPaintEvent *) {
     QPainter painter(this); painter.setRenderHints(QPainter::Antialiasing|QPainter::TextAntialiasing);
-    painter.setPen(EditorTheme::fieldBorder()); painter.setBrush(EditorTheme::panel()); painter.drawRoundedRect(rect().adjusted(1,1,-1,-1),6,6);
+    painter.setPen(EditorTheme::fieldBorder()); painter.setBrush(EditorTheme::panel()); painter.drawRoundedRect(rect().adjusted(1,1,-1,-1),EditorTheme::panelRadius,EditorTheme::panelRadius);
     painter.setFont(QFont("Segoe UI",8)); painter.setPen(QColor("#bbb"));
     for (const auto &face : faces()) {
         const bool active = face.preset==camera_.preset;
@@ -76,8 +76,8 @@ void ViewCube::paintEvent(QPaintEvent *) {
         painter.drawText(QRectF(0,0,100,100),Qt::AlignCenter,label); painter.restore();
     }
     painter.setFont(QFont("Segoe UI",9));
-    painter.setBrush(backgroundHover_ ? QColor("#497957") : EditorTheme::field());
-    painter.setPen(EditorTheme::fieldBorder()); painter.drawRoundedRect(backgroundRect(),3,3);
+    painter.setBrush(backgroundHover_ ? EditorTheme::buttonHover() : EditorTheme::button());
+    painter.setPen(Qt::NoPen); painter.drawRoundedRect(backgroundRect(),EditorTheme::controlRadius,EditorTheme::controlRadius);
     painter.setPen(Qt::white); painter.drawText(backgroundRect(),Qt::AlignCenter,light_ ? tr("Background: Light") : tr("Background: Dark"));
 }
 void ViewCube::leaveEvent(QEvent *event) {

@@ -23,6 +23,16 @@ public:
             // item hover rules. A styled delegate honours the application theme.
             if (!qobject_cast<QStyledItemDelegate *>(view->itemDelegate())) view->setItemDelegate(new QStyledItemDelegate(view));
             view->setMouseTracking(true);view->viewport()->setMouseTracking(true);
+            if (auto *popup=view->parentWidget()) popup->installEventFilter(this);
+        }
+        if (event->type()==QEvent::Show) if (auto *popup=qobject_cast<QWidget *>(object)) if (auto *combo=qobject_cast<QComboBox *>(popup->parentWidget());combo && popup->isWindow()) {
+            // Qt butts the list against the combo and hides its bottom (or top) border; leave a small gap instead.
+            constexpr int gap=3;const QPoint origin=combo->mapToGlobal(QPoint(0,0));
+            const bool below=popup->y()>=origin.y();
+            // Match the combo's width unless the longest item needs more room.
+            int width=combo->width();
+            if (auto *view=combo->view()) width=std::max(width,view->sizeHintForColumn(0)+popup->width()-view->viewport()->width());
+            popup->setGeometry(origin.x(),below ? origin.y()+combo->height()+gap : origin.y()-popup->height()-gap,width,popup->height());
         }
         if (event->type()==QEvent::ToolTip) if (auto *widget=qobject_cast<QWidget *>(object);widget && widget->isEnabled() && !widget->toolTip().isEmpty()) {
             const auto *help=static_cast<QHelpEvent *>(event);
@@ -64,15 +74,15 @@ QWidget {font-family: 'Segoe UI'; font-size: 10pt; color: %TEXT%;}
 QMainWindow, QDialog {background: %WINDOW%;}
 QWidget:disabled {color: %DISABLED%;}
 QDockWidget::title {background: %PANEL%; color: %MUTED%; padding: 7px; border-bottom: 1px solid %PANEL_BORDER%;}
-QGroupBox {background: %PANEL%; border: 1px solid %PANEL_BORDER%; border-radius: 4px; margin-top: 22px; padding: 6px 4px 4px 4px;}
+QGroupBox {background: %PANEL%; border: 1px solid %PANEL%; border-radius: 6px; margin-top: 22px; padding: 6px 4px 4px 4px;}
 /* The title sits in the top margin above the frame, so the border never crosses its glyphs. */
 QGroupBox::title {subcontrol-origin: margin; subcontrol-position: top left; left: 4px; top: 0; padding: 0 2px; color: %MUTED%;}
-QGroupBox:disabled {background: %WINDOW%;}
+QGroupBox:disabled {background: %WINDOW%; border-color: %WINDOW%;}
 QLabel#assetTitle {font-size: 14pt; font-weight: 600;}
 QLabel#sectionTitle {color: %ACCENT%; font-size: 12pt; font-weight: 600;}
 QWidget#timeline {background: %WINDOW%; border-top: 1px solid %PANEL_BORDER%;}
 QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox {
-    background: %FIELD%; border: 1px solid %FIELD_BORDER%; border-radius: 3px; padding: 4px 7px;
+    background: %FIELD%; border: 1px solid %FIELD_BORDER%; border-radius: 4px; padding: 4px 7px;
     selection-background-color: #2e6d4e; selection-color: white;
 }
 QSpinBox, QDoubleSpinBox {padding-right: 18px; min-height: 20px;}
@@ -86,7 +96,7 @@ QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {image: url(:/icons/spin_down.p
 QSpinBox::up-arrow:disabled, QDoubleSpinBox::up-arrow:disabled, QSpinBox::up-arrow:off, QDoubleSpinBox::up-arrow:off {image: url(:/icons/spin_up_disabled.png);}
 QSpinBox::down-arrow:disabled, QDoubleSpinBox::down-arrow:disabled, QSpinBox::down-arrow:off, QDoubleSpinBox::down-arrow:off {image: url(:/icons/spin_down_disabled.png);}
 QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover, QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {background: %PANEL%;}
-QComboBox {background: %FIELD%; border: 1px solid %FIELD_BORDER%; border-radius: 3px; padding: 4px 22px 4px 8px; combobox-popup: 0;}
+QComboBox {background: %FIELD%; border: 1px solid %FIELD_BORDER%; border-radius: 4px; padding: 4px 22px 4px 8px; combobox-popup: 0;}
 QComboBox:hover {border-color: %HOVER%;} QComboBox:focus, QComboBox:on {border-color: %ACCENT%;}
 QComboBox:disabled {border-color: %PANEL_BORDER%; color: %DISABLED%;}
 QComboBox::drop-down {subcontrol-origin: padding; subcontrol-position: center right; width: 18px; border: none; background: transparent;}
@@ -96,16 +106,16 @@ QComboBox QAbstractItemView {background: %FIELD%; border: 1px solid %FIELD_BORDE
 QComboBox QAbstractItemView::item {padding: 4px 8px; border-radius: 2px;}
 QComboBox QAbstractItemView::item:selected {background: %SELECTION%; color: %TEXT%;}
 QComboBox QAbstractItemView::item:hover {background: %ITEM_HOVER%; color: %TEXT%;}
-QPushButton, QToolButton {background: %FIELD%; border: 1px solid %FIELD_BORDER%; border-radius: 3px; color: %TEXT%;}
+QPushButton, QToolButton {background: %BUTTON%; border: 1px solid transparent; border-radius: 4px; color: %TEXT%;}
 QPushButton {padding: 7px 10px;} QToolButton {padding: 3px;}
-QPushButton:hover {background: %SECTION%; border: 1px solid %HOVER%; border-radius: 3px; padding: 7px 10px; color: %TEXT%;}
-QToolButton:hover {background: %SECTION%; border: 1px solid %HOVER%; border-radius: 3px; padding: 3px; color: %TEXT%;}
-QPushButton:pressed, QToolButton:pressed {background: %WINDOW%;}
+QPushButton:hover {background: %BUTTON_HOVER%; border: 1px solid transparent; border-radius: 4px; padding: 7px 10px; color: %TEXT%;}
+QToolButton:hover {background: %BUTTON_HOVER%; border: 1px solid transparent; border-radius: 4px; padding: 3px; color: %TEXT%;}
+QPushButton:pressed, QToolButton:pressed {background: %PANEL%;}
 QPushButton:checked, QToolButton:checked {background: #2e6d4e; border-color: #41b018;}
-QToolButton[neutralToggle="true"]:checked {background: %SELECTION%; border-color: %HOVER%;}
+QToolButton[neutralToggle="true"]:checked {background: %SELECTION%; border-color: transparent;}
 QToolButton[neutralToggle="true"]:checked:hover {background: %ITEM_HOVER%;}
-QPushButton:disabled, QToolButton:disabled {background: %WINDOW%; border-color: %PANEL_BORDER%; color: %DISABLED%;}
-QToolButton[neutralToggle="true"]:disabled {background: %WINDOW%; border-color: %PANEL_BORDER%; color: %DISABLED%;}
+QPushButton:disabled, QToolButton:disabled {background: %BUTTON_DISABLED%; border-color: transparent; color: %DISABLED%;}
+QToolButton[neutralToggle="true"]:disabled {background: %BUTTON_DISABLED%; border-color: transparent; color: %DISABLED%;}
 QWidget#timelinePlaybackControls QPushButton {padding: 3px;}
 QCheckBox {spacing: 5px; background: transparent;}
 QMenuBar {background: %WINDOW%;} QMenuBar::item {background: transparent; padding: 3px 7px;}
@@ -118,8 +128,8 @@ QHeaderView::section {background: %SECTION%; color: %MUTED%; border: none; borde
 QTableWidget {gridline-color: %PANEL_BORDER%;}
 QScrollArea {border: none; background: transparent;}
 QScrollBar:vertical {background: %WINDOW%; width: 10px; margin: 0;} QScrollBar:horizontal {background: %WINDOW%; height: 10px; margin: 0;}
-QScrollBar::handle {background: %FIELD_BORDER%; border-radius: 3px; min-height: 24px; min-width: 24px;}
-QScrollBar::handle:hover {background: %HOVER%;}
+QScrollBar::handle {background: %HOVER%; border-radius: 3px; min-height: 24px; min-width: 24px;}
+QScrollBar::handle:hover {background: %ITEM_HOVER%;}
 QScrollBar::add-line, QScrollBar::sub-line {height: 0; width: 0; border: none;}
 QScrollBar::add-page, QScrollBar::sub-page {background: none;}
 QToolTip {background: %PANEL%; color: %TEXT%; border: 1px solid %HOVER%; border-radius: 4px; padding: 6px 8px;}
@@ -134,6 +144,7 @@ QWidget[compactControls="true"] QComboBox {padding: 3px 20px 3px 7px;}
 )QSS").replace("%TEXT%",text().name()).replace("%WINDOW%",window().name()).replace("%PANEL%",panel().name())
         .replace("%PANEL_BORDER%",panelBorder().name()).replace("%FIELD%",field().name()).replace("%FIELD_BORDER%",fieldBorder().name())
         .replace("%HOVER%",hoverBorder().name()).replace("%MUTED%",mutedText().name()).replace("%DISABLED%",disabledText().name()).replace("%ACCENT%",accent().name())
-        .replace("%SECTION%",sectionHeader().name()).replace("%SELECTION%",selection().name()).replace("%ITEM_HOVER%",itemHover().name()));
+        .replace("%SECTION%",sectionHeader().name()).replace("%SELECTION%",selection().name()).replace("%ITEM_HOVER%",itemHover().name())
+        .replace("%BUTTON_HOVER%",buttonHover().name()).replace("%BUTTON_DISABLED%",buttonDisabled().name()).replace("%BUTTON%",button().name()));
     qApp->installEventFilter(new ThemeInteractionStyler(qApp));
 }
