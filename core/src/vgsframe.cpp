@@ -225,7 +225,243 @@ constexpr uint64_t kSplatsPerPiece = 16384;
 
 float clamp01(float v) { return std::clamp(v, 0.0f, 1.0f); }
 constexpr double sphericalHarmonicC0() { return 0.28209479177387814; }
+
+// ------------------------------------------------------------ motion helpers
+
+// The real spherical harmonic basis every 3DGS renderer evaluates, bands 1 to 3 in the
+// order the coefficients are stored. Rotations are derived from these same functions, so
+// they agree with the evaluation by construction rather than by matching a convention.
+void shBasis(double x, double y, double z, double *b) {
+  b[0] = -0.4886025119029199 * y;
+  b[1] = 0.4886025119029199 * z;
+  b[2] = -0.4886025119029199 * x;
+  b[3] = 1.0925484305920792 * x * y;
+  b[4] = -1.0925484305920792 * y * z;
+  b[5] = 0.31539156525252005 * (2 * z * z - x * x - y * y);
+  b[6] = -1.0925484305920792 * x * z;
+  b[7] = 0.5462742152960396 * (x * x - y * y);
+  b[8] = -0.5900435899266435 * y * (3 * x * x - y * y);
+  b[9] = 2.890611442640554 * x * y * z;
+  b[10] = -0.4570457994644658 * y * (4 * z * z - x * x - y * y);
+  b[11] = 0.3731763325901154 * z * (2 * z * z - 3 * x * x - 3 * y * y);
+  b[12] = -0.4570457994644658 * x * (4 * z * z - x * x - y * y);
+  b[13] = 1.445305721320277 * z * (x * x - y * y);
+  b[14] = -0.5900435899266435 * x * (x * x - 3 * y * y);
+}
+constexpr int kShBandFirst[3] = {0, 3, 8}, kShBandSize[3] = {3, 5, 7};
+constexpr int kShDirections = 64;
+
+// Fibonacci directions, and per band the pseudo-inverse (A^T A)^-1 A^T of the basis
+// sampled at them. Neither depends on the rotation, so both are built once.
+struct ShFit {
+  double directions[kShDirections][3];
+  std::vector<double> pseudoInverse[3]; // size x kShDirections, row-major
+  ShFit() {
+    const double golden = 3.14159265358979323846 * (3.0 - std::sqrt(5.0));
+    for (int i = 0; i < kShDirections; ++i) {
+      const double z = 1.0 - 2.0 * (i + 0.5) / kShDirections;
+      const double r = std::sqrt(std::max(0.0, 1.0 - z * z));
+      directions[i][0] = r * std::cos(golden * i);
+      directions[i][1] = r * std::sin(golden * i);
+      directions[i][2] = z;
+    }
+    for (int band = 0; band < 3; ++band) {
+      const int n = kShBandSize[band], first = kShBandFirst[band];
+      std::vector<double> a(size_t(kShDirections * n));
+      for (int i = 0; i < kShDirections; ++i) {
+        double b[15];
+        shBasis(directions[i][0], directions[i][1], directions[i][2], b);
+        for (int j = 0; j < n; ++j)
+          a[size_t(i * n + j)] = b[first + j];
+      }
+      // Normal matrix, inverted by Gauss-Jordan with partial pivoting: at most 7x7 and
+      // well conditioned on 64 spread directions.
+      std::vector<double> m(size_t(n * 2 * n), 0.0);
+      for (int r = 0; r < n; ++r) {
+        for (int c = 0; c < n; ++c)
+          for (int i = 0; i < kShDirections; ++i)
+            m[size_t(r * 2 * n + c)] += a[size_t(i * n + r)] * a[size_t(i * n + c)];
+        m[size_t(r * 2 * n + n + r)] = 1.0;
+      }
+      for (int col = 0; col < n; ++col) {
+        int pivot = col;
+        for (int r = col + 1; r < n; ++r)
+          if (std::abs(m[size_t(r * 2 * n + col)]) > std::abs(m[size_t(pivot * 2 * n + col)]))
+            pivot = r;
+        for (int c = 0; c < 2 * n; ++c)
+          std::swap(m[size_t(col * 2 * n + c)], m[size_t(pivot * 2 * n + c)]);
+        const double d = m[size_t(col * 2 * n + col)];
+        for (int c = 0; c < 2 * n; ++c)
+          m[size_t(col * 2 * n + c)] /= d;
+        for (int r = 0; r < n; ++r)
+          if (r != col) {
+            const double f = m[size_t(r * 2 * n + col)];
+            for (int c = 0; c < 2 * n; ++c)
+              m[size_t(r * 2 * n + c)] -= f * m[size_t(col * 2 * n + c)];
+          }
+      }
+      auto &p = pseudoInverse[band];
+      p.assign(size_t(n * kShDirections), 0.0);
+      for (int r = 0; r < n; ++r)
+        for (int i = 0; i < kShDirections; ++i)
+          for (int k = 0; k < n; ++k)
+            p[size_t(r * kShDirections + i)] += m[size_t(r * 2 * n + n + k)] * a[size_t(i * n + k)];
+    }
+  }
+};
+const ShFit &shFit() {
+  static const ShFit fit;
+  return fit;
+}
+void rotationMatrix(const double q[4], double r[9]) {
+  const double x = q[0], y = q[1], z = q[2], w = q[3];
+  r[0] = 1 - 2 * (y * y + z * z); r[1] = 2 * (x * y - z * w);     r[2] = 2 * (x * z + y * w);
+  r[3] = 2 * (x * y + z * w);     r[4] = 1 - 2 * (x * x + z * z); r[5] = 2 * (y * z - x * w);
+  r[6] = 2 * (x * z - y * w);     r[7] = 2 * (y * z + x * w);     r[8] = 1 - 2 * (x * x + y * y);
+}
 } // namespace
+
+bool Motion::isIdentity() const {
+  return translation[0] == 0 && translation[1] == 0 && translation[2] == 0 &&
+         rotation[0] == 0 && rotation[1] == 0 && rotation[2] == 0 &&
+         std::abs(rotation[3]) == 1 && scale == 1;
+}
+void Motion::matrix(double out[12]) const {
+  double r[9];
+  rotationMatrix(rotation, r);
+  for (int row = 0; row < 3; ++row) {
+    for (int col = 0; col < 3; ++col)
+      out[row * 4 + col] = r[row * 3 + col] * scale;
+    out[row * 4 + 3] = translation[row];
+  }
+}
+Spec motionSamplesSpec(uint64_t samples) {
+  Spec s;
+  s.kind = 2; // packed words
+  s.family = 0;
+  s.width = 8;
+  s.fields = {16, 16, 16, 16};
+  s.rows = samples * 8;
+  return s;
+}
+bool isMotionSamplesSpec(const Spec &s, uint64_t totalRows, uint64_t samples) {
+  const std::vector<int> fields = {16, 16, 16, 16};
+  return s.kind == 2 && s.family == 0 && s.width == 8 && s.fields == fields &&
+         s.ranks.empty() && samples && samples <= 256 && totalRows == samples * 8;
+}
+bool declaresMotion(const Header &h) {
+  for (const auto &p : h.policies)
+    if (p.attribute == MotionSamples)
+      return true;
+  return false;
+}
+Bytes packMotionSamples(const std::vector<Motion> &samples) {
+  Bytes out(samples.size() * MotionSampleBytes);
+  size_t at = 0;
+  auto put = [&](double v) {
+    uint64_t bits;
+    std::memcpy(&bits, &v, 8);
+    for (int i = 0; i < 8; ++i)
+      out[at++] = uint8_t(bits >> (8 * i));
+  };
+  for (const auto &m : samples) {
+    for (double v : m.translation)
+      put(v);
+    for (double v : m.rotation)
+      put(v);
+    put(m.scale);
+  }
+  return out;
+}
+std::vector<Motion> unpackMotionSamples(const uint8_t *data, size_t size, uint64_t samples) {
+  if (!samples || samples > 256 || size != samples * MotionSampleBytes)
+    throw Error("invalid motion samples");
+  std::vector<Motion> out(static_cast<size_t>(samples));
+  const char *p = reinterpret_cast<const char *>(data);
+  for (auto &m : out) {
+    for (double &v : m.translation) {
+      v = readF64(p);
+      p += 8;
+    }
+    for (double &v : m.rotation) {
+      v = readF64(p);
+      p += 8;
+    }
+    m.scale = readF64(p);
+    p += 8;
+    double norm = 0;
+    for (double v : m.rotation)
+      norm += v * v;
+    norm = std::sqrt(norm);
+    for (double v : m.translation)
+      if (!std::isfinite(v) || std::abs(v) > 1e9)
+        throw Error("invalid motion translation");
+    if (!std::isfinite(norm) || std::abs(norm - 1) > 1e-6)
+      throw Error("invalid motion rotation");
+    if (!std::isfinite(m.scale) || !(m.scale > 0) || m.scale > 1e6)
+      throw Error("invalid motion scale");
+    for (double &v : m.rotation)
+      v /= norm;
+  }
+  return out;
+}
+Motion interpolateMotion(const Motion &a, const Motion &b, double t) {
+  Motion m;
+  for (int k = 0; k < 3; ++k)
+    m.translation[k] = a.translation[k] + (b.translation[k] - a.translation[k]) * t;
+  m.scale = a.scale + (b.scale - a.scale) * t;
+  double dot = 0;
+  for (int k = 0; k < 4; ++k)
+    dot += a.rotation[k] * b.rotation[k];
+  const double sign = dot < 0 ? -1 : 1;
+  dot = std::abs(dot);
+  double wa = 1 - t, wb = t;
+  // Nearly parallel: the sine below vanishes, and linear interpolation then
+  // normalisation is the same rotation to within rounding.
+  if (dot < 0.9999995) {
+    const double angle = std::acos(std::min(1.0, dot)), s = std::sin(angle);
+    wa = std::sin((1 - t) * angle) / s;
+    wb = std::sin(t * angle) / s;
+  }
+  double norm = 0;
+  for (int k = 0; k < 4; ++k) {
+    m.rotation[k] = wa * a.rotation[k] + wb * sign * b.rotation[k];
+    norm += m.rotation[k] * m.rotation[k];
+  }
+  norm = std::sqrt(norm);
+  for (double &v : m.rotation)
+    v /= norm;
+  return m;
+}
+void shRotationMatrices(const double rotation[4], double band1[9], double band2[25],
+                        double band3[49]) {
+  // A function f(d) moved by R becomes f(R^T d): sample that at fixed directions and
+  // project back onto the basis. The rotated band lies in the band's span, so this is
+  // exact to rounding.
+  const auto &fit = shFit();
+  double r[9];
+  rotationMatrix(rotation, r);
+  double rotated[kShDirections][15];
+  for (int i = 0; i < kShDirections; ++i) {
+    const double *d = fit.directions[i];
+    const double x = r[0] * d[0] + r[3] * d[1] + r[6] * d[2];
+    const double y = r[1] * d[0] + r[4] * d[1] + r[7] * d[2];
+    const double z = r[2] * d[0] + r[5] * d[1] + r[8] * d[2];
+    shBasis(x, y, z, rotated[i]);
+  }
+  double *out[3] = {band1, band2, band3};
+  for (int band = 0; band < 3; ++band) {
+    const int n = kShBandSize[band], first = kShBandFirst[band];
+    const auto &p = fit.pseudoInverse[band];
+    for (int row = 0; row < n; ++row)
+      for (int col = 0; col < n; ++col) {
+        double v = 0;
+        for (int i = 0; i < kShDirections; ++i)
+          v += p[size_t(row * kShDirections + i)] * rotated[i][first + col];
+        out[band][row * n + col] = v;
+      }
+  }
+}
 void FrameDecoder::buildBasis(const Block &shared, uint64_t frame, float alpha,
                               bool needPosition, bool needRotation,
                               SharedBasis *out) const {
@@ -396,6 +632,16 @@ void FrameDecoder::evaluatePositions(double normalized,
     }
     written += n;
   }
+  if (!motionSamples.empty()) {
+    double m[12];
+    motion(normalized).matrix(m);
+    for (uint64_t i = 0; i < total; ++i) {
+      float *p = out->data() + i * 3;
+      const double x = p[0], y = p[1], z = p[2];
+      for (int row = 0; row < 3; ++row)
+        p[row] = float(m[row * 4] * x + m[row * 4 + 1] * y + m[row * 4 + 2] * z + m[row * 4 + 3]);
+    }
+  }
 }
 
 Frame FrameDecoder::evaluate(double normalized, bool includeSh) const {
@@ -545,6 +791,29 @@ void FrameDecoder::evaluateInto(double normalized, bool includeSh, Frame *out,
       }
       plans.push_back(plan);
       first += n;
+    }
+  }
+
+  // ---- the chunk's motion at this instant, applied to every splat below -------------
+  const bool moving = !motionSamples.empty();
+  double motionMatrix[12] = {};
+  double motionRotation[4] = {0, 0, 0, 1};
+  float motionScale = 1;
+  bool rotateSh = false;
+  float shBand[3][49] = {};
+  if (moving) {
+    const Motion m = motion(normalized);
+    m.matrix(motionMatrix);
+    for (int k = 0; k < 4; ++k)
+      motionRotation[k] = m.rotation[k];
+    motionScale = float(m.scale);
+    rotateSh = evaluateSh && !(m.rotation[0] == 0 && m.rotation[1] == 0 && m.rotation[2] == 0);
+    if (rotateSh) {
+      double band[3][49];
+      shRotationMatrices(m.rotation, band[0], band[1], band[2]);
+      for (int b = 0; b < 3; ++b)
+        for (int k = 0; k < 49; ++k)
+          shBand[b][k] = float(band[b][k]);
     }
   }
 
@@ -730,6 +999,54 @@ void FrameDecoder::evaluateInto(double normalized, bool includeSh, Frame *out,
         }
       }
     }
+
+    // --- motion ------------------------------------------------------------
+    if (moving) {
+      const double *m = motionMatrix, *turn = motionRotation;
+      for (uint64_t i = begin; i < end; ++i) {
+        const size_t record = size_t(written + i);
+        float *p = out->position.data() + record * 3;
+        const double x = p[0], y = p[1], z = p[2];
+        for (int row = 0; row < 3; ++row)
+          p[row] = float(m[row * 4] * x + m[row * 4 + 1] * y + m[row * 4 + 2] * z + m[row * 4 + 3]);
+        // World orientation is the motion's rotation applied after the splat's own.
+        float *q = out->rotation.data() + record * 4;
+        const double qx = q[0], qy = q[1], qz = q[2], qw = q[3];
+        const double nx = turn[3] * qx + qw * turn[0] + (turn[1] * qz - turn[2] * qy);
+        const double ny = turn[3] * qy + qw * turn[1] + (turn[2] * qx - turn[0] * qz);
+        const double nz = turn[3] * qz + qw * turn[2] + (turn[0] * qy - turn[1] * qx);
+        const double nw = turn[3] * qw - (turn[0] * qx + turn[1] * qy + turn[2] * qz);
+        const double norm = std::max(std::sqrt(nx * nx + ny * ny + nz * nz + nw * nw), 1e-20);
+        q[0] = float(nx / norm);
+        q[1] = float(ny / norm);
+        q[2] = float(nz / norm);
+        q[3] = float(nw / norm);
+        float *s = out->scale.data() + record * 3;
+        for (int c = 0; c < 3; ++c)
+          s[c] *= motionScale;
+      }
+      if (rotateSh) {
+        for (uint64_t i = begin; i < end; ++i) {
+          float *coefficients = out->shRest.data() + size_t(written + i) * shCoefficients * 3;
+          for (int band = 0; band < 3; ++band) {
+            const int first = band == 0 ? 0 : band == 1 ? 3 : 8, size = 3 + 2 * band;
+            if (uint64_t(first + size) > shCoefficients)
+              break;
+            float source[7][3];
+            for (int k = 0; k < size; ++k)
+              for (int c = 0; c < 3; ++c)
+                source[k][c] = coefficients[(first + k) * 3 + c];
+            for (int row = 0; row < size; ++row)
+              for (int c = 0; c < 3; ++c) {
+                float v = 0;
+                for (int k = 0; k < size; ++k)
+                  v += shBand[band][row * size + k] * source[k][c];
+                coefficients[(first + row) * 3 + c] = v;
+              }
+          }
+        }
+      }
+    }
   };
 
   // A range of the whole frame, which may cross from one group into the next.
@@ -762,8 +1079,26 @@ const char *FrameDecoder::Block::array(const char *name) const {
 bool FrameDecoder::usedByPositions(uint32_t attribute) {
   // By name, because that is how evaluatePositions looks its arrays up: every array it
   // reads is one of the format's position_ attributes, and it reads nothing else.
+  // Motion moves the positions too, so a positions-only reader needs it as well.
+  if (attribute == MotionSamples)
+    return true;
   const char *name = attributeName(attribute);
   return name && std::strncmp(name, "position_", 9) == 0;
+}
+
+Motion FrameDecoder::motion(double normalized) const {
+  if (motionSamples.empty())
+    return {};
+  if (!std::isfinite(normalized) || normalized < 0 || normalized >= 1)
+    throw Error("time must be in [0,1)");
+  // The same sample and fraction every other attribute is evaluated with, in double.
+  const uint64_t intervals = blocks.front().intervals;
+  const float sampleTime = float(normalized) * float(intervals);
+  const uint64_t frame =
+      std::min<uint64_t>(uint64_t(std::floor(sampleTime)), intervals - 1);
+  const double alpha = double(sampleTime - float(frame));
+  return interpolateMotion(motionSamples[size_t(frame)], motionSamples[size_t(frame + 1)],
+                           alpha);
 }
 
 FrameDecoder::FrameDecoder(const DecodedChunk &chunk, double tick, Contents contents)
@@ -959,5 +1294,13 @@ FrameDecoder::FrameDecoder(const DecodedChunk &chunk, double tick, Contents cont
   if (shared.arrays.count("sh_temporal_codebooks"))
     require(shared, "sh_temporal_codebooks",
             samples * bookPlanes * 3 * shared.shTemporalEntries * 3 * 2);
+  const auto motion = shared.arrays.find(attributeName(MotionSamples));
+  if (motion != shared.arrays.end()) {
+    motionSamples = unpackMotionSamples(motion->second.data(), motion->second.size(), samples);
+    // Nothing to apply: evaluate as the static capture it is, at no cost.
+    if (std::all_of(motionSamples.begin(), motionSamples.end(),
+                    [](const Motion &m) { return m.isIdentity(); }))
+      motionSamples.clear();
+  }
 }
 } // namespace vgs

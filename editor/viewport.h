@@ -38,6 +38,9 @@ public:
     void setDisplayControls(QWidget *controls);
     void setPlaybackTime(double seconds,double duration);
     void setGrid(bool enabled);
+    // Preview of a walking capture: it stays where it is and the floor slides under it,
+    // by `distance` along -Z, with a finer grid to read the feet against.
+    void setFloorScroll(bool walking, double distance);
     // Display-only viewport contrast (Dark by default); never stored in projects or presets.
     void setLightBackground(bool light);
     bool lightBackground() const { return lightBackground_; }
@@ -104,10 +107,13 @@ private:
     GLuint modifierBuffer_ = 0, modifierTexture_ = 0;
     bool cropEditing_ = false;
     QPoint lastMouse_;
+    bool walking_ = false;
+    double walkDistance_ = 0;
     bool grid_ = true, frameDirty_ = true, initialized_ = false, lightBackground_ = false;
     QColor overlayText() const;
     GLuint vao_ = 0, buffer_ = 0, shBuffer_ = 0, shTexture_ = 0;
-    GLuint gridVao_ = 0, gridBuffer_ = 0;
+    GLuint gridVao_ = 0, gridBuffer_ = 0, fineVao_ = 0, fineBuffer_ = 0;
+    int fineVertices_ = 0;
     int gridVertices_ = 0, shCoefficients_ = 0;
     std::unique_ptr<QOpenGLShaderProgram> pointShader_, gridShader_;
     QString error_;

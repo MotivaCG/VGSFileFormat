@@ -1,59 +1,61 @@
-# Compact animated export
+# Animated export: motion samples
 
-The previous animated fallback evaluated and repacked the full capture at every
-frame. It repeated Gaussian records and colour/SH/opacity data instead of retaining
-the original temporal dictionaries. Adding a few scene transform keys does not
-justify that multiplication. Varying animated export is now blocked before opening
-an output file. Tests verify that an existing destination remains byte-identical.
+An animated transform is exported as the capture's native temporal blocks, unchanged
+in size, plus the motion of the whole capture stored as samples beside them. Readers
+apply that motion; MINT, which has nowhere to put it, is refused.
 
-## Existing representation
+## Why not bake it
 
-Encoding 0 and MINT format 6 have static per-Gaussian scale indices, a shared scale
-LUT, and at most four position residual terms. Rotation and SH have temporal data,
-but an arbitrary global transform cannot always be baked exactly into those fixed
-limits. Keeping the full record set once per frame is a fallback, not a requirement
-of animated content. A legacy-compatible bake can alter temporal position/rotation
-data and fit SH dictionaries; varying scale needs additional representation or
-duplicate lifetimes. Quality and size must be measured before making it automatic.
+The first fallback evaluated and repacked the full capture at every frame, repeating
+every Gaussian record and dictionary per frame. Baking into the native arrays instead
+does not fit the format: every residual-position splat measured already uses all four
+position terms (214,706 of 214,714 records in the reported capture, 100% in five
+captures checked), so a shared translation cannot be added as a term, and the weights
+of a splat do not sum to a constant, so moving the shared trajectories moves each
+splat by a different amount. Rotation is harder still: static SH dictionaries and
+per-splat bases would have to become temporal. Exact baking means a block per frame.
 
-## Compact VGS/PGS option
+## What is stored
 
-Use a new authenticated encoding profile, preserving the native Gaussian arrays
-and dictionaries, and store the global reference/offset curve once. Encoding 1 is
-already reserved for the temporal experiment; a production scene-transform profile
-must use a distinct identifier. Updated decoders expose correct world geometry,
-and GPU viewers apply the affine matrix to means and covariance while evaluating
-SH in the corresponding local camera direction. Positions, rotations, covariance
-and directional colour must all agree with the editor; adding ignored JSON
-metadata is insufficient.
+`motion_samples` (attribute 12) is a shared, base-layer attribute: one sample at each
+of a chunk's sample points, eight f64 each - translation, rotation quaternion xyzw and
+uniform scale. Between samples translation and scale are linear and rotation is
+spherical, with the fraction every other attribute uses. FORMAT.md has the details.
 
-Cropping/colour filtering/isolation still evaluate transformed world means at each
-source frame. A per-record activity mask can retain visibility gaps without
-duplicating all attributes for every lifetime span. For 200,000 records and 30
-frames, a raw one-bit visibility mask costs 750,000 bytes; a small transform curve
-costs orders of magnitude less than another full capture. Dictionary compaction
-still removes rows/entries unused over the exported range.
+Its policy is never optional. A reader that does not know attribute 12 refuses the file
+("invalid VGS policy"), which is what an old reader must do: playing a moving capture
+in place would be wrong without saying so. Measured with the 2.0.0 decoder: it refuses
+a moving export and opens a static one from the same build. Captures without motion
+are written exactly as before and stay readable by every reader.
 
-Updated readers must continue accepting ordinary encoding-0 captures. Old readers
-must reject the new profile rather than silently ignoring its animation. Native,
-WASM and the PlayCanvas renderer/sorter all need coverage before release.
+`FrameDecoder` applies the motion, so every reader of frames - the C++ decoder, the
+C API, WebAssembly, the Blender and Houdini plugins, the editor - gets positions,
+rotations and scales already moved and spherical harmonics already rotated. A renderer
+that draws the stored attributes itself (the PlayCanvas viewer, `Output::Packed`)
+applies `motionAt()` as a model matrix; the viewer does it by putting the motion on a
+child entity, so sorting, culling and the view direction of the harmonics happen in the
+capture's own space.
 
-## MINT compatibility
+## How the editor exports it
 
-Current MINT readers have no supported global transform curve or temporal scale
-attribute. A compatible MINT output therefore needs a measured native bake, or
-must report unsupported animation explicitly. No transform is to be hidden in
-unknown auxiliary metadata and presented as a compatible animated MINT capture.
+The transform at the first exported frame is baked into the data as for a static
+export. At every native sample the world transform is the editor's transform at that
+frame over whatever motion a .vgs source already had; what is stored is that, with the
+baked transform taken back out. It must be a rotation with uniform scale - non-uniform
+animated scale, shear or a mirror stops the export with a message rather than being
+approximated. Crops, colour filters and Purge Isolated evaluate world positions at each
+sample with that transform, exactly as the preview does.
 
-The pending decision is whether updating VGS/PGS readers/webviewer is acceptable,
-or all outputs must remain compatible with the currently deployed readers.
+On the reported capture (30 frames, 214,714 records) the moving export is 2.2 KB larger
+than the static one.
 
-## Deferred shared translation delta
+## Tests
 
-At the user's request, the codec/rank extension is deferred; no encoding or reader
-changes are currently applied. A pure translation can be represented by one shared
-position trajectory and a coefficient/index per Gaussian. The reported MINT has
-214,706 residual-position records, all at rank four, plus eight direct-position
-records. Appending the common delta would require a fifth term for most records.
-A future implementation must address that limit, decoder/viewer compatibility,
-MINT's four-term constraint, quantization accuracy and measured size before release.
+`export_tests` compares the decoded moving export with the editor's per-frame reference
+bake (positions, covariance, DC and SH), checks the chunk boxes hold every live splat,
+that `positionsAt` agrees with `setTime`, that the size matches a static export, that
+re-exporting a moving .vgs composes the motion once, and that MINT is refused.
+`tests/motion.cpp` checks the SH rotation against evaluation at the rotated direction,
+the interpolation and the stored form. The Blender plugin, Houdini plugin and the
+PlayCanvas viewer were checked against a static export of the same take: each moving
+frame is that frame moved rigidly, by the animated angle.

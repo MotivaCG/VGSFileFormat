@@ -99,6 +99,8 @@ int main(int argc, char **argv) {
     const char *motions[] = {"in place", "walking"};
     std::printf("%-18s %s, moving at %g units/s\n", "motion",
                 motions[int(capture.motionType())], double(capture.movingSpeed()));
+    std::printf("%-18s %s\n", "motion samples",
+                capture.hasMotion() ? "yes: the capture moves as a whole" : "no");
     std::printf("%-18s %llu bytes, up to %llu splats per frame\n", "size",
                 static_cast<unsigned long long>(capture.fileSize()),
                 static_cast<unsigned long long>(capture.maxSplatsPerFrame()));

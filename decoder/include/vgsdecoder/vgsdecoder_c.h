@@ -156,6 +156,27 @@ VGS_DECODER_API int vgs_current_frame(const vgs_capture *, vgs_frame *out);
 /** Drops the cached chunk. */
 VGS_DECODER_API void vgs_release_cache(vgs_capture *);
 
+/* ---- motion ----
+ *
+ * A capture can move as a whole: world = translation + scale * rotate(local). Frames from
+ * vgs_set_time are already moved, harmonics included, so a player that draws those needs
+ * nothing here. These are for a renderer that draws the stored attributes itself.
+ */
+typedef struct vgs_motion {
+  double translation[3];
+  double rotation[4]; /* unit quaternion, xyzw */
+  double scale;
+  float matrix[16];   /* the same as a column-major 4x4 model matrix */
+} vgs_motion;
+/** 1 when the capture moves as a whole. */
+VGS_DECODER_API int vgs_has_motion(const vgs_capture *);
+/**
+ * The motion at `seconds`; the identity for a capture that does not move. The chunk at
+ * that time must be held, as it is after vgs_set_time there. Returns VGS_DEC_OK, or
+ * VGS_DEC_ERROR; see vgs_last_error.
+ */
+VGS_DECODER_API int vgs_motion_at(const vgs_capture *, double seconds, vgs_motion *out);
+
 /* ---- payloads carried alongside ----
  *
  * A capture can carry a sound track, a thumbnail and two independent blocks of JSON.

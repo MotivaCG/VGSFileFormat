@@ -45,7 +45,7 @@ set(VGS_WASM_EXPORTS
     ,_vgs_string,_vgs_tag_count,_vgs_tag,_vgs_number,_vgs_bounds
     ,_vgs_chunk,_vgs_chunk_at,_vgs_chunk_bounds
     ,_vgs_set_time,_vgs_prepare,_vgs_prepared_fraction
-    ,_vgs_set_output,_vgs_output,_vgs_chunk_layout,_vgs_instant,_vgs_frame,_vgs_frame_sh_coefficients,_vgs_frame_chunk
+    ,_vgs_set_output,_vgs_output,_vgs_chunk_layout,_vgs_instant,_vgs_motion_at,_vgs_frame,_vgs_frame_sh_coefficients,_vgs_frame_chunk
     ,_vgs_positions_at,_vgs_positions_data
     ,_vgs_set_cache_policy,_vgs_is_chunk_cached,_vgs_is_chunk_held,_vgs_cached_chunk_count,_vgs_cached_bytes,_vgs_release_cache
     ,_vgs_has_payload,_vgs_payload_format,_vgs_payload_offset,_vgs_payload_size,_vgs_payload)

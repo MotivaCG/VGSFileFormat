@@ -5,6 +5,7 @@
 // authoring code.
 
 #include "vgsinternal.h"
+#include "vgsframe.h"
 #include "vgspublickey.h"
 #include <algorithm>
 #include <cmath>
@@ -31,7 +32,8 @@ const char *attributeName(uint32_t id) {
                                  "rotation_delta_lut",
                                  "rotation_delta_indices",
                                  "position_trajectories",
-                                 "mesh_extent_lut"};
+                                 "mesh_extent_lut",
+                                 "motion_samples"};
   static const char *group[] = {"scale_indices",
                                 "position_samples",
                                 "sh_static_indices",
@@ -47,7 +49,7 @@ const char *attributeName(uint32_t id) {
                                 "position_base",
                                 "position_rq_coefficients",
                                 "position_rank_boundaries"};
-  if (id >= 1 && id <= 11)
+  if (id >= 1 && id <= MotionSamples)
     return shared[id - 1];
   if (id >= 32 && id <= 46)
     return group[id - 32];
@@ -332,7 +334,9 @@ ChunkDirectory readChunkDirectory(const Header &h, size_t index,
         p.firstRow > p.totalRows ||
         p.spec.rows > p.totalRows - p.firstRow ||
         (pol.codec == Raw && p.size != p.decodedSize) ||
-        ((p.attribute < 32) != (p.group == 0)))
+        ((p.attribute < 32) != (p.group == 0)) ||
+        (p.attribute == MotionSamples &&
+         !isMotionSamplesSpec(p.spec, p.totalRows, c.intervals + 1)))
       throw Error("invalid VGS page");
     auto key = std::make_pair(p.group, p.attribute);
     auto &cov = coverage[key];
@@ -347,6 +351,10 @@ ChunkDirectory readChunkDirectory(const Header &h, size_t index,
   for (auto kv : coverage)
     if (kv.second.first != kv.second.second)
       throw Error("incomplete VGS attribute");
+  // A capture that moves moves in every chunk: a chunk without its samples would play
+  // in place, which is exactly the silent failure this attribute is mandatory to prevent.
+  if (declaresMotion(h) && !coverage.count({0u, uint32_t(MotionSamples)}))
+    throw Error("VGS chunk without motion samples");
   if (at != c.size || r.at != ds)
     throw Error("VGS chunk size mismatch");
   return d;

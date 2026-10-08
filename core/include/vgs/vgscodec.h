@@ -110,6 +110,11 @@ enum Attribute : uint32_t {
   RotationDeltas,
   PositionTrajectories,
   MeshExtentLut,
+  // A rigid motion with uniform scale applied to the whole chunk at every sample:
+  // translation, rotation and scale as eight f64 per sample. Never optional, so a
+  // reader that predates it refuses the capture instead of playing it in place.
+  // See vgsframe.h (Motion) and FORMAT.md.
+  MotionSamples,
   ScaleIndices = 32,
   PositionSamples,
   ShStaticIndices,

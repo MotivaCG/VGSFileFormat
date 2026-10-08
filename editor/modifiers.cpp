@@ -31,6 +31,8 @@ QMatrix4x4 Project::animationMatrix(double frame) const {
     QMatrix4x4 result;for (const auto &modifier:modifiers) if (modifier.active() && modifier.type==ModifierType::AnimateTransform) result*=modifier.animation.evaluate(frame).matrix();return result;
 }
 Transform Project::transformAtFrame(double frame) const {return hasAnimation() ? Transform::fromMatrix(transform.matrix()*animationMatrix(frame)) : transform;}
+double Project::walkSpeed() const {double speed=0;for (const auto &m:modifiers) if (m.active() && m.type==ModifierType::Walk) speed+=m.walkSpeed;return speed;}
+double Project::walkDistance(double seconds) const {return walkSpeed()*(seconds-in);}
 bool Project::hasAnimation() const {for (const auto &m:modifiers) if (m.active() && m.type==ModifierType::AnimateTransform && !m.animation.keys.isEmpty()) return true;return false;}
 bool Project::hasAnimatedMotion() const {
     for (const auto &m:modifiers) if (m.active() && m.type==ModifierType::AnimateTransform && m.animation.keys.size()>1) {
@@ -97,6 +99,7 @@ QJsonArray Project::modifierJson() const {
             case ModifierType::RemoveGreen: type="remove-green";break;
             case ModifierType::AnimateTransform: type="animate-transform";break;
             case ModifierType::PurgeIsolated: type="purge-isolated";break;
+            case ModifierType::Walk: type="walk";break;
             }
             QJsonObject item{{"id",m.id},{"name",m.name},{"enabled",m.active()},{"type",type},{"timeline","full"}};
             if (m.type==ModifierType::Crop) {const auto &c=m.crop;item["crop"]=QJsonObject{{"space","world"},{"shape",c.shape==CropShape::Box ? "box" : "cylinder"},
@@ -104,6 +107,7 @@ QJsonArray Project::modifierJson() const {
                 {"rotation",vector(c.transform.rotation)},{"scale",vector(c.transform.scale)},{"shear",vector(c.transform.shear)}};}
             else if (m.type==ModifierType::RemoveGreen) item["green"]=QJsonObject{{"minimumSaturation",m.green.minimumSaturation},{"hueTolerance",m.green.hueTolerance},{"targetHue",120},{"colourSource","dc"},{"colourSpace",m.green.linearRgb ? "linear-rgb" : "srgb"}};
             else if (m.type==ModifierType::AnimateTransform) item["animation"]=QJsonObject{{"space","reference-offset"},{"interpolation","linear-slerp"},{"keys",m.animation.json()}};
+            else if (m.type==ModifierType::Walk) item["walk"]=QJsonObject{{"speed",m.walkSpeed},{"axis","+z"},{"units","m/s"},{"display",m.walkKmh ? "km/h" : "m/s"}};
             else if (m.type==ModifierType::PurgeIsolated) item["isolation"]=QJsonObject{{"neighbour",m.isolation.neighbour},{"medianPercent",m.isolation.medianPercent}};
             result.append(item);
     }

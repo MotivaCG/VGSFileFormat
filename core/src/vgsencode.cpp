@@ -255,6 +255,18 @@ struct SourceChunk {
   std::vector<Group> groups;
   std::vector<SourceArray> arrays;
 };
+// The chunk's motion samples, validated, or nothing when it does not move.
+std::vector<Motion> motionOf(const SourceChunk &c, const uint8_t *mint) {
+  for (const auto &a : c.arrays)
+    if (a.attribute == MotionSamples) {
+      const uint64_t samples = c.entry.intervals + 1;
+      if (a.group != 0 || !isMotionSamplesSpec(a.spec, a.spec.rows, samples))
+        throw Error("invalid motion samples");
+      const uint8_t *base = a.data.empty() ? mint + a.offset : a.data.data();
+      return unpackMotionSamples(base, size_t(a.size), samples);
+    }
+  return {};
+}
 struct Source {
   Header header;
   std::vector<SourceChunk> chunks;
@@ -640,17 +652,46 @@ static void tighten(Header &h, size_t ci, const uint8_t *chunk, size_t size) {
   const uint64_t intervals = entry.intervals;
   float lo[3] = {0, 0, 0}, hi[3] = {0, 0, 0};
   bool any = false;
+  double pad = 0;
   try {
     const auto decoded = decodeChunk(h, ci, chunk, size, 1);
     const FrameDecoder decoder(decoded,
                                double(h.timeNumerator) / h.timeDenominator);
+    // With motion, positions are no longer linear between samples: rotation follows an
+    // arc and scale multiplies a moving point. What leaves the box spanned by the samples
+    // is bounded by f''/8 for f(t) = s(t) R(t) p(t), with p linear, R a slerp through
+    // angle theta and s linear, so the samples are measured and the box grown by that.
+    std::vector<double> previousLocal;
+    Motion previous;
+    double radius = 0, step = 0;
+    struct Pair { double theta, scaleStep, scale; };
+    std::vector<Pair> pairs;
     for (uint64_t s = 0; s <= intervals; ++s) {
       // The last sample is approached from just inside the chunk: one is the start
       // of the next chunk, not an instant this one ever shows.
       const double nt =
           intervals ? std::min(double(s) / double(intervals), 1.0 - 1e-9) : 0.0;
       const Frame frame = decoder.evaluate(nt, false);
+      Motion motion;
+      double forward[12] = {};
+      if (decoder.hasMotion()) {
+        motion = decoder.motion(nt);
+        motion.matrix(forward);
+      }
+      std::vector<double> local;
+      if (decoder.hasMotion())
+        local.assign(size_t(frame.count) * 3, 0.0);
       for (uint64_t i = 0; i < frame.count; ++i) {
+        if (decoder.hasMotion()) {
+          // Back to the capture's own space: R^T (world - t) / s.
+          double d[3];
+          for (int k = 0; k < 3; ++k)
+            d[k] = frame.position[size_t(i) * 3 + size_t(k)] - forward[k * 4 + 3];
+          for (int k = 0; k < 3; ++k)
+            local[size_t(i) * 3 + size_t(k)] =
+                (forward[k] * d[0] + forward[4 + k] * d[1] + forward[8 + k] * d[2]) /
+                (motion.scale * motion.scale);
+        }
         if (!frame.active[size_t(i)])
           continue;
         for (int k = 0; k < 3; ++k) {
@@ -658,8 +699,35 @@ static void tighten(Header &h, size_t ci, const uint8_t *chunk, size_t size) {
           lo[k] = any ? std::min(lo[k], v) : v;
           hi[k] = any ? std::max(hi[k], v) : v;
         }
+        if (decoder.hasMotion()) {
+          const double *p = &local[size_t(i) * 3];
+          radius = std::max(radius, std::sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]));
+          if (!previousLocal.empty()) {
+            const double *q = &previousLocal[size_t(i) * 3];
+            step = std::max(step, std::sqrt((p[0] - q[0]) * (p[0] - q[0]) +
+                                            (p[1] - q[1]) * (p[1] - q[1]) +
+                                            (p[2] - q[2]) * (p[2] - q[2])));
+          }
+        }
         any = true;
       }
+      if (decoder.hasMotion()) {
+        if (s) {
+          double dot = 0;
+          for (int k = 0; k < 4; ++k)
+            dot += previous.rotation[k] * motion.rotation[k];
+          pairs.push_back({2 * std::acos(std::min(1.0, std::abs(dot))),
+                           std::abs(motion.scale - previous.scale),
+                           std::max(motion.scale, previous.scale)});
+        }
+        previous = motion;
+        previousLocal = std::move(local);
+      }
+    }
+    for (const auto &p : pairs) {
+      const double second = p.scale * p.theta * p.theta + 2 * p.scaleStep * p.theta;
+      const double first = p.scale * p.theta + p.scaleStep;
+      pad = std::max(pad, (second * radius + 2 * first * step) / 8);
     }
   } catch (const Error &) {
     return;
@@ -667,8 +735,8 @@ static void tighten(Header &h, size_t ci, const uint8_t *chunk, size_t size) {
   if (!any)
     return;
   for (int k = 0; k < 3; ++k) {
-    entry.bounds[size_t(k)] = lo[k];
-    entry.bounds[size_t(k) + 3] = hi[k];
+    entry.bounds[size_t(k)] = float(lo[k] - pad);
+    entry.bounds[size_t(k) + 3] = float(hi[k] + pad);
   }
 }
 
@@ -695,8 +763,14 @@ static Bytes encodeSource(Source src, const uint8_t *mint, const EncodeOptions &
     std::vector<uint64_t> models;
   };
   std::map<uint32_t, Costs> costs;
+  size_t movingChunks = 0;
   for (size_t ci = 0; ci < src.chunks.size(); ++ci) {
     const auto &sourceChunk = getChunk(ci);
+    // Motion is checked here, before anything is written, rather than discovered by a
+    // reader: a sample that does not validate, or a chunk without samples in a capture
+    // that has them, would make every reader refuse the file.
+    if (!motionOf(sourceChunk, mint).empty())
+      ++movingChunks;
     if (src.provider) {
       h.maxChunkSplatRecords = std::max(h.maxChunkSplatRecords, sourceChunk.entry.splats);
       h.maxSplatsPerFrame = std::max(h.maxSplatsPerFrame, sourceChunk.entry.splats);
@@ -730,6 +804,8 @@ static Bytes encodeSource(Source src, const uint8_t *mint, const EncodeOptions &
     }
     report(int(ci + 1));
   }
+  if (movingChunks && movingChunks != src.chunks.size())
+    throw Error("motion samples must be in every chunk or in none");
   for (const auto &kv : costs) {
     Policy p;
     p.attribute = kv.first;
@@ -843,6 +919,21 @@ static Bytes encodeSource(Source src, const uint8_t *mint, const EncodeOptions &
     for (int k = 0; k < 3; ++k) {
       c.bounds[k] = lo;
       c.bounds[k + 3] = hi;
+    }
+    // A moving chunk's quantisation cube moves with it. Its circumscribed sphere holds it
+    // under any rotation, and between two samples the centre moves linearly and the scale
+    // stays between theirs, so the boxes of those spheres at the samples hold the chunk.
+    if (const auto motion = motionOf(sourceChunk, mint); !motion.empty()) {
+      const double radius = std::sqrt(3.0) * std::max(std::abs(double(lo)), std::abs(double(hi)));
+      for (int k = 0; k < 3; ++k) {
+        double a = 1e300, b = -1e300;
+        for (const auto &m : motion) {
+          a = std::min(a, m.translation[k] - radius * m.scale);
+          b = std::max(b, m.translation[k] + radius * m.scale);
+        }
+        c.bounds[k] = float(a);
+        c.bounds[k + 3] = float(b);
+      }
     }
     while ((outputBase + out.b.size()) % 16) out.b.push_back(0);
     c.offset = outputBase + out.b.size();

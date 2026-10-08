@@ -32,6 +32,8 @@ Recreating a `.mint` byte for byte is what MGS does, which is a different format
   captured (in place or walking) and how fast.
 - A chunk table: where each span of time is in the file and what it covers, so a player
   can seek without reading anything else.
+- Optionally, how the whole capture moves: a rigid motion with uniform scale per sample,
+  stored beside the native data rather than baked into it (see Motion samples).
 - Base colour, static spherical harmonics and temporal spherical harmonics as three
   independently downloadable contiguous layers, so a reader that evaluates colour detail
   on the GPU, or not at all, can skip fetching it.
@@ -62,8 +64,10 @@ its interval count, and written as the exact fraction that gives it back (1/30, 
 group followed by splat groups. Unknown nonzero header fields,
 nonempty auxiliary top-level records, unknown blocks, missing supported attributes and
 unsupported sampling/SH layouts fail explicitly. The source order and rank grouping are
-retained. Bounds are measured, not copied: the encoder decodes each chunk it has just written and takes the extent of its live splats over the chunk's own sample grid, which is exact because positions move linearly between samples.
-Positions are in source local space; rotations use the conventions below.
+retained. Bounds are measured, not copied: the encoder decodes each chunk it has just written and takes the extent of its live splats over the chunk's own sample grid, which is exact because positions move linearly between samples; a moving capture's box is widened for its motion as Motion samples describes.
+Positions are in source local space; rotations use the conventions below. A capture with
+motion samples moves as a whole on top of that, and its bounds are where it is after the
+motion; see Motion samples.
 
 Spatial page bounds/culling, Morton reorder, local dictionary dependencies, temporal
 rotation checkpoints, lower SH degrees and GPU motion evaluation remain roadmap work.
@@ -91,8 +95,8 @@ raw is a genuine no-entropy-code path. No TurboPFor, Rust, pcodec or new depende
 
 Raw data retains its binary numerical packing (including quantized values, VQ indices
 and f16 fields already present in the source). It is not expanded float32 frame data.
-The JavaScript reader returns raw payload views and never loads WASM/workers for an
-all-raw capture. Checksums and directory parsing still consume CPU time; direct GPU
+The JavaScript reader goes through the same WebAssembly decoder whatever the codec, so
+every check here applies to it unchanged. Checksums and directory parsing still consume CPU time; direct GPU
 upload requires shaders that understand these attribute representations and any upload
 alignment required by the graphics API.
 
@@ -253,7 +257,9 @@ reserved field.
 checked, not yet read by any player. `motionType` says whether the performer stayed on
 the spot (`0`, the default) or walked (`1`); a walking capture is still stored where it
 was captured, and `movingSpeed`, in the capture's units per second, says how fast a
-player should carry it along. Encoders write `0` and `0.0` unless told otherwise. More
+player should carry it along: along +Z of the capture's own space, from the start of the
+timeline. To walk another way, the capture is rotated before it is written. Encoders
+write `0` and `0.0` unless told otherwise. More
 motion types may follow; a reader refuses one it does not know, and a speed that is not
 a finite number.
 
@@ -391,12 +397,49 @@ sample count and entry stride retain their full attribute meaning. Opt-in encode
 searches may also vary stored rANS precision and high/low bit splits within the
 already supported ranges. Neither option changes the encoding ID or model IDs.
 
-Attribute IDs and shapes are named in `core/include/vgs/vgscodec.h` and `attributeName()`. IDs 1..11
-are shared dictionaries/LUTs; IDs 32..46 are group attributes. Their interpretation,
+Attribute IDs and shapes are named in `core/include/vgs/vgscodec.h` and `attributeName()`. IDs 1..12
+are shared (dictionaries, LUTs and motion samples); IDs 32..46 are group attributes. Their interpretation,
 quantized field widths, quaternion ordering and reconstruction arithmetic are defined
 by the source format, whose semantics this import profile retains unchanged. The
 normative statement of them here is `core/src/vgsframe.cpp`, which is the code every
 reader runs; a reader does not parse a .mint and does not need that format's document.
+
+### Motion samples
+
+A capture can move as a whole - a performer walking across a set, say - without that
+motion being baked into every splat. Baking it is not possible in this encoding without
+a block per frame: residual positions already use all four terms per splat, and a
+rotation would turn the static SH dictionaries temporal. So the motion is stored as it
+is, and readers apply it.
+
+`motion_samples`, attribute 12, is a shared attribute in group 0 and the base layer. It
+holds one sample at each of the chunk's sample points, `intervals + 1`, each eight
+little-endian f64: translation `tx ty tz`, a unit rotation quaternion `qx qy qz qw` and a
+uniform scale `s`. Its descriptor is fixed: kind 2 (packed words), family 0, width 8,
+fields `16 16 16 16`, `totalRows = samples * 8`; entropy coding is lossless on it like on
+everything else. A rotation is a unit quaternion to within 1e-6 and is renormalised; the
+scale lies in (0, 1e6]; every value is finite. Anything else is refused.
+
+A splat at local position `p` is drawn at `t + s * R(q) p`; its rotation becomes
+`q * q_splat`, its scale `s * scale`, and its higher-order spherical harmonics are those
+of the rotated function, `f'(d) = f(R^T d)`. Between samples `a` and `b`, at the same
+fraction every other attribute uses, translation and scale are interpolated linearly and
+rotation spherically along the shorter arc (linearly and renormalised when their dot
+product is at least 0.9999995, about 1e-3 rad apart). `core/src/vgsframe.cpp` is the normative implementation: FrameDecoder
+applies all of it, so a reader of frames sees the moved capture. A renderer that
+evaluates stored attributes itself applies the motion as a model matrix and evaluates
+the harmonics with the view direction rotated by `R^T`.
+
+The policy for attribute 12 is never optional. A reader that does not know it refuses
+the capture, by the rule for unknown attributes above, instead of playing it in place.
+When the header declares it, every chunk carries it; a chunk without it is refused.
+Captures that do not move do not declare it and are unchanged. Chunk and capture bounds
+are where the capture is after its motion: measured at the samples, and widened by the
+largest distance the interpolated motion can take a splat off the chord between two
+samples, so they still hold every position.
+
+The header's `motionType` and `movingSpeed` are unrelated hints and stay reserved. MINT
+has no equivalent, so a moving capture cannot be written as one.
 
 ## Reading and writing one
 

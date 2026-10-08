@@ -40,7 +40,7 @@ const Number_ = {
   duration: 0, frameCount: 1, frameRate: 2, startSeconds: 3, shDegree: 4,
   maxSplatsPerFrame: 5, fileSize: 6, createdMillis: 7, chunkCount: 8,
   signatureKeyId: 9, signatureAlgorithm: 10, signedBytes: 11, version: 12, isPlain: 13,
-  playbackMode: 14, motionType: 15, movingSpeed: 16,
+  playbackMode: 14, motionType: 15, movingSpeed: 16, hasMotion: 17,
 };
 const Chunk = { offset: 0, size: 1, startSeconds: 2, endSeconds: 3, splats: 4 };
 const Attribute = {
@@ -265,6 +265,11 @@ export class VgsCapture {
   get motionType() { return this.#module._vgs_number(Number_.motionType); }
   /** Reserved: how fast a walking capture moves, in its own units per second; 0 in place. */
   get movingSpeed() { return this.#module._vgs_number(Number_.movingSpeed); }
+  /**
+   * Whether the capture moves as a whole. Frames from setTime and positionsAt are
+   * already moved; see motionAt for a renderer that draws the stored data itself.
+   */
+  get hasMotion() { return this.#module._vgs_number(Number_.hasMotion) === 1; }
   get shDegree() { return this.#module._vgs_number(Number_.shDegree); }
   get maxSplatsPerFrame() { return this.#module._vgs_number(Number_.maxSplatsPerFrame); }
   get fileSize() { return this.#module._vgs_number(Number_.fileSize); }
@@ -533,6 +538,33 @@ export class VgsCapture {
     if (!pointer) this.#fail();
     const at = m.HEAPF64.subarray(pointer >>> 3, (pointer >>> 3) + 4);
     return { chunkIndex: at[0], sampleA: at[1], sampleB: at[2], alpha: at[3] };
+  }
+
+  /**
+   * How the whole capture moves at `seconds`: world = translation + scale * rotate(local).
+   *
+   * Frames from setTime and positionsAt already have it applied, harmonics included. In
+   * packed mode the buffers hold the capture in its own space: use `matrix` as the model
+   * matrix, multiply each splat's rotation by `rotation` and its scale by `scale`, and
+   * evaluate the harmonics with the view direction rotated back by the inverse rotation.
+   * It is interpolated between the same samples, with the same fraction, as instantAt.
+   * The chunk must be held (after setTime, positionsAt or prepare); the identity for a
+   * capture that does not move.
+   *
+   * @returns {{translation:number[], rotation:number[], scale:number, matrix:Float32Array}}
+   */
+  motionAt(seconds) {
+    this.#check();
+    const m = this.#module;
+    const pointer = m._vgs_motion_at(seconds);
+    if (!pointer) this.#fail();
+    const v = m.HEAPF64.subarray(pointer >>> 3, (pointer >>> 3) + 24);
+    return {
+      translation: [v[0], v[1], v[2]],
+      rotation: [v[3], v[4], v[5], v[6]],
+      scale: v[7],
+      matrix: Float32Array.from(v.subarray(8, 24)),
+    };
   }
 
   // ---- what playback keeps in memory --------------------------------------------------

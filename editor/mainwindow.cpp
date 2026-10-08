@@ -51,6 +51,7 @@
 #include <QSignalBlocker>
 #include "rangeslider.h"
 #include <QSpinBox>
+#include <functional>
 #include <QSlider>
 #include <QStatusBar>
 #include <QStyle>
@@ -111,15 +112,32 @@ static QIcon timelineClockIcon() {
 // to the press point so the drag never runs into a screen edge.
 class SpinScrubber final : public QObject {
 public:
-    static void attach(QLabel *label,QDoubleSpinBox *spin,double pixelStep) {new SpinScrubber(label,spin,pixelStep);}
+    static void attach(QWidget *label,QDoubleSpinBox *spin,double pixelStep) {
+        new SpinScrubber(label,spin,[spin] {return spin->value();},[spin](double v) {spin->setValue(v);},pixelStep);
+    }
+    // Whole numbers: the drag accumulates fractions and the field takes the nearest one.
+    static void attach(QWidget *label,QSpinBox *spin,double pixelStep) {
+        new SpinScrubber(label,spin,[spin] {return double(spin->value());},[spin](double v) {spin->setValue(int(std::lround(v)));},pixelStep);
+    }
+    // Any field, through functions that read and write its value in the units to scrub in.
+    static void attach(QWidget *label,QAbstractSpinBox *spin,std::function<double()> get,std::function<void(double)> set,double pixelStep) {
+        new SpinScrubber(label,spin,std::move(get),std::move(set),pixelStep);
+    }
+    // The label of a field laid out by a QFormLayout, if it has one.
+    template<class Spin> static void attachFormLabel(Spin *spin,double pixelStep) {
+        auto *form=spin->parentWidget() ? qobject_cast<QFormLayout *>(spin->parentWidget()->layout()) : nullptr;
+        auto *label=form ? form->labelForField(spin) : nullptr;if (!label) return;
+        attach(label,spin,pixelStep);
+        spin->setToolTip(spin->toolTip()+(spin->toolTip().isEmpty() ? QString() : QStringLiteral("\n"))+tr("Drag the label to scrub: Shift fine, Ctrl coarse, Esc cancels."));
+    }
 protected:
     bool eventFilter(QObject *watched,QEvent *event) override {
-        auto *label=static_cast<QLabel *>(watched);
+        auto *label=static_cast<QWidget *>(watched);
         switch (event->type()) {
         case QEvent::MouseButtonPress: {
             auto *e=static_cast<QMouseEvent *>(event);
             if (e->button()!=Qt::LeftButton || !spin_->isEnabled()) return false;
-            pressed_=true;dragging_=false;accumulated_=0;startValue_=spin_->value();
+            pressed_=true;dragging_=false;accumulated_=0;startValue_=get_();
             pressPos_=lastPos_=e->globalPosition().toPoint();label->grabKeyboard();
             return true;
         }
@@ -132,7 +150,7 @@ protected:
             }
             const double factor=e->modifiers()&Qt::ShiftModifier ? 0.1 : e->modifiers()&Qt::ControlModifier ? 10.0 : 1.0;
             accumulated_+=(pos.x()-lastPos_.x())*pixelStep_*factor;
-            spin_->setValue(startValue_+accumulated_);
+            set_(startValue_+accumulated_);
             QCursor::setPos(pressPos_);lastPos_=pressPos_;
             return true;
         }
@@ -147,19 +165,22 @@ protected:
             if (pressed_ && static_cast<QKeyEvent *>(event)->key()==Qt::Key_Escape) {event->accept();return true;}
             return false;
         case QEvent::KeyPress:
-            if (pressed_ && static_cast<QKeyEvent *>(event)->key()==Qt::Key_Escape) {spin_->setValue(startValue_);finish(label);return true;}
+            if (pressed_ && static_cast<QKeyEvent *>(event)->key()==Qt::Key_Escape) {set_(startValue_);finish(label);return true;}
             return false;
         default: return false;
         }
     }
 private:
-    SpinScrubber(QLabel *label,QDoubleSpinBox *spin,double pixelStep) : QObject(label),spin_(spin),pixelStep_(pixelStep) {
+    SpinScrubber(QWidget *label,QAbstractSpinBox *spin,std::function<double()> get,std::function<void(double)> set,double pixelStep)
+        : QObject(label),spin_(spin),get_(std::move(get)),set_(std::move(set)),pixelStep_(pixelStep) {
         label->setCursor(Qt::SizeHorCursor);label->installEventFilter(this);
     }
-    void finish(QLabel *label) {
+    void finish(QWidget *label) {
         pressed_=dragging_=false;label->releaseKeyboard();label->setCursor(Qt::SizeHorCursor);
     }
-    QDoubleSpinBox *spin_;
+    QAbstractSpinBox *spin_;
+    std::function<double()> get_;
+    std::function<void(double)> set_;
     double pixelStep_,startValue_=0,accumulated_=0;
     QPoint pressPos_,lastPos_;
     bool pressed_=false,dragging_=false;
@@ -511,6 +532,46 @@ void MainWindow::buildUi() {
     isolationPercent_=new QDoubleSpinBox;isolationPercent_->setObjectName("isolationMedianPercent");isolationPercent_->setRange(0,1000000);isolationPercent_->setDecimals(1);isolationPercent_->setSuffix(" %");isolationPercent_->setValue(700);
     isolationForm->addRow(tr("Nth neighbour"),isolationNeighbour_);isolationForm->addRow(tr("Distance / median"),isolationPercent_);
     auto *isolationNote=new QLabel(tr("Removes points whose distance to neighbour N exceeds this percentage of the frame's median Nth-neighbour distance, after crop and colour filtering. 100% = median; 700% = 7 times median."));isolationNote->setWordWrap(true);isolationForm->addRow(isolationNote);side->addWidget(isolationProperties_);
+    walkProperties_=new QGroupBox(tr("Walk"));walkProperties_->setObjectName("walkModifierProperties");auto *walkForm=new QFormLayout(walkProperties_);
+    walkProperties_->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Minimum);
+    walkSpeed_=new QDoubleSpinBox;walkSpeed_->setObjectName("walkSpeed");walkSpeed_->setRange(0,100);walkSpeed_->setDecimals(2);walkSpeed_->setSingleStep(.1);walkSpeed_->setSuffix(" m/s");walkSpeed_->setValue(1);
+    walkSpeed_->setToolTip(tr("How fast the capture advances along +Z, from the start of the export range."));
+    // The speed is stored in m/s; this only chooses how it is shown, and is kept with the
+    // modifier so projects and presets reopen showing the same unit.
+    walkUnits_=new QToolButton;walkUnits_->setObjectName("walkUnits");walkUnits_->setCheckable(true);walkUnits_->setProperty("neutralToggle",true);
+    {
+        const QIcon source=QIcon::fromTheme(QIcon::ThemeIcon::MediaPlaylistRepeat,style()->standardIcon(QStyle::SP_BrowserReload));QIcon icon;
+        for (auto mode:{QIcon::Normal,QIcon::Disabled}) {
+            QPixmap pixmap=source.pixmap(20,20);QPainter tint(&pixmap);tint.setCompositionMode(QPainter::CompositionMode_SourceIn);
+            tint.fillRect(pixmap.rect(),mode==QIcon::Disabled ? QColor("#666666") : QColor("#e6e6e6"));tint.end();icon.addPixmap(pixmap,mode);
+        }
+        walkUnits_->setIcon(icon);
+    }
+    walkUnits_->setIconSize({18,18});walkUnits_->setFixedSize(30,30);walkUnits_->setAccessibleName(tr("Speed units"));
+    walkUnits_->setToolTip(tr("Show the speed in km/h instead of m/s. It is always stored in m/s."));
+    auto *walkRow=new QWidget;auto *walkRowLayout=new QHBoxLayout(walkRow);walkRowLayout->setContentsMargins(0,0,0,0);walkRowLayout->setSpacing(4);
+    walkRowLayout->addWidget(walkSpeed_,1);walkRowLayout->addWidget(walkUnits_);walkForm->addRow(tr("Speed"),walkRow);
+    auto *walkNote=new QLabel(tr("Preview: the capture stays and the floor slides back under it, with a finer grid; at the right speed a planted foot stays on the grid. Export does not move the capture: VGS/PGS mark it as walking at this speed along +Z in the header, for players to carry it. Rotate the capture to choose the direction."));walkNote->setWordWrap(true);walkForm->addRow(walkNote);side->addWidget(walkProperties_);
+    connect(walkUnits_,&QToolButton::toggled,this,[this](bool kmh) {
+        auto *m=project_.modifier();if (syncing_ || !m || m->type!=ModifierType::Walk) return;
+        m->walkKmh=kmh;showWalkSpeed(*m);syncModifiers();dirty();
+    });
+    connect(walkSpeed_,&QDoubleSpinBox::valueChanged,this,[this](double value) {
+        if (syncing_ || !project_.modifier() || project_.modifier()->type!=ModifierType::Walk) return;
+        project_.modifier()->walkSpeed=project_.modifier()->walkKmh ? value/3.6 : value;viewport_->setFloorScroll(project_.walkSpeed()>0,project_.walkDistance(project_.time));syncModifiers();dirty();
+    });
+    // Modifier parameters scrub from their labels like the transform fields: per pixel, a
+    // step that suits the unit (metres, percent, degrees, whole neighbours, m/s).
+    for (auto *spin:{cropRadius_,cropHeight_,cropWidth_,cropDepth_}) SpinScrubber::attachFormLabel(spin,0.005);
+    SpinScrubber::attachFormLabel(greenSaturation_,0.25);SpinScrubber::attachFormLabel(greenHue_,0.25);
+    SpinScrubber::attachFormLabel(isolationNeighbour_,0.05);SpinScrubber::attachFormLabel(isolationPercent_,1.0);
+    // The speed's label belongs to its row (field and unit button), and it scrubs in m/s
+    // whichever unit is shown, so a pixel moves the walk by the same amount either way.
+    if (auto *label=walkForm->labelForField(walkRow)) {
+        SpinScrubber::attach(label,walkSpeed_,[this] {return walkUnits_->isChecked() ? walkSpeed_->value()/3.6 : walkSpeed_->value();},
+                             [this](double v) {walkSpeed_->setValue(walkUnits_->isChecked() ? v*3.6 : v);},0.01);
+        walkSpeed_->setToolTip(walkSpeed_->toolTip()+"\n"+tr("Drag the label to scrub: Shift fine, Ctrl coarse, Esc cancels."));
+    }
     isolationNeighbour_->setToolTip(tr("Nearest-neighbour rank, excluding the point itself. Frames with too few surviving points are preserved."));isolationPercent_->setToolTip(tr("Maximum Nth-neighbour distance as a percentage of the frame median. Lower values remove more points."));
     auto isolationChanged=[this] {if (syncing_ || !project_.modifier() || project_.modifier()->type!=ModifierType::PurgeIsolated) return;project_.modifier()->isolation={isolationNeighbour_->value(),isolationPercent_->value()};syncModifiers();dirty();};
     connect(isolationNeighbour_,&QSpinBox::valueChanged,this,[isolationChanged](int) {isolationChanged();});connect(isolationPercent_,&QDoubleSpinBox::valueChanged,this,[isolationChanged](double) {isolationChanged();});
@@ -622,10 +683,18 @@ void MainWindow::syncModifiers() {
     QJsonObject state;if (purge) state={{"modifiers",project_.modifierJson()},{"transform",project_.json({})["transform"]},{"cropEditing",viewport_->cropEditing()}};
     if (state!=processingState_) {processingState_=state;if (purge) requestFrame();}
 }
+// The Walk speed in the unit its modifier shows: range, suffix and value, without
+// writing anything back.
+void MainWindow::showWalkSpeed(const Modifier &m) {
+    const bool kmh=m.walkKmh,was=syncing_;syncing_=true;
+    QSignalBlocker blocker(walkUnits_);walkUnits_->setChecked(kmh);
+    walkSpeed_->setRange(0,kmh ? 360 : 100);walkSpeed_->setSuffix(kmh ? " km/h" : " m/s");walkSpeed_->setValue(kmh ? m.walkSpeed*3.6 : m.walkSpeed);
+    syncing_=was;
+}
 void MainWindow::revealModifierProperties() {
     QTimer::singleShot(0,this,[this] {
         const auto *m=project_.modifier();auto *scroll=findChild<QScrollArea *>("toolsScrollArea");if (!m || !scroll) return;
-        QWidget *panel=m->type==ModifierType::AnimateTransform ? static_cast<QWidget *>(animationProperties_) : m->type==ModifierType::PurgeIsolated ? isolationProperties_ : m->type==ModifierType::Crop ? cropProperties_ : greenProperties_;
+        QWidget *panel=m->type==ModifierType::AnimateTransform ? static_cast<QWidget *>(animationProperties_) : m->type==ModifierType::PurgeIsolated ? isolationProperties_ : m->type==ModifierType::Walk ? walkProperties_ : m->type==ModifierType::Crop ? cropProperties_ : greenProperties_;
         scroll->ensureWidgetVisible(panel,0,12);
     });
 }
@@ -637,6 +706,8 @@ void MainWindow::syncUi() {
     cropProperties_->setVisible(selectedCrop);greenProperties_->setVisible(selected && selected->type==ModifierType::RemoveGreen);
     const bool animation=selected && selected->type==ModifierType::AnimateTransform,isolation=selected && selected->type==ModifierType::PurgeIsolated;
     animationProperties_->setVisible(animation);isolationProperties_->setVisible(isolation);
+    const bool walk=selected && selected->type==ModifierType::Walk;walkProperties_->setVisible(walk);
+    if (walk) {walkProperties_->setTitle(tr("Walk: %1").arg(selected->name));showWalkSpeed(*selected);}
     if (animation) {animationProperties_->setTitle(tr("Animate transform: %1").arg(selected->name));animationProperties_->setAnimation(selected->animation,int(std::round(project_.time*info_.fps)),std::max(0,info_.frames-1));}
     if (isolation) {isolationProperties_->setTitle(tr("Purge Isolated: %1").arg(selected->name));isolationNeighbour_->setValue(selected->isolation.neighbour);isolationPercent_->setValue(selected->isolation.medianPercent);}
     viewport_->setTransform(project_.transformAtFrame(std::round(project_.time*info_.fps)));
@@ -679,6 +750,7 @@ void MainWindow::syncUi() {
     timelineSecondsButton_->setToolTip(seconds ? tr("Display time in seconds. Click to display frame indices. Entries snap to the nearest valid frame.") : tr("Display frame indices. Click to display time in seconds. Entries snap to the nearest valid frame."));
     modifierPanel_->setTimeline(frame,maximum);
     viewport_->setPlaybackTime(project_.time,info_.duration);
+    viewport_->setFloorScroll(project_.walkSpeed()>0,project_.walkDistance(project_.time));
     speed_->setValue(project_.speed); loop_->setChecked(project_.loop); gridAction_->setChecked(project_.grid);
     syncTransformButtons();
     // The group title names what the fields edit: the capture, or the selected crop/animation modifier.

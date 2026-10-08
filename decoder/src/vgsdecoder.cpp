@@ -151,6 +151,27 @@ bool wanted(const vgs::Page &page, uint32_t mask) {
          vgs::FrameDecoder::usedByPositions(page.attribute);
 }
 
+/**
+ * A chunk's motion samples, if it carries any: its MotionSamples pages put back in row
+ * order and validated. Read whatever the mode, because both setTime and a Packed shader
+ * need the chunk's motion and neither keeps the page in a form that would give it back.
+ */
+std::vector<vgs::Motion> motionSamples(const vgs::DecodedChunk &chunk, uint64_t intervals) {
+  std::vector<const vgs::DecodedPage *> pages;
+  for (const auto &page : chunk.pages)
+    if (page.descriptor.attribute == vgs::MotionSamples)
+      pages.push_back(&page);
+  if (pages.empty())
+    return {};
+  std::sort(pages.begin(), pages.end(), [](const vgs::DecodedPage *a, const vgs::DecodedPage *b) {
+    return a->descriptor.firstRow < b->descriptor.firstRow;
+  });
+  std::vector<uint8_t> bytes;
+  for (const auto *page : pages)
+    bytes.insert(bytes.end(), page->bytes.begin(), page->bytes.end());
+  return vgs::unpackMotionSamples(bytes.data(), bytes.size(), intervals + 1);
+}
+
 } // namespace
 
 struct Capture::State {
@@ -182,6 +203,8 @@ struct Capture::State {
     std::vector<Buffer> buffers;
     std::vector<GroupData> groups;
     ChunkData data;
+    // Empty for a capture without motion; otherwise one per sample of the chunk.
+    std::vector<vgs::Motion> motion;
   };
   std::vector<Cached> cache;
   CachePolicy policy = defaultCachePolicy();
@@ -405,6 +428,7 @@ struct Capture::State {
     entry.index = index;
     entry.mask = mask;
     entry.bytes = held;
+    entry.motion = motionSamples(chunk, chunks[index].intervals);
     if (output == Output::Floats) {
       // Without the whole base layer the evaluator can only answer positionsAt; asking it
       // for more is refused inside it rather than read past the arrays it does not have.
@@ -861,6 +885,42 @@ Instant Capture::instantAt(double seconds) const {
   at.sampleB = uint32_t(std::min(floor + 1, double(info.intervals)));
   at.alpha = float(bounded - floor);
   return at;
+}
+
+bool Capture::hasMotion() const { return vgs::declaresMotion(state->header); }
+
+Motion Capture::motionAt(double seconds) const {
+  Motion result;
+  if (!hasMotion())
+    return result;
+  const Instant at = instantAt(seconds);
+  const State::Cached *held = nullptr;
+  for (const auto &entry : state->cache)
+    if (entry.index == at.chunkIndex)
+      held = &entry;
+  if (!held || held->motion.size() <= at.sampleB)
+    throw Error("motionAt needs its chunk held: call setTime, positionsAt or prepare first");
+  // The fraction again in double, from the same clamped tick instantAt used.
+  const ChunkInfo &info = state->chunks[at.chunkIndex];
+  const double clamped = std::min(std::max(seconds, 0.0), duration());
+  const double tick = std::min(std::max(clamped / state->secondsPerTick() - double(info.startTick), 0.0),
+                               double(info.intervals));
+  const double alpha = tick - double(at.sampleA);
+  const vgs::Motion m =
+      vgs::interpolateMotion(held->motion[at.sampleA], held->motion[at.sampleB], alpha);
+  for (int k = 0; k < 3; ++k)
+    result.translation[k] = m.translation[k];
+  for (int k = 0; k < 4; ++k)
+    result.rotation[k] = m.rotation[k];
+  result.scale = m.scale;
+  double rows[12];
+  m.matrix(rows);
+  for (int row = 0; row < 3; ++row)
+    for (int col = 0; col < 4; ++col)
+      result.matrix[col * 4 + row] = float(rows[row * 4 + col]);
+  result.matrix[3] = result.matrix[7] = result.matrix[11] = 0;
+  result.matrix[15] = 1;
+  return result;
 }
 
 double Capture::preparedFraction() const {

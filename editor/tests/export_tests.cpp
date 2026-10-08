@@ -111,8 +111,8 @@ private slots:
         auto original=vgsdec::Capture::openFile(source.toStdString());
         const auto guardedOutput=dir.filePath("existing.vgs");QFile guardedFile(guardedOutput);QVERIFY(guardedFile.open(QIODevice::WriteOnly));guardedFile.write("existing");guardedFile.close();
         QVERIFY_EXCEPTION_THROWN(exportCaptureFile(project,guardedOutput),std::runtime_error);QVERIFY(guardedFile.open(QIODevice::ReadOnly));QCOMPARE(guardedFile.readAll(),QByteArray("existing"));guardedFile.close();
-        // Attribute bake correctness remains covered independently while compact
-        // animated export is developed; the writer must not expand implicitly.
+        // Non-uniform animated scale cannot be stored as motion, so the export above is
+        // refused; the reference bake it would be compared with is still checked here.
         for (int frame=2;frame<5;++frame) {const auto input=copy(original.setTime(frame/25.,true));const auto expected=bakeExportFrame(input,project,3,{},25);QVERIFY(expected.count>0);}
         animation.animation.keys={animation.animation.keys.back()};project.modifiers[0]=animation;
         for (const auto &extension:{QString("vgs"),QString("pgs"),QString("mint")}) {
@@ -129,6 +129,76 @@ private slots:
                 }
             }
         }
+    }
+    void animatedMotionIsStoredAsSamples() {
+        QTemporaryDir dir;const auto source=dir.filePath("source.pgs");sourceFile(source,5);
+        Project project;project.asset=source;project.in=.08;project.out=.16;project.transform.position={1,2,3};project.transform.rotation={0,20,0};project.modifiers.clear();
+        Modifier animation;animation.id=Project::newId();animation.name="Walk";animation.type=ModifierType::AnimateTransform;
+        Transform end;end.position={2,0,1};end.rotation={10,90,30};end.scale={1.5f,1.5f,1.5f};animation.animation.setKey(0,{});animation.animation.setKey(4,end);project.modifiers.append(animation);
+        QVERIFY(project.hasAnimatedMotion());
+        auto original=vgsdec::Capture::openFile(source.toStdString());
+        Project still=project;still.modifiers.clear();const auto staticPath=dir.filePath("static.vgs");exportCaptureFile(still,staticPath);
+        auto compare=[&](vgsdec::Capture &capture,const Project &reference,double tolerance) {
+            for (int sample=0;sample<3;++sample) {
+                const auto input=copy(original.setTime((sample+2)/25.,true));const auto expected=bakeExportFrame(input,reference,3,{},25);
+                const auto actual=copy(capture.setTime(sample/25.,true));QCOMPARE(actual.count,expected.count);
+                for (size_t row=0;row<actual.count;++row) {
+                    for (int c=0;c<3;++c) QVERIFY2(std::abs(actual.position[row*3+c]-expected.position[row*3+c])<tolerance,qPrintable(QString("sample %1 row %2").arg(sample).arg(row)));
+                    QVERIFY((covariance(actual.rotation.data()+row*4,actual.scale.data()+row*3)-covariance(expected.rotation.data()+row*4,expected.scale.data()+row*3)).norm()<.002);
+                    for (int c=0;c<3;++c) QVERIFY(std::abs(actual.colorDc[row*3+c]-expected.colorDc[row*3+c])<.003);
+                    for (int c=0;c<45;++c) QVERIFY(std::abs(actual.shRest[row*45+c]-expected.shRest[row*45+c])<.003);
+                }
+                // The box a player culls with holds every splat that is alive.
+                const auto &box=capture.chunk(capture.chunkAt(sample/25.)).bounds;
+                for (size_t row=0;row<actual.count;++row) if (actual.active[row]) for (int c=0;c<3;++c)
+                    QVERIFY(actual.position[row*3+c]>=box[c]-1e-5f && actual.position[row*3+c]<=box[c+3]+1e-5f);
+            }
+        };
+        for (const auto &extension:{QString("vgs"),QString("pgs")}) {
+            project.captureSettings.plain=extension=="pgs";const auto path=dir.filePath("moving."+extension);const auto result=exportCaptureFile(project,path);QCOMPARE(result.frames,3);
+            auto capture=vgsdec::Capture::openFile(path.toStdString());QVERIFY(capture.hasMotion());
+            compare(capture,project,1e-4);
+            // The first exported frame is what is baked, so the motion starts at the identity.
+            capture.setTime(0,false);const auto start=capture.motionAt(0);
+            QVERIFY(std::abs(start.translation[0])+std::abs(start.translation[1])+std::abs(start.translation[2])<1e-5);
+            QVERIFY(std::abs(std::abs(start.rotation[3])-1)<1e-6 && std::abs(start.scale-1)<1e-6);
+            // Positions alone are moved the same way setTime moves them.
+            uint64_t count=0;const float *positions=capture.positionsAt(1/25.,&count);const auto frame=copy(capture.setTime(1/25.,false));
+            QCOMPARE(count,frame.count);for (size_t i=0;i<count*3;++i) QCOMPARE(positions[i],frame.position[i]);
+            if (extension=="vgs") QVERIFY(QFileInfo(path).size()<QFileInfo(staticPath).size()+4096);
+        }
+        // A moving .vgs edited again keeps its motion, composed with the new transform once.
+        Project again;again.asset=dir.filePath("moving.vgs");again.in=0;again.out=2./25;again.modifiers.clear();again.transform.position={0,.5f,0};
+        const auto twice=dir.filePath("twice.vgs");exportCaptureFile(again,twice);
+        auto first=vgsdec::Capture::openFile(again.asset.toStdString()),second=vgsdec::Capture::openFile(twice.toStdString());QVERIFY(second.hasMotion());
+        for (int sample=0;sample<3;++sample) {
+            const auto a=copy(first.setTime(sample/25.,true)),b=copy(second.setTime(sample/25.,true));QCOMPARE(b.count,a.count);
+            for (size_t row=0;row<a.count;++row) for (int c=0;c<3;++c) QVERIFY(std::abs(b.position[row*3+c]-(a.position[row*3+c]+(c==1 ? .5f : 0.f)))<1e-4f);
+        }
+        // MINT has nowhere to put motion: refused, and the destination is left alone.
+        QVERIFY_EXCEPTION_THROWN(exportCaptureFile(project,dir.filePath("moving.mint")),std::runtime_error);
+        QVERIFY_EXCEPTION_THROWN(exportCaptureFile(again,dir.filePath("again.mint")),std::runtime_error);
+        QVERIFY(!QFileInfo::exists(dir.filePath("moving.mint")));
+    }
+    void walkMarksTheHeaderAndLeavesTheDataInPlace() {
+        QTemporaryDir dir;const auto source=dir.filePath("source.pgs");sourceFile(source,5);
+        Project project;project.asset=source;project.in=.08;project.out=.16;project.modifiers.clear();
+        Modifier walk;walk.id=Project::newId();walk.name="Walk";walk.type=ModifierType::Walk;walk.walkSpeed=1.5;walk.walkKmh=true;project.modifiers.append(walk);project.selectedModifier=walk.id;project.time=project.in;
+        QCOMPARE(project.walkSpeed(),1.5);QCOMPARE(project.walkDistance(.08+2),3.);
+        Project restored;QString error;QVERIFY2(Project::fromJson(project.json(dir.filePath("scene.vgsproj")),dir.path(),&restored,&error),qPrintable(error));
+        QCOMPARE(restored.modifiers.size(),1);QCOMPARE(restored.modifiers[0].type,ModifierType::Walk);QCOMPARE(restored.modifiers[0].walkSpeed,1.5);QVERIFY(restored.modifiers[0].walkKmh);
+        Project still=project;still.modifiers.clear();
+        const auto walking=dir.filePath("walking.vgs"),inPlace=dir.filePath("in-place.vgs");exportCaptureFile(project,walking);exportCaptureFile(still,inPlace);
+        auto a=vgsdec::Capture::openFile(walking.toStdString()),b=vgsdec::Capture::openFile(inPlace.toStdString());
+        QCOMPARE(a.motionType(),vgsdec::MotionType::Walking);QCOMPARE(a.movingSpeed(),1.5f);QVERIFY(!a.hasMotion());
+        QCOMPARE(b.motionType(),vgsdec::MotionType::InPlace);QCOMPARE(b.movingSpeed(),0.f);
+        for (int sample=0;sample<3;++sample) {
+            const auto x=copy(a.setTime(sample/25.,true)),y=copy(b.setTime(sample/25.,true));QCOMPARE(x.count,y.count);
+            for (size_t i=0;i<x.position.size();++i) QCOMPARE(x.position[i],y.position[i]);
+        }
+        // MINT has nowhere to say it: exported, and the loss is reported.
+        const auto mint=exportCaptureFile(project,dir.filePath("walking.mint"));
+        QVERIFY(std::any_of(mint.notes.begin(),mint.notes.end(),[](const QString &n) {return n.contains("Walk");}));
     }
     void isolationMatchesNativeSampledAndWorkerPreview() {
         QTemporaryDir dir;const auto source=dir.filePath("cloud.pgs");vgs::Frame cloud;cloud.count=26;cloud.active.assign(26,1);cloud.opacity.assign(26,1);

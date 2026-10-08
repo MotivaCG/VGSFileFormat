@@ -139,6 +139,15 @@ private slots:
         QTest::keyClick(&viewport,Qt::Key_6,Qt::KeypadModifier); QCOMPARE(viewport.camera().preset,ViewPreset::Free); QVERIFY(!viewport.camera().orthographic);
         QVERIFY(!viewport.handleViewKey(Qt::Key_1,Qt::NoModifier));
     }
+    void walkingSlidesTheFloorInASeamlessLoop() {
+        Viewport viewport; viewport.resize(600,500); viewport.show(); QVERIFY(QTest::qWaitForWindowExposed(&viewport));
+        auto grab = [&](bool walking, double distance) { viewport.setFloorScroll(walking, distance); return viewport.grabFramebuffer(); };
+        const auto still = grab(false, 0), start = grab(true, 0);
+        QVERIFY(start != still); // the quarter-metre grid appears
+        QCOMPARE(grab(true, 5), start); // one major period later the floor looks the same
+        QVERIFY(grab(true, 1.3) != start);
+        QCOMPARE(grab(false, 2), still); // and it goes away again
+    }
     void backgroundToggleIsDisplayOnly() {
         Viewport viewport; viewport.resize(600,500); viewport.show(); QVERIFY(QTest::qWaitForWindowExposed(&viewport));
         auto *cube = viewport.findChild<ViewCube *>(); QVERIFY(cube); QVERIFY(!viewport.lightBackground());

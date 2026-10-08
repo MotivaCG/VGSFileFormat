@@ -199,6 +199,9 @@ bool Project::fromJson(const QJsonObject &root,const QString &baseDirectory,Proj
             } else if (item["type"]=="purge-isolated") {
                 m.type=ModifierType::PurgeIsolated;
                 if (item.contains("isolation")) {const auto p=item["isolation"].toObject();const double n=number(p,"neighbour",1,256);valid &= n==std::floor(n);m.isolation.neighbour=int(n);m.isolation.medianPercent=number(p,"medianPercent",0,1000000);}
+            } else if (item["type"]=="walk") {
+                m.type=ModifierType::Walk;const auto w=item["walk"].toObject();valid &= w["axis"]=="+z";m.walkSpeed=number(w,"speed",0,100);
+                valid &= !w.contains("display") || w["display"]=="m/s" || w["display"]=="km/h";m.walkKmh=w["display"]=="km/h";
             } else return fail();
             p.modifiers.append(m);
         }

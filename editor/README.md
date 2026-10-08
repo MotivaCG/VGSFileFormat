@@ -168,11 +168,21 @@ remove more. Each frame is evaluated independently; small populations with at mo
 N points and a zero median are preserved. Preview processing runs in the decode
 worker, so camera navigation does not rebuild the KD-tree. VGS/PGS/MINT export uses
 the same rule, retaining temporal blocks when the capture transform is constant.
-Varying animated-transform export is temporarily blocked: the previous fallback
-expanded the capture into complete per-frame blocks and could multiply file size.
-Preview/keyframe editing still work, and constant offsets retain existing export
-behaviour. See docs/ANIMATED_EXPORT.md for the compact representation and legacy
-compatibility decision. No oversized animated file is silently produced.
+An animated transform (moving, rotating, uniform scale) exports to VGS/PGS as the
+native temporal blocks plus the capture's motion stored as samples, so the file is
+the size of a static export. Readers apply the motion; readers built before it refuse
+the file rather than play it in place. Non-uniform animated scale or shear is refused
+with a message, and so is MINT output, which cannot store motion. A moving .vgs keeps
+its motion when edited again. See docs/ANIMATED_EXPORT.md.
+
+**Walk** previews a capture walking on a treadmill: the capture stays where it is and
+the floor slides back under it at the set speed (m/s), with a quarter-metre grid added
+and its edge faded out. At the right speed a planted foot stays on the grid, which is
+how to set it. The axes stay fixed; time is counted from the start of the export range. It is
+not baked: VGS/PGS exports keep the capture in place and write `motionType = walking`
+and `movingSpeed` to the header, for players to carry it along +Z (rotate the capture to
+choose the direction). Several active Walk modifiers add up. MINT has no such field and
+reports that the walk is not stored.
 
 Projects and editor presets preserve the flat stack, activation and selected row.
 Older projects/presets migrate their one crop to one crop modifier without changing

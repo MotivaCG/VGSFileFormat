@@ -232,6 +232,30 @@ VGS_DECODER_API int vgs_set_time(vgs_capture *h, double seconds, int include_sh,
 
 VGS_DECODER_API double vgs_time(const vgs_capture *h) { return self(h)->capture.time(); }
 
+VGS_DECODER_API int vgs_has_motion(const vgs_capture *h) { return self(h)->capture.hasMotion() ? 1 : 0; }
+
+VGS_DECODER_API int vgs_motion_at(const vgs_capture *h, double seconds, vgs_motion *out) {
+  if (!out)
+    return VGS_DEC_ERROR;
+  lastError.clear();
+  try {
+    const vgsdec::Motion m = self(h)->capture.motionAt(seconds);
+    for (int k = 0; k < 3; ++k)
+      out->translation[k] = m.translation[k];
+    for (int k = 0; k < 4; ++k)
+      out->rotation[k] = m.rotation[k];
+    out->scale = m.scale;
+    for (int k = 0; k < 16; ++k)
+      out->matrix[k] = m.matrix[k];
+    return VGS_DEC_OK;
+  } catch (const std::exception &e) {
+    lastError = e.what();
+  } catch (...) {
+    lastError = "unknown failure";
+  }
+  return VGS_DEC_ERROR;
+}
+
 VGS_DECODER_API int vgs_current_frame(const vgs_capture *h, vgs_frame *out) {
   if (!out)
     return VGS_DEC_ERROR;

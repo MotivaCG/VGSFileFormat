@@ -41,7 +41,7 @@ struct CropVolume {
     bool contains(const QVector3D &worldPosition) const;
 };
 Q_DECLARE_METATYPE(CropVolume)
-enum class ModifierType { Crop, RemoveGreen, AnimateTransform, PurgeIsolated };
+enum class ModifierType { Crop, RemoveGreen, AnimateTransform, PurgeIsolated, Walk };
 struct GreenFilter {
     float minimumSaturation = 0.5f, hueTolerance = 45; // HSV: saturation 0..1, circular distance from 120 degrees.
     bool linearRgb = true; // Convert clamped sRGB base colour to linear RGB before HSV.
@@ -67,6 +67,11 @@ struct Modifier {
     GreenFilter green;
     TransformAnimation animation;
     IsolationFilter isolation;
+    // Walk: metres per second along +Z of the exported capture. Preview only; export
+    // writes it to the header as a walking capture instead of moving the data.
+    double walkSpeed = 1;
+    // Whether the Walk speed is shown in km/h. Display only: walkSpeed stays in m/s.
+    bool walkKmh = false;
     bool active() const { return enabled && (type!=ModifierType::Crop || crop.enabled); }
 };
 struct Project {
@@ -86,6 +91,10 @@ struct Project {
     void setAnimatedPose(int frame,const Transform &pose);
     bool hasAnimation() const;
     bool hasAnimatedMotion() const;
+    // The summed speed of the active Walk modifiers, and how far the capture has walked
+    // at a time along +Z, from the start of the export range.
+    double walkSpeed() const;
+    double walkDistance(double seconds) const;
     static QString newId();
     CaptureSettings captureSettings;
     double time = 0, in = 0, out = 0, speed = 1;

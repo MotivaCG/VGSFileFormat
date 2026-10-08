@@ -341,6 +341,28 @@ struct PageInfo {
   bool usedByPositions = false;
 };
 
+/**
+ * How the whole capture moves at an instant: world = translation + scale * rotate(local).
+ *
+ * A capture can carry motion - a performer walking across a set, say - as one rigid
+ * motion with uniform scale per sample, rather than baked into every splat. In Floats
+ * mode there is nothing to do: setTime and positionsAt return positions, rotations and
+ * scales already moved, and spherical harmonics already rotated. In Packed mode the
+ * buffers hold the capture in its own space, and a shader applies `matrix` as a model
+ * matrix, multiplies each splat's rotation by `rotation` and its scale by `scale`, and
+ * evaluates the harmonics with the view direction rotated back by the inverse rotation.
+ *
+ * A capture without motion reports the identity at every instant.
+ */
+struct Motion {
+  double translation[3] = {0, 0, 0};
+  /** A unit quaternion, xyzw. */
+  double rotation[4] = {0, 0, 0, 1};
+  double scale = 1;
+  /** The same transform as a 4x4 column-major matrix, ready to use as a model matrix. */
+  float matrix[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+};
+
 /** Where a time falls between a chunk's samples: everything a frame needs in Packed mode. */
 struct Instant {
   size_t chunkIndex = 0;
@@ -510,6 +532,20 @@ public:
    * work in Packed mode.
    */
   Instant instantAt(double seconds) const;
+
+  /**
+   * Whether the capture moves as a whole; see Motion. Known as soon as it is open.
+   */
+  bool hasMotion() const;
+
+  /**
+   * The capture's motion at `seconds`, interpolated between the same two samples and with
+   * the same fraction instantAt reports, so it never drifts from the rest of a Packed
+   * frame. The chunk must be held, in either mode - after setTime, positionsAt or a
+   * prepare() that returned true - since its samples travel with it; throws otherwise.
+   * The identity for a capture without motion, without needing anything decoded.
+   */
+  Motion motionAt(double seconds) const;
 
   // ---- playback --------------------------------------------------------------------
 

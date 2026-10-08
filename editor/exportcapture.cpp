@@ -293,6 +293,48 @@ vgs::Frame copyFrame(const vgsdec::Frame &f) {
     out.scale.assign(f.scales,f.scales+3*n);out.opacity.assign(f.opacities,f.opacities+n);out.colorDc.assign(f.colors,f.colors+3*n);out.active.assign(f.active,f.active+n);
     if (f.sphericalHarmonics) out.shRest.assign(f.sphericalHarmonics,f.sphericalHarmonics+n*f.shCoefficients*3);return out;
 }
+// ---- motion ------------------------------------------------------------------------
+//
+// A capture that moves as a whole is exported as the data with one fixed transform baked
+// in, plus a rigid motion with uniform scale per sample that readers apply on top. These
+// convert between that motion and the editor's matrices.
+
+// The chunk's motion samples, removed from it: everything downstream edits the capture
+// in its own space and the motion is written again afterwards.
+std::vector<vgs::Motion> takeMotionSamples(vgs::DecodedChunk &chunk) {
+    std::vector<vgs::DecodedPage> pages;
+    for (auto it=chunk.pages.begin();it!=chunk.pages.end();)
+        if (it->descriptor.attribute==vgs::MotionSamples) {pages.push_back(std::move(*it));it=chunk.pages.erase(it);} else ++it;
+    if (pages.empty()) return {};
+    std::sort(pages.begin(),pages.end(),[](const auto &a,const auto &b) {return a.descriptor.firstRow<b.descriptor.firstRow;});
+    vgs::Bytes bytes;for (const auto &page:pages) bytes.insert(bytes.end(),page.bytes.begin(),page.bytes.end());
+    return vgs::unpackMotionSamples(bytes.data(),bytes.size(),chunk.groups.front().intervals+1);
+}
+QMatrix4x4 motionMatrix(const vgs::Motion &motion) {
+    double rows[12];motion.matrix(rows);QMatrix4x4 result;
+    for (int row=0;row<3;++row) for (int col=0;col<4;++col) result(row,col)=float(rows[row*4+col]);return result;
+}
+// A rotation and a uniform scale, or a clear refusal: anything else (non-uniform scale,
+// shear, a mirror) changes the shape of the splats and cannot be carried as motion.
+vgs::Motion similarityFrom(const QMatrix4x4 &m,int frame) {
+    Matrix linear;for (int i=0;i<3;++i) for (int j=0;j<3;++j) linear(i,j)=m(i,j);
+    const double determinant=linear.determinant();
+    if (!(determinant>0) || !std::isfinite(determinant))
+        throw std::runtime_error(QStringLiteral("The animated transform at frame %1 mirrors or collapses the capture, which cannot be exported as motion.").arg(frame).toStdString());
+    const double scale=std::cbrt(determinant);const Matrix rotation=linear/scale;
+    if (!(rotation.transpose()*rotation).isApprox(Matrix::Identity(),1e-4))
+        throw std::runtime_error(QStringLiteral("The animated transform at frame %1 changes scale unevenly or shears. Motion export supports moving, rotating and uniform scaling; keep the animated scale equal on all three axes.").arg(frame).toStdString());
+    Eigen::Quaterniond q(rotation);q.normalize();
+    vgs::Motion result;result.translation[0]=m(0,3);result.translation[1]=m(1,3);result.translation[2]=m(2,3);
+    result.rotation[0]=q.x();result.rotation[1]=q.y();result.rotation[2]=q.z();result.rotation[3]=q.w();result.scale=scale;
+    return result;
+}
+vgs::DecodedPage motionPage(const std::vector<vgs::Motion> &samples) {
+    vgs::DecodedPage page;page.descriptor.attribute=vgs::MotionSamples;page.descriptor.group=0;page.descriptor.layer=0;
+    page.descriptor.spec=vgs::motionSamplesSpec(samples.size());page.descriptor.totalRows=page.descriptor.spec.rows;
+    page.bytes=vgs::packMotionSamples(samples);page.descriptor.decodedSize=page.bytes.size();return page;
+}
+
 vgs::Frame copyFrame(const MintFrame &f) {
     vgs::Frame out;out.count=f.count;out.seconds=f.seconds;out.shCoefficients=f.shRest.isEmpty() ? 0 : 15;
     auto copy=[](const auto &v,auto &dest) {dest.assign(v.begin(),v.end());};
@@ -316,8 +358,8 @@ vgs::Frame bakeExportFrame(const vgs::Frame &frame,const Project &project,int de
 
 ExportResult exportCaptureFile(const Project &inputProject,const QString &destination,const ExportProgress &progress) {
     Project project=inputProject;const bool animated=project.hasAnimatedMotion();if (!animated) project.transform=inputProject.transformAtFrame(0);
-    if (animated) throw std::runtime_error("Animated export is temporarily blocked: the current writer expands the capture into one full block per frame and can multiply its size. Static/constant offsets still use native temporal export. A compact animated representation requires updated decoder support or a compatible temporal bake.");
     const bool mintOutput=QFileInfo(destination).suffix().compare("mint",Qt::CaseInsensitive)==0;
+    if (animated && mintOutput) throw std::runtime_error("MINT cannot store an animated transform. Export to .vgs or .pgs, which carry it as motion samples, or remove the animation.");
     QString error;if (!project.captureSettings.validate(&error)) throw std::runtime_error(error.toStdString());
     if (QFileInfo(project.asset).absoluteFilePath().compare(QFileInfo(destination).absoluteFilePath(),Qt::CaseInsensitive)==0)
         throw std::runtime_error("Choose a destination different from the source capture.");
@@ -325,7 +367,7 @@ ExportResult exportCaptureFile(const Project &inputProject,const QString &destin
     std::unique_ptr<MintFile> mint;std::unique_ptr<FileSource> source;std::unique_ptr<vgsdec::Capture> capture;
     ExportResult result;
     double rate,duration;int sourceDegree=3;vgs::Header header,sourceHeader;vgs::EncodeOptions options;
-    std::unique_ptr<vgs::MintLogicalSource> nativeMint;bool native=!animated && supportsNativeTransform(project);
+    std::unique_ptr<vgs::MintLogicalSource> nativeMint;bool native=supportsNativeTransform(project);
     if (QFileInfo(project.asset).suffix().compare("mint",Qt::CaseInsensitive)==0) {
         mint=std::make_unique<MintFile>();if (!mint->open(project.asset,&error)) throw std::runtime_error(error.toStdString());
         if (!mint->frameRateProblem().isEmpty()) {native=false;result.notes << QStringLiteral("The source uses varying sample rates and is resampled at the timeline frame rate.");}
@@ -338,6 +380,7 @@ ExportResult exportCaptureFile(const Project &inputProject,const QString &destin
         vgs::Bytes structural(size_t(vgs::structuralSize(prefix.data(),prefix.size())));
         if (!source->read(0,structural.size(),structural.data())) throw std::runtime_error("Cannot read source structure.");
         const auto original=vgs::readHeader(structural.data(),structural.size());header.timeNumerator=original.timeNumerator;header.timeDenominator=original.timeDenominator;
+        if (mintOutput && vgs::declaresMotion(original)) throw std::runtime_error("This capture moves as a whole, and MINT cannot store that motion. Export to .vgs or .pgs instead.");
         header.motionType=original.motionType;header.movingSpeed=original.movingSpeed;sourceHeader=original;
         for (const auto &extra : original.extras) {
             if (extra.type==vgs::ThumbnailExtra || extra.type==vgs::AudioExtra) continue;
@@ -352,6 +395,18 @@ ExportResult exportCaptureFile(const Project &inputProject,const QString &destin
     const int first=std::clamp(int(std::round(project.in*rate)),0,available-1),last=std::clamp(int(std::round(project.out*rate)),first,available-1);
     result.frames=last-first+1;
     const int degree=project.captureSettings.shDegree<0 ? sourceDegree : project.captureSettings.shDegree;
+    // A capture that moves - animated here, or already moving in a .vgs source - keeps its
+    // native blocks and stores the motion as samples beside them. The transform at the first
+    // exported frame is baked into the data; every sample stores the rest of the way to the
+    // world, which must be a rotation with uniform scale.
+    const bool sourceMoves=!mint && vgs::declaresMotion(sourceHeader);
+    const bool moving=animated || (native && sourceMoves);
+    if (animated) {
+        project.transform=inputProject.transformAtFrame(first);
+        native=supportsNativeTransform(project) && (!mint || mint->frameRateProblem().isEmpty());
+        if (!native) throw std::runtime_error("Animated export needs a transform without non-uniform scale or shear at the first exported frame, and a source with a constant frame rate.");
+    }
+    const QMatrix4x4 unbake=project.transform.matrix().inverted();
     if (native && mint) {
         const auto &bytes=mint->bytes();report(progress,0,QStringLiteral("Reading native temporal dictionaries"));nativeMint=std::make_unique<vgs::MintLogicalSource>(reinterpret_cast<const uint8_t *>(bytes.constData()),size_t(bytes.size()),degree);
         sourceHeader=nativeMint->header();header.timeNumerator=sourceHeader.timeNumerator;header.timeDenominator=sourceHeader.timeDenominator;
@@ -364,6 +419,9 @@ ExportResult exportCaptureFile(const Project &inputProject,const QString &destin
     options.shDegree=degree;options.signer=vgs::authoringSigner();options.compression=project.captureSettings.plain ? vgs::Compression::None : vgs::Compression::Auto;
     options.playbackMode=project.captureSettings.playbackMode<0 ? (capture ? vgs::PlaybackMode(capture->playbackMode()) : vgs::PlaybackMode::Loop) : vgs::PlaybackMode(project.captureSettings.playbackMode);
     options.motionType=header.motionType;options.movingSpeed=header.movingSpeed;
+    // A Walk modifier is not baked: the capture stays where it is and the header tells
+    // players it walks, at this speed along +Z, for them to carry it.
+    if (project.walkSpeed()>0) {options.motionType=vgs::MotionType::Walking;options.movingSpeed=float(project.walkSpeed());}
     const auto &s=project.captureSettings;auto utf=[](const QString &v) {return v.toUtf8().toStdString();};
     auto &m=options.metadata;m.id=utf(s.catalogueId);m.title=utf(s.title);m.author=utf(s.author);m.projectName=utf(s.projectName);m.takeName=utf(s.takeName);
     m.captureStudio=utf(s.studio);m.copyright=utf(s.copyright);m.softwareName=utf(s.softwareName);m.softwareVersion=utf(s.softwareVersion);
@@ -388,6 +446,18 @@ ExportResult exportCaptureFile(const Project &inputProject,const QString &destin
                 chunk=assembleNativeChunk(vgs::decodeChunk(sourceHeader,plan.sourceIndex,bytes.data(),bytes.size()));
                 setNativeShDegree(chunk,sourceDegree,degree);
             }
+            // The world at every sample: the editor's transform over whatever motion the
+            // source already had. What is baked is taken back out, and the rest is stored.
+            const auto sourceMotion=takeMotionSamples(chunk);
+            std::vector<QMatrix4x4> models;std::vector<vgs::Motion> samples;
+            if (moving) {
+                const int start=int(sourceHeader.chunks[plan.sourceIndex].startTick)+plan.first;
+                for (int sample=0;sample<=plan.intervals;++sample) {
+                    QMatrix4x4 world=inputProject.transformAtFrame(start+sample).matrix();
+                    if (!sourceMotion.empty()) world=world*motionMatrix(sourceMotion[size_t(plan.first+sample)]);
+                    models.push_back(world);samples.push_back(similarityFrom(world*unbake,start+sample));
+                }
+            }
             std::optional<vgs::DecodedChunk> classification;
             if (s.despill && !CompiledModifiers(project).greens.isEmpty()) classification=chunk;
             if (s.despill) {
@@ -396,7 +466,9 @@ ExportResult exportCaptureFile(const Project &inputProject,const QString &destin
                 report(progress,currentPercent,QStringLiteral("Processing native colour dictionaries"));
                 if (!MintFile::despillLogical(&chunk,1/rate,processing,innerProgress,&error)) throw std::runtime_error(error.toStdString());
             }
-            return editNativeChunk(std::move(chunk),plan,project,writing ? nullptr : &result,innerProgress,classification ? &*classification : nullptr);
+            auto edited=editNativeChunk(std::move(chunk),plan,project,writing ? nullptr : &result,innerProgress,classification ? &*classification : nullptr,moving ? &models : nullptr);
+            if (moving) edited.pages.push_back(motionPage(samples));
+            return edited;
         }
         const double seconds=std::min(double(first+int(index))/rate,duration-1e-7);vgs::Frame frame;
         if (mint) {MintFrame decoded;if (!mint->decode(seconds,&decoded,true,&error)) throw std::runtime_error(error.toStdString());frame=copyFrame(decoded);}
@@ -416,6 +488,7 @@ ExportResult exportCaptureFile(const Project &inputProject,const QString &destin
     if (mintOutput) {
         MintFile verified;if (!verified.open(temporary.fileName(),&error)) throw std::runtime_error(error.toStdString());
         for (int i=0;i<result.frames;++i) {report(progress,85+10*i/result.frames,QStringLiteral("Verifying MINT frame %1 / %2").arg(i+1).arg(result.frames));MintFrame frame;if (!verified.decode(i/rate,&frame,true,&error)) throw std::runtime_error(error.toStdString());}
+        if (project.walkSpeed()>0) result.notes << QStringLiteral("MINT has no walking flag: the Walk modifier is not stored.");
         result.notes << QStringLiteral("MINT format 6: capture metadata, audio, thumbnail and playback hints are omitted. Lower SH degrees are zero-padded to the MINT degree-3 layout.");
     } else {
         FileSource verifySource(temporary.fileName());auto verified=vgsdec::Capture::openStream(verifySource);verified.setCachePolicy({0,0,64ull*1024*1024});
@@ -430,7 +503,7 @@ ExportResult exportCaptureFile(const Project &inputProject,const QString &destin
     result.notes << (native ? QStringLiteral("Native temporal blocks are retained; unused Gaussian records and dictionary entries are removed.")
                           : QStringLiteral("Native-frame sampling; frames are held between samples. Attributes are requantized to the existing VGS dictionaries."));
     if (!native) result.notes << QStringLiteral("Nonuniform scale/shear and variable-rate sources currently use sampled export, which can produce larger files.");
-    if (animated) result.notes << QStringLiteral("Animated transform offsets are baked at each source frame, including covariance and SH. Animated exports currently use frame sampling and can be larger than native temporal exports.");
+    if (moving) result.notes << QStringLiteral("The capture moves as a whole: its motion is stored as samples beside the native blocks, so the file stays the size of a static export. Readers built before motion samples refuse it rather than play it in place; MINT cannot store it.");
     const Matrix a=linear(project.transform.matrix()),metric=a.transpose()*a;
     if (!metric.isApprox(Matrix::Identity()*metric.trace()/3,1e-5)) result.notes << QStringLiteral("SH under nonuniform scale or shear is projected to the selected SH degree.");
     if (capture && (capture->hasAudio() || capture->hasThumbnail())) result.notes << QStringLiteral("Source audio and thumbnail are omitted because timeline and framing may have changed.");

@@ -53,6 +53,15 @@ Besides its metadata, a capture says how its author means it to play:
 that way unless your user chooses otherwise. `motionType()` and `movingSpeed()` are
 reserved for later and read `InPlace` and 0 for now.
 
+A capture can also move as a whole - `hasMotion()` says so. Frames from `setTime` and
+`positionsAt` are already moved, spherical harmonics included, so a player that draws
+them needs nothing more. In `Output::Packed` the buffers hold the capture in its own
+space: `motionAt(seconds)` gives the motion at an instant, interpolated exactly as
+`instantAt` places it, with a column-major `matrix` to use as the model matrix; multiply
+splat rotations by its `rotation`, scales by its `scale`, and evaluate the harmonics with
+the view direction rotated back. A decoder older than motion refuses such a capture
+rather than play it in place. The C API has `vgs_has_motion` and `vgs_motion_at`.
+
 `setTime` gives plain arrays - positions, rotations, scales, opacities, colours, spherical
 harmonics - all indexed the same way, so element `i` of each describes the same splat. The
 pointers belong to the capture and are replaced by the next `setTime`.

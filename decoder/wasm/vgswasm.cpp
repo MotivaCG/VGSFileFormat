@@ -278,7 +278,8 @@ enum Number {
   NumberIsPlain,
   NumberPlaybackMode,
   NumberMotionType,
-  NumberMovingSpeed
+  NumberMovingSpeed,
+  NumberHasMotion
 };
 
 EMSCRIPTEN_KEEPALIVE double vgs_number(int which) {
@@ -302,6 +303,7 @@ EMSCRIPTEN_KEEPALIVE double vgs_number(int which) {
   case NumberPlaybackMode: return double(int(capture->playbackMode()));
   case NumberMotionType: return double(int(capture->motionType()));
   case NumberMovingSpeed: return double(capture->movingSpeed());
+  case NumberHasMotion: return capture->hasMotion() ? 1 : 0;
   default: return 0;
   }
 }
@@ -539,6 +541,7 @@ constexpr int GroupStride = 14;
 constexpr int BufferStride = 10;
 std::vector<double> layout;
 double instant[4] = {};
+double motion[24] = {};
 } // namespace
 
 /** Floats (0) or packed (1). Changing it drops what is decoded, which was built for the
@@ -624,6 +627,31 @@ EMSCRIPTEN_KEEPALIVE const double *vgs_instant(double seconds) {
     instant[3] = at.alpha;
     error.clear();
     return instant;
+  } catch (const std::exception &e) {
+    fail(e);
+    return nullptr;
+  }
+}
+
+/**
+ * The capture's motion at `seconds`: 24 doubles, translation xyz, rotation xyzw, scale,
+ * then the same as a column-major 4x4 matrix. The identity for a capture that does not
+ * move. The chunk must be held, as after vgs_set_time, vgs_positions_at or vgs_prepare.
+ */
+EMSCRIPTEN_KEEPALIVE const double *vgs_motion_at(double seconds) {
+  try {
+    if (!capture)
+      throw vgsdec::Error("no capture open");
+    const vgsdec::Motion m = capture->motionAt(seconds);
+    for (int k = 0; k < 3; ++k)
+      motion[k] = m.translation[k];
+    for (int k = 0; k < 4; ++k)
+      motion[3 + k] = m.rotation[k];
+    motion[7] = m.scale;
+    for (int k = 0; k < 16; ++k)
+      motion[8 + k] = m.matrix[k];
+    error.clear();
+    return motion;
   } catch (const std::exception &e) {
     fail(e);
     return nullptr;

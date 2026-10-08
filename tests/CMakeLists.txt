@@ -26,6 +26,12 @@ target_link_libraries(vgs_entropy PRIVATE ${VGS_DECODER_LINK})
 vgs_apply_settings(vgs_entropy)
 add_test(NAME entropy_search COMMAND vgs_entropy)
 
+add_executable(vgs_motion motion.cpp)
+target_include_directories(vgs_motion PRIVATE ${VGS_CORE_INCLUDE_DIRS})
+target_link_libraries(vgs_motion PRIVATE ${VGS_DECODER_LINK})
+vgs_apply_settings(vgs_motion)
+add_test(NAME motion_arithmetic COMMAND vgs_motion)
+
 add_executable(vgs_keyleak keyleak.cpp)
 target_include_directories(vgs_keyleak PRIVATE ${VGS_CORE_INCLUDE_DIRS})
 vgs_apply_settings(vgs_keyleak)

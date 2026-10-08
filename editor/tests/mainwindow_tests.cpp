@@ -24,6 +24,7 @@
 #include <QCheckBox>
 #include <QTableWidget>
 #include <QLabel>
+#include <QFormLayout>
 #include <QSlider>
 #include <QtTest>
 
@@ -63,6 +64,23 @@ private slots:
         QCOMPARE(modifiers->topLevelItem(0)->text(0),QString("Crop"));QCOMPARE(modifiers->topLevelItemCount(),2);QCOMPARE(modifiers->currentItem()->text(1),QString("Crop cylinder"));QCOMPARE(modifiers->currentItem()->text(0),QString("Crop 2"));
         auto *shape=window.findChild<QComboBox *>("cropShape");QVERIFY(shape);shape->setCurrentIndex(shape->findData(int(CropShape::Box)));
         QVERIFY(QMetaObject::invokeMethod(shape,"activated",Qt::DirectConnection,Q_ARG(int,shape->currentIndex())));QCOMPARE(modifiers->currentItem()->text(1),QString("Crop box"));
+        {   // Modifier parameters scrub from their labels too: the box crop's Width.
+            QLabel *widthLabel=nullptr;for (auto *label:window.findChildren<QLabel *>()) if (label->text()=="Width" && label->isVisible()) widthLabel=label;
+            QVERIFY(widthLabel);QCOMPARE(widthLabel->cursor().shape(),Qt::SizeHorCursor);
+            auto *form=qobject_cast<QFormLayout *>(widthLabel->parentWidget()->layout());QVERIFY(form);
+            auto *width=qobject_cast<QDoubleSpinBox *>(form->itemAt(form->indexOf(widthLabel)+1)->widget());QVERIFY(width);
+            const double before=width->value();const QPoint start=widthLabel->rect().center();
+            QTest::mousePress(widthLabel,Qt::LeftButton,{},start);QTest::mouseMove(widthLabel,start+QPoint(20,0));QTest::mouseRelease(widthLabel,Qt::LeftButton,{},start+QPoint(20,0));
+            QVERIFY(std::abs(width->value()-(before+0.1))<1e-6);
+            width->setValue(before);
+        }
+        {   // Walk shows its speed in m/s or km/h; the value it keeps does not change.
+            newType->setCurrentIndex(newType->findData(5));add->click();
+            auto *speed=window.findChild<QDoubleSpinBox *>("walkSpeed");auto *units=window.findChild<QToolButton *>("walkUnits");QVERIFY(speed && units);
+            speed->setValue(2);units->click();QVERIFY(units->isChecked());QCOMPARE(speed->suffix(),QString(" km/h"));QVERIFY(std::abs(speed->value()-7.2)<1e-9);
+            units->click();QCOMPARE(speed->suffix(),QString(" m/s"));QVERIFY(std::abs(speed->value()-2)<1e-9);
+            remove->click();
+        }
         window.activateWindow();QApplication::setActiveWindow(&window);QVERIFY(QTest::qWaitForWindowActive(&window)); // popups only open in the active window
         for (auto *combo:{shape,newType}) { // Popups must show every item uncut despite the themed item padding.
             combo->showPopup();auto *view=combo->view();QTRY_VERIFY(view->isVisible());QTest::qWait(300); // let the popup settle its final size

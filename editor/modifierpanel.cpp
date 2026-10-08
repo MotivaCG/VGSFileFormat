@@ -31,6 +31,7 @@ QString typeName(const Modifier &modifier) {
     case ModifierType::RemoveGreen: return ModifierPanel::tr("Remove green");
     case ModifierType::AnimateTransform: return ModifierPanel::tr("Animate transform");
     case ModifierType::PurgeIsolated: return ModifierPanel::tr("Purge Isolated");
+    case ModifierType::Walk: return ModifierPanel::tr("Walk");
     }
     return {};
 }
@@ -40,6 +41,7 @@ QColor modifierColour(ModifierType type) {
     case ModifierType::RemoveGreen: return {85,185,105};
     case ModifierType::AnimateTransform: return {67,147,214};
     case ModifierType::PurgeIsolated: return {219,181,76};
+    case ModifierType::Walk: return {160,110,214};
     }
     return {75,80,86};
 }
@@ -125,7 +127,7 @@ ModifierPanel::ModifierPanel(QWidget *parent):QWidget(parent) {
         auto *b=new QToolButton;b->setText(text);b->setObjectName(id);b->setToolTip(tip);toolbar->addWidget(b);connect(b,&QToolButton::clicked,this,action);return b;
     };
     type_=new QComboBox;type_->setObjectName("newModifierType");type_->addItem(tr("Crop"),0);type_->addItem(tr("Remove green points"),2);
-    type_->addItem(tr("Animate transform"),3);type_->addItem(tr("Purge Isolated"),4);toolbar->addWidget(type_);
+    type_->addItem(tr("Animate transform"),3);type_->addItem(tr("Purge Isolated"),4);type_->addItem(tr("Walk"),5);toolbar->addWidget(type_);
     type_->setToolTip(tr("Choose a modifier to add: crop union, green colour removal, animated transform offsets or Nth-neighbour isolation filtering."));
     addModifier_=button(tr("+ Modifier"),"addModifier",tr("Add the selected modifier type to the stack. Modifiers affect the full capture timeline."),[this] {addModifier();});
     duplicate_=button(tr("Duplicate"),"duplicateModifier",tr("Duplicate the selected modifier."),[this] {duplicateSelection();});
@@ -221,7 +223,7 @@ void ModifierPanel::setTimeline(int frame,int maximum) {
 }
 void ModifierPanel::addModifier() {
     Modifier m;m.id=Project::newId();const int type=type_->currentData().toInt();
-    m.type=type==2 ? ModifierType::RemoveGreen : type==3 ? ModifierType::AnimateTransform : type==4 ? ModifierType::PurgeIsolated : ModifierType::Crop;
+    m.type=type==2 ? ModifierType::RemoveGreen : type==3 ? ModifierType::AnimateTransform : type==4 ? ModifierType::PurgeIsolated : type==5 ? ModifierType::Walk : ModifierType::Crop;
     m.crop.enabled=true;m.crop.shape=CropShape::Cylinder; // Shape is chosen afterwards in the crop parameters.
     // The first of a kind keeps the bare name ("Crop"); later ones take the next free number ("Crop 2", "Crop 3"...).
     const QString base=m.type==ModifierType::Crop ? tr("Crop") : typeName(m);

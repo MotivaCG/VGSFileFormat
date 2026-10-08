@@ -4,6 +4,46 @@
 #include <map>
 #include <string>
 namespace vgs {
+// How a capture moves as a whole: world = translation + scale * rotate(rotation, local).
+// Rotation is a unit quaternion, xyzw; scale is uniform and positive. A capture without
+// motion samples behaves as if every sample were the identity.
+//
+// Stored per chunk as the shared attribute MotionSamples, one sample at every sample
+// point of the chunk (intervals + 1), each eight little-endian f64 in the order
+// tx ty tz qx qy qz qw s. Between two samples translation and scale are interpolated
+// linearly and rotation by spherical linear interpolation along the shorter arc, with the
+// same fraction every other attribute uses.
+//
+// FrameDecoder applies it: positions, rotations and scales come out moved, and the
+// higher-order spherical harmonics come out rotated, so a reader of Frame needs nothing
+// further. A renderer that evaluates the stored attributes itself applies motion(t) as a
+// model matrix and evaluates the harmonics with the view direction rotated by the inverse
+// rotation.
+struct Motion {
+  double translation[3] = {0, 0, 0};
+  double rotation[4] = {0, 0, 0, 1};
+  double scale = 1;
+  bool isIdentity() const;
+  // Row-major 3x4: [R*s | t].
+  void matrix(double out[12]) const;
+};
+constexpr uint64_t MotionSampleBytes = 64;
+// The one numerical descriptor motion samples are stored with: 8-byte words split into
+// four 16-bit fields, which entropy codes losslessly. `totalRows` is samples * 8.
+Spec motionSamplesSpec(uint64_t samples);
+bool isMotionSamplesSpec(const Spec &, uint64_t totalRows, uint64_t samples);
+// Whether a capture declares motion; if it does, every chunk carries its samples.
+bool declaresMotion(const Header &);
+Bytes packMotionSamples(const std::vector<Motion> &);
+// Validates (finite, unit rotation within 1e-6, scale in (0, 1e6]) and renormalises the
+// rotation; throws vgs::Error otherwise.
+std::vector<Motion> unpackMotionSamples(const uint8_t *, size_t, uint64_t samples);
+Motion interpolateMotion(const Motion &a, const Motion &b, double fraction);
+// The spherical harmonic rotation matrices for one rotation, in this format's coefficient
+// order (bands 1, 2 and 3: 3x3, 5x5, 7x7, row-major): rotated = M * stored.
+void shRotationMatrices(const double rotation[4], double band1[9], double band2[25],
+                        double band3[49]);
+
 // Owning frame arrays. Rotation is xyzw; scale and opacity are activated.
 // colorDc is RGB (0.5 + C0 * SH0); shRest is [splat][shCoefficients][RGB], with
 // three, eight or fifteen coefficients for SH degree 1, 2 or 3.
@@ -59,6 +99,10 @@ public:
   // GPU still needs these on the CPU when it sorts splats by depth there, and reading
   // them back from the GPU costs tens of milliseconds on a phone.
   void evaluatePositions(double normalizedTime, std::vector<float> *) const;
+  // The chunk's motion at a normalised time, and whether it has any. Every evaluation
+  // above has already applied it.
+  bool hasMotion() const { return !motionSamples.empty(); }
+  Motion motion(double normalizedTime) const;
 
 private:
   struct Block {
@@ -76,6 +120,7 @@ private:
     std::vector<float> sh0, opacity, position, rotation;
   };
   std::vector<Block> blocks;
+  std::vector<Motion> motionSamples;
   double secondsPerTick = 1.0 / 30.0;
   Contents held = Contents::Frame;
   void buildBasis(const Block &, uint64_t, float, bool, bool,

@@ -99,9 +99,11 @@ private:
     Viewport *viewport_;
     ModifierPanel *modifierPanel_;
     AnimationPanel *animationProperties_;
-    QGroupBox *isolationProperties_;
+    QGroupBox *isolationProperties_, *walkProperties_;
+    QToolButton *walkUnits_;
+    void showWalkSpeed(const Modifier &);
     QSpinBox *isolationNeighbour_;
-    QDoubleSpinBox *isolationPercent_;
+    QDoubleSpinBox *isolationPercent_, *walkSpeed_;
     QJsonObject processingState_;
     QGroupBox *cropProperties_, *greenProperties_;
     QLabel *parametersHeading_;

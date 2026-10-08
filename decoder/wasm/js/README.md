@@ -32,6 +32,13 @@ always 30), `shDegree`, `bounds`, and `playbackMode`, one of the exported `Playb
 values: how the capture's author means it to play. `motionType` and `movingSpeed` are
 reserved for later and read `MotionType.inPlace` and 0 for now.
 
+`hasMotion` says whether the capture moves as a whole. `setTime` and `positionsAt` return
+it already moved, harmonics included. In packed mode, `motionAt(seconds)` gives
+`{ translation, rotation, scale, matrix }` for the held chunk, interpolated the way
+`instantAt` places the instant: use `matrix` as the model matrix (or put the motion on the
+splat entity's transform) and evaluate the harmonics in the capture's own space. A
+module older than motion refuses such a capture with `invalid VGS policy`.
+
 Anything wrong with a capture throws `VgsError` whose message is exactly
 `invalid 4dgs capture`, the same string the native library uses.
 

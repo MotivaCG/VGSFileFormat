@@ -98,15 +98,25 @@ static const char *gridVertex = R"GLSL(
 layout(location=0) in vec3 position;
 layout(location=1) in vec3 color;
 uniform mat4 mvp;
+uniform vec3 offset; // the sliding floor; zero for everything else
 out vec3 rgb;
-void main() { gl_Position=mvp*vec4(position,1); rgb=color; }
+out vec2 ground;
+void main() { vec3 p=position+offset; gl_Position=mvp*vec4(p,1); rgb=color; ground=p.xz; }
 )GLSL";
 static const char *gridFragment = R"GLSL(
 #version 330 core
 in vec3 rgb;
+in vec2 ground;
 uniform vec2 greyMap; // scale, offset for neutral grid lines; coloured axes and gizmos pass through
+uniform vec2 fade;    // start, end radius; end 0 disables it
+uniform vec3 fadeColour;
 out vec4 fragColor;
-void main() { vec3 c=rgb; if (c.r==c.g && c.g==c.b) c=vec3(greyMap.y+c.r*greyMap.x); fragColor=vec4(c,1); }
+void main() {
+    vec3 c=rgb; if (c.r==c.g && c.g==c.b) c=vec3(greyMap.y+c.r*greyMap.x);
+    // A sliding floor is finite: its edge would be seen arriving, so it fades into the background.
+    if (fade.y>0.0) c=mix(c,fadeColour,smoothstep(fade.x,fade.y,length(ground)));
+    fragColor=vec4(c,1);
+}
 )GLSL";
 
 static const char *ghostVertex=R"GLSL(
@@ -173,6 +183,7 @@ void Viewport::cleanup() {
     glDeleteBuffers(1,&modifierBuffer_);glDeleteTextures(1,&modifierTexture_);
     glDeleteTextures(1, &shTexture_); glDeleteVertexArrays(1, &vao_);
     glDeleteBuffers(1, &gridBuffer_); glDeleteVertexArrays(1, &gridVao_);
+    glDeleteBuffers(1, &fineBuffer_); glDeleteVertexArrays(1, &fineVao_);
     glDeleteBuffers(1, &gizmoBuffer_); glDeleteVertexArrays(1, &gizmoVao_);
     initialized_ = false; doneCurrent();
 }
@@ -238,6 +249,20 @@ void Viewport::initializeGL() {
     glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(lines.size() * sizeof(LineVertex)), lines.data(), GL_STATIC_DRAW);
     glEnableVertexAttribArray(0); glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(LineVertex), nullptr);
     glEnableVertexAttribArray(1); glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(LineVertex), reinterpret_cast<void *>(3*sizeof(float)));
+    // Quarter-metre lines between the metre ones, shown only while a capture walks.
+    std::vector<LineVertex> fine;
+    for (int i = -80; i <= 80; ++i) {
+        if (i % 4 == 0) continue;
+        const float at = float(i) * 0.25f, shade = 0.09f;
+        fine.push_back({{at,0,-20},{shade,shade,shade}}); fine.push_back({{at,0,20},{shade,shade,shade}});
+        fine.push_back({{-20,0,at},{shade,shade,shade}}); fine.push_back({{20,0,at},{shade,shade,shade}});
+    }
+    fineVertices_ = int(fine.size());
+    glGenVertexArrays(1, &fineVao_); glGenBuffers(1, &fineBuffer_);
+    glBindVertexArray(fineVao_); glBindBuffer(GL_ARRAY_BUFFER, fineBuffer_);
+    glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(fine.size() * sizeof(LineVertex)), fine.data(), GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0); glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(LineVertex), nullptr);
+    glEnableVertexAttribArray(1); glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(LineVertex), reinterpret_cast<void *>(3*sizeof(float)));
     glGenVertexArrays(1,&gizmoVao_); glGenBuffers(1,&gizmoBuffer_);
     glBindVertexArray(gizmoVao_); glBindBuffer(GL_ARRAY_BUFFER,gizmoBuffer_);
     glEnableVertexAttribArray(0); glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,sizeof(LineVertex),nullptr);
@@ -247,6 +272,10 @@ void Viewport::initializeGL() {
 }
 QMatrix4x4 Viewport::viewMatrix() const {
     return camera_.viewMatrix();
+}
+void Viewport::setFloorScroll(bool walking, double distance) {
+    if (walking_ == walking && walkDistance_ == distance) return;
+    walking_ = walking; walkDistance_ = distance; update();
 }
 QMatrix4x4 Viewport::projectionMatrix() const {
     QMatrix4x4 projection;
@@ -279,12 +308,29 @@ void Viewport::paintGL() {
         gridShader_->bind(); gridShader_->setUniformValue("mvp", projection * view);
         // On the light background darker greys stand out: minor lines ~0.71, major ~0.58.
         gridShader_->setUniformValue("greyMap",lightBackground_ ? QVector2D(-1.6f,0.93f) : QVector2D(1,0));
-        glBindVertexArray(gridVao_); glDrawArrays(GL_LINES, 0, gridVertices_-10);
-        if (camera_.orthographic) {
-            glDrawArrays(GL_LINES,gridVertices_-10,4);
-        } else {
-            // No grid segment runs beneath X/Z; equal depth also covers crossings.
+        if (walking_) {
+            // A treadmill: the capture stays and the floor slides back under its feet, by the
+            // distance walked modulo the major-line period so the loop has no seam. A planted
+            // foot then stays on the grid exactly when the speed is right. The axes stay put.
+            const float slide = -float(std::fmod(walkDistance_, 5.0));
+            const QColor floor = lightBackground_ ? QColor(204,206,209) : EditorTheme::viewportBackground();
+            gridShader_->setUniformValue("offset", QVector3D(0,0,slide));
+            gridShader_->setUniformValue("fade", QVector2D(10,15));
+            gridShader_->setUniformValue("fadeColour", QVector3D(float(floor.redF()),float(floor.greenF()),float(floor.blueF())));
+            glBindVertexArray(fineVao_); glDrawArrays(GL_LINES, 0, fineVertices_);
+            // Whole grey lines, the segments under the axes included: those slide too.
+            glBindVertexArray(gridVao_); glDrawArrays(GL_LINES, 0, gridVertices_-6);
+            gridShader_->setUniformValue("offset", QVector3D());
+            gridShader_->setUniformValue("fade", QVector2D());
             glDepthFunc(GL_LEQUAL);glDrawArrays(GL_LINES,gridVertices_-6,6);glDepthFunc(GL_LESS);
+        } else {
+            glBindVertexArray(gridVao_); glDrawArrays(GL_LINES, 0, gridVertices_-10);
+            if (camera_.orthographic) {
+                glDrawArrays(GL_LINES,gridVertices_-10,4);
+            } else {
+                // No grid segment runs beneath X/Z; equal depth also covers crossings.
+                glDepthFunc(GL_LEQUAL);glDrawArrays(GL_LINES,gridVertices_-6,6);glDepthFunc(GL_LESS);
+            }
         }
         gridShader_->setUniformValue("greyMap",QVector2D(1,0)); // crop and gizmo lines share this shader
         gridShader_->release();
