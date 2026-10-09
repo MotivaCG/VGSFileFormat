@@ -566,7 +566,7 @@ void Viewport::paintGL() {
             GLint maxTexels = 0; glGetIntegerv(GL_MAX_TEXTURE_BUFFER_SIZE, &maxTexels);
             if (frame_->sh.size()/3 > size_t(maxTexels)) {
                 shCoefficients_ = 0;
-                emit renderFailed(tr("This GPU cannot hold all SH coefficients for this capture; showing base colour."));
+                emit renderFailed(tr("This GPU cannot hold all SH coefficients for this capture; showing base color."));
             }
             glBindBuffer(GL_TEXTURE_BUFFER, shBuffer_);
             const float dummy[3] = {};
@@ -720,7 +720,7 @@ void Viewport::paintGL() {
     }
     if (frame_) {
         QString text=tr("%1 source points\nDecode %2 ms   ·   upload %3 ms   ·   %4")
-            .arg(qulonglong(frame_->points.size())).arg(frame_->decodeMs,0,'f',1).arg(uploadMs_,0,'f',1).arg(shCoefficients_ ? "SH" : "base colour");
+            .arg(qulonglong(frame_->points.size())).arg(frame_->decodeMs,0,'f',1).arg(uploadMs_,0,'f',1).arg(shCoefficients_ ? "SH" : "base color");
         if (!playbackTimeText_.isEmpty()) text+='\n'+playbackTimeText_;
         statistics_->setText(text);
         statistics_->adjustSize();
@@ -969,7 +969,7 @@ void Viewport::keyReleaseEvent(QKeyEvent *event) {
 void Viewport::keyPressEvent(QKeyEvent *event) {
     if (selectTool_!=SelectTool::None && event->key()==Qt::Key_Alt) update();
     if (handleViewKey(event->key(),event->modifiers())) { event->accept(); return; }
-    if (event->key()==Qt::Key_Escape) { setTransformMode(TransformMode::None); event->accept(); return; }
+    if (event->key()==Qt::Key_Escape) { setTransformMode(TransformMode::None); emit escapePressed(); event->accept(); return; }
     if (!event->modifiers()) {
         if (event->isAutoRepeat() && (event->key()==Qt::Key_G || event->key()==Qt::Key_R || event->key()==Qt::Key_S)) { event->accept(); return; }
         if (event->key()==Qt::Key_G) { activateTransformShortcut(TransformMode::Move); event->accept(); return; }
@@ -981,6 +981,10 @@ void Viewport::keyPressEvent(QKeyEvent *event) {
 void Viewport::wheelEvent(QWheelEvent *event) {
     focusTimer_.stop();
     if (dragging_) { dragging_ = false; ignoreLeftUntilRelease_ = true; }
+    if (selectTool_==SelectTool::Brush && (event->modifiers() & Qt::ControlModifier)) {
+        if (!selecting_ && event->angleDelta().y()) emit brushRadiusRequested(brushRadius_ * std::pow(1.15f, event->angleDelta().y()/120.0f));
+        event->accept(); return;
+    }
     camera_.distance = std::clamp(camera_.distance * std::pow(0.85f, event->angleDelta().y()/120.0f), 0.001f, 1e7f);
     update(); emit cameraChanged();
 }

@@ -462,7 +462,7 @@ void MainWindow::buildUi() {
     exportAction_ = exportMenu->addAction(tr("Export capture\u2026"), QKeySequence("Ctrl+E"), this, &MainWindow::exportCapture);
     exportAction_->setToolTip(tr("Export the selected Start/End range to VGS, PGS or MINT, baking capture transforms and active modifiers (Ctrl+E). MINT omits capture metadata."));
     plyAction_ = exportMenu->addAction(tr("Export current frame as PLY\u2026"), QKeySequence("Ctrl+Alt+E"), this, &MainWindow::exportFrame);
-    plyAction_->setToolTip(tr("Write the frame on screen as a 3D Gaussian Splatting .ply, edited as Export capture would write it: transform, modifiers, colour processing and SH degree (Ctrl+Alt+E)."));
+    plyAction_->setToolTip(tr("Write the frame on screen as a 3D Gaussian Splatting .ply, edited as Export capture would write it: transform, modifiers, color processing and SH degree (Ctrl+Alt+E)."));
     imageAction_ = exportMenu->addAction(tr("Export viewport image\u2026"), QKeySequence("Ctrl+Shift+E"), this, &MainWindow::exportImage);
     estimateAction_ = exportMenu->addAction(tr("Estimate export size\u2026"), QKeySequence("Ctrl+Alt+S"), this, &MainWindow::estimateExport);
     estimateAction_->setToolTip(tr("How much a .vgs export of the Start/End range would weigh, and the bitrate it needs to stream, with every modifier and setting as it is now (Ctrl+Alt+S).\nA few seconds are exported for real and extrapolated; short ranges are measured exactly."));
@@ -672,8 +672,8 @@ void MainWindow::buildUi() {
     cropModeCombo_=new QComboBox;cropModeCombo_->setObjectName("cropMode");cropModeCombo_->addItem(tr("Keep inside"),0);cropModeCombo_->addItem(tr("Remove inside"),1);
     cropModeCombo_->setToolTip(tr("Keep preserves what is inside, Remove deletes it.\nWhere they overlap, Remove wins.\nWith only Remove crops, everything outside them is kept."));
     cropForm->addRow(tr("Mode"),cropModeCombo_);
-    cropPreviewCombo_=new QComboBox;cropPreviewCombo_->setObjectName("cropEditPreview");cropPreviewCombo_->addItem(tr("Colour code"),1);cropPreviewCombo_->addItem(tr("Hide removed"),0);
-    cropPreviewCombo_->setToolTip(tr("While this crop is edited:\nColour code lightens what the crops keep and shows what they delete in red.\nHide removed hides what they delete.\nEditing only: the normal view and the export are unaffected."));
+    cropPreviewCombo_=new QComboBox;cropPreviewCombo_->setObjectName("cropEditPreview");cropPreviewCombo_->addItem(tr("Color code"),1);cropPreviewCombo_->addItem(tr("Hide removed"),0);
+    cropPreviewCombo_->setToolTip(tr("While this crop is edited:\nColor code lightens what the crops keep and shows what they delete in red.\nHide removed hides what they delete.\nEditing only: the normal view and the export are unaffected."));
     cropForm->addRow(tr("While editing"),cropPreviewCombo_);
     connect(cropModeCombo_,&QComboBox::activated,this,[this](int) {
         if (syncing_ || !project_.modifier() || project_.modifier()->type!=ModifierType::Crop) return;
@@ -752,7 +752,7 @@ void MainWindow::buildUi() {
     greenHue_->setToolTip(tr("Maximum circular hue distance from pure green (120 degrees). Smaller values target a narrower green range."));
     greenForm->addRow(tr("Minimum saturation"),greenSaturation_);greenForm->addRow(tr("Hue distance"),greenHue_);
     greenLinearRgb_=new QCheckBox(tr("Linear RGB"));greenLinearRgb_->setObjectName("greenLinearRgb");greenLinearRgb_->setChecked(true);
-    greenLinearRgb_->setToolTip(tr("Convert source base RGB from sRGB to linear RGB before HSV matching. Saved older presets keep their original colour space."));greenForm->addRow(greenLinearRgb_);
+    greenLinearRgb_->setToolTip(tr("Convert source base RGB from sRGB to linear RGB before HSV matching. Saved older presets keep their original color space."));greenForm->addRow(greenLinearRgb_);
     auto *greenNote=new QLabel(tr("Removes matching source RGB points over the full timeline, after the union of enabled crops."));greenNote->setWordWrap(true);greenForm->addRow(greenNote);side->addWidget(greenProperties_);
     auto greenChanged=[this] {
         if (syncing_ || !project_.modifier() || project_.modifier()->type!=ModifierType::RemoveGreen) return;
@@ -768,8 +768,8 @@ void MainWindow::buildUi() {
     isolationProperties_->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Maximum);
     isolationNeighbour_=new QSpinBox;isolationNeighbour_->setObjectName("isolationNeighbour");isolationNeighbour_->setRange(1,256);isolationNeighbour_->setValue(4);
     isolationPercent_=new QDoubleSpinBox;isolationPercent_->setObjectName("isolationMedianPercent");isolationPercent_->setRange(0,1000000);isolationPercent_->setDecimals(1);isolationPercent_->setSuffix(" %");isolationPercent_->setValue(700);
-    isolationForm->addRow(tr("Nth neighbour"),isolationNeighbour_);isolationForm->addRow(tr("Distance / median"),isolationPercent_);
-    auto *isolationNote=new QLabel(tr("Removes points whose distance to neighbour N exceeds this percentage\nof the frame's median Nth-neighbour distance, after crop and colour filtering.\n100% is the median, 700% is 7 times the median."));isolationNote->setWordWrap(true);isolationForm->addRow(isolationNote);side->addWidget(isolationProperties_);
+    isolationForm->addRow(tr("Nth neighbor"),isolationNeighbour_);isolationForm->addRow(tr("Distance / median"),isolationPercent_);
+    auto *isolationNote=new QLabel(tr("Removes points whose distance to neighbor N exceeds this percentage\nof the frame's median Nth-neighbor distance, after crop and color filtering.\n100% is the median, 700% is 7 times the median."));isolationNote->setWordWrap(true);isolationForm->addRow(isolationNote);side->addWidget(isolationProperties_);
     // Prune low contribution: up to a share of each chunk's splats, those that add least to
     // the image, never one above the protection threshold.
     pruneProperties_=new QGroupBox(tr("Prune low contribution"));pruneProperties_->setObjectName("pruneModifierProperties");auto *pruneForm=new QFormLayout(pruneProperties_);
@@ -819,16 +819,16 @@ void MainWindow::buildUi() {
     colourExposure_=colourSpin("colourExposure",-4,4,0.1,2,tr(" EV"),tr("Brightness in stops: +1 doubles it, -1 halves it."));
     colourTemperature_=colourSpin("colourTemperature",-2,2,0.05,2,QString(),tr("White balance: positive warmer (more red, less blue), negative cooler."));
     colourTint_=colourSpin("colourTint",-2,2,0.05,2,QString(),tr("White balance: positive greener, negative more magenta."));
-    colourSaturation_=colourSpin("colourSaturation",0,300,1,0,tr(" %"),tr("100% leaves the colour as it is, 0% is grey, above 100% more vivid."));
+    colourSaturation_=colourSpin("colourSaturation",0,300,1,0,tr(" %"),tr("100% leaves the color as it is, 0% is gray, above 100% more vivid."));
     colourForm->addRow(tr("Exposure"),colourExposure_);colourForm->addRow(tr("Temperature"),colourTemperature_);colourForm->addRow(tr("Tint"),colourTint_);colourForm->addRow(tr("Saturation"),colourSaturation_);
     // Despill: the same settings as Metadata and processing; when on, these override those.
     colourDespill_=new QComboBox;colourDespill_->setObjectName("colourDespill");
     colourDespill_->addItem(tr("None"),int(Modifier::DespillNone));colourDespill_->addItem(tr("Only on export"),int(Modifier::DespillOnExport));colourDespill_->addItem(tr("Always"),int(Modifier::DespillAlways));
-    colourDespill_->setToolTip(tr("Remove green-screen spill from the colour.\nNone: never. Only on export: the viewport shows the source colour. Always: the viewport shows it too.\nThe settings start as THE4DSCANNER's."));
+    colourDespill_->setToolTip(tr("Remove green-screen spill from the color.\nNone: never. Only on export: the viewport shows the source color. Always: the viewport shows it too.\nThe settings start as THE4DSCANNER's."));
     colourDespillStrength_=colourSpin("colourDespillStrength",0,1,0.05,4,QString(),tr("How much of the spill is removed."));
     colourGreenGain_=colourSpin("colourGreenGain",0,2,0.01,3,QString(),tr("Gain on the green channel before the spill is measured."));
-    colourViewChroma_=colourSpin("colourViewChroma",0,1,0.05,4,QString(),tr("How much of the view-dependent colour's chroma is kept."));
-    colourRecoverSkin_=new QCheckBox(tr("Recover skin colour"));colourRecoverSkin_->setObjectName("colourRecoverSkin");colourRecoverSkin_->setToolTip(tr("Recover skin tones from nearby clean skin while protecting neutral clothing."));
+    colourViewChroma_=colourSpin("colourViewChroma",0,1,0.05,4,QString(),tr("How much of the view-dependent color's chroma is kept."));
+    colourRecoverSkin_=new QCheckBox(tr("Recover skin color"));colourRecoverSkin_->setObjectName("colourRecoverSkin");colourRecoverSkin_->setToolTip(tr("Recover skin tones from nearby clean skin while protecting neutral clothing."));
     colourForm->addRow(tr("Apply despill"),colourDespill_);colourForm->addRow(tr("Strength"),colourDespillStrength_);colourForm->addRow(tr("Green gain"),colourGreenGain_);colourForm->addRow(tr("View chroma"),colourViewChroma_);colourForm->addRow(colourRecoverSkin_);
     colourNote_=new QLabel;colourNote_->setWordWrap(true);colourForm->addRow(colourNote_);side->addWidget(colourProperties_);
     for (auto *spin:{colourExposure_,colourTemperature_,colourTint_}) SpinScrubber::attachFormLabel(spin,0.01);
@@ -846,24 +846,32 @@ void MainWindow::buildUi() {
     // Erase: pick splats with a brush or a lasso; they are removed, chunk by chunk.
     eraseProperties_=new QGroupBox(tr("Eraser"));eraseProperties_->setObjectName("eraseModifierProperties");auto *eraseForm=new QFormLayout(eraseProperties_);
     eraseProperties_->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Maximum);
+    eraseEdit_=new QToolButton;eraseEdit_->setText(tr("Edit"));eraseEdit_->setObjectName("eraseEdit");eraseEdit_->setCheckable(true);eraseEdit_->setChecked(true);
+    eraseEdit_->setToolTip(tr("Toggle editing the picks (Tab).\nOn: the brush or lasso picks, and the picks show in pink.\nOff: the viewport shows the result, the picks removed, with the usual navigation."));
+    connect(eraseEdit_,&QToolButton::clicked,this,[this](bool checked) {setEraseEditing(checked);viewport_->setFocus();});
     auto *toolRow=new QWidget;auto *toolLayout=new QHBoxLayout(toolRow);toolLayout->setContentsMargins(0,0,0,0);
     eraseBrush_=new QToolButton;eraseBrush_->setText(tr("Brush"));eraseBrush_->setObjectName("eraseBrush");eraseBrush_->setCheckable(true);eraseBrush_->setChecked(true);
     eraseLasso_=new QToolButton;eraseLasso_->setText(tr("Lasso"));eraseLasso_->setObjectName("eraseLasso");eraseLasso_->setCheckable(true);
     eraseBrush_->setToolTip(tr("Paint over the splats to pick them."));eraseLasso_->setToolTip(tr("Draw round the splats to pick them."));
     auto *tools=new QButtonGroup(this);tools->addButton(eraseBrush_);tools->addButton(eraseLasso_);tools->setExclusive(true);
-    toolLayout->addWidget(eraseBrush_);toolLayout->addWidget(eraseLasso_);toolLayout->addStretch();eraseForm->addRow(tr("Tool"),toolRow);
+    toolLayout->addWidget(eraseEdit_);toolLayout->addWidget(eraseBrush_);toolLayout->addWidget(eraseLasso_);toolLayout->addStretch();eraseForm->addRow(tr("Tool"),toolRow);
     eraseBrushSize_=new QDoubleSpinBox;eraseBrushSize_->setObjectName("eraseBrushSize");eraseBrushSize_->setRange(2,300);eraseBrushSize_->setDecimals(0);eraseBrushSize_->setSuffix(" px");
-    eraseBrushSize_->setValue(settings_.value("Erase/BrushRadius",20).toDouble());eraseBrushSize_->setToolTip(tr("The brush's radius on screen."));
+    eraseBrushSize_->setValue(settings_.value("Erase/BrushRadius",20).toDouble());eraseBrushSize_->setToolTip(tr("The brush's radius on screen. Ctrl + mouse wheel over the viewport changes it."));
     eraseForm->addRow(tr("Brush radius"),eraseBrushSize_);SpinScrubber::attachFormLabel(eraseBrushSize_,0.5);
     eraseStatus_=new QLabel;eraseStatus_->setObjectName("eraseStatus");eraseStatus_->setWordWrap(true);eraseForm->addRow(eraseStatus_);
     auto *clearRow=new QWidget;auto *clearLayout=new QHBoxLayout(clearRow);clearLayout->setContentsMargins(0,0,0,0);
     eraseClearChunk_=new QPushButton(tr("Clear this chunk"));eraseClearChunk_->setObjectName("eraseClearChunk");eraseClearAll_=new QPushButton(tr("Clear all"));eraseClearAll_->setObjectName("eraseClearAll");
     clearLayout->addWidget(eraseClearChunk_);clearLayout->addWidget(eraseClearAll_);eraseForm->addRow(clearRow);
-    auto *eraseNote=new QLabel(tr("While this modifier is selected the picks show in pink; otherwise, and in exports, they are removed. "
+    auto *eraseNote=new QLabel(tr("While Edit is on (Tab) the picks show in pink; with it off, with the modifier not selected, and in exports, they are removed. "
         "Drag to pick, replacing the picks of the chunk on screen; Ctrl adds, Alt subtracts. The right button orbits and the middle one pans. "
         "A splat is itself only within one chunk, so each chunk keeps its own picks."));eraseNote->setWordWrap(true);eraseForm->addRow(eraseNote);side->addWidget(eraseProperties_);
     connect(tools,&QButtonGroup::buttonClicked,this,[this](QAbstractButton *) {syncEraseTool();viewport_->setFocus();});
     connect(eraseBrushSize_,&QDoubleSpinBox::valueChanged,this,[this](double value) {settings_.setValue("Erase/BrushRadius",value);syncEraseTool();});
+    connect(viewport_,&Viewport::brushRadiusRequested,this,[this](float radius) {
+        // At least a pixel per step, so small brushes still grow and shrink.
+        const double now=eraseBrushSize_->value();double next=std::round(radius);
+        if (next==now) next+=radius>now ? 1 : -1;
+        eraseBrushSize_->setValue(next);});
     connect(viewport_,&Viewport::selectionStroke,this,[this](std::vector<uint32_t> records,Viewport::SelectMode mode) {applyStroke(records,int(mode));});
     connect(eraseClearChunk_,&QPushButton::clicked,this,[this] {auto *m=project_.modifier();if (!m || m->type!=ModifierType::Erase || screenChunk_<0) return;m->erased.erase(screenChunk_);syncUi();dirty();});
     connect(eraseClearAll_,&QPushButton::clicked,this,[this] {auto *m=project_.modifier();if (!m || m->type!=ModifierType::Erase) return;m->erased.clear();syncUi();dirty();});
@@ -927,7 +935,7 @@ void MainWindow::buildUi() {
                              [this](double v) {walkSpeed_->setValue(walkUnits_->isChecked() ? v*3.6 : v);},0.01);
         walkSpeed_->setToolTip(walkSpeed_->toolTip()+"\n"+tr("Drag the label to scrub: Shift fine, Ctrl coarse, Esc cancels."));
     }
-    isolationNeighbour_->setToolTip(tr("Nearest-neighbour rank, excluding the point itself. Frames with too few surviving points are preserved."));isolationPercent_->setToolTip(tr("Maximum Nth-neighbour distance as a percentage of the frame median. Lower values remove more points."));
+    isolationNeighbour_->setToolTip(tr("Nearest-neighbor rank, excluding the point itself. Frames with too few surviving points are preserved."));isolationPercent_->setToolTip(tr("Maximum Nth-neighbor distance as a percentage of the frame median. Lower values remove more points."));
     auto isolationChanged=[this] {if (syncing_ || !project_.modifier() || project_.modifier()->type!=ModifierType::PurgeIsolated) return;project_.modifier()->isolation={isolationNeighbour_->value(),isolationPercent_->value()};syncModifiers();dirty();};
     connect(isolationNeighbour_,&QSpinBox::valueChanged,this,[isolationChanged](int) {isolationChanged();});connect(isolationPercent_,&QDoubleSpinBox::valueChanged,this,[isolationChanged](double) {isolationChanged();});
     displayControls_=new QWidget;displayControls_->setObjectName("viewportDisplayControls");
@@ -949,11 +957,11 @@ void MainWindow::buildUi() {
     // Splats take the point size's place with the spherical-harmonic bands they evaluate.
     splatSh_=new PrefixedComboBox(tr("SH"));splatSh_->setObjectName("displaySplatSh");
     for (int degree=0;degree<=3;++degree) {
-        splatSh_->addItem(degree ? tr("SH%1").arg(degree) : tr("SH0 (base colour)"),degree);
-        splatSh_->setItemData(degree,degree ? QString::number(degree) : tr("0 (base colour)"),PrefixedComboBox::ClosedTextRole);
+        splatSh_->addItem(degree ? tr("SH%1").arg(degree) : tr("SH0 (base color)"),degree);
+        splatSh_->setItemData(degree,degree ? QString::number(degree) : tr("0 (base color)"),PrefixedComboBox::ClosedTextRole);
     }
     splatSh_->addItem(tr("All"),-1);
-    splatSh_->setToolTip(tr("Spherical-harmonic bands evaluated for the splats' view-dependent colour.\nAll uses every band the capture has.\nDisplay only. The export settings decide what is written."));
+    splatSh_->setToolTip(tr("Spherical-harmonic bands evaluated for the splats' view-dependent color.\nAll uses every band the capture has.\nDisplay only. The export settings decide what is written."));
     splatSh_->setMinimumWidth(0);splatSh_->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Fixed);
     displayLayout->addWidget(splatSh_);
     auto showRenderStyle=[this] {const bool splats=renderStyle_->currentIndex()==1;pointSize_->setVisible(!splats);splatSh_->setVisible(splats);viewport_->setSplatRendering(splats);};
@@ -1040,12 +1048,24 @@ void MainWindow::buildUi() {
         connect(shortcut,&QShortcut::activated,this,[this,g] { activateTransformShortcut(TransformMode(g+1)); });
     }
     auto *escape = new QShortcut(QKeySequence(Qt::Key_Escape),this);
-    connect(escape,&QShortcut::activated,this,[this] { viewport_->setTransformMode(TransformMode::None); });
+    // Esc leaves every mode: the transform's, and what Tab entered - crop or Eraser editing.
+    auto leaveModes=[this] {
+        viewport_->setTransformMode(TransformMode::None);
+        if (viewport_->cropEditing()) editCrop(false);
+        if (eraseEditing_) setEraseEditing(false);
+    };
+    connect(escape,&QShortcut::activated,this,leaveModes);
+    connect(viewport_,&Viewport::escapePressed,this,leaveModes);
     auto shortcut = [&](const QString &key,auto action) { auto *s = new QShortcut(QKeySequence(key),this); s->setAutoRepeat(false); connect(s,&QShortcut::activated,this,action); };
     shortcut("Ctrl+Home",[this] { play(false); setTime(project_.in,true); });
     shortcut("Ctrl+End",[this] { play(false); setTime(project_.out,true); });
     shortcut("Alt+Home",[this] { resetTransform(); });
-    shortcut("Tab",[this] { editCrop(!viewport_->cropEditing()); viewport_->setFocus(); });
+    // Tab toggles editing what is selected: an Eraser's picks, or a crop's volume.
+    shortcut("Tab",[this] {
+        if (const auto *m=project_.modifier();m && m->type==ModifierType::Erase) setEraseEditing(!eraseEditing_);
+        else editCrop(!viewport_->cropEditing());
+        viewport_->setFocus();
+    });
     // 1 and 2 on the main keyboard switch 3D points / Gaussian; the numpad keeps its views.
     shortcut("1",[this] { renderStyle_->setCurrentIndex(0); });
     shortcut("2",[this] { renderStyle_->setCurrentIndex(1); });
@@ -1065,7 +1085,7 @@ void MainWindow::buildUi() {
 void MainWindow::syncModifiers() {
     viewport_->setModifiers(project_.modifiersAtFrame(currentFrame()));modifierPanel_->setProject(project_);syncAudio();
     const CompiledModifiers compiled(project_);const bool purge=!compiled.isolations.isEmpty() || !compiled.prunes.isEmpty() || !compiled.erased.empty() || compiled.despillPreview;
-    QJsonObject state;if (purge) state={{"modifiers",project_.modifierJson()},{"transform",project_.json({})["transform"]},{"cropEditing",viewport_->cropEditing()},{"selected",project_.selectedModifier}};
+    QJsonObject state;if (purge) state={{"modifiers",project_.modifierJson()},{"transform",project_.json({})["transform"]},{"cropEditing",viewport_->cropEditing()},{"selected",project_.selectedModifier},{"eraseEditing",eraseEditing_}};
     if (state!=processingState_) {processingState_=state;requestFrame();}
 }
 // The Walk speed in the unit its modifier shows: range, suffix and value, without
@@ -1248,7 +1268,7 @@ void MainWindow::syncUi() {
     cropWidth_->setEnabled(selectedCrop); cropDepth_->setEnabled(selectedCrop);
     cropRadius_->setEnabled(selectedCrop); cropRadiusZ_->setEnabled(selectedCrop); cropHeight_->setEnabled(selectedCrop); cropClearButton_->setEnabled(project_.crop().enabled);
     cropStatus_->setText(!project_.crop().enabled ? tr("Modifier disabled. Its settings are kept, and Edit adjusts this volume.") : viewport_->cropEditing()
-        ? (project_.crop().showRemovedInRed ? tr("Editing the selected crop, colour coded: kept points lightened, deleted points red.") : tr("Editing the selected crop: what the crops would delete is hidden."))
+        ? (project_.crop().showRemovedInRed ? tr("Editing the selected crop, color coded: kept points lightened, deleted points red.") : tr("Editing the selected crop: what the crops would delete is hidden."))
         : tr("Keep crops preserve what is inside any of them. Remove crops delete what is inside them and win where they overlap, over the full timeline."));
     pointSize_->setValue(project_.pointSize); viewport_->setPointSize(float(project_.pointSize)); viewport_->setGrid(project_.grid);
     updateUndoActions();
@@ -1415,7 +1435,7 @@ void MainWindow::requestFrame() {
     if (!loaded_ || loading_) return;
     if (decoding_) { pendingDecode_ = true; return; }
     Project snapshot=project_;if (viewport_->cropEditing()) for (auto &m:snapshot.modifiers) if (m.type==ModifierType::Crop) m.enabled=false;
-    for (auto &m:snapshot.modifiers) if (m.type==ModifierType::Erase) m.showErased=m.id==project_.selectedModifier;
+    for (auto &m:snapshot.modifiers) if (m.type==ModifierType::Erase) m.showErased=m.id==project_.selectedModifier && eraseEditing_;
     decoding_ = true; emit decodeRequested(project_.time, generation_, true,snapshot);
 }
 void MainWindow::play(bool playing) {
@@ -1446,8 +1466,14 @@ void MainWindow::showPruneStatus() {
 }
 // The pick tools are on while an enabled Erase modifier is selected and a capture is open.
 void MainWindow::syncEraseTool() {
-    const auto *m=project_.modifier();const bool on=loaded_ && !loading_ && m && m->type==ModifierType::Erase && m->enabled;
+    const auto *m=project_.modifier();const bool on=loaded_ && !loading_ && m && m->type==ModifierType::Erase && m->enabled && eraseEditing_;
+    for (QWidget *w:std::initializer_list<QWidget *>{eraseBrush_,eraseLasso_,eraseBrushSize_}) w->setEnabled(eraseEditing_);
+    if (auto *label=static_cast<QFormLayout *>(eraseProperties_->layout())->labelForField(eraseBrushSize_)) label->setEnabled(eraseEditing_);
     viewport_->setSelectTool(on ? (eraseLasso_->isChecked() ? Viewport::SelectTool::Lasso : Viewport::SelectTool::Brush) : Viewport::SelectTool::None,float(eraseBrushSize_->value()));
+}
+void MainWindow::setEraseEditing(bool editing) {
+    eraseEditing_=editing;{QSignalBlocker blocker(eraseEdit_);eraseEdit_->setChecked(editing);}
+    syncEraseTool();syncModifiers(); // the picks show or go: a new frame
 }
 // A stroke's records on the picks of the chunk on screen: replace, add or subtract.
 void MainWindow::applyStroke(const std::vector<uint32_t> &records,int mode) {

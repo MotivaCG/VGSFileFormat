@@ -47,7 +47,7 @@ void writeMintSequence(const vgs::Header &source,const std::function<vgs::Decode
                        const vgs::WriteSink &sink,const vgs::Progress &progress) {
     if (source.chunks.empty() || !source.timeDenominator || !provider || !sink) throw std::runtime_error("Invalid MINT sequence.");
     const size_t count=source.chunks.size();const double tick=double(source.timeNumerator)/source.timeDenominator;
-    auto report=[&](size_t done) {if (progress && !progress(int(done),int(2*count))) throw std::runtime_error("Export cancelled.");};
+    auto report=[&](size_t done) {if (progress && !progress(int(done),int(2*count))) throw std::runtime_error("Export canceled.");};
     std::vector<std::vector<BlockPlan>> plans(count);size_t metadataSize=48+56+24*count;
     std::array<double,6> bounds{};bool any=false;
     for (size_t ci=0;ci<count;++ci) {

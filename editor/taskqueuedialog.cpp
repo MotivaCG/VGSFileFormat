@@ -20,7 +20,7 @@
 
 namespace {
 QString stateText(int state,const QString &message) {
-    static const char *names[]={"Pending","Exporting","Done","Failed","Skipped","Cancelled"};
+    static const char *names[]={"Pending","Exporting","Done","Failed","Skipped","Canceled"};
     return message.isEmpty() ? QObject::tr(names[state]) : QObject::tr(names[state])+": "+message;
 }
 }
@@ -124,7 +124,7 @@ void TaskQueueDialog::runNext() {
         awake_.reset();writeLog();
         int done=0,failed=0,other=0;for (int i:run_) {const auto s=entries_[i].state;s==State::Done ? ++done : s==State::Failed ? ++failed : ++other;}
         taskLabel_->setText(tr("Current task"));taskBar_->setValue(0);
-        totalLabel_->setText(tr("Finished: %1 done, %2 failed, %3 cancelled or skipped.").arg(done).arg(failed).arg(other));
+        totalLabel_->setText(tr("Finished: %1 done, %2 failed, %3 canceled or skipped.").arg(done).arg(failed).arg(other));
         if (!stopAll_) totalBar_->setValue(totalBar_->maximum());
         refreshButtons();return;
     }
@@ -139,7 +139,7 @@ void TaskQueueDialog::runNext() {
                 return !stopTask_.load();
             });
         } catch (const std::exception &error) {jobFailure_=QString::fromUtf8(error.what());}
-        if (jobFailure_.isEmpty() && stopTask_) jobFailure_=QStringLiteral("Export cancelled.");
+        if (jobFailure_.isEmpty() && stopTask_) jobFailure_=QStringLiteral("Export canceled.");
     });
     connect(job_,&QThread::finished,this,[this] {finished(jobFailure_);});
     refreshButtons();job_->start();

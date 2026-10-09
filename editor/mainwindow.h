@@ -143,6 +143,11 @@ private:
     QDoubleSpinBox *eraseBrushSize_;
     QLabel *eraseStatus_;
     QPushButton *eraseClearChunk_, *eraseClearAll_;
+    QToolButton *eraseEdit_;
+    // Eraser's Edit: on, the brush or lasso picks and the picks show in pink; off, the viewport
+    // shows the result, the picks removed, with the usual navigation. Tab toggles it.
+    bool eraseEditing_ = true;
+    void setEraseEditing(bool editing);
     int screenChunk_ = -1;
     void syncEraseTool();
     void applyStroke(const std::vector<uint32_t> &records, int mode);

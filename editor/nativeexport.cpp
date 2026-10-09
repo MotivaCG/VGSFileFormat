@@ -39,7 +39,7 @@ vgs::DecodedPage &get(vgs::DecodedChunk &c,uint32_t id,uint32_t group=0) {
     auto *p=find(c,id,group);if (!p) throw std::runtime_error("Missing native attribute.");return *p;
 }
 void report(const ExportProgress &progress,const QString &message) {
-    if (progress && !progress(0,message)) throw std::runtime_error("Export cancelled.");
+    if (progress && !progress(0,message)) throw std::runtime_error("Export canceled.");
 }
 int planes(int degree) {return degree==3 ? 5 : degree==2 ? 3 : degree;}
 std::vector<uint8_t> ranks(vgs::DecodedChunk &c,uint32_t group,bool position) {
@@ -627,7 +627,7 @@ vgs::DecodedChunk editNativeChunk(vgs::DecodedChunk chunk,const NativeChunkPlan 
                 for (size_t row=0;row<chunk.groups[group].splats;++row) {const size_t record=offsets[group]+row,index=record*3;worldPositions[record]=world.map({positions[index],positions[index+1],positions[index+2]});
                     visibility[record]=plan.first+sample>=life[2*row] && plan.first+sample+1<=life[2*row+1] && (!pruned || (*pruned)[record]) && sampleModifiers.keepsPosition(worldPositions[record]) && (!colourDecoder || !modifiers.removesColour({colourFrame.colorDc[index],colourFrame.colorDc[index+1],colourFrame.colorDc[index+2]}));}
             }
-            applyIsolation(worldPositions,visibility,modifiers.isolations,[&] {report(progress,QStringLiteral("Purge Isolated: searching neighbours"));return false;});
+            applyIsolation(worldPositions,visibility,modifiers.isolations,[&] {report(progress,QStringLiteral("Purge Isolated: searching neighbors"));return false;});
         }
         for (size_t group=1;group<chunk.groups.size();++group) {
             const auto &life=get(chunk,vgs::Lifetimes,uint32_t(group)).bytes;

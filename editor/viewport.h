@@ -103,6 +103,10 @@ signals:
     void frameRequested();
     void ghostChanged(bool enabled);
     void selectionStroke(std::vector<uint32_t> records, Viewport::SelectMode mode);
+    // Ctrl + wheel over the brush asks for a new radius; the owner sets it back.
+    void brushRadiusRequested(float radius);
+    // Esc in the viewport: the owner leaves its editing modes too.
+    void escapePressed();
 protected:
     bool event(QEvent *event) override;
     void initializeGL() override;

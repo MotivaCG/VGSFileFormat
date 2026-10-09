@@ -540,6 +540,21 @@ private slots:
         for (int c=0;c<3;++c) QCOMPARE(deltas[401*3+c],0.f);
         original.shRest.clear();QVERIFY(mintSkinRecovery(original,corrected,&deltas,{}));QVERIFY(deltas[401*3]>.05f);
     }
+    void skinRecoveryNeverTintsPastTheSourceColour() {
+        // Red and white cloth beside a face passes for skin once despilled; the skin next to it
+        // may only move back towards its own source colour, not take the cloth's pink.
+        const int n=401;MintFrame original,corrected;original.count=corrected.count=n;
+        original.active.fill(1,n);original.opacity.fill(1,n);original.position.resize(n*3);original.colorDc.resize(n*3);corrected.colorDc.resize(n*3);
+        for (int i=0;i<n;++i) {
+            original.position[i*3]=i<400 ? float(i%20)*.01f : .09f;
+            original.position[i*3+1]=i<400 ? 1+float(i/20)*.01f : 1.09f;original.position[i*3+2]=i<400 ? 0 : .01f;
+            const float cloth[3]={.75f,.35f,.33f},skin[3]={.70f,.52f,.42f},despilled[3]={.70f,.50f,.42f};
+            for (int c=0;c<3;++c) {original.colorDc[i*3+c]=i<400 ? cloth[c] : skin[c];corrected.colorDc[i*3+c]=i<400 ? cloth[c] : despilled[c];}
+        }
+        QVector<float> deltas;QVERIFY(mintSkinRecovery(original,corrected,&deltas,{}));
+        QCOMPARE(deltas[400*3],0.f);QCOMPARE(deltas[400*3+2],0.f);
+        QVERIFY(deltas[400*3+1]>=0 && deltas[400*3+1]<=.02f);
+    }
     void colourProcessingDiagnostics() {
         const QString path=qEnvironmentVariable("EDITOR_DIAGNOSE_PROJECT");if (path.isEmpty()) QSKIP("Set EDITOR_DIAGNOSE_PROJECT for colour processing diagnostics.");
         Project p;QString error;QVERIFY2(Project::read(path,&p,&error),qPrintable(error));

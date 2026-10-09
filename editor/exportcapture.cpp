@@ -33,7 +33,7 @@ using Matrix = Eigen::Matrix3d;
 using ShMatrix = Eigen::Matrix<double,16,16>;
 using Colour = std::array<float,3>;
 void report(const ExportProgress &progress,int value,const QString &message) {
-    if (progress && !progress(value,message)) throw std::runtime_error("Export cancelled.");
+    if (progress && !progress(value,message)) throw std::runtime_error("Export canceled.");
 }
 Matrix linear(const QMatrix4x4 &m) {
     Matrix a; for (int i=0;i<3;++i) for (int j=0;j<3;++j) a(i,j)=m(i,j); return a;
@@ -101,11 +101,11 @@ void processColour(vgs::Frame &frame,const CaptureSettings &settings,const Expor
             const float luminance=.2126f*v[0]+.7152f*v[1]+.0722f*v[2];
             for (int j=0;j<3;++j) v[j]=luminance+float(settings.viewChromaScale)*(v[j]-luminance);
         }
-        if ((i%8192)==0) report(progress,0,QStringLiteral("Processing colours"));
+        if ((i%8192)==0) report(progress,0,QStringLiteral("Processing colors"));
     }
     if (original.count) {
         corrected.colorDc=QVector<float>(frame.colorDc.begin(),frame.colorDc.end()); QVector<float> delta;
-        if (!mintSkinRecovery(original,corrected,&delta,progress)) throw std::runtime_error("Export cancelled.");
+        if (!mintSkinRecovery(original,corrected,&delta,progress)) throw std::runtime_error("Export canceled.");
         for (size_t i=0;i<frame.colorDc.size();++i) frame.colorDc[i]+=strength*delta[qsizetype(i)];
         if (strength>=1) for (size_t i=0;i<frame.count;++i) frame.colorDc[3*i+1]=std::min(frame.colorDc[3*i+1],.5f*(frame.colorDc[3*i]+frame.colorDc[3*i+2]));
     }
@@ -126,7 +126,7 @@ public:
         std::vector<QVector3D> worldPositions(size_t(source.count));std::vector<uint8_t> keep(size_t(source.count));
         if (pruned && pruned->size()!=source.count) throw std::runtime_error("The pruning does not match the frame's records.");
         for (size_t i=0;i<source.count;++i) {worldPositions[i]=model.map({source.position[3*i],source.position[3*i+1],source.position[3*i+2]});keep[i]=source.active[i] && (!pruned || (*pruned)[i]) && modifiers.keeps(worldPositions[i],{source.colorDc[3*i],source.colorDc[3*i+1],source.colorDc[3*i+2]});}
-        applyIsolation(worldPositions,keep,modifiers.isolations,[&] {report(progress,0,QStringLiteral("Purge Isolated: searching neighbours"));return false;});
+        applyIsolation(worldPositions,keep,modifiers.isolations,[&] {report(progress,0,QStringLiteral("Purge Isolated: searching neighbors"));return false;});
         vgs::Frame input=source; processColour(input,project.captureSettings,progress);
         vgs::Frame out;out.shCoefficients=coefficients;out.seconds=source.seconds;
         for (size_t i=0;i<input.count;++i) {
@@ -156,7 +156,7 @@ public:
             for (int c=0;c<3;++c) colours(0,c)=(input.colorDc[3*i+c]-.5)/C0;
             for (int k=0;k<input.shCoefficients;++k) for (int c=0;c<3;++c) colours(k+1,c)=input.shRest[(i*input.shCoefficients+k)*3+c];
             colours=(sh*colours).eval();
-            if (!colours.allFinite() || !std::isfinite(input.opacity[i])) throw std::runtime_error("Non-finite Gaussian colour or opacity.");
+            if (!colours.allFinite() || !std::isfinite(input.opacity[i])) throw std::runtime_error("Non-finite Gaussian color or opacity.");
             // Colour modifiers: the matrix on the colour (0.5 + C0*DC) and on every SH term.
             if (modifiers.colourChanges) {
                 const auto &a=modifiers.colour;Eigen::Matrix3d m;m<<a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7],a[8];
@@ -173,7 +173,7 @@ void u16(vgs::Bytes &b,uint16_t value) { b.push_back(uint8_t(value));b.push_back
 void u32(vgs::Bytes &b,uint32_t value) { for (int i=0;i<4;++i) b.push_back(uint8_t(value>>(8*i))); }
 void u64(vgs::Bytes &b,uint64_t value) { for (int i=0;i<8;++i) b.push_back(uint8_t(value>>(8*i))); }
 float half(float value,vgs::Bytes *bytes=nullptr) {
-    if (!std::isfinite(value) || std::abs(value)>65504) throw std::runtime_error("Colour exceeds the VGS half-float range.");
+    if (!std::isfinite(value) || std::abs(value)>65504) throw std::runtime_error("Color exceeds the VGS half-float range.");
     qfloat16 h(value);uint16_t bits;std::memcpy(&bits,&h,2);if (bytes) u16(*bytes,bits);return float(h);
 }
 void f32(vgs::Bytes &b,float value) { uint32_t bits;std::memcpy(&bits,&value,4);u32(b,bits); }
@@ -575,7 +575,7 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
             if (s.despill) {
                 MintDespillOptions processing;processing.strength=s.despillStrength;processing.greenGain=s.greenGain;
                 processing.viewChromaScale=s.viewChromaScale;processing.recoverSkinColour=s.recoverSkin;
-                report(progress,currentPercent,QStringLiteral("Processing native colour dictionaries"));
+                report(progress,currentPercent,QStringLiteral("Processing native color dictionaries"));
                 if (!MintFile::despillLogical(&chunk,1/rate,processing,innerProgress,&error)) throw std::runtime_error(error.toStdString());
             }
             auto edited=editNativeChunk(std::move(chunk),plan,project,writing ? nullptr : &result,innerProgress,classification ? &*classification : nullptr,moving ? &models : nullptr,

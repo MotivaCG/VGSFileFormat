@@ -21,7 +21,7 @@ scale transforms the entire capture without changing point size.
   the point under the cursor (what is seen there: through faint splats to the first that covers
   it), keeping the angle and distance, as the web viewer does; any navigation cancels the glide.
 - `Numpad decimal` / `Numpad Del` / `F`: Focus visible. `Ctrl+E`: export the edited capture. `Ctrl+Shift+E`: export the viewport as PNG.
-- `G` / `R` / `S`: activate Move / Rotate / Scale. Repeat the active mode's key to switch Global/Local. `Esc`: leave all transform modes.
+- `G` / `R` / `S`: activate Move / Rotate / Scale. Repeat the active mode's key to switch Global/Local. `Esc`: leave all transform modes, and what `Tab` entered (crop or Eraser editing).
 - `Shift+G` or **View > Grid and axes**: toggle the world grid and reference axes.
 
 The timeline uses Gracia Converter's range control: drag the upper Start marker, lower End marker, or white playhead. Above it, the clock toggle comes first, followed by Start/Frame/End on the left; transport buttons are centred and Loop/Speed sit on the right. The frame field reads **Frame X of Y**, with a zero-based index and the full capture frame count. The clock switches all three fields to seconds; typed values snap to the nearest valid frame. Start and End are inclusive and define the export range. Current time / full duration appears below decode statistics in the viewport. The unit preference is remembered without changing the project range.
@@ -138,9 +138,11 @@ identified by colour and tooltips rather than a separate visible column. There a
 no container layers or fixed modifier-count limits. Rows have the same 30 px
 minimum height, including the initial crop. A fresh capture starts with an enabled
 crop automatically fitted to its bounds. The panel reserves enough height for
-four rows. Crop bars and wire volumes use the section-heading red; Remove green
-uses green, Animate transform uses blue, Purge Isolated uses warm yellow and Prune low
-contribution uses turquoise.
+four rows. Each group has its family of hues: reds darkening through cleaning (Crop
+#EF3450, Remove green points #D83A60, Purge Isolated #A3214F, Eraser #781638), grey for the
+look (Color #A0A6AD), blue and cyan for motion (Animate transform #3B82F6, Walk #20C9D2), yellow
+for sound (Audio #F4C542) and greens for delivery (Prune low contribution #70C45A, Bake
+anti-aliasing #328D62). Crop wire volumes keep the section-heading red.
 
 Add Cylinder, Box, Remove green points, Animate transform, Purge Isolated, Prune low
 contribution or the others from
@@ -192,11 +194,13 @@ whole capture and in how many chunks the protection limited it. On Gracia captur
 measured about 14-15% smaller files with renders differing by 50 dB or more on average
 (at least 40 dB in the worst view); scoring adds about a second per chunk to the export.
 
-**Eraser** removes splats picked by hand. While it is selected (and enabled) the viewport picks:
-a left drag paints with the **Brush** (its radius in pixels) or draws a **Lasso**, and on release
+**Eraser** removes splats picked by hand. While it is selected (and enabled) with **Edit** on —
+the default; **Tab** toggles it — the viewport picks:
+a left drag paints with the **Brush** (its radius in pixels; Ctrl + wheel changes it) or draws a **Lasso**, and on release
 the visible splats inside replace the picks of the chunk on screen; **Ctrl** adds to them and
 **Alt** subtracts. The right button orbits and the middle one pans meanwhile. Picks show in pink
-while the modifier is selected; otherwise, and in every export, they are removed. A splat is
+while Edit is on; with it off the viewport shows the result, the picks removed, with the usual
+navigation, as it does when the modifier is not selected and in every export. A splat is
 itself only within one chunk of the source, so each chunk keeps its own picks, as record indices
 within it, stored in the project as runs; the panel counts them for the chunk on screen and for
 all, and clears either. Each stroke is one undo step.

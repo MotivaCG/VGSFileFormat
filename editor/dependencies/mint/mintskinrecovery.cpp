@@ -129,7 +129,7 @@ bool mintSkinRecovery(const MintFrame& original, const MintFrame& corrected,
     }
 
     for (int i = 0; i < n; ++i) {
-        if ((i % 4096) == 0 && progress && !progress(100*i/std::max(1,n), QStringLiteral("Recovering skin colour"))) return false;
+        if ((i % 4096) == 0 && progress && !progress(100*i/std::max(1,n), QStringLiteral("Recovering skin color"))) return false;
         if (!candidate[i]) continue;
         const float* p = original.position.constData()+i*3;
         std::array<std::pair<float,int>,16> nearest;
@@ -150,8 +150,14 @@ bool mintSkinRecovery(const MintFrame& original, const MintFrame& corrected,
             sum += weight;
             for (int c = 0; c < 3; ++c) target[c] += weight*color[j*3+c]/luminance[j];
         }
-        for (int c = 0; c < 3; ++c)
-            (*deltas)[i*3+c] = .95f*std::clamp(target[c]/sum*luminance[i]-color[i*3+c],-.2f,.2f);
+        // Recovery only undoes the despill: each channel may move back towards its source
+        // colour, never past it. A reference that is not skin - red and white cloth next to
+        // a face looks the same once despilled - cannot then tint the skin beyond either.
+        for (int c = 0; c < 3; ++c) {
+            const float now = color[i*3+c], was = source[i*3+c];
+            const float shift = std::clamp(target[c]/sum*luminance[i]-now,-.2f,.2f);
+            (*deltas)[i*3+c] = .95f*std::clamp(shift,std::min(was-now,0.0f),std::max(was-now,0.0f));
+        }
     }
     return true;
 }

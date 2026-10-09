@@ -105,7 +105,7 @@ std::vector<float> contributionScores(const std::vector<vgs::Frame> &samples, bo
         for (double height : {0.95, -0.95})
             views.push_back(look(centre + Eigen::Vector3d(std::sin(yaw)*0.35*far, height*far, std::cos(yaw)*0.35*far), centre));
     }
-    if (cancelled && cancelled()) throw std::runtime_error("Export cancelled.");
+    if (cancelled && cancelled()) throw std::runtime_error("Export canceled.");
     const double focal = Size / 2.0 / std::tan(HalfFov);
     const size_t workers = std::clamp<size_t>(std::thread::hardware_concurrency(), 1, views.size());
     std::vector<std::vector<double>> credits(workers, std::vector<double>(n, 0));
@@ -116,7 +116,7 @@ std::vector<float> contributionScores(const std::vector<vgs::Frame> &samples, bo
             for (const auto &s : samples) render(s, views[v], focal, antialiased, items, transmittance, credits[w]);
     });
     for (auto &t : threads) t.join();
-    if (cancelled && cancelled()) throw std::runtime_error("Export cancelled.");
+    if (cancelled && cancelled()) throw std::runtime_error("Export canceled.");
     // Pixels at this size, as pixels of a 1080p view.
     const double toHd = (1080.0 / Size) * (1080.0 / Size);
     for (size_t i = 0; i < n; ++i) {

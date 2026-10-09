@@ -34,7 +34,7 @@ int main(int argc, char *argv[])
     QCommandLineParser parser; parser.addHelpOption();
     parser.addPositionalArgument("capture", "A .vgs, .pgs, .mint or .vgsproj file.");
     QCommandLineOption smoke("smoke-test", "Open, seek, verify a project and save a PNG preview.", "output");
-    QCommandLineOption smokeScreen("smoke-screen", "Maximise an automated preview on the specified screen index.", "index");
+    QCommandLineOption smokeScreen("smoke-screen", "Maximize an automated preview on the specified screen index.", "index");
     QCommandLineOption exportOption("export-capture", "Export a .vgsproj to VGS/PGS/MINT without opening the editor window.", "output");
     QCommandLineOption tasksOption("process-tasks", "Export the .vgstask files given, one after another, without opening the editor window.");
     parser.addOption(smoke);parser.addOption(smokeScreen); parser.addOption(exportOption); parser.addOption(tasksOption); parser.process(a);

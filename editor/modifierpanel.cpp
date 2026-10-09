@@ -53,30 +53,32 @@ QString typeName(const Modifier &modifier) {
 QString typeDescription(ModifierType type) {
     switch (type) {
     case ModifierType::Crop: return ModifierPanel::tr("Keeps the splats inside a cylinder or box, or removes them in Remove mode.\nSeveral Keep crops add up, and Remove wins where they overlap.\nWhen animated, it follows keys on the timeline.");
-    case ModifierType::RemoveGreen: return ModifierPanel::tr("Removes splats whose base colour is green-screen spill:\nsaturated colours within a hue range around green.");
+    case ModifierType::RemoveGreen: return ModifierPanel::tr("Removes splats whose base color is green-screen spill:\nsaturated colors within a hue range around green.");
     case ModifierType::AnimateTransform: return ModifierPanel::tr("Moves, rotates and scales the whole capture over time with keys.\nVGS/PGS exports store the movement as motion samples. MINT cannot hold it.");
-    case ModifierType::PurgeIsolated: return ModifierPanel::tr("Removes stray splats: those whose Nth nearest neighbour\nis farther than a multiple of the frame's median distance.");
+    case ModifierType::PurgeIsolated: return ModifierPanel::tr("Removes stray splats: those whose Nth nearest neighbor\nis farther than a multiple of the frame's median distance.");
     case ModifierType::Walk: return ModifierPanel::tr("Marks the capture as walking at a speed along +Z.\nThe preview slides the floor under it.\nExports write the speed to the header and leave the data in place.");
     case ModifierType::BakeAntialiasing: return ModifierPanel::tr("Prepares a capture trained with anti-aliasing (every Gracia .mint)\nfor renderers that do not compensate for it.\nThin splats grow to about a pixel at a chosen viewing distance and fade by as much,\nso they no longer draw as solid lines.");
     case ModifierType::PruneLowContribution: return ModifierPanel::tr("Removes the splats that add least to the image:\nthe hidden, the faint and the tiny, measured by rendering each chunk\nfrom around the capture. Up to a share of them, and never one\nthat covers more than a set area.");
     case ModifierType::Audio: return ModifierPanel::tr("The soundtrack: the capture's own or a file, with an offset.\nThe editor plays it with the timeline; VGS/PGS exports carry it in sync.\nMINT cannot hold audio.");
-    case ModifierType::Colour: return ModifierPanel::tr("Exposure, white balance and saturation for the whole capture,\nview-dependent colour included, and green spill removal.\nShown in the viewport; exports keep the capture's own colour tables.");
+    case ModifierType::Colour: return ModifierPanel::tr("Exposure, white balance and saturation for the whole capture,\nview-dependent color included, and green spill removal.\nShown in the viewport; exports keep the capture's own color tables.");
     case ModifierType::Erase: return ModifierPanel::tr("Removes splats picked by hand with a brush or a lasso:\nfloaters, stray pieces, whatever the filters miss.\nA splat is itself only within one chunk, so each chunk keeps its own picks.");
     }
     return {};
 }
+// One family of hues per group: reds darkening through cleaning, grey for the look, blues for
+// motion, yellow for sound, greens for delivery.
 QColor modifierColour(ModifierType type) {
     switch (type) {
-    case ModifierType::Crop: return {240,60,90};
-    case ModifierType::RemoveGreen: return {85,185,105};
-    case ModifierType::AnimateTransform: return {47,123,234}; // #2F7BEA
-    case ModifierType::PurgeIsolated: return {219,181,76};
-    case ModifierType::Walk: return {160,110,214};
-    case ModifierType::BakeAntialiasing: return {185,133,114}; // #B98572
-    case ModifierType::PruneLowContribution: return {31,209,174}; // #1FD1AE
-    case ModifierType::Audio: return {168,224,74}; // #A8E04A
-    case ModifierType::Colour: return {226,226,226}; // #E2E2E2
-    case ModifierType::Erase: return {163,33,79}; // #A3214F
+    case ModifierType::Crop: return QColor(QRgb(0xEF3450u));
+    case ModifierType::RemoveGreen: return QColor(QRgb(0xD83A60u));
+    case ModifierType::PurgeIsolated: return QColor(QRgb(0xA3214Fu));
+    case ModifierType::Erase: return QColor(QRgb(0x781638u));
+    case ModifierType::Colour: return QColor(QRgb(0xA0A6ADu));
+    case ModifierType::AnimateTransform: return QColor(QRgb(0x3B82F6u));
+    case ModifierType::Walk: return QColor(QRgb(0x20C9D2u));
+    case ModifierType::Audio: return QColor(QRgb(0xF4C542u));
+    case ModifierType::PruneLowContribution: return QColor(QRgb(0x70C45Au));
+    case ModifierType::BakeAntialiasing: return QColor(QRgb(0x328D62u));
     }
     return {75,80,86};
 }

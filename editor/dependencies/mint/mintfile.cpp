@@ -1055,7 +1055,7 @@ bool MintFile::despill(const MintDespillOptions& options, const MintProgressFn& 
 
         if (progress && !progress(100 * ci / std::max(1, totalSteps),
                                   QObject::tr("Despilling chunk %1 of %2").arg(ci + 1).arg(totalSteps))) {
-            if (error) *error = QObject::tr("Cancelled");
+            if (error) *error = QObject::tr("Canceled");
             return false;
         }
 
@@ -1162,7 +1162,7 @@ bool MintFile::despill(const MintDespillOptions& options, const MintProgressFn& 
         for (int s = 0; s < sampleCount; ++s) {
             if (progress && !progress(100 * ci / std::max(1, totalSteps),
                                      QObject::tr("Despilling chunk %1 of %2").arg(ci + 1).arg(totalSteps))) {
-                if (error) *error = QObject::tr("Cancelled");
+                if (error) *error = QObject::tr("Canceled");
                 return false;
             }
             const float sampleTime = (float(s) + 0.5f) / float(samplesPerInterval);
@@ -1234,7 +1234,7 @@ bool MintFile::despill(const MintDespillOptions& options, const MintProgressFn& 
             for (int s = 0; s < sampleCount; ++s) {
                 if (progress && !progress(100 * ci / std::max(1, totalSteps),
                                          QObject::tr("Limiting green in chunk %1 of %2").arg(ci + 1).arg(totalSteps))) {
-                    if (error) *error = QObject::tr("Cancelled");
+                    if (error) *error = QObject::tr("Canceled");
                     return false;
                 }
                 const float sampleTime = (float(s) + 0.5f) / float(samplesPerInterval);
@@ -1358,7 +1358,7 @@ bool MintFile::despill(const MintDespillOptions& options, const MintProgressFn& 
                 return !progress || progress(100*ci/std::max(1,totalSteps), stage);
             };
             if (!mintSkinRecovery(originalSkinFrame, corrected, &delta, reportSkin)) {
-                if (error) *error = QObject::tr("Cancelled");
+                if (error) *error = QObject::tr("Canceled");
                 return false;
             }
             int offset = 0;
