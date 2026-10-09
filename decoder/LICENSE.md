@@ -1,162 +1,221 @@
-# Licence
+# VGS Decoder Licence
 
-VGS Decoder: the library, the WebAssembly module, the accompanying documentation and the
-example source (together, "the Software").
+<!-- SPDX-License-Identifier: LicenseRef-VGS-Decoder-Proprietary -->
 
-Copyright © 2026 Víctor M. Feliz, The4DScanner | ScanMeNow ("the Licensor"). All rights
-reserved.
+VGS Decoder: the supplied native libraries (including the VGS native playback
+bridge, `vgsblender`), WebAssembly modules, public headers, accompanying
+documentation, and example source code (collectively, the "Software").
 
-By using the Software you accept the terms below.
+Copyright © 2026 Víctor M. Feliz. All rights reserved.
 
-## 1. Grant
+The4DScanner and ScanMeNow are referenced for identification only. In this licence,
+"Licensor" means Víctor M. Feliz, or a successor or other rights holder duly
+entitled to license the Software. The identity of the contracting licensor may be
+specified differently in a separate written agreement.
 
-Subject to these terms, you are granted a free, worldwide, non-exclusive,
+The Software is proprietary, not open source. It is made available free of charge
+under the limited permissions below, including for commercial use. By exercising
+rights under this licence, you agree to comply with its terms.
+
+## 1. Licence grant
+
+Subject to this licence, the Licensor grants you a free, worldwide, non-exclusive,
 non-transferable, non-sublicensable licence to:
 
-a) use the Software for any purpose, including commercial purposes;
+a) use and execute the Software for any purpose, including commercial purposes;
 
-b) reproduce the library and the WebAssembly module, in the form supplied, within
-applications, plugins, extensions, games and other end products you develop, and
-distribute them as part of those products, whether linked into an executable, supplied as
-an accompanying dynamic library, or included in an installer or other distribution
-package;
+b) integrate the supplied native libraries and WebAssembly modules, without
+modifying them, into applications, games, plugins, extensions, viewers, websites,
+and other end-user products ("End Products"), whether their principal purpose is
+to display, import, inspect or otherwise read VGS captures;
 
-c) use, modify and incorporate the example source supplied in
-`examples` into your own work without restriction.
+c) reproduce and redistribute the supplied native libraries and WebAssembly
+modules solely as incorporated components of, or alongside, those End Products,
+including by static linking, dynamic linking, embedding, hosting for execution by
+an End Product, or inclusion in an installer or application package;
+
+d) use, copy, modify, and incorporate the example source code provided in the
+`examples` directory into your own work, including commercial work.
+
+You may charge for End Products developed under this licence. End users may use
+lawfully distributed copies of the Software as part of those End Products without
+obtaining a separate licence from the Licensor.
+
+This grant does not cover VGS Encoder, VGS Editor or any software not expressly
+included in the definition of the Software above. VGS Encoder and VGS Editor
+are separately licensed proprietary commercial products; the free permissions
+in this licence do not authorise their use or distribution.
 
 ## 2. Restrictions
 
-You shall not:
+Except as expressly permitted by clause 1 or mandatory applicable law, you shall
+not:
 
-a) modify, adapt or translate the library or the WebAssembly module, or create derivative
-works of either;
+a) modify, adapt, translate, patch or create derivative works of the supplied
+native libraries or WebAssembly modules;
 
-b) distribute, sell, license or otherwise make available the library or the WebAssembly
-module as such, whether alone or as the substance of a software development kit, library,
-plugin, service or other offering whose purpose or effect is to provide third parties with
-the ability to read the file format. Distribution under clause 1(b) is permitted because
-the Software is a component of your product; it is not permitted where the Software, or
-access to it, is what your product provides;
+b) offer, sell, license, publish or distribute the Software as a standalone
+library, general-purpose SDK, development toolkit, or substantially equivalent
+redistributable component, independently of an End Product;
 
-c) reverse engineer, decompile or disassemble the library or the WebAssembly module, or
-attempt to derive the structure of the file format from them;
+c) repackage or expose the Software as a general-purpose decoding library, API,
+service or SDK for other developers to integrate as a substitute for obtaining
+the Software from the Licensor. This does not prohibit normal decoding features,
+file import/export, playback, or services offered to users of an End Product;
 
-d) remove, obscure or alter any copyright, authorship or licence notice.
+d) reverse engineer, decompile or disassemble the supplied libraries or modules,
+or attempt to derive their source code or internal algorithms, except to the
+extent expressly permitted by mandatory applicable law, including applicable
+interoperability rights;
 
-Clause 2(a) does not apply to the example source, which clause 1(c) expressly permits you
-to modify.
+e) remove, obscure or alter copyright, authorship or licence notices included
+with the Software.
 
-Any use, reproduction or distribution of the Software not expressly permitted by clause 1
-requires the Licensor's prior written permission.
+Clause 2(a) does not restrict the example source code covered by clause 1(d).
+The grant to integrate the Software into End Products is not permission to
+redistribute the headers and native or WebAssembly libraries as a separate SDK.
+Other uses require the Licensor's prior written permission.
 
-## 3. Attribution
+## 3. Notices and attribution
 
-Products distributed under clause 1(b) shall include, in their credits, "about" screen,
-documentation or other customary place for such notices, a statement to the effect of:
-"Includes VGS Decoder, © Víctor M. Feliz, The4DScanner | ScanMeNow."
+When distributing an End Product containing the Software, include the following
+notice in its credits, acknowledgements, documentation, legal notices, or another
+customary location reasonably accessible to recipients:
 
-## 4. Reservation of rights
+> Includes VGS Decoder. Copyright © 2026 Víctor M. Feliz.
 
-All rights not expressly granted by clause 1 are reserved to the Licensor. This licence
-transfers no ownership in the Software or in the file format it reads.
+You may identify VGS Decoder accurately by name to explain compatibility or
+integration. No endorsement by the Licensor, The4DScanner or ScanMeNow may be
+implied.
 
-You acknowledge that the Software and the file format, including its structure,
-organisation and encoding, are the property of the Licensor. You shall not apply to
-register, or assist any third party in registering, any intellectual property right in or
-substantially derived from the file format, nor challenge the Licensor's rights in it.
+## 4. Ownership and reserved rights
 
-No right is granted to use the names "VGS", "The4DScanner" or "ScanMeNow", or any related
-mark or logo, other than as required by clause 3 or to state accurately that your product
-incorporates the Software.
+The Licensor retains all intellectual property and other rights it holds in the
+Software, including its proprietary implementations, and in any protected
+specifications, confidential know-how or trade secrets associated with it. No
+ownership is transferred by this licence.
+
+Nothing in this licence grants rights in VGS Encoder or VGS Editor, transfers
+rights in captures, or grants a general licence to patents, trademarks or other
+rights not necessary to exercise the permissions expressly provided here.
+
+You shall not claim ownership of the Software or apply to register rights in the
+Licensor's protected original work as your own. This clause does not restrict
+rights that applicable law permits you to exercise in independently developed
+work, nor rights that cannot lawfully be waived or restricted.
+
+The names "VGS", "The4DScanner" and "ScanMeNow" and associated logos remain
+subject to their respective owners' rights. Clause 3 and accurate, non-misleading
+references to compatibility are permitted.
 
 ## 5. Feedback
 
-If you provide the Licensor with suggestions, corrections or other feedback concerning the
-Software, the Licensor may use it for any purpose without obligation or payment to you.
-You retain no rights in the Software by reason of having provided it.
+If you voluntarily provide feedback about the Software, the Licensor may use it
+without an obligation to pay you or incorporate it. You retain whatever rights
+you independently hold in the feedback; providing feedback does not grant you
+rights in the Software.
 
 ## 6. No warranty
 
-The Software is provided "as is", without warranty of any kind, whether express, implied
-or statutory, including any warranty of merchantability, fitness for a particular purpose
-or non-infringement.
+To the fullest extent permitted by applicable law, the Software is provided
+"as is" and "as available", without warranties of any kind, express, implied or
+statutory, including merchantability, fitness for a particular purpose and
+non-infringement. Mandatory rights that cannot lawfully be excluded are unaffected.
 
 ## 7. Limitation of liability
 
-To the fullest extent permitted by applicable law, the Licensor shall not be liable for
-any claim, damage, loss or other liability, whether in contract, tort or otherwise,
-arising from or in connection with the Software or its use. Nothing in this clause
-excludes or limits liability that cannot lawfully be excluded or limited.
+To the fullest extent permitted by applicable law, the Licensor shall not be
+liable for indirect, incidental, special, consequential or punitive damages, or
+for loss of profits, revenue, data or business opportunities arising out of the
+Software or this licence, even if advised of their possibility.
 
-## 8. Indemnity
+Where permitted by applicable law, the Licensor's aggregate liability in
+connection with the Software made available free of charge under this licence
+shall be limited to the amount, if any, you paid the Licensor specifically for
+that Software. This provision does not exclude or limit liability that cannot
+lawfully be excluded or limited.
 
-You shall indemnify the Licensor against any claim, demand, proceeding, loss, damage and
-reasonable legal costs brought by a third party and arising from your use of the Software,
-from any product in which you distribute it, or from your breach of this licence. This
-does not apply to a claim that the Software, used in accordance with this licence,
-infringes that third party's intellectual property rights.
+## 8. Third-party claims
+
+To the extent permitted by applicable law, you are responsible for third-party
+claims arising from your End Product, your unlawful conduct, or your material
+breach of this licence, except to the extent attributable to the Software itself
+as supplied by the Licensor and used in accordance with this licence.
+
+Nothing in this clause imposes on either party an obligation to indemnify the
+other beyond what is enforceable under applicable law or a separate written
+agreement.
 
 ## 9. Enforcement
 
-You acknowledge that a breach of clause 2 or clause 4 may cause the Licensor harm for
-which damages alone are not an adequate remedy, and that the Licensor may accordingly seek
-injunctive or other interim relief in addition to any other remedy.
+A material breach of clause 2 or 4 may cause harm for which damages alone are
+inadequate. The Licensor may seek appropriate injunctive or interim relief,
+subject to applicable law, in addition to other available remedies. Any recovery
+of enforcement costs, including legal costs, is subject to applicable law and
+court determination.
 
-The Licensor's rights and remedies under this licence are cumulative and do not exclude
-any right or remedy provided by law. The Licensor may recover the reasonable costs,
-including legal costs, of enforcing this licence against a party found to have breached
-it.
+## 10. Termination and cure
 
-## 10. Termination
+If you materially breach this licence, the Licensor may notify you in writing,
+specifying the breach. Your rights under this licence terminate if you do not
+cure that breach within 30 days after receiving the notice. No cure period is
+required where mandatory law permits immediate relief for an incurable or
+particularly serious infringement.
 
-The licence granted in clause 1 terminates automatically upon any breach of clause 2. It
-is reinstated if the breach is cured within 30 days of the Licensor giving notice of it,
-unless the Licensor has by then terminated it in writing.
+Following termination, you shall cease new integration and distribution of the
+Software and cease unlicensed use. You shall remove copies held for further
+distribution, unless retention is required by law.
 
-On termination you shall immediately cease all distribution of the Software and destroy
-the copies in your possession or control, other than those forming part of products
-already delivered to end users. Where the Licensor requires it in writing, you shall in
-addition use all reasonable efforts to recall, withdraw from sale, remove or disable the
-Software in products already distributed, and shall confirm in writing when you have done
-so.
+Termination does not retroactively invalidate rights of end users to continue
+using copies of the Software lawfully incorporated into End Products and
+distributed before termination. The Licensor does not acquire a general right
+under this clause to disable or recall those End Products. This does not prevent
+remedies available under mandatory applicable law for unlawful distributions.
 
-Termination does not limit any other right or remedy available to the Licensor, and no
-distribution made after termination is licensed.
+A licence terminated solely for a curable breach is reinstated once the breach
+is cured within the 30-day period, unless a court orders otherwise or the parties
+agree otherwise in writing.
 
 ## 11. Survival
 
-Clauses 2, 4, 5, 6, 7, 8, 9, 11, 12 and 13 survive termination or expiry of this licence.
+Provisions intended by their nature to survive termination, including ownership,
+notices applicable to existing distributions, disclaimers, limitations of
+liability and remedies relating to prior breaches, shall survive to the extent
+permitted by law. Termination does not create a new right to use or distribute
+the Software.
 
 ## 12. Severability
 
-If any provision of this licence is held by a court of competent jurisdiction to be
-invalid or unenforceable, in whole or in part, that provision shall apply with the minimum
-modification necessary to make it valid and enforceable, or, if no such modification is
-possible, shall be severed. In either case the remaining provisions continue in full
-force.
+If a provision is held invalid or unenforceable, it shall be enforced to the
+maximum extent permitted by law, or severed if necessary, without affecting the
+remaining provisions.
 
 ## 13. Governing law and jurisdiction
 
-This licence is governed by the law of Spain, excluding its conflict of law rules and the
-United Nations Convention on Contracts for the International Sale of Goods.
+This licence is governed by the laws of Spain, excluding its conflict-of-law
+rules to the extent permitted by applicable law.
 
-The courts of Valladolid, Spain, have exclusive jurisdiction over any dispute arising from
-or in connection with it. Where you are a consumer, this does not deprive you of the
-protection of the mandatory provisions of the law of your habitual residence, nor of the
-right to bring proceedings before the courts of that place.
+To the extent a choice of court is valid and enforceable, the courts of
+Valladolid, Spain, shall have exclusive jurisdiction. Nothing in this clause
+overrides mandatory consumer-protection or jurisdiction rules or other mandatory
+rights under applicable law.
 
 ## 14. Third-party components
 
-The Software incorporates the TweetNaCl reference implementation of Ed25519 and SHA-512,
-placed in the public domain by its authors. No attribution is owed in respect of it and no
-notice for it need be reproduced.
+The Software incorporates the TweetNaCl reference implementation of Ed25519 and
+SHA-512, which its authors have placed in the public domain. Other third-party
+components, if any, remain subject to their applicable terms and notices.
 
-## 15. Contact
+## 15. Separate agreements and contact
 
-Víctor M. Feliz
-The4DScanner | ScanMeNow
+A separate written agreement signed by the Licensor may grant additional rights
+or impose different terms. Where such an agreement expressly conflicts with this
+licence, the separate agreement prevails for the parties and subject matter it
+covers.
+
+Víctor M. Feliz\
+The4DScanner | ScanMeNow\
 victor.feliz@the4dscanner.com
 
-Requests for anything this licence does not grant, including modification of the library,
-distribution of it other than as clause 1(b) permits, or licensing on other terms, should
-be addressed there.
+For standalone SDK distribution, modifications to the supplied libraries, or
+other uses outside this licence, contact the Licensor at the address above.

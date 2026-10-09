@@ -1,5 +1,13 @@
 # VGS Editor - phase 1
 
+VGS Editor is proprietary commercial software, **not freeware**. Ownership
+and licensing rights in the original software remain with **Víctor
+M. Feliz**. **ScanMeNow** and **The4DScanner** receive only the internal-use
+permission in [LICENSE.md](LICENSE.md), with no sale, redistribution, sublicensing
+or ownership rights. Other uses require a separate written licence and the
+agreed payment conditions.
+The free VGS Decoder licence does not grant permission to use this editor.
+
 Qt 6 desktop editor for animated `.vgs`, `.pgs` and `.mint` captures.
 The viewport draws **opaque points** with depth testing. Point size is fixed in
 pixels and adjustable; Gaussian opacity and individual scale do not affect the

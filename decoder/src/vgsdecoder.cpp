@@ -1,3 +1,15 @@
+// SPDX-License-Identifier: LicenseRef-VGS-Decoder-Proprietary
+// Copyright (c) 2026 Víctor M. Feliz. All rights reserved.
+//
+// Proprietary VGS Decoder implementation source; not open source.
+// Supplied decoder binaries are free to use, including commercially,
+// and may be integrated and redistributed within end-user products under
+// the VGS Decoder licence; standalone SDK redistribution is not permitted.
+// This implementation source is not covered by the example-code grant.
+// Other source uses require prior written authorisation from the rights
+// holder, subject to mandatory applicable law. See decoder/LICENSE.md in
+// the source repository for the applicable permissions and liability terms.
+
 #include "vgsdecoder/vgsdecoder.h"
 
 #include "vgscodec.h"

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
+# Additional permission for the VGS native library: see LICENSE.md.
 
 """VGS 4D Gaussian Splatting Player: import and play 4D Gaussian splat captures (.vgs, .pgs).
 

@@ -9,7 +9,10 @@ not write MINT. `despillLogical` presents complete decoded VGS arrays to that sa
 operator in memory; no synthetic MINT container is emitted. The sampled fallback
 retains the frame colour operator in `despillcolor.h`.
 
-Licence: LICENSE.md. Keep the original colour operator's semantics when updating.
+Licence: [LICENSE.md](LICENSE.md), including Víctor M. Feliz's additional
+permission for integration and authorised commercial distribution within VGS
+Editor. It does not grant a free editor licence or standalone redistribution.
+Keep the original colour operator's semantics when updating.
 
 VGS decoding compiles sibling sources without writer code or signing keys.
 The separate `editor_authoring` target owns logical MINT import, container writing

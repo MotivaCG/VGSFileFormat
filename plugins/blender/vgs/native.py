@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
+# Additional permission for the VGS native library: see LICENSE.md.
 
 """The decoder library, loaded from bin/ next to this file.
 

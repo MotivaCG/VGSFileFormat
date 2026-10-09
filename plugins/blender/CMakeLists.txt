@@ -18,6 +18,7 @@ string(REGEX REPLACE "^version *= *\"([^\"]+)\".*" "\\1" addon_version "${versio
 
 set(addon_files
     blender_manifest.toml
+    LICENSE.md
     LICENSE.txt
     __init__.py
     native.py
@@ -34,6 +35,7 @@ endforeach()
 
 set(stage ${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/${addon})
 set(zip ${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/${addon}-${addon_version}.zip)
+set(decoder_license ${CMAKE_SOURCE_DIR}/decoder/LICENSE.md)
 
 # The manifest sits at the root of the zip, not in a folder, which is what Blender expects
 # of an extension package.
@@ -42,10 +44,11 @@ add_custom_target(vgs_blender_addon ALL
     COMMAND ${CMAKE_COMMAND} -E make_directory ${stage}/bin
     COMMAND ${CMAKE_COMMAND} -E copy ${addon_sources} ${stage}
     COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:vgsblender> ${stage}/bin
+    COMMAND ${CMAKE_COMMAND} -E copy ${decoder_license} ${stage}/bin/LICENSE.md
     COMMAND ${CMAKE_COMMAND} -E chdir ${stage}
             ${CMAKE_COMMAND} -E tar cf ${zip} --format=zip --
-            ${addon_files} bin/$<TARGET_FILE_NAME:vgsblender>
-    DEPENDS vgsblender ${addon_sources}
+            ${addon_files} bin/$<TARGET_FILE_NAME:vgsblender> bin/LICENSE.md
+    DEPENDS vgsblender ${addon_sources} ${decoder_license}
     COMMENT "Packaging the Blender add-on ${addon} ${addon_version}"
     VERBATIM)
 add_dependencies(vgs_blender_addon vgsblender)

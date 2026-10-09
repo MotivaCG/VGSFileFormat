@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
+# Additional permission for the VGS native library: see LICENSE.md.
 
 """Settings: one group per point cloud (PointCloud.vgs), and the add-on's preferences."""
 

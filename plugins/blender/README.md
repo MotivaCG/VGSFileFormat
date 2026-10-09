@@ -3,6 +3,11 @@
 What the add-on is and how playback works is in [../README.md](../README.md). This file is
 the rest: how to use it, how it was tested, what is known to be odd, and what is left.
 
+Available free of charge. The Python add-on is GPL-3.0-or-later with the native
+linking permission in [vgs/LICENSE.md](vgs/LICENSE.md); the bundled closed-source
+library has its own VGS Decoder licence in `bin/LICENSE.md`. Both include
+warranty and liability limitations, subject to applicable law.
+
 ## Using it
 
 Blender 5.3 or later, Windows x64.
@@ -161,8 +166,6 @@ Test capture: `D:\Trabajos\ScanMeNow\SMNWebviewer\Playcanvas\dist\data\boxing_de
   zips and the `index.json` that `blender --command extension server-generate` writes. A
   link ending in `?repository=<url of index.json>` can then be dragged from a browser into
   Blender to install. Could be a CMake target that leaves the folder ready to upload.
-- **The library's licence in the zip**, as `bin/LICENSE.md` with the decoder's terms, so
-  it is plain that the DLL is not covered by the GPL that `LICENSE.txt` gives the Python.
 - **`website`** (and perhaps `copyright`) in `blender_manifest.toml`.
 - **Signing `vgsblender.dll`** with a code-signing certificate, which quietens some
   antivirus products about an unsigned DLL.

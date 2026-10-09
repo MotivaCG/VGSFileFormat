@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
+# Additional permission for the VGS native library: see LICENSE.md.
 
 """The capture panel in the point cloud's data properties, and File > Import."""
 

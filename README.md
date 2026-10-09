@@ -22,6 +22,27 @@ is genuine after about a kilobyte, before any of the payload has been fetched.
 [FORMAT.md](FORMAT.md) describes the bytes. This file describes the projects and how to
 build them.
 
+## Licensing
+
+Licensing is specific to each component; access to this repository does not
+grant a general right to use, modify or distribute its contents.
+
+- [VGS Encoder](encoder/LICENSE.md) and [VGS Editor](editor/LICENSE.md) are
+  proprietary commercial software owned by **Víctor M. Feliz**. **ScanMeNow**
+  and **The4DScanner** have only the internal-use permission stated in those
+  licences, with no ownership, sale, redistribution or sublicensing rights.
+  Other uses require Víctor's prior written authorisation and compliance with
+  the applicable agreement's fees and payment conditions.
+- [VGS Decoder](decoder/LICENSE.md) is proprietary but free to use, including
+  commercially, and may be integrated and redistributed within end-user
+  products under its licence. This permission does not cover the encoder or editor.
+- The [Blender plugin](plugins/blender/vgs/LICENSE.md) is free of charge, with
+  GPL-3.0-or-later Python code and an express linking permission for its
+  separately licensed closed native library.
+- The [Houdini plugin](plugins/houdini/LICENSE.md) is proprietary and free of
+  charge, including for commercial use. Both plugins include warranty and
+  liability limitations. Dependencies retain their own licences.
+
 ## The three projects
 
     core/        the codec: container, entropy coding, frame evaluation, crypto

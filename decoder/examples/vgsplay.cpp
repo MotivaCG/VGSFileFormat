@@ -1,3 +1,12 @@
+// SPDX-License-Identifier: LicenseRef-VGS-Decoder-Proprietary
+// Copyright (c) 2026 Víctor M. Feliz. All rights reserved.
+//
+// VGS Decoder example source, licensed under clause 1(d) of ../LICENSE.md.
+// Use, copying, modification and incorporation into your own work are
+// permitted, including commercially, subject to that licence.
+// These example-code permissions do not relicense the decoder libraries
+// or grant ownership of them. The licence warranty and liability terms apply.
+
 // vgsplay - plays a capture and reports what decoding it costs.
 //
 //   vgsplay boxing.vgs

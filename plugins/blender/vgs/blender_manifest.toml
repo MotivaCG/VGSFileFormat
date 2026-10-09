@@ -12,6 +12,8 @@ tags = ["Import-Export", "Animation"]
 blender_version_min = "5.3.0"
 
 license = ["SPDX:GPL-3.0-or-later"]
+# The Python code has the additional native-linking permission in LICENSE.md.
+# The proprietary native component has separate terms in bin/LICENSE.md.
 
 # The decoder ships as a native library inside bin/, built for this platform only.
 platforms = ["windows-x64"]

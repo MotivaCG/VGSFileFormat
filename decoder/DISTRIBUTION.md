@@ -10,20 +10,24 @@
 
 ---
 
-By Víctor M. Feliz, The4DScanner | ScanMeNow. Free to use, including commercially; see
-[LICENSE.md](LICENSE.md).
+By Víctor M. Feliz, The4DScanner | ScanMeNow. Free to use, including commercially, and to redistribute as part of end-user
+products (including viewers and plugins); see [LICENSE.md](LICENSE.md).
+The decoder is proprietary: it may not be repackaged as a standalone SDK.
 
 A capture is a timeline of frames, each a few hundred thousand splats, stored so a player
 fetches and decodes one chunk of time at a time rather than the whole file. Every capture
-carries what it is - title, author, project, take, studio, copyright, tags - and a
-signature over all of it, so a reader knows whether a file is genuine after about a
-kilobyte, before any of the frames have been downloaded.
+carries what it is - title, author, project, take, studio, copyright, tags - and signed metadata and payloads. A decoder can verify the initial signed information
+using a trusted verification key after fetching only the initial bytes, without
+downloading all frame data. Successful signature verification establishes integrity
+and correspondence to that trusted key; it does not independently establish who
+created the underlying capture or whether its contents are truthful.
 
 This package reads captures. It cannot write one.
 
 ## What is here
 
-    LICENSE.md                          the terms
+    LICENSE.md                          the decoder licence
+    DISTRIBUTION.md                     integration and distribution guide
     include/vgsdecoder/vgsdecoder.h     the C++ API
     include/vgsdecoder/vgsdecoder_c.h   the same thing in C
     lib/                                the library, and CMake package files
@@ -36,7 +40,8 @@ This package reads captures. It cannot write one.
 #include "vgsdecoder/vgsdecoder.h"
 
 vgsdec::Capture capture = vgsdec::Capture::openFile("boxing.vgs");
-// Opening it authenticated it. If this line runs, the capture is genuine.
+// Opening verifies the signed capture information using trusted decoder keys.
+// This checks integrity and key authenticity, not the truth of the metadata.
 
 printf("%s by %s, %.2f s\n", capture.metadata().title.c_str(),
        capture.metadata().author.c_str(), capture.duration());
@@ -74,17 +79,21 @@ harmonics - all indexed the same way, so element `i` of each describes the same 
 pointers belong to the capture and are replaced by the next `setTime`.
 
 Three ways in: `openFile`, `openMemory`, and `openStream` with a `Source` you implement
-for a socket or a CDN. A streamed capture authenticates from its first kilobytes, so you
-know whether a file is worth downloading before downloading it.
+for a socket or a CDN. A streamed capture can verify its initial signed information from the first
+kilobytes using a trusted key. This allows early rejection of unsupported or
+untrusted data; payload integrity is checked as the relevant data is accessed.
 
 ### Staying in real time
 
 Two costs decide whether a host keeps up, and they are separate questions.
 
-Evaluating a frame happens every frame and costs about 16 ms for a quarter of a million
-splats, twice that with spherical harmonics. Getting a chunk ready happens about once a
-second and costs around 200 ms; paid by the frame that arrives at the chunk, it is a
-dropped frame every second. `prepare` spreads it instead:
+As an illustrative measurement, evaluating a frame has taken about 16 ms for
+a quarter of a million splats, and roughly twice that with spherical harmonics.
+Preparing a chunk has taken around 200 ms, often once per second of playback.
+These figures are not performance guarantees: CPU, thread settings, capture
+complexity and decoder build matter. The hardware and benchmark configuration
+for these measurements are not specified here. A chunk prepared synchronously
+can stall playback; `prepare` spreads the work instead:
 
 ```cpp
 // once a frame, after drawing, with the time left over
@@ -107,19 +116,22 @@ gives the two samples the current time falls between and the blend factor. Your 
 shader does the interpolation and activation, and the per-frame cost on the CPU stops
 depending on the splat count or on how many captures are playing.
 
-This is how to draw several captures at once, and the only way to fit one inside a
-headset's frame. It asks more of you: the shader has to know how the attributes are
-encoded, which the default `Output::Floats` keeps inside the library. Ask if you need it.
+This is the recommended way to render several captures at once and can be
+important for tight headset frame budgets. It asks more of you: the shader has to know how the attributes are
+encoded, which the default `Output::Floats` keeps inside the library. Contact the Licensor if you need the packed attribute layout and a reference
+shader implementation. Availability and terms for additional documentation
+should be confirmed separately; the decoder licence does not grant access to
+undistributed source code or confidential internal specifications.
 
 Payloads carried alongside the frames each have their own getter: `audio()`,
 `thumbnail()`, `metadataJson()`, `metadataJson2()`, each with a matching `has…()` and,
 where it applies, a format. All four are checked against the signature before they come
 back.
 
-Anything wrong with a capture - altered bytes, a broken or missing signature, an unknown
-key - throws `vgsdec::Error` whose message is exactly `invalid 4dgs capture`. That string
-is the same in every implementation, including the JavaScript one, so a user-facing
-message can be written against it.
+For certain invalid or unauthenticated captures - for example, altered bytes,
+a broken or missing signature, or an unknown key - the decoder throws `vgsdec::Error` whose message is exactly `invalid 4dgs capture`. This is the documented error text for this failure category in the supplied
+implementations; other failures may have different messages. Callers should
+handle the error type rather than rely only on matching its text.
 
 ### Building against it
 
@@ -142,6 +154,16 @@ cmake -S . -B build && cmake --build build --config Release
 or a host built with a different compiler. If this package contains a DLL rather than a
 static library, that C interface is what it exports, and the only thing it exports.
 
+## Format support and compatibility
+
+The package accepts `.vgs` and `.pgs` captures. Their detailed differences and
+per-version compatibility guarantees are not specified in this distribution
+guide; refer to the decoder release notes or ask the Licensor before relying on
+a particular producer/decoder version combination.
+
+Applications should handle unsupported versions and features as errors, rather
+than assuming that future captures can always be read by older decoders.
+
 ## The web
 
 The WebAssembly build of this decoder, with its JavaScript API, installs into `web/` and
@@ -157,7 +179,30 @@ documents itself there. It is present only if this package was assembled with it
 | `vgsexport capture.vgs out/` | the whole capture as a numbered `.ply` sequence |
 | `vgspagecost capture.vgs` | where the bytes and decoding time go, per attribute and per detail level, and what a CPU-sorting player spends |
 
-`vgsexport` is the bridge to everything that does not read VFGS: the 3DGS tools, the DCC
+`vgsexport` is the bridge to everything that does not read VGS: the 3DGS tools, the DCC
 importers and the training code all read per-frame `.ply`. Expect it to be large - a
 capture is a few hundred megabytes precisely because it does not store frames
 independently, and writing them back out separately undoes that.
+
+
+## Redistributing VGS Decoder
+
+The supplied native library or WebAssembly module may be embedded in or shipped
+alongside a commercial or free End Product, including a viewer, game, plugin,
+website or importer whose main purpose is reading VGS captures. You may not
+redistribute the decoder as a standalone third-party SDK, library or substitute
+for the Licensor's developer distribution.
+
+Include the notice required by [LICENSE.md](LICENSE.md) somewhere reasonably
+accessible in the End Product's credits, acknowledgements, documentation or
+legal notices:
+
+> Includes VGS Decoder. Copyright © 2026 Víctor M. Feliz.
+
+You may distribute End Products in binary form without publishing your own
+source code. Modification of the supplied native decoder library or WebAssembly
+module is not permitted under the standard licence; the example source code
+under `examples/` is expressly modifiable. See [LICENSE.md](LICENSE.md) for
+the full terms, limitations and exceptions.
+
+VGS Encoder is separate software and is not licensed with this package.

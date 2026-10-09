@@ -42,10 +42,16 @@ unzipped into the user's Houdini `packages` folder; `cmake --install` copies it 
 
 ## Two licences, one line between them
 
-The add-on is Python written against Blender's API, and the Blender Foundation's position
-is that anything written against that API is GPL; it is licensed GPL-3.0-or-later and
-carries the licence text. The native library holds the decoder and is not GPL: it ships
-under the decoder's own terms, inside the add-on's zip as a separate file in `bin/`.
+Both plugins are supplied free of charge, including for commercial use, with
+the warranty and liability limitations in their respective licences.
+
+The Blender Python add-on is GPL-3.0-or-later and carries the complete GPL text
+in `LICENSE.txt`. Its [licensing notice](blender/vgs/LICENSE.md) grants an
+additional permission under GPLv3 section 7 for linking the author's code with
+the closed VGS native playback bridge and decoder. Separating files in a ZIP
+does not itself create a GPL exception. The native component remains under
+[the VGS Decoder licence](../decoder/LICENSE.md), packaged as `bin/LICENSE.md`.
+The permission does not waive obligations for Blender or other third-party code.
 
 Keep that line where it is. Nothing of the format belongs in the Python: it opens a
 capture, says which instants it wants and copies arrays it is handed. Everything that
@@ -57,9 +63,10 @@ so that it can use the static C runtime and load on a machine without the Visual
 redistributable. It is therefore its own artefact, and `keyleak_blender` checks it for
 the signing key like the other decoder builds.
 
-The Houdini plugin has no such line to keep: an HDK plugin is not bound by the GPL, and
-it is closed like the decoder. It compiles the same player (`vgsblender.cpp`, with
-`VGSBLENDER_STATIC`) into its DSO, so `keyleak_houdini` checks that too.
+The Houdini plugin is proprietary under [its own free-use licence](houdini/LICENSE.md).
+It compiles the same player (`vgsblender.cpp`, with `VGSBLENDER_STATIC`) into its
+DSO and includes the native components' licence as `vgs/DECODER-LICENSE.md` in
+the package, so `keyleak_houdini` checks that too.
 
 ## How playback works
 

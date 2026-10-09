@@ -9,5 +9,7 @@ load graphics from the converter checkout at runtime.
 - `logo_bbb.svg`: legacy converter logo, retained for future use.
 - `calib.png`, `calibtotem.png`, `range.png`: converter tool illustrations.
 
-The original source project's licence is preserved at
-`dependencies/mint/LICENSE.md`.
+The source project's licence, with Víctor M. Feliz's additional permission for
+the MINT code's integration and authorised distribution within VGS Editor, is
+recorded at `dependencies/mint/LICENSE.md`. That code permission does not itself
+grant rights in third-party artwork, names or logos.

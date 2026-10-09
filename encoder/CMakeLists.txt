@@ -1,3 +1,13 @@
+# SPDX-License-Identifier: LicenseRef-VGS-Encoder-Proprietary
+# Copyright (c) 2026 Víctor M. Feliz. All rights reserved.
+#
+# Proprietary software owned by Víctor M. Feliz.
+# ScanMeNow and The4DScanner are licensed for internal use only.
+# No ownership, sale, redistribution, sublicensing or modification rights
+# are granted. All other rights remain reserved to the copyright holder.
+# See LICENSE.md for the limited use grant and applicable terms.
+# Other uses require prior written authorisation, subject to mandatory law.
+
 # The encoder: the codec's shared half, the authoring half, and the API over them.
 #
 # This is the only target that defines VGS_AUTHORING, and so the only one that may
@@ -83,4 +93,10 @@ install(FILES
     ${CMAKE_CURRENT_BINARY_DIR}/VGSEncoderConfig.cmake
     ${CMAKE_CURRENT_BINARY_DIR}/VGSEncoderConfigVersion.cmake
     DESTINATION ${VGS_ENCODER_PREFIX}/${CMAKE_INSTALL_LIBDIR}/cmake/VGSEncoder
+        COMPONENT encoder)
+
+# The terms install with the library, as the decoder's do: a copy without them is one
+# nobody can tell they may not use.
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/LICENSE.md
+        DESTINATION ${VGS_ENCODER_PREFIX}
         COMPONENT encoder)

@@ -4,6 +4,11 @@ An HDK plugin for Houdini 22.0: a **VGS Capture** object and a **VGS Capture** S
 same player as the Blender add-on (`plugins/vgsblender`) is compiled into it, so it plays
 captures the same way; what differs is how the frames get into the host.
 
+Proprietary and free of charge, including for commercial use, under
+[LICENSE.md](LICENSE.md), with no warranty and liability limited to the extent
+permitted by law. Distributed packages carry this licence as `vgs/LICENSE.md`
+and the native components' VGS Decoder licence as `vgs/DECODER-LICENSE.md`.
+
 ## Using it
 
 Install: unzip `vgs-houdini-<version>-h22.0.zip` into the `packages` folder of the

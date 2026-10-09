@@ -1,3 +1,11 @@
+# SPDX-License-Identifier: LicenseRef-VGS-Decoder-Proprietary
+# Copyright (c) 2026 Víctor M. Feliz. All rights reserved.
+#
+# Proprietary VGS Decoder build configuration.
+# Supplied decoder components are free to use, including commercially,
+# under the VGS Decoder licence. No public implementation-source licence
+# is granted. See decoder/LICENSE.md in the source repository for terms.
+
 # The decoder: the codec's shared half and the API over it.
 #
 # What is missing here is the point. There is no VGS_AUTHORING, no vgsencode.cpp and no

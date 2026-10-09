@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
+# Additional permission for the VGS native library: see LICENSE.md.
 
 """A capture scattered over points: variants of it, instanced with Geometry Nodes.
 

@@ -122,6 +122,8 @@ set(package_dir ${CMAKE_CURRENT_SOURCE_DIR}/package)
 # than logo.svg, whose clip paths not every SVG renderer draws.
 set(logo ${package_dir}/icon.png)
 set(zip ${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/vgs-houdini-${VGS_HOUDINI_VERSION}-h${houdini_version}.zip)
+set(plugin_license ${CMAKE_CURRENT_SOURCE_DIR}/LICENSE.md)
+set(decoder_license ${CMAKE_SOURCE_DIR}/decoder/LICENSE.md)
 configure_file(${package_dir}/vgs.json.in ${CMAKE_CURRENT_BINARY_DIR}/vgs.json @ONLY)
 
 add_custom_target(vgs_houdini_package ALL
@@ -129,12 +131,14 @@ add_custom_target(vgs_houdini_package ALL
     COMMAND ${CMAKE_COMMAND} -E make_directory ${stage}/vgs/dso ${stage}/vgs/config/Icons
     COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_BINARY_DIR}/vgs.json ${stage}
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${package_dir}/vgs ${stage}/vgs
+    COMMAND ${CMAKE_COMMAND} -E copy ${plugin_license} ${stage}/vgs/LICENSE.md
+    COMMAND ${CMAKE_COMMAND} -E copy ${decoder_license} ${stage}/vgs/DECODER-LICENSE.md
     COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:vgs_houdini> ${stage}/vgs/dso
     COMMAND ${CMAKE_COMMAND} -E copy ${logo} ${stage}/vgs/config/Icons/SOP_vgs_capture.png
     COMMAND ${CMAKE_COMMAND} -E copy ${logo} ${stage}/vgs/config/Icons/OBJ_vgs_capture.png
     COMMAND ${CMAKE_COMMAND} -E chdir ${stage}
             ${CMAKE_COMMAND} -E tar cf ${zip} --format=zip -- vgs.json vgs
-    DEPENDS vgs_houdini ${logo} ${package_dir}/vgs.json.in
+    DEPENDS vgs_houdini ${logo} ${package_dir}/vgs.json.in ${plugin_license} ${decoder_license}
     COMMENT "Packaging the Houdini plugin ${VGS_HOUDINI_VERSION} for Houdini ${houdini_version}"
     VERBATIM)
 add_dependencies(vgs_houdini_package vgs_houdini)

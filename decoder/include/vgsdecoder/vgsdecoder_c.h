@@ -1,3 +1,14 @@
+// SPDX-License-Identifier: LicenseRef-VGS-Decoder-Proprietary
+// Copyright (c) 2026 Víctor M. Feliz. All rights reserved.
+//
+// Proprietary VGS Decoder component; not open source.
+// Supplied decoder components are free to use, including commercially.
+// Integration and redistribution within end-user products are subject to
+// the VGS Decoder licence; standalone SDK redistribution is not permitted.
+// No ownership or licensing authority is transferred to ScanMeNow,
+// The4DScanner or other recipients. See the VGS Decoder LICENSE.md supplied
+// with the package for permissions, restrictions and liability terms.
+
 #ifndef VGSDECODER_C_H
 #define VGSDECODER_C_H
 
