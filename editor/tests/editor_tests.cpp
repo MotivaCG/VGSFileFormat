@@ -3,6 +3,7 @@
 #include "filehistory.h"
 #include "presetstore.h"
 #include "isolation.h"
+#include "pruning.h"
 #include "displayscaling.h"
 #include <QFile>
 #include <QJsonDocument>
@@ -72,6 +73,37 @@ private slots:
         QTemporaryDir dir;project.asset=dir.filePath("source.mint");Project restored;QString error;
         QVERIFY2(Project::fromJson(project.json(dir.filePath("scene.vgsproj")),dir.path(),&restored,&error),qPrintable(error));
         QCOMPARE(restored.modifiers[0].type,ModifierType::BakeAntialiasing);QCOMPARE(restored.modifiers[0].bakeDistance,5.);QCOMPARE(restored.modifiers[0].bakeScreenHeight,2160);
+    }
+    void pruneKeepsWhatCountsAndPersists() {
+        // Up to the share, lowest first, never above the protection, never what was not measured.
+        const std::vector<float> scores{0.01f,0.5f,0.02f,-1,0.9f,0.03f,0.2f,0.3f,0.4f,0.6f};
+        auto removed=[&](const QVector<PruneFilter> &filters) {QList<int> out;const auto keep=pruneKeep(scores,filters);for (int i=0;i<int(keep.size());++i) if (!keep[size_t(i)]) out<<i;return out;};
+        QCOMPARE(removed({{20,0.25}}),(QList<int>{0,2}));                 // 20% of 10: the two lowest
+        QCOMPARE(removed({{50,0.25}}),(QList<int>{0,2,5,6}));             // only four score below 0.25
+        QCOMPARE(removed({{90,1000}}),(QList<int>{0,1,2,4,5,6,7,8,9}));   // -1 is never removed
+        QCOMPARE(removed({{50,0}}),QList<int>{});                         // a capture where everything counts
+        QCOMPARE(removed({{10,1},{0,1}}),(QList<int>{0}));
+        // What each filter did: asked for five, the protection let four go.
+        std::vector<PruneStats> stats;pruneKeep(scores,{{50,0.25},{20,0.25}},&stats);QCOMPARE(stats.size(),size_t(2));
+        QCOMPARE(stats[0].records,size_t(10));QCOMPARE(stats[0].asked,size_t(5));QCOMPARE(stats[0].removed,size_t(4));QVERIFY(stats[0].limited());
+        QCOMPARE(stats[1].asked,size_t(2));QCOMPARE(stats[1].removed,size_t(2));QVERIFY(!stats[1].limited());
+        QCOMPARE(pruneSampleTimes(1,2).size(),size_t(4));for (double t:pruneSampleTimes(1,2)) QVERIFY(t>1 && t<2);
+        // Faint and tiny splats score below the ones that make the picture.
+        vgs::Frame f;f.count=0;
+        auto add=[&](float x,float y,float z,float scale,float opacity) {f.position.insert(f.position.end(),{x,y,z});f.rotation.insert(f.rotation.end(),{0,0,0,1});
+            f.scale.insert(f.scale.end(),{scale,scale,scale});f.opacity.push_back(opacity);f.active.push_back(1);++f.count;};
+        for (int i=0;i<25;++i) add((i%5)*.1f,(i/5)*.1f,0,.04f,.9f);
+        add(.2f,.2f,.02f,.0003f,.9f);add(.15f,.15f,-.02f,.02f,.01f);
+        const auto s=contributionScores({f,f},true);QCOMPARE(s.size(),f.count);
+        for (int i=0;i<25;++i) {QVERIFY(s[size_t(i)]>s[25]);QVERIFY(s[size_t(i)]>s[26]);}
+        // A dead record was not measured.
+        auto dead=f;dead.active[3]=0;QCOMPARE(contributionScores({dead},false)[3],-1.f);
+        // Saved and read back.
+        Project project;project.modifiers.clear();Modifier prune;prune.id=Project::newId();prune.name="Prune";prune.type=ModifierType::PruneLowContribution;
+        QCOMPARE(prune.prune.percent,15.);prune.prune={22,0.4};project.modifiers={prune};QCOMPARE(CompiledModifiers(project).prunes.size(),1);
+        QTemporaryDir dir;project.asset=dir.filePath("source.mint");Project restored;QString error;
+        QVERIFY2(Project::fromJson(project.json(dir.filePath("scene.vgsproj")),dir.path(),&restored,&error),qPrintable(error));
+        QCOMPARE(restored.modifiers[0].type,ModifierType::PruneLowContribution);QCOMPARE(restored.modifiers[0].prune.percent,22.);QCOMPARE(restored.modifiers[0].prune.protectAbove,0.4);
     }
     void isolationMatchesNthNeighbourMedianAndEdgeCases() {
         std::vector<QVector3D> points;for (int y=0;y<5;++y) for (int x=0;x<5;++x) points.push_back({x*.01f,y*.01f,0});points.push_back({100,100,100});points.push_back({101,100,100});

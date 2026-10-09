@@ -218,6 +218,9 @@ bool Project::fromJson(const QJsonObject &root,const QString &baseDirectory,Proj
                 m.type=ModifierType::BakeAntialiasing;const auto b=item["bake"].toObject();
                 m.bakeDistance=number(b,"distance",.01,1000);const double height=number(b,"screenHeight",16,16384);
                 valid &= height==std::floor(height) && (!b.contains("verticalFov") || b["verticalFov"].toDouble()==45);m.bakeScreenHeight=int(height);
+            } else if (item["type"]=="prune-low-contribution") {
+                m.type=ModifierType::PruneLowContribution;const auto p=item["prune"].toObject();
+                m.prune.percent=number(p,"percent",0,90);m.prune.protectAbove=number(p,"protectAbove",0,1000);valid &= p["protectUnit"]=="px-1080p-mean";
             } else if (item["type"]=="walk") {
                 m.type=ModifierType::Walk;const auto w=item["walk"].toObject();valid &= w["axis"]=="+z";m.walkSpeed=number(w,"speed",0,100);
                 valid &= !w.contains("display") || w["display"]=="m/s" || w["display"]=="km/h";m.walkKmh=w["display"]=="km/h";

@@ -221,6 +221,37 @@ private slots:
         QVERIFY_EXCEPTION_THROWN(exportCaptureFile(again,dir.filePath("again.mint")),std::runtime_error);
         QVERIFY(!QFileInfo::exists(dir.filePath("moving.mint")));
     }
+    void pruneRemovesWhatAddsLeastAndNothingElse() {
+        // Forty splats that make a picture and eight faint specks: 15% of 48 is seven, all specks.
+        QTemporaryDir dir;const auto source=dir.filePath("source.pgs");
+        vgs::Frame f;f.count=0;f.shCoefficients=0;
+        auto add=[&](float x,float y,float scale,float opacity) {f.position.insert(f.position.end(),{x,y,0});f.rotation.insert(f.rotation.end(),{0,0,0,1});
+            f.scale.insert(f.scale.end(),{scale,scale,scale});f.colorDc.insert(f.colorDc.end(),{.5f,.5f,.5f});f.opacity.push_back(opacity);f.active.push_back(1);++f.count;};
+        for (int i=0;i<40;++i) add((i%8)*.1f,1+(i/8)*.1f,.04f,.9f);
+        for (int i=0;i<8;++i) add(.05f+i*.1f,1.05f,.0004f,.02f);
+        {vgs::Header h;h.shDegree=0;h.frameCount=h.durationTicks=3;h.timeDenominator=25;h.chunks.resize(3);for (int i=0;i<3;++i) {h.chunks[i].startTick=i;h.chunks[i].intervals=1;}
+         vgs::EncodeOptions options;options.signer=vgs::authoringSigner();options.shDegree=0;options.compression=vgs::Compression::None;
+         QFile file(source);QVERIFY(file.open(QIODevice::WriteOnly));
+         vgs::encodeSequence(h,[&](size_t) {return packExportFrame(f,0);},[&](uint64_t offset,const uint8_t *data,size_t count) {file.seek(qint64(offset));file.write(reinterpret_cast<const char *>(data),qint64(count));},options);}
+        Project project;project.asset=source;project.in=0;project.out=2./25;project.modifiers.clear();project.captureSettings.shDegree=0;
+        Modifier prune;prune.id=Project::newId();prune.name="Prune";prune.type=ModifierType::PruneLowContribution;project.modifiers={prune};
+        QStringList notes;
+        auto exported=[&](const Project &p,const QString &name) {
+            const auto path=dir.filePath(name);notes=exportCaptureFile(p,path).notes;auto capture=vgsdec::Capture::openFile(path.toStdString());
+            const auto frame=copy(capture.setTime(1/25.,false));size_t live=0,specks=0;
+            for (size_t i=0;i<frame.count;++i) if (frame.active[i]) {++live;specks+=frame.opacity[i]<.1f;}
+            return qMakePair(live,specks);};
+        QCOMPARE(exported(project,"pruned.vgs"),qMakePair(size_t(41),size_t(1)));
+        // The summary gives the share that really went: seven of 48 in each of the three chunks.
+        QVERIFY2(notes.contains("Prune low contribution removed 14.6% of the splats, as asked."),qPrintable(notes.join('\n')));
+        // The protection wins over the share: with nothing protected below zero, nothing goes.
+        project.modifiers[0].prune.protectAbove=0;QCOMPARE(exported(project,"protected.vgs"),qMakePair(size_t(48),size_t(8)));
+        QVERIFY2(notes.contains("Prune low contribution removed 0.0% of the splats, not the 14.6% asked: Protect above kept the rest in 3 of 3 chunks."),qPrintable(notes.join('\n')));
+        project.modifiers[0].prune.protectAbove=.25;project.modifiers[0].enabled=false;QCOMPARE(exported(project,"off.vgs"),qMakePair(size_t(48),size_t(8)));
+        // The frame exported as a .ply is pruned the same way.
+        project.modifiers[0].enabled=true;const auto ply=dir.filePath("frame.ply");const auto result=exportFramePly(project,1/25.,ply);QCOMPARE(result.kept,quint64(41));
+        QVERIFY(result.notes.contains("Prune low contribution removed 14.6% of the splats, as asked."));
+    }
     void removeCropDeletesWhatIsInsideIt() {
         // The fixture's live splats sit at x=0 and x=3; a Remove cylinder at the origin takes the first.
         QTemporaryDir dir;const auto source=dir.filePath("source.pgs");sourceFile(source,3);

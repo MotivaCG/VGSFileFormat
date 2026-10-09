@@ -2,6 +2,8 @@
 #include "captureworker.h"
 #include "project.h"
 #include <array>
+#include <QElapsedTimer>
+#include <QTimer>
 #include <QOpenGLFunctions_3_3_Core>
 #include <QOpenGLShaderProgram>
 #include <QOpenGLWidget>
@@ -61,6 +63,14 @@ public:
     bool lightBackground() const { return lightBackground_; }
     void fit(const QVector3D &minimum, const QVector3D &maximum);
     bool focusVisible();
+    // The world point drawn under a viewport position, as a viewer sees it: for splats, where
+    // the splats in front add up to half opacity along that pixel; for points, the nearest
+    // point under the cursor. False over empty space.
+    bool pickPoint(const QPointF &screen, QVector3D *world) const;
+    // Double-click: the orbit pivot glides to a point, keeping the view's angle and distance,
+    // as the web viewer does. Any navigation cancels the glide.
+    void focusOn(const QVector3D &point);
+    bool focusing() const { return focusTimer_.isActive(); }
     bool setGhost(bool enabled);
     void setGhostOpacity(float opacity);
     float ghostOpacity() const {return ghostOpacity_;}
@@ -83,6 +93,7 @@ protected:
     void mousePressEvent(QMouseEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
     void mouseReleaseEvent(QMouseEvent *event) override;
+    void mouseDoubleClickEvent(QMouseEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
     void wheelEvent(QWheelEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
@@ -109,6 +120,9 @@ private:
     std::vector<QVector3D> visibleWorldPoints() const;
     void drawGhost(const QMatrix4x4 &viewProjection,const QSize &pixels,float dpr);
     Transform worldTransformed(const Transform &start,const QMatrix4x4 &delta) const;
+    QTimer focusTimer_;
+    QElapsedTimer focusClock_;
+    QVector3D focusFrom_, focusTo_;
     FramePtr frame_;
     Transform transform_;
     Camera camera_;

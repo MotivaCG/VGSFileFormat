@@ -35,6 +35,34 @@ class ViewportTests : public QObject {
         return point;
     }
 private slots:
+    void doubleClickGlidesThePivotToWhatIsSeen() {
+        // Two splats on the line of sight: an opaque one in front and one behind it.
+        Viewport viewport;viewport.resize(400,300);auto frame=std::make_shared<RenderFrame>();
+        auto add=[&](float z,float opacity) {Splat s{};s.position[2]=z;s.rotation[3]=1;s.scale[0]=s.scale[1]=s.scale[2]=.05f;s.color[3]=opacity;s.id=float(frame->records.size());
+            frame->records.push_back(s);frame->active.push_back(1);PointVertex p{};p.position[2]=z;p.id=s.id;frame->points.push_back(p);};
+        add(.5f,.9f);add(-.5f,.9f);viewport.setFrame(frame);viewport.setSplatRendering(true);
+        Camera camera;camera.target={0,0,0};camera.yaw=0;camera.pitch=0;camera.distance=4;viewport.setCamera(camera);
+        const QPointF centre(200,150);QVector3D point;
+        QVERIFY(viewport.pickPoint(centre,&point));QVERIFY((point-QVector3D(0,0,.5f)).length()<1e-3f);
+        // A faint splat in front lets the eye through to the one behind.
+        frame->records[0].color[3]=.05f;QVERIFY(viewport.pickPoint(centre,&point));QVERIFY((point-QVector3D(0,0,-.5f)).length()<1e-3f);
+        frame->records[0].color[3]=.9f;
+        // Empty space picks nothing.
+        QVERIFY(!viewport.pickPoint({10,10},&point));
+        // As points: the nearest point under the cursor.
+        viewport.setSplatRendering(false);QVERIFY(viewport.pickPoint(centre,&point));QVERIFY((point-QVector3D(0,0,.5f)).length()<1e-3f);viewport.setSplatRendering(true);
+        // A double-click glides the pivot there, keeping the angle and the distance; a click on
+        // nothing leaves it alone.
+        camera.target={.01f,.005f,0};viewport.setCamera(camera);const QPoint below=centre.toPoint();
+        QVector3D target;QVERIFY(viewport.pickPoint(below,&target));
+        QTest::mouseDClick(&viewport,Qt::LeftButton,Qt::NoModifier,below);QVERIFY(viewport.focusing());
+        QTRY_VERIFY_WITH_TIMEOUT(!viewport.focusing(),2000);
+        QVERIFY((viewport.camera().target-target).length()<1e-4f);QCOMPARE(viewport.camera().distance,4.f);QCOMPARE(viewport.camera().yaw,0.f);
+        const auto before=viewport.camera().target;QTest::mouseDClick(&viewport,Qt::LeftButton,Qt::NoModifier,{5,5});QVERIFY(!viewport.focusing());QCOMPARE(viewport.camera().target,before);
+        // Navigating cancels a glide in progress.
+        viewport.focusOn({1,1,1});QVERIFY(viewport.focusing());QTest::mousePress(&viewport,Qt::LeftButton,Qt::NoModifier,{5,5});QVERIFY(!viewport.focusing());
+        QTest::mouseRelease(&viewport,Qt::LeftButton,Qt::NoModifier,{5,5});
+    }
     void focusOnlyIncludesVisibleWorldPointsAndPreservesModes() {
         Viewport viewport;viewport.resize(500,500);auto frame=std::make_shared<RenderFrame>();
         frame->points={{{0,1,0},{1,0,0},0},{{100,1,0},{0,1,0},1},{{-100,1,0},{1,0,0},2,0}};viewport.setFrame(frame);

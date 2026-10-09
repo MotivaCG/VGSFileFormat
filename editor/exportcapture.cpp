@@ -2,6 +2,7 @@
 #include "nativeexport.h"
 #include "mintwriter.h"
 #include "isolation.h"
+#include "pruning.h"
 #include "mintfile.h"
 #include "mintskinrecovery.h"
 #include "despillcolor.h"
@@ -120,9 +121,10 @@ public:
         if (!a.allFinite() || std::abs(a.determinant())<1e-15) throw std::runtime_error("Cannot export a singular capture transform.");
         sh=angularBake(a);
     }
-    vgs::Frame bake(const vgs::Frame &source,const ExportProgress &progress) const {
+    vgs::Frame bake(const vgs::Frame &source,const ExportProgress &progress,const std::vector<uint8_t> *pruned=nullptr) const {
         std::vector<QVector3D> worldPositions(size_t(source.count));std::vector<uint8_t> keep(size_t(source.count));
-        for (size_t i=0;i<source.count;++i) {worldPositions[i]=model.map({source.position[3*i],source.position[3*i+1],source.position[3*i+2]});keep[i]=source.active[i] && modifiers.keeps(worldPositions[i],{source.colorDc[3*i],source.colorDc[3*i+1],source.colorDc[3*i+2]});}
+        if (pruned && pruned->size()!=source.count) throw std::runtime_error("The pruning does not match the frame's records.");
+        for (size_t i=0;i<source.count;++i) {worldPositions[i]=model.map({source.position[3*i],source.position[3*i+1],source.position[3*i+2]});keep[i]=source.active[i] && (!pruned || (*pruned)[i]) && modifiers.keeps(worldPositions[i],{source.colorDc[3*i],source.colorDc[3*i+1],source.colorDc[3*i+2]});}
         applyIsolation(worldPositions,keep,modifiers.isolations,[&] {report(progress,0,QStringLiteral("Purge Isolated: searching neighbours"));return false;});
         vgs::Frame input=source; processColour(input,project.captureSettings,progress);
         vgs::Frame out;out.shCoefficients=coefficients;out.seconds=source.seconds;
@@ -358,10 +360,25 @@ std::array<double,256> exportShTransform(const Transform &transform) {
     for (int row=0;row<16;++row) for (int col=0;col<16;++col) result[row*16+col]=matrix(row,col);return result;
 }
 
-vgs::Frame bakeExportFrame(const vgs::Frame &frame,const Project &project,int degree,const ExportProgress &progress,double frameRate) {
+// One scored chunk in the totals: with several prune modifiers, what all of them removed,
+// the largest share asked, and limited when any of them was.
+void countPruning(ExportResult &result,const std::vector<PruneStats> &stats,const std::vector<uint8_t> &keep) {
+    if (stats.empty()) return;
+    quint64 asked=0;bool limited=false;for (const auto &s:stats) {asked=std::max<quint64>(asked,s.asked);limited|=s.limited();}
+    result.pruneRecords+=keep.size();result.pruneAsked+=asked;result.pruneRemoved+=quint64(std::count(keep.begin(),keep.end(),uint8_t(0)));
+    ++result.pruneChunks;if (limited) ++result.pruneLimited;
+}
+QString pruningNote(const ExportResult &result) {
+    if (!result.pruneChunks || !result.pruneRecords) return {};
+    const double removed=100.0*double(result.pruneRemoved)/double(result.pruneRecords),asked=100.0*double(result.pruneAsked)/double(result.pruneRecords);
+    if (!result.pruneLimited) return QStringLiteral("Prune low contribution removed %1% of the splats, as asked.").arg(removed,0,'f',1);
+    return QStringLiteral("Prune low contribution removed %1% of the splats, not the %2% asked: Protect above kept the rest in %3 of %4 chunks.")
+        .arg(removed,0,'f',1).arg(asked,0,'f',1).arg(result.pruneLimited).arg(result.pruneChunks);
+}
+vgs::Frame bakeExportFrame(const vgs::Frame &frame,const Project &project,int degree,const ExportProgress &progress,double frameRate,const std::vector<uint8_t> *pruned) {
     if (degree<0 || degree>3) throw std::runtime_error("Invalid export SH degree.");
     Project pose=project;pose.transform=project.transformAtFrame(frame.seconds*frameRate);pose.modifiers=project.modifiersAtFrame(std::round(frame.seconds*frameRate));
-    return Baker(pose,degree).bake(frame,progress);
+    return Baker(pose,degree).bake(frame,progress,pruned);
 }
 
 ExportResult exportCaptureFile(const Project &inputProject,const QString &destination,const ExportProgress &progress) {
@@ -435,6 +452,8 @@ ExportResult exportCaptureFile(const Project &inputProject,const QString &destin
     // anti-aliasing, and a .vgs/.pgs source says so (or not) in its own header.
     options.renderHints=mint ? uint32_t(vgs::AntialiasedSplats) : sourceHeader.renderHints;
     // Baked for plain renderers: the result no longer wants the compensation.
+    // Pruning scores the source as it is drawn, compensated when it was trained with anti-aliasing.
+    const bool sourceAntialiased=options.renderHints & uint32_t(vgs::AntialiasedSplats);
     if (project.antialiasingBake()>0) options.renderHints&=~uint32_t(vgs::AntialiasedSplats);
     // A Walk modifier is not baked: the capture stays where it is and the header tells
     // players it walks, at this speed along +Z, for them to carry it.
@@ -452,6 +471,18 @@ ExportResult exportCaptureFile(const Project &inputProject,const QString &destin
     QTemporaryFile temporary(QFileInfo(destination).absolutePath()+"/.vgs-export-XXXXXX");if (!temporary.open()) throw std::runtime_error(temporary.errorString().toStdString());
     const Baker baker(project,degree);int currentPercent=0;bool writing=false;const bool animatedCrops=project.hasAnimatedCrop();
     auto innerProgress=[&](int,const QString &message) {report(progress,currentPercent,message);return true;};
+    // Sampled export: each source chunk is scored once, as the preview scores it.
+    const auto pruneFilters=CompiledModifiers(project).prunes;std::map<size_t,std::vector<uint8_t>> pruneCache;
+    auto sourcePruning=[&](size_t chunk) {
+        double start,end;
+        if (mint) {const auto &c=mint->chunks().at(qsizetype(chunk));start=c.start;end=c.start+c.duration;}
+        else {const auto &c=capture->chunk(chunk);start=c.startSeconds;end=c.endSeconds;}
+        std::vector<PruneStats> stats;
+        auto keep=pruneChunk(start,end,[&](double t) {
+            if (mint) {MintFrame decoded;if (!mint->decode(t,&decoded,false,&error)) throw std::runtime_error(error.toStdString());return copyFrame(decoded);}
+            return copyFrame(capture->setTime(t,false));},sourceAntialiased,pruneFilters,[&] {report(progress,currentPercent,QStringLiteral("Prune low contribution: scoring splats"));return false;},&stats);
+        countPruning(result,stats,keep);return keep;
+    };
     auto provider=[&](size_t index) {
         report(progress,currentPercent,QStringLiteral("%1 %2 %3 / %4").arg(writing ? "Writing" : "Preparing",native ? "native block" : "frame").arg(index+1).arg(native ? header.chunks.size() : size_t(result.frames)));
         if (native) {
@@ -475,6 +506,18 @@ ExportResult exportCaptureFile(const Project &inputProject,const QString &destin
                     models.push_back(world);samples.push_back(similarityFrom(world*unbake,start+sample));
                 }
             }
+            // Scored once per source chunk, before colour processing, as the preview scores it.
+            const std::vector<uint8_t> *pruned=nullptr;
+            if (!pruneFilters.isEmpty()) {
+                auto found=pruneCache.find(plan.sourceIndex);
+                if (found==pruneCache.end()) {
+                    const vgs::FrameDecoder scorer(chunk);std::vector<PruneStats> stats;
+                    auto keep=pruneChunk(0,1,[&](double t) {return scorer.evaluate(std::min(t,1.-1e-9),false);},sourceAntialiased,pruneFilters,
+                                         [&] {report(progress,currentPercent,QStringLiteral("Prune low contribution: scoring splats"));return false;},&stats);
+                    countPruning(result,stats,keep);found=pruneCache.emplace(plan.sourceIndex,std::move(keep)).first;
+                }
+                pruned=&found->second;
+            }
             std::optional<vgs::DecodedChunk> classification;
             if (s.despill && !CompiledModifiers(project).greens.isEmpty()) classification=chunk;
             if (s.despill) {
@@ -484,17 +527,23 @@ ExportResult exportCaptureFile(const Project &inputProject,const QString &destin
                 if (!MintFile::despillLogical(&chunk,1/rate,processing,innerProgress,&error)) throw std::runtime_error(error.toStdString());
             }
             auto edited=editNativeChunk(std::move(chunk),plan,project,writing ? nullptr : &result,innerProgress,classification ? &*classification : nullptr,moving ? &models : nullptr,
-                                        int(sourceHeader.chunks[plan.sourceIndex].startTick)+plan.first);
+                                        int(sourceHeader.chunks[plan.sourceIndex].startTick)+plan.first,pruned);
             if (moving) edited.pages.push_back(motionPage(samples));
             return edited;
         }
-        const double seconds=std::min(double(first+int(index))/rate,duration-1e-7);vgs::Frame frame;
-        if (mint) {MintFrame decoded;if (!mint->decode(seconds,&decoded,true,&error)) throw std::runtime_error(error.toStdString());frame=copyFrame(decoded);}
-        else frame=copyFrame(capture->setTime(seconds,true));
+        const double seconds=std::min(double(first+int(index))/rate,duration-1e-7);vgs::Frame frame;size_t sourceChunk=0;
+        if (mint) {MintFrame decoded;if (!mint->decode(seconds,&decoded,true,&error)) throw std::runtime_error(error.toStdString());frame=copyFrame(decoded);sourceChunk=size_t(decoded.chunkIndex);}
+        else {frame=copyFrame(capture->setTime(seconds,true));sourceChunk=capture->chunkAt(seconds);}
+        const std::vector<uint8_t> *pruned=nullptr;
+        if (!pruneFilters.isEmpty()) {
+            auto found=pruneCache.find(sourceChunk);
+            if (found==pruneCache.end()) found=pruneCache.emplace(sourceChunk,sourcePruning(sourceChunk)).first;
+            pruned=&found->second;
+        }
         auto baked=[&] {
-            if (!animated && !animatedCrops) return baker.bake(frame,innerProgress);
+            if (!animated && !animatedCrops) return baker.bake(frame,innerProgress,pruned);
             Project pose=project;if (animated) pose.transform=inputProject.transformAtFrame(first+int(index));
-            pose.modifiers=inputProject.modifiersAtFrame(first+int(index));return Baker(pose,degree).bake(frame,innerProgress);}();
+            pose.modifiers=inputProject.modifiersAtFrame(first+int(index));return Baker(pose,degree).bake(frame,innerProgress,pruned);}();
         if (!writing) {result.kept+=baked.count;result.removed+=std::count(frame.active.begin(),frame.active.end(),uint8_t(1))-baked.count;}
         return packFrame(std::move(baked),degree);
     };
@@ -521,6 +570,7 @@ ExportResult exportCaptureFile(const Project &inputProject,const QString &destin
         if (bytes.isEmpty() || output.write(bytes)!=bytes.size()) throw std::runtime_error("Cannot save the exported capture.");
     }
     report(progress,99,QStringLiteral("Finishing export"));if (!output.commit()) throw std::runtime_error(output.errorString().toStdString());
+    if (const auto note=pruningNote(result);!note.isEmpty()) result.notes << note;
     result.notes << (native ? QStringLiteral("Native temporal blocks are retained; unused Gaussian records and dictionary entries are removed.")
                           : QStringLiteral("Native-frame sampling; frames are held between samples. Attributes are requantized to the existing VGS dictionaries."));
     if (!native) result.notes << QStringLiteral("Nonuniform scale/shear and variable-rate sources currently use sampled export, which can produce larger files.");
@@ -562,20 +612,28 @@ ExportResult exportFramePly(const Project &project,double seconds,const QString 
     QString error;if (!project.captureSettings.validate(&error)) throw std::runtime_error(error.toStdString());
     report(progress,0,QStringLiteral("Decoding the frame"));
     vgs::Frame frame;double rate;int sourceDegree=3;
+    const auto filters=CompiledModifiers(project).prunes;std::vector<uint8_t> pruned;std::vector<PruneStats> pruneStats;
+    auto scoring=[&] {report(progress,10,QStringLiteral("Prune low contribution: scoring splats"));return false;};
     if (QFileInfo(project.asset).suffix().compare("mint",Qt::CaseInsensitive)==0) {
         MintFile mint;if (!mint.open(project.asset,&error)) throw std::runtime_error(error.toStdString());
         rate=mint.frameRate();MintFrame decoded;
         if (!mint.decode(std::min(seconds,mint.duration()-1e-7),&decoded,true,&error)) throw std::runtime_error(error.toStdString());
         frame=copyFrame(decoded);
+        if (!filters.isEmpty()) {const auto &c=mint.chunks().at(decoded.chunkIndex);
+            pruned=pruneChunk(c.start,c.start+c.duration,[&](double t) {MintFrame f;if (!mint.decode(t,&f,false,&error)) throw std::runtime_error(error.toStdString());return copyFrame(f);},true,filters,scoring,&pruneStats);}
     } else {
         FileSource source(project.asset);auto capture=vgsdec::Capture::openStream(source);
-        rate=capture.frameRate();sourceDegree=capture.shDegree();frame=copyFrame(capture.setTime(std::min(seconds,capture.duration()-1e-7),true));
+        const double at=std::min(seconds,capture.duration()-1e-7);
+        rate=capture.frameRate();sourceDegree=capture.shDegree();frame=copyFrame(capture.setTime(at,true));
+        if (!filters.isEmpty()) {const auto &c=capture.chunk(capture.chunkAt(at));
+            pruned=pruneChunk(c.startSeconds,c.endSeconds,[&](double t) {return copyFrame(capture.setTime(t,false));},capture.antialiased(),filters,scoring,&pruneStats);}
     }
     const int degree=project.captureSettings.shDegree<0 ? sourceDegree : project.captureSettings.shDegree;
-    const auto baked=bakeExportFrame(frame,project,degree,progress,rate);
+    const auto baked=bakeExportFrame(frame,project,degree,progress,rate,pruned.empty() ? nullptr : &pruned);
     if (!baked.count) throw std::runtime_error("No Gaussian records remain at this frame after applying active modifiers.");
     report(progress,90,QStringLiteral("Writing the .ply"));writePly(baked,destination);
-    ExportResult result;result.frames=1;result.kept=baked.count;
+    ExportResult result;result.frames=1;result.kept=baked.count;countPruning(result,pruneStats,pruned);
+    if (const auto note=pruningNote(result);!note.isEmpty()) result.notes << note;
     result.removed=quint64(std::count(frame.active.begin(),frame.active.end(),uint8_t(1)))-baked.count;
     return result;
 }

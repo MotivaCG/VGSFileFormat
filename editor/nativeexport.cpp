@@ -563,7 +563,7 @@ void setNativeShDegree(vgs::DecodedChunk &c,int sourceDegree,int targetDegree) {
     }
     normalizeSchemas(c);
 }
-vgs::DecodedChunk editNativeChunk(vgs::DecodedChunk chunk,const NativeChunkPlan &plan,const Project &project,ExportResult *statistics,const ExportProgress &progress,const vgs::DecodedChunk *classificationSource,const std::vector<QMatrix4x4> *sampleModels,int sourceStartFrame) {
+vgs::DecodedChunk editNativeChunk(vgs::DecodedChunk chunk,const NativeChunkPlan &plan,const Project &project,ExportResult *statistics,const ExportProgress &progress,const vgs::DecodedChunk *classificationSource,const std::vector<QMatrix4x4> *sampleModels,int sourceStartFrame,const std::vector<uint8_t> *pruned) {
     if (sampleModels && sampleModels->size()!=size_t(plan.intervals)+1) throw std::runtime_error("Motion export needs one world model per sample.");
     report(progress,QStringLiteral("Filtering native Gaussian lifetimes"));
     normalizeSchemas(chunk);const size_t T=chunk.groups[0].intervals;
@@ -577,6 +577,7 @@ vgs::DecodedChunk editNativeChunk(vgs::DecodedChunk chunk,const NativeChunkPlan 
     if (!modifiers.greens.isEmpty()) colourDecoder=std::make_unique<vgs::FrameDecoder>(classificationSource ? *classificationSource : chunk);
     std::vector<float> positions;
     std::vector<QVector3D> worldPositions(offsets.back());std::vector<uint8_t> visibility(offsets.back());
+    if (pruned && pruned->size()!=offsets.back()) throw std::runtime_error("The pruning does not match the chunk's records.");
     for (int sample=0;sample<=plan.intervals;++sample) {
         const bool closing=sample==plan.intervals;
         if (!closing) {
@@ -589,7 +590,7 @@ vgs::DecodedChunk editNativeChunk(vgs::DecodedChunk chunk,const NativeChunkPlan 
             for (size_t group=1;group<chunk.groups.size();++group) {
                 const auto &life=get(chunk,vgs::Lifetimes,uint32_t(group)).bytes;
                 for (size_t row=0;row<chunk.groups[group].splats;++row) {const size_t record=offsets[group]+row,index=record*3;worldPositions[record]=world.map({positions[index],positions[index+1],positions[index+2]});
-                    visibility[record]=plan.first+sample>=life[2*row] && plan.first+sample+1<=life[2*row+1] && sampleModifiers.keepsPosition(worldPositions[record]) && (!colourDecoder || !modifiers.removesColour({colourFrame.colorDc[index],colourFrame.colorDc[index+1],colourFrame.colorDc[index+2]}));}
+                    visibility[record]=plan.first+sample>=life[2*row] && plan.first+sample+1<=life[2*row+1] && (!pruned || (*pruned)[record]) && sampleModifiers.keepsPosition(worldPositions[record]) && (!colourDecoder || !modifiers.removesColour({colourFrame.colorDc[index],colourFrame.colorDc[index+1],colourFrame.colorDc[index+2]}));}
             }
             applyIsolation(worldPositions,visibility,modifiers.isolations,[&] {report(progress,QStringLiteral("Purge Isolated: searching neighbours"));return false;});
         }

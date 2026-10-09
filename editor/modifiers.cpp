@@ -124,6 +124,7 @@ CompiledModifiers::CompiledModifiers(const QVector<Modifier> &modifiers) {
     for (const auto &modifier:modifiers) if (modifier.active()) {
         if (modifier.type==ModifierType::RemoveGreen) greens.append(modifier.green);
         else if (modifier.type==ModifierType::PurgeIsolated) isolations.append(modifier.isolation);
+        else if (modifier.type==ModifierType::PruneLowContribution) prunes.append(modifier.prune);
         else if (modifier.type==ModifierType::Crop) {
             bool valid=false;auto inverse=modifier.crop.transform.matrix().inverted(&valid);
             if (!valid) throw std::runtime_error("A crop modifier has a singular transform.");
@@ -155,6 +156,7 @@ QJsonArray Project::modifierJson() const {
             case ModifierType::PurgeIsolated: type="purge-isolated";break;
             case ModifierType::Walk: type="walk";break;
             case ModifierType::BakeAntialiasing: type="bake-antialiasing";break;
+            case ModifierType::PruneLowContribution: type="prune-low-contribution";break;
             }
             QJsonObject item{{"id",m.id},{"name",m.name},{"enabled",m.active()},{"type",type},{"timeline","full"}};
             if (m.type==ModifierType::Crop) {const auto c=m.staticCrop();item["crop"]=QJsonObject{{"space","world"},{"shape",c.shape==CropShape::Box ? "box" : "cylinder"},
@@ -168,6 +170,7 @@ QJsonArray Project::modifierJson() const {
             else if (m.type==ModifierType::AnimateTransform) item["animation"]=QJsonObject{{"space","reference-offset"},{"interpolation","linear-slerp"},{"keys",m.animation.json()}};
             else if (m.type==ModifierType::Walk) item["walk"]=QJsonObject{{"speed",m.walkSpeed},{"axis","+z"},{"units","m/s"},{"display",m.walkKmh ? "km/h" : "m/s"}};
             else if (m.type==ModifierType::BakeAntialiasing) item["bake"]=QJsonObject{{"distance",m.bakeDistance},{"screenHeight",m.bakeScreenHeight},{"verticalFov",45}};
+            else if (m.type==ModifierType::PruneLowContribution) item["prune"]=QJsonObject{{"percent",m.prune.percent},{"protectAbove",m.prune.protectAbove},{"protectUnit","px-1080p-mean"}};
             else if (m.type==ModifierType::PurgeIsolated) item["isolation"]=QJsonObject{{"neighbour",m.isolation.neighbour},{"medianPercent",m.isolation.medianPercent}};
             result.append(item);
     }

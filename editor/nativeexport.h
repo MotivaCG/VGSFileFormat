@@ -10,6 +10,7 @@ void setNativeShDegree(vgs::DecodedChunk &, int sourceDegree, int targetDegree);
 // `sampleModels`, when given, holds the world model at each of the plan's samples
 // sourceStartFrame is the source frame of the plan's first sample: animated crops are
 // evaluated there, sample by sample, like animated transforms.
+// `pruned`, when given, is Prune low contribution's decision for the source chunk's records.
 // (intervals + 1) for a capture that moves: modifiers then see where every splat really is
 // at that instant, while project.transform is still what is baked into the data.
 // Bake anti-aliasing's opacity factor, from each axis's s/sqrt(s^2+b^2): the product over
@@ -23,4 +24,5 @@ inline float bakedOpacityFactor(const float ratios[3]) {
 }
 vgs::DecodedChunk editNativeChunk(vgs::DecodedChunk, const NativeChunkPlan &, const Project &,
                                  ExportResult *, const ExportProgress &, const vgs::DecodedChunk *classificationSource=nullptr,
-                                 const std::vector<QMatrix4x4> *sampleModels=nullptr,int sourceStartFrame=0);
+                                 const std::vector<QMatrix4x4> *sampleModels=nullptr,int sourceStartFrame=0,
+                                 const std::vector<uint8_t> *pruned=nullptr);

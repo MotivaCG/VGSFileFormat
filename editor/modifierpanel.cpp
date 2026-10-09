@@ -41,6 +41,7 @@ QString typeName(const Modifier &modifier) {
     case ModifierType::PurgeIsolated: return ModifierPanel::tr("Purge Isolated");
     case ModifierType::Walk: return ModifierPanel::tr("Walk");
     case ModifierType::BakeAntialiasing: return ModifierPanel::tr("Bake anti-aliasing");
+    case ModifierType::PruneLowContribution: return ModifierPanel::tr("Prune low contribution");
     }
     return {};
 }
@@ -53,6 +54,7 @@ QString typeDescription(ModifierType type) {
     case ModifierType::PurgeIsolated: return ModifierPanel::tr("Removes stray splats: those whose Nth nearest neighbour\nis farther than a multiple of the frame's median distance.");
     case ModifierType::Walk: return ModifierPanel::tr("Marks the capture as walking at a speed along +Z.\nThe preview slides the floor under it.\nExports write the speed to the header and leave the data in place.");
     case ModifierType::BakeAntialiasing: return ModifierPanel::tr("Prepares a capture trained with anti-aliasing (every Gracia .mint)\nfor renderers that do not compensate for it.\nThin splats grow to about a pixel at a chosen viewing distance and fade by as much,\nso they no longer draw as solid lines.");
+    case ModifierType::PruneLowContribution: return ModifierPanel::tr("Removes the splats that add least to the image:\nthe hidden, the faint and the tiny, measured by rendering each chunk\nfrom around the capture. Up to a share of them, and never one\nthat covers more than a set area.");
     }
     return {};
 }
@@ -60,10 +62,11 @@ QColor modifierColour(ModifierType type) {
     switch (type) {
     case ModifierType::Crop: return {240,60,90};
     case ModifierType::RemoveGreen: return {85,185,105};
-    case ModifierType::AnimateTransform: return {67,147,214};
+    case ModifierType::AnimateTransform: return {47,123,234}; // #2F7BEA
     case ModifierType::PurgeIsolated: return {219,181,76};
     case ModifierType::Walk: return {160,110,214};
     case ModifierType::BakeAntialiasing: return {185,133,114}; // #B98572
+    case ModifierType::PruneLowContribution: return {31,209,174}; // #1FD1AE
     }
     return {75,80,86};
 }
@@ -171,9 +174,9 @@ ModifierPanel::ModifierPanel(QWidget *parent):QWidget(parent) {
         auto *b=new QToolButton;b->setText(text);b->setObjectName(id);b->setToolTip(tip);toolbar->addWidget(b);connect(b,&QToolButton::clicked,this,action);return b;
     };
     type_=new QComboBox;type_->setObjectName("newModifierType");type_->addItem(tr("Crop"),0);type_->addItem(tr("Remove green points"),2);
-    type_->addItem(tr("Animate transform"),3);type_->addItem(tr("Purge Isolated"),4);type_->addItem(tr("Walk"),5);type_->addItem(tr("Bake anti-aliasing"),6);toolbar->addWidget(type_);
+    type_->addItem(tr("Animate transform"),3);type_->addItem(tr("Purge Isolated"),4);type_->addItem(tr("Walk"),5);type_->addItem(tr("Bake anti-aliasing"),6);type_->addItem(tr("Prune low contribution"),7);toolbar->addWidget(type_);
     {   // Each kind says what it does, in the list and in the context menu's Add modifier.
-        const ModifierType kinds[]={ModifierType::Crop,ModifierType::RemoveGreen,ModifierType::AnimateTransform,ModifierType::PurgeIsolated,ModifierType::Walk,ModifierType::BakeAntialiasing};
+        const ModifierType kinds[]={ModifierType::Crop,ModifierType::RemoveGreen,ModifierType::AnimateTransform,ModifierType::PurgeIsolated,ModifierType::Walk,ModifierType::BakeAntialiasing,ModifierType::PruneLowContribution};
         for (int i=0;i<type_->count();++i) type_->setItemData(i,typeDescription(kinds[i]),Qt::ToolTipRole);
     }
     type_->setToolTip(tr("Choose a modifier to add.\nHover a kind to see what it does."));
@@ -330,7 +333,7 @@ void ModifierPanel::setTimeline(int frame,int maximum) {
 void ModifierPanel::addModifier() {
     Modifier m;m.id=Project::newId();const int type=type_->currentData().toInt();
     m.type=type==2 ? ModifierType::RemoveGreen : type==3 ? ModifierType::AnimateTransform : type==4 ? ModifierType::PurgeIsolated : type==5 ? ModifierType::Walk
-          : type==6 ? ModifierType::BakeAntialiasing : ModifierType::Crop;
+          : type==6 ? ModifierType::BakeAntialiasing : type==7 ? ModifierType::PruneLowContribution : ModifierType::Crop;
     m.crop.enabled=true;m.crop.shape=CropShape::Cylinder; // Shape is chosen afterwards in the crop parameters.
     // The first of a kind keeps the bare name ("Crop"); later ones take the next free number ("Crop 2", "Crop 3"...).
     const QString base=m.type==ModifierType::Crop ? tr("Crop") : typeName(m);

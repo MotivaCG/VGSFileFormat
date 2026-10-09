@@ -1,9 +1,11 @@
 #pragma once
 #include "mintfile.h"
 #include "project.h"
+#include "pruning.h"
 #include "vgsdecoder/vgsdecoder.h"
 #include <QObject>
 #include <QVector3D>
+#include <map>
 #include <memory>
 #include <vector>
 
@@ -26,6 +28,8 @@ struct RenderFrame {
     quint64 total = 0;
     size_t chunkIndex = 0;
     double decodeMs = 0;
+    // What each active Prune low contribution did to this frame's chunk, in stack order.
+    std::vector<PruneStats> prune;
 };
 using FramePtr = std::shared_ptr<RenderFrame>;
 Q_DECLARE_METATYPE(FramePtr)
@@ -60,5 +64,8 @@ private:
     std::unique_ptr<MintFile> mint_;
     CaptureInfo info_;
     quint64 generation_ = 0;
+    // Prune low contribution's scores, per source chunk: they depend on the capture alone.
+    std::map<size_t, std::vector<float>> pruneScores_;
     FramePtr frame(double time, bool sh);
+    const std::vector<float> &pruneScores(size_t chunk);
 };

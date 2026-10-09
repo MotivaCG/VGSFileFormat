@@ -159,6 +159,10 @@ private slots:
         QTest::keyClicks(radius,"2");QCOMPARE(radius->value(),2.);QCoreApplication::processEvents();QTest::keyClick(radius,Qt::Key_Up);QCOMPARE(radius->value(),2.05);
         QTest::keyClick(radius,Qt::Key_Z,Qt::ControlModifier);QCOMPARE(radius->value(),start+1);
         QTest::keyClick(radius,Qt::Key_Z,Qt::ControlModifier|Qt::ShiftModifier);QCOMPARE(radius->value(),2.05);
+        // Prune low contribution says what it did to the chunk on screen.
+        auto *type=window.findChild<QComboBox *>("newModifierType");auto *status=window.findChild<QLabel *>("pruneStatus");QVERIFY(type && status);
+        type->setCurrentIndex(type->findData(7));add->click();QCOMPARE(tree->topLevelItemCount(),2);
+        QTRY_VERIFY_WITH_TIMEOUT(status->text().startsWith("This chunk:"),10000);
         window.setWindowModified(false);
     }
     void taskQueueRunsWhatItCanAndReportsTheRest() {

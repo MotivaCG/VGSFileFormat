@@ -17,7 +17,9 @@ scale transforms the entire capture without changing point size.
   typing in one field without pausing, is one step. The camera, the playhead, display options
   and Global/Local are not edits, and opening a capture or project starts the history afresh.
 - Space: play or pause. Arrow keys: previous or next frame.
-- Drag: orbit; right/middle drag or Shift+drag: pan; wheel: zoom.
+- Drag: orbit; right/middle drag or Shift+drag: pan; wheel: zoom. Double-click: the pivot glides to
+  the point under the cursor (what is seen there: through faint splats to the first that covers
+  it), keeping the angle and distance, as the web viewer does; any navigation cancels the glide.
 - `Numpad decimal` / `Numpad Del` / `F`: Focus visible. `Ctrl+E`: export the edited capture. `Ctrl+Shift+E`: export the viewport as PNG.
 - `G` / `R` / `S`: activate Move / Rotate / Scale. Repeat the active mode's key to switch Global/Local. `Esc`: leave all transform modes.
 - `Shift+G` or **View > Grid and axes**: toggle the world grid and reference axes.
@@ -131,9 +133,11 @@ no container layers or fixed modifier-count limits. Rows have the same 30 px
 minimum height, including the initial crop. A fresh capture starts with an enabled
 crop automatically fitted to its bounds. The panel reserves enough height for
 four rows. Crop bars and wire volumes use the section-heading red; Remove green
-uses green, Animate transform uses blue, and Purge Isolated uses warm yellow.
+uses green, Animate transform uses blue, Purge Isolated uses warm yellow and Prune low
+contribution uses turquoise.
 
-Add Cylinder, Box, Remove green points, Animate transform or Purge Isolated from
+Add Cylinder, Box, Remove green points, Animate transform, Purge Isolated, Prune low
+contribution or the others from
 the type selector. Select a row to
 edit that modifier's properties in Tools. The context menu provides add, rename,
 duplicate, move, remove and temporary enable/disable; buttons provide the same
@@ -164,6 +168,23 @@ comma-separated values. **Remove key** deletes the selected key. White diamonds
 appear on the modifier's timeline bar and clicking one seeks to its frame. Disabled
 animations retain keys and leave the reference pose visible; table edits remain
 available, while the gizmo is disabled until the modifier is enabled again.
+
+**Prune low contribution** removes the splats that add least to the image. Each chunk is
+rendered on the CPU from 24 views around the capture (a ring from afar, a ring from close,
+four from above and four from below) at four instants, drawn as the viewport draws splats,
+and every splat is credited with its blending weight over the pixels it touches: what those
+images would lose without it. Hidden, faint and tiny splats score almost nothing. Up to
+**Remove up to** (default **15%**) of each chunk's splats are removed, lowest first, but never
+one scoring above **Protect above** (default **0.25 px**: its area at full weight in a 1080p
+view, averaged over the views it is scored from), so a capture where every splat counts loses
+nothing; splats alive at none of the four instants are not measured and never removed. The
+decision is per chunk and per splat, for the splat's whole life in it, so the preview shows
+exactly what the export writes and native temporal blocks are kept. The panel says what happened to
+the chunk on screen: the share removed, or, in amber, that Protect above kept it below the
+share asked and how many splats it kept. The export summary gives the share removed over the
+whole capture and in how many chunks the protection limited it. On Gracia captures 15%
+measured about 14-15% smaller files with renders differing by 50 dB or more on average
+(at least 40 dB in the worst view); scoring adds about a second per chunk to the export.
 
 **Purge Isolated** uses the exact Nth-neighbour distance, excluding self, and the
 global upper median of those distances among points surviving crops/colour filters.

@@ -106,7 +106,12 @@ private:
     Viewport *viewport_;
     ModifierPanel *modifierPanel_;
     AnimationPanel *animationProperties_;
-    QGroupBox *isolationProperties_, *walkProperties_, *bakeProperties_;
+    QGroupBox *isolationProperties_, *walkProperties_, *bakeProperties_, *pruneProperties_;
+    QDoubleSpinBox *prunePercent_, *pruneProtect_;
+    QLabel *pruneStatus_;
+    // What the pruning did to the chunk on screen, from the last decoded frame.
+    std::vector<PruneStats> pruneStats_;
+    void showPruneStatus();
     QDoubleSpinBox *bakeDistance_;
     QSpinBox *bakeScreenHeight_;
     QLabel *bakeSizeLabel_;

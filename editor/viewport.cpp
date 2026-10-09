@@ -346,6 +346,14 @@ Viewport::Viewport(QWidget *parent) : QOpenGLWidget(parent) {
     // otherwise step visibly along every diagonal edge. Only this widget pays for it.
     QSurfaceFormat surface = format(); surface.setSamples(4); setFormat(surface);
     setMinimumSize(400, 300); setFocusPolicy(Qt::StrongFocus);
+    // The double-click glide: 0.4 s of smoothstep, only the pivot moving.
+    focusTimer_.setInterval(16);
+    connect(&focusTimer_, &QTimer::timeout, this, [this] {
+        const double t = std::min(1.0, focusClock_.elapsed() / 400.0), s = t*t*(3 - 2*t);
+        camera_.target = focusFrom_ + (focusTo_ - focusFrom_)*float(s);
+        if (t >= 1) focusTimer_.stop();
+        update(); emit cameraChanged();
+    });
     setMouseTracking(true);
     viewCube_ = new ViewCube(this); viewCube_->move(width()-viewCube_->width()-12,12);
     statistics_=new QLabel(this);statistics_->setObjectName("viewportStatistics");statistics_->move(18,12);
@@ -596,7 +604,7 @@ void Viewport::paintGL() {
         auto activeModifiers=modifiers_;
         if (!modifierStack_) {Modifier modifier;modifier.crop=crop_;activeModifiers={modifier};}
         CompiledModifiers modifiers(activeModifiers);std::vector<QVector4D> values;
-        shader->setUniformValue("usePurgeMask",!modifiers.isolations.isEmpty());
+        shader->setUniformValue("usePurgeMask",!modifiers.isolations.isEmpty() || !modifiers.prunes.isEmpty());
         for (const auto &crop:modifiers.crops) {
             for (int col=0;col<4;++col) values.push_back(crop.inverse.column(col));
             values.push_back({float(int(crop.volume.shape)),crop.volume.height,crop.volume.radius,crop.volume.remove ? 1.f : 0.f});
@@ -709,7 +717,7 @@ void Viewport::setPlaybackTime(double seconds,double duration) {
 }
 void Viewport::setTransform(const Transform &transform) { transform_ = transform; update(); }
 void Viewport::setCamera(const Camera &camera) {
-    camera_ = camera;
+    focusTimer_.stop(); camera_ = camera;
     if (camera_.preset==ViewPreset::Free) { camera_.orthographic = false; camera_.pitch = std::clamp(camera_.pitch,-89.0f,89.0f); }
     viewCube_->setCamera(camera_); update();
 }
@@ -729,7 +737,7 @@ void Viewport::setLightBackground(bool light) {
     update();
 }
 void Viewport::fit(const QVector3D &minimum, const QVector3D &maximum) {
-    const auto m = transform_.matrix();
+    focusTimer_.stop(); const auto m = transform_.matrix();
     camera_.target = m.map((minimum+maximum)*0.5f);
     float radius = 0;
     for (int i = 0; i < 8; ++i) {
@@ -743,14 +751,14 @@ std::vector<QVector3D> Viewport::visibleWorldPoints() const {
     std::vector<QVector3D> points;if (!frame_) return points;points.reserve(frame_->points.size());const auto model=transform_.matrix();
     auto stack=modifiers_;if (!modifierStack_) {Modifier m;m.crop=crop_;stack={m};}CompiledModifiers modifiers(stack);
     for (const auto &point:frame_->points) {
-        if (!modifiers.isolations.isEmpty() && point.modifierVisibility<.5f) continue;
+        if ((!modifiers.isolations.isEmpty() || !modifiers.prunes.isEmpty()) && point.modifierVisibility<.5f) continue;
         const auto world=model.map({point.position[0],point.position[1],point.position[2]});
         if (!std::isfinite(world.x()) || !std::isfinite(world.y()) || !std::isfinite(world.z())) continue;
         if ((cropEditing_ || modifiers.keepsPosition(world)) && !modifiers.removesColour({point.color[0],point.color[1],point.color[2]})) points.push_back(world);
     }return points;
 }
 bool Viewport::focusVisible() {
-    const auto points=visibleWorldPoints();bool any=false;QVector3D minimum,maximum;
+    focusTimer_.stop();const auto points=visibleWorldPoints();bool any=false;QVector3D minimum,maximum;
     auto include=[&](QVector3D p) {if (!any) {minimum=maximum=p;any=true;}else for (int axis=0;axis<3;++axis) {minimum[axis]=std::min(minimum[axis],p[axis]);maximum[axis]=std::max(maximum[axis],p[axis]);}};
     for (const auto &point:points) include(point);
     if (ghostEnabled_ && ghostOpacity_>0) for (const auto &point:ghostPoints_) include({point.position[0],point.position[1],point.position[2]});
@@ -789,7 +797,7 @@ void Viewport::drawGhost(const QMatrix4x4 &viewProjection,const QSize &pixels,fl
     ghostCompositeShader_->bind();ghostCompositeShader_->setUniformValue("ghostMask",0);ghostCompositeShader_->setUniformValue("outlineWidth",dpr);ghostCompositeShader_->setUniformValue("ghostOpacity",ghostOpacity_);glBindVertexArray(ghostCompositeVao_);glDrawArrays(GL_TRIANGLES,0,3);ghostCompositeShader_->release();glDisable(GL_BLEND);glDepthMask(GL_TRUE);
 }
 void Viewport::mousePressEvent(QMouseEvent *event) {
-    lastMouse_ = event->position().toPoint(); setFocus();
+    focusTimer_.stop(); lastMouse_ = event->position().toPoint(); setFocus();
     if (event->button()==Qt::LeftButton && !(event->modifiers() & Qt::ShiftModifier)) {
         const int handle = pickHandle(event->position());
         if (handle >= 0) { beginManipulation(handle,event->position()); event->accept(); return; }
@@ -822,6 +830,59 @@ void Viewport::mouseReleaseEvent(QMouseEvent *event) {
     }
     QOpenGLWidget::mouseReleaseEvent(event);
 }
+void Viewport::mouseDoubleClickEvent(QMouseEvent *event) {
+    // On a gizmo handle a double-click is a press like any other; elsewhere it focuses.
+    if (event->button()==Qt::LeftButton && !(event->modifiers() & Qt::ShiftModifier) && pickHandle(event->position())<0) {
+        lastMouse_ = event->position().toPoint(); ignoreLeftUntilRelease_ = true; // the second press does not orbit
+        QVector3D point; if (pickPoint(event->position(),&point)) focusOn(point);
+        event->accept(); return;
+    }
+    QOpenGLWidget::mouseDoubleClickEvent(event);
+}
+void Viewport::focusOn(const QVector3D &point) {
+    if (!std::isfinite(point.x()) || !std::isfinite(point.y()) || !std::isfinite(point.z())) return;
+    focusFrom_ = camera_.target; focusTo_ = point; focusClock_.start(); focusTimer_.start();
+}
+bool Viewport::pickPoint(const QPointF &screen, QVector3D *world) const {
+    if (!frame_ || width()<1 || height()<1) return false;
+    const auto model = transform_.matrix(), view = viewMatrix(), viewProjection = projectionMatrix()*view;
+    auto stack = modifiers_; if (!modifierStack_) { Modifier m; m.crop = crop_; stack = {m}; }
+    const CompiledModifiers modifiers(stack);
+    const bool masked = !modifiers.isolations.isEmpty() || !modifiers.prunes.isEmpty();
+    const float modelScale = std::cbrt(std::abs(model.determinant()));
+    const bool orthographic = camera_.orthographic && camera_.preset!=ViewPreset::Free;
+    const float tangent = std::tan(qDegreesToRadians(22.5f)), pixelsAtUnitDepth = height()*0.5f/tangent;
+    const float orthographicPixels = height()*0.5f/std::max(1e-6f,camera_.distance*tangent);
+    struct Hit { float depth, alpha; }; std::vector<Hit> hits;
+    for (const auto &point : frame_->points) {
+        if (masked && point.modifierVisibility<.5f) continue;
+        const QVector3D p = model.map({point.position[0],point.position[1],point.position[2]});
+        if (!std::isfinite(p.x()) || !std::isfinite(p.y()) || !std::isfinite(p.z())) continue;
+        if (!(cropEditing_ || modifiers.keepsPosition(p)) || modifiers.removesColour({point.color[0],point.color[1],point.color[2]})) continue;
+        const QVector4D clip = viewProjection*QVector4D(p,1); if (clip.w()<=1e-5f) continue;
+        const float depth = -view.map(p).z(); if (depth<=0) continue;
+        const float dx = (clip.x()/clip.w()+1)*width()*0.5f-float(screen.x()), dy = (1-clip.y()/clip.w())*height()*0.5f-float(screen.y()), d2 = dx*dx+dy*dy;
+        if (!splats_) { const float r = std::max(pointSize_*0.5f,3.f); if (d2<=r*r) hits.push_back({depth,1}); continue; }
+        // A splat's footprint at this depth, from its largest axis; its opacity falls off with it.
+        const auto &record = frame_->records[size_t(point.id)];
+        const float size = std::max({record.scale[0],record.scale[1],record.scale[2]})*modelScale;
+        const float sigma = std::max(0.7f, size*(orthographic ? orthographicPixels : pixelsAtUnitDepth/depth));
+        if (d2>9*sigma*sigma) continue;
+        const float alpha = std::min(0.99f, record.color[3]*std::exp(-0.5f*d2/(sigma*sigma))); if (alpha<1.f/255) continue;
+        hits.push_back({depth,alpha});
+    }
+    if (hits.empty()) return false;
+    std::sort(hits.begin(),hits.end(),[](const Hit &a,const Hit &b) {return a.depth<b.depth;});
+    // Front to back until half the light is stopped; short of that, the splat that weighs most.
+    float transmittance = 1, picked = hits.front().depth, heaviest = 0;
+    for (const auto &h : hits) {
+        const float weight = h.alpha*transmittance; if (weight>heaviest) { heaviest = weight; picked = h.depth; }
+        transmittance *= 1-h.alpha; if (transmittance<0.5f) { picked = h.depth; break; }
+    }
+    QVector3D origin, direction; mouseRay(screen,&origin,&direction);
+    const float z0 = -view.map(origin).z(), z1 = -view.map(origin+direction).z(); if (std::abs(z1-z0)<1e-9f) return false;
+    *world = origin + direction*((picked-z0)/(z1-z0)); return true;
+}
 void Viewport::keyPressEvent(QKeyEvent *event) {
     if (handleViewKey(event->key(),event->modifiers())) { event->accept(); return; }
     if (event->key()==Qt::Key_Escape) { setTransformMode(TransformMode::None); event->accept(); return; }
@@ -834,6 +895,7 @@ void Viewport::keyPressEvent(QKeyEvent *event) {
     QOpenGLWidget::keyPressEvent(event);
 }
 void Viewport::wheelEvent(QWheelEvent *event) {
+    focusTimer_.stop();
     if (dragging_) { dragging_ = false; ignoreLeftUntilRelease_ = true; }
     camera_.distance = std::clamp(camera_.distance * std::pow(0.85f, event->angleDelta().y()/120.0f), 0.001f, 1e7f);
     update(); emit cameraChanged();
@@ -1143,7 +1205,7 @@ void Viewport::orbit(float yawDelta,float pitchDelta) {
     viewCube_->setCamera(camera_); update();
 }
 void Viewport::setViewPreset(ViewPreset preset,bool orthographic) {
-    cancelManipulation(); camera_.preset = preset; camera_.orthographic = preset!=ViewPreset::Free && orthographic; camera_.roll = 0;
+    focusTimer_.stop(); cancelManipulation(); camera_.preset = preset; camera_.orthographic = preset!=ViewPreset::Free && orthographic; camera_.roll = 0;
     camera_.pitch = 0;
     switch (preset) {
     case ViewPreset::Front: camera_.yaw = 0; break;
@@ -1158,6 +1220,7 @@ void Viewport::setViewPreset(ViewPreset preset,bool orthographic) {
 }
 bool Viewport::handleViewKey(int key,Qt::KeyboardModifiers modifiers) {
     if (!(modifiers & Qt::KeypadModifier) || (modifiers & (Qt::AltModifier | Qt::MetaModifier))) return false;
+    focusTimer_.stop();
     switch (key) { // Preserve the physical numpad layout with Num Lock off.
     case Qt::Key_End: key = Qt::Key_1; break;
     case Qt::Key_Down: key = Qt::Key_2; break;

@@ -29,8 +29,8 @@ SOURCES += $$PWD/nativeexport.cpp
 HEADERS += $$PWD/nativeexport.h
 
 SOURCES += $$PWD/modifiers.cpp
-SOURCES += $$PWD/isolation.cpp $$PWD/animationpanel.cpp
-HEADERS += $$PWD/isolation.h $$PWD/animationpanel.h
+SOURCES += $$PWD/isolation.cpp $$PWD/pruning.cpp $$PWD/animationpanel.cpp
+HEADERS += $$PWD/isolation.h $$PWD/pruning.h $$PWD/animationpanel.h
 SOURCES += $$PWD/mintwriter.cpp
 HEADERS += $$PWD/mintwriter.h
 

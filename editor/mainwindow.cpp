@@ -755,6 +755,22 @@ void MainWindow::buildUi() {
     isolationPercent_=new QDoubleSpinBox;isolationPercent_->setObjectName("isolationMedianPercent");isolationPercent_->setRange(0,1000000);isolationPercent_->setDecimals(1);isolationPercent_->setSuffix(" %");isolationPercent_->setValue(700);
     isolationForm->addRow(tr("Nth neighbour"),isolationNeighbour_);isolationForm->addRow(tr("Distance / median"),isolationPercent_);
     auto *isolationNote=new QLabel(tr("Removes points whose distance to neighbour N exceeds this percentage\nof the frame's median Nth-neighbour distance, after crop and colour filtering.\n100% is the median, 700% is 7 times the median."));isolationNote->setWordWrap(true);isolationForm->addRow(isolationNote);side->addWidget(isolationProperties_);
+    // Prune low contribution: up to a share of each chunk's splats, those that add least to
+    // the image, never one above the protection threshold.
+    pruneProperties_=new QGroupBox(tr("Prune low contribution"));pruneProperties_->setObjectName("pruneModifierProperties");auto *pruneForm=new QFormLayout(pruneProperties_);
+    pruneProperties_->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Maximum);
+    prunePercent_=new QDoubleSpinBox;prunePercent_->setObjectName("prunePercent");prunePercent_->setRange(0,90);prunePercent_->setDecimals(0);prunePercent_->setSuffix(" %");prunePercent_->setValue(15);
+    prunePercent_->setToolTip(tr("At most this share of each chunk's splats is removed, those that add least to the image first."));
+    pruneProtect_=new QDoubleSpinBox;pruneProtect_->setObjectName("pruneProtectAbove");pruneProtect_->setRange(0,1000);pruneProtect_->setDecimals(2);pruneProtect_->setSingleStep(0.05);pruneProtect_->setSuffix(" px");pruneProtect_->setValue(0.25);
+    pruneProtect_->setToolTip(tr("A splat that covers more than this is never removed, whatever the share above:\nits area at full weight in a 1080p view, averaged over the views it is scored from.\nIn a capture where every splat counts, nothing is removed."));
+    pruneForm->addRow(tr("Remove up to"),prunePercent_);pruneForm->addRow(tr("Protect above"),pruneProtect_);
+    pruneStatus_=new QLabel;pruneStatus_->setObjectName("pruneStatus");pruneStatus_->setWordWrap(true);pruneForm->addRow(pruneStatus_);
+    auto *pruneNote=new QLabel(tr("Each chunk is rendered from around the capture, from afar, from close, from above and from below, at a few instants. "
+        "A splat's contribution is what those images would lose without it. Hidden, faint and tiny splats contribute almost nothing. "
+        "A splat is kept or removed for its whole life in the chunk."));pruneNote->setWordWrap(true);pruneForm->addRow(pruneNote);side->addWidget(pruneProperties_);
+    SpinScrubber::attachFormLabel(prunePercent_,0.1);SpinScrubber::attachFormLabel(pruneProtect_,0.005);
+    auto pruneChanged=[this] {if (syncing_ || !project_.modifier() || project_.modifier()->type!=ModifierType::PruneLowContribution) return;project_.modifier()->prune={prunePercent_->value(),pruneProtect_->value()};syncModifiers();dirty();};
+    connect(prunePercent_,&QDoubleSpinBox::valueChanged,this,[pruneChanged](double) {pruneChanged();});connect(pruneProtect_,&QDoubleSpinBox::valueChanged,this,[pruneChanged](double) {pruneChanged();});
     walkProperties_=new QGroupBox(tr("Walk"));walkProperties_->setObjectName("walkModifierProperties");auto *walkForm=new QFormLayout(walkProperties_);
     walkProperties_->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Minimum);
     walkSpeed_=new QDoubleSpinBox;walkSpeed_->setObjectName("walkSpeed");walkSpeed_->setRange(0,100);walkSpeed_->setDecimals(2);walkSpeed_->setSingleStep(.1);walkSpeed_->setSuffix(" m/s");walkSpeed_->setValue(1);
@@ -953,7 +969,7 @@ void MainWindow::buildUi() {
 
 void MainWindow::syncModifiers() {
     viewport_->setModifiers(project_.modifiersAtFrame(currentFrame()));modifierPanel_->setProject(project_);
-    const bool purge=!CompiledModifiers(project_).isolations.isEmpty();
+    const CompiledModifiers compiled(project_);const bool purge=!compiled.isolations.isEmpty() || !compiled.prunes.isEmpty();
     QJsonObject state;if (purge) state={{"modifiers",project_.modifierJson()},{"transform",project_.json({})["transform"]},{"cropEditing",viewport_->cropEditing()}};
     if (state!=processingState_) {processingState_=state;if (purge) requestFrame();}
 }
@@ -968,7 +984,7 @@ void MainWindow::showWalkSpeed(const Modifier &m) {
 void MainWindow::revealModifierProperties() {
     QTimer::singleShot(0,this,[this] {
         const auto *m=project_.modifier();auto *scroll=findChild<QScrollArea *>("toolsScrollArea");if (!m || !scroll) return;
-        QWidget *panel=m->type==ModifierType::AnimateTransform ? static_cast<QWidget *>(animationProperties_) : m->type==ModifierType::PurgeIsolated ? isolationProperties_ : m->type==ModifierType::Walk ? walkProperties_ : m->type==ModifierType::BakeAntialiasing ? bakeProperties_ : m->type==ModifierType::Crop ? cropProperties_ : greenProperties_;
+        QWidget *panel=m->type==ModifierType::AnimateTransform ? static_cast<QWidget *>(animationProperties_) : m->type==ModifierType::PurgeIsolated ? isolationProperties_ : m->type==ModifierType::Walk ? walkProperties_ : m->type==ModifierType::BakeAntialiasing ? bakeProperties_ : m->type==ModifierType::PruneLowContribution ? pruneProperties_ : m->type==ModifierType::Crop ? cropProperties_ : greenProperties_;
         scroll->ensureWidgetVisible(panel,0,12);
     });
 }
@@ -1029,6 +1045,8 @@ void MainWindow::syncUi() {
     animationProperties_->setVisible(animation);isolationProperties_->setVisible(isolation);
     const bool walk=selected && selected->type==ModifierType::Walk;walkProperties_->setVisible(walk);
     const bool bake=selected && selected->type==ModifierType::BakeAntialiasing;bakeProperties_->setVisible(bake);
+    const bool prune=selected && selected->type==ModifierType::PruneLowContribution;pruneProperties_->setVisible(prune);
+    if (prune) {pruneProperties_->setTitle(tr("Prune low contribution: %1").arg(selected->name));prunePercent_->setValue(selected->prune.percent);pruneProtect_->setValue(selected->prune.protectAbove);showPruneStatus();}
     if (bake) {bakeProperties_->setTitle(tr("Bake anti-aliasing: %1").arg(selected->name));bakeDistance_->setValue(selected->bakeDistance);bakeScreenHeight_->setValue(selected->bakeScreenHeight);
         bakeSizeLabel_->setText(tr("%1 mm").arg(selected->bakeSize()*1000,0,'f',2));}
     if (walk) {walkProperties_->setTitle(tr("Walk: %1").arg(selected->name));showWalkSpeed(*selected);}
@@ -1241,8 +1259,26 @@ void MainWindow::play(bool playing) {
     } else playback_.stop();
     playButton_->setIcon(transportIcon(style(),playing ? QStyle::SP_MediaPause : QStyle::SP_MediaPlay));
 }
+// The selected Prune low contribution's effect on the chunk on screen: the share removed, and
+// whether the protection kept it below what was asked.
+void MainWindow::showPruneStatus() {
+    const auto *m=project_.modifier();if (!m || m->type!=ModifierType::PruneLowContribution) return;
+    QString text,style;
+    if (!m->active()) text=tr("Disabled: nothing is removed.");
+    else {
+        int index=0;for (const auto &other:project_.modifiers) {if (&other==m) break;if (other.active() && other.type==ModifierType::PruneLowContribution) ++index;}
+        if (index>=int(pruneStats_.size()) || !pruneStats_[size_t(index)].records) text=tr("Scoring the chunk on screen\u2026");
+        else {
+            const auto &s=pruneStats_[size_t(index)];const double removed=100.0*double(s.removed)/double(s.records),asked=100.0*double(s.asked)/double(s.records);
+            if (s.limited()) {text=tr("This chunk: %1% removed, not the %2% asked. Protect above kept %3 splats that count.").arg(removed,0,'f',1).arg(asked,0,'f',1).arg(qulonglong(s.asked-s.removed));style="color: #e8b04a;";}
+            else text=tr("This chunk: %1% removed (%2 of %3 splats).").arg(removed,0,'f',1).arg(qulonglong(s.removed)).arg(qulonglong(s.records));
+        }
+    }
+    pruneStatus_->setText(text);pruneStatus_->setStyleSheet(style);
+}
 void MainWindow::receiveFrame(FramePtr frame) {
     viewport_->setFrame(frame);
+    pruneStats_=frame->prune;showPruneStatus();
     if (smokeOutput_.isEmpty()) return;
     qInfo("%s: %llu points / %llu records, t=%.3f, decode %.2f ms, SH=%d",
           qPrintable(info_.format), qulonglong(frame->points.size()), qulonglong(frame->records.size()), frame->seconds, frame->decodeMs, frame->coefficients);

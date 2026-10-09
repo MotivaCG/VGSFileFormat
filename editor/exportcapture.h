@@ -8,12 +8,18 @@ struct ExportResult {
     int frames = 0;
     quint64 kept = 0, removed = 0;
     QStringList notes;
+    // Prune low contribution over the source chunks it scored: their records, what its share
+    // asked for, what went, and in how many chunks the protection kept more than the share.
+    quint64 pruneRecords = 0, pruneAsked = 0, pruneRemoved = 0;
+    int pruneChunks = 0, pruneLimited = 0;
 };
 using ExportProgress = std::function<bool(int, const QString &)>;
 
 // Source attributes are immutable. Crop tests transformed means in world space.
+// `pruned`, when given, says which records Prune low contribution keeps (pruning.h).
 vgs::Frame bakeExportFrame(const vgs::Frame &, const Project &, int degree,
-                          const ExportProgress & = {},double frameRate = 30);
+                          const ExportProgress & = {},double frameRate = 30,
+                          const std::vector<uint8_t> *pruned = nullptr);
 ExportResult exportCaptureFile(const Project &, const QString &destination,
                                const ExportProgress & = {});
 

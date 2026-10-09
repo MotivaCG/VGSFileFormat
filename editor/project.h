@@ -48,7 +48,7 @@ struct CropVolume {
     bool contains(const QVector3D &worldPosition) const;
 };
 Q_DECLARE_METATYPE(CropVolume)
-enum class ModifierType { Crop, RemoveGreen, AnimateTransform, PurgeIsolated, Walk, BakeAntialiasing };
+enum class ModifierType { Crop, RemoveGreen, AnimateTransform, PurgeIsolated, Walk, BakeAntialiasing, PruneLowContribution };
 struct GreenFilter {
     float minimumSaturation = 0.5f, hueTolerance = 45; // HSV: saturation 0..1, circular distance from 120 degrees.
     bool linearRgb = true; // Convert clamped sRGB base colour to linear RGB before HSV.
@@ -83,6 +83,13 @@ struct IsolationFilter {
     int neighbour=4;
     double medianPercent=700;
 };
+// Prune low contribution: removes, chunk by chunk, up to `percent` of the splats that add
+// least to images of the capture - but never one that covers more than `protectAbove`
+// pixels of a 1080p view on average, so a capture where everything counts loses nothing.
+struct PruneFilter {
+    double percent=15;
+    double protectAbove=0.25;
+};
 struct Modifier {
     QString id, name;
     ModifierType type = ModifierType::Crop;
@@ -95,6 +102,7 @@ struct Modifier {
     // The crop as it is when static: what is saved as its fixed pose and size.
     CropVolume staticCrop() const;
     IsolationFilter isolation;
+    PruneFilter prune;
     // Walk: metres per second along +Z of the exported capture. Preview only; export
     // writes it to the header as a walking capture instead of moving the data.
     double walkSpeed = 1;
@@ -165,4 +173,5 @@ public:
     QVector<Crop> crops;
     QVector<GreenFilter> greens;
     QVector<IsolationFilter> isolations;
+    QVector<PruneFilter> prunes;
 };
