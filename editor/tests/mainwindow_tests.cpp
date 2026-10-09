@@ -60,8 +60,9 @@ private slots:
         auto treeKeys=[&] {return tree->topLevelItem(0)->data(2,Qt::UserRole+4).toList().size();};
         QCOMPARE(animation->currentData().toInt(),0);QVERIFY(!keys->isVisible());QCOMPARE(treeKeys(),0);
         const double still=radius->value();
-        // Animated starts from where the crop is, with a key at the current frame.
-        choose(1);QVERIFY(keys->isVisible());QCOMPARE(table->rowCount(),1);QCOMPARE(treeKeys(),1);
+        // Animated starts from where the crop is, without a key: Set key or an edit adds the first.
+        choose(1);QVERIFY(keys->isVisible());QCOMPARE(table->rowCount(),0);QCOMPARE(treeKeys(),0);QCOMPARE(radius->value(),still);
+        auto *setKey=window.findChild<QPushButton *>("setCropKey");QVERIFY(setKey);setKey->click();QCOMPARE(table->rowCount(),1);QCOMPARE(treeKeys(),1);
         // Editing at another frame sets a key there; going back shows the first pose.
         emit slider->playheadChanged(4);radius->setValue(still+0.5);QCOMPARE(table->rowCount(),2);QCOMPARE(table->item(1,0)->text(),QString("4"));QCOMPARE(treeKeys(),2);
         emit slider->playheadChanged(0);QCOMPARE(radius->value(),still);
@@ -116,6 +117,49 @@ private slots:
         // Reopening shows the timeline whole again: the zoom is not saved.
         slider->zoomAt(10,slider->trackRect().left());QCOMPARE(slider->zoom(),2.);window.setWindowModified(false);
         window.openPath(capture);QTRY_COMPARE(slider->zoom(),1.);QTRY_VERIFY(edit->isEnabled());QCOMPARE(panel->view(),qMakePair(0.,4.));
+    }
+    void undoRestoresEditsButNotTheView() {
+        QTemporaryDir dir;QVERIFY(dir.isValid());
+        QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());
+        vgs::Frame f;f.count=1;f.active={1};f.position={0,1,0};f.rotation={0,0,0,1};f.scale={.01f,.02f,.03f};f.colorDc={.5f,.5f,.5f};f.opacity={1};
+        vgs::Header h;h.shDegree=0;h.frameCount=h.durationTicks=5;h.chunks.resize(5);for (size_t i=0;i<5;++i) {h.chunks[i].startTick=i;h.chunks[i].intervals=1;}
+        vgs::EncodeOptions options;options.signer=vgs::authoringSigner();options.shDegree=0;options.compression=vgs::Compression::None;
+        const QString capture=dir.filePath("source.pgs");QFile file(capture);QVERIFY(file.open(QIODevice::WriteOnly));
+        vgs::encodeSequence(h,[&](size_t) {return packExportFrame(f,0);},[&](uint64_t offset,const uint8_t *data,size_t count) {file.seek(qint64(offset));file.write(reinterpret_cast<const char *>(data),qint64(count));},options);file.close();
+        MainWindow window(nullptr,dir.filePath("presets"));window.show();QVERIFY(QTest::qWaitForWindowExposed(&window));
+        // While it opens, the overlay says so and neither the timeline nor the tools take input; it goes once it is open.
+        auto *overlay=window.findChild<QWidget *>("loadingOverlay");auto *timeline=window.findChild<QWidget *>("timeline");auto *edit=window.findChild<QPushButton *>("editCropVolume");
+        QVERIFY(overlay && timeline && edit);
+        window.openPath(capture);QVERIFY(overlay->property("loading").toBool());QVERIFY(!timeline->isEnabled());QVERIFY(!edit->isEnabled());QCOMPARE(QApplication::overrideCursor()->shape(),Qt::BusyCursor);
+        QTRY_VERIFY_WITH_TIMEOUT(edit->isEnabled(),5000);
+        QVERIFY(!overlay->property("loading").toBool());QVERIFY(!overlay->isVisible());QVERIFY(!QApplication::overrideCursor());
+        auto *undo=window.findChild<QAction *>("editUndo");auto *redo=window.findChild<QAction *>("editRedo");auto *radius=window.findChild<QDoubleSpinBox *>("cropRadiusX");
+        auto *tree=window.findChild<QTreeWidget *>("modifierTree");auto *add=window.findChild<QToolButton *>("addModifier");auto *slider=window.findChild<RangeSlider *>();
+        auto *pointSize=window.findChild<QDoubleSpinBox *>("displayPointSize");
+        QVERIFY(undo && redo && radius && tree && add && slider && pointSize);
+        // Opening is where the history starts.
+        QVERIFY(!undo->isEnabled() && !redo->isEnabled());
+        QCOMPARE(redo->shortcuts(),(QList<QKeySequence>{QKeySequence("Ctrl+Y"),QKeySequence("Ctrl+Shift+Z")}));QCOMPARE(undo->shortcut(),QKeySequence("Ctrl+Z"));
+        // The playhead and display options are not edits.
+        emit slider->playheadChanged(3);pointSize->setValue(8);QVERIFY(!undo->isEnabled());
+        const double start=radius->value();
+        // Each action below is its own step once the event loop has run, as it does between clicks.
+        radius->setValue(start+1);QVERIFY(undo->isEnabled());QCoreApplication::processEvents();
+        add->click();QCOMPARE(tree->topLevelItemCount(),2);QCoreApplication::processEvents();
+        undo->trigger();QCOMPARE(tree->topLevelItemCount(),1);QCOMPARE(radius->value(),start+1);QVERIFY(redo->isEnabled());
+        undo->trigger();QCOMPARE(radius->value(),start);QVERIFY(!undo->isEnabled());
+        // The view stays where it was.
+        QCOMPARE(slider->playheadValue(),3);QCOMPARE(pointSize->value(),8.);
+        redo->trigger();QCOMPARE(radius->value(),start+1);redo->trigger();QCOMPARE(tree->topLevelItemCount(),2);QVERIFY(!redo->isEnabled());
+        // A new edit drops what could be redone.
+        undo->trigger();QVERIFY(redo->isEnabled());radius->setValue(start+3);QVERIFY(!redo->isEnabled());QCoreApplication::processEvents();
+        // Typing in one field without pausing is one step, and Ctrl+Z there undoes the edit, not the text.
+        undo->trigger();QCOMPARE(radius->value(),start+1);
+        QCoreApplication::processEvents();radius->setFocus();QTRY_VERIFY(radius->hasFocus());radius->selectAll();
+        QTest::keyClicks(radius,"2");QCOMPARE(radius->value(),2.);QCoreApplication::processEvents();QTest::keyClick(radius,Qt::Key_Up);QCOMPARE(radius->value(),2.05);
+        QTest::keyClick(radius,Qt::Key_Z,Qt::ControlModifier);QCOMPARE(radius->value(),start+1);
+        QTest::keyClick(radius,Qt::Key_Z,Qt::ControlModifier|Qt::ShiftModifier);QCOMPARE(radius->value(),2.05);
+        window.setWindowModified(false);
     }
     void taskQueueRunsWhatItCanAndReportsTheRest() {
         QTemporaryDir dir;QVERIFY(dir.isValid());

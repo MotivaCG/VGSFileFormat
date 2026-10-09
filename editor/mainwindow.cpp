@@ -159,6 +159,27 @@ public:
         return QObject::eventFilter(watched,event);
     }
 };
+// Counts mouse presses, so that one drag is told from the next, and lets Undo and Redo reach
+// the editor from a number field instead of undoing the text typed in it.
+class UndoInput : public QObject {
+public:
+    using QObject::QObject;
+    static inline quint64 presses = 0, keys = 0;
+    static inline bool held = false; // a mouse button is down, as the events have said
+    bool eventFilter(QObject *watched,QEvent *event) override {
+        if (event->type()==QEvent::MouseButtonPress || event->type()==QEvent::MouseButtonRelease) {
+            held=static_cast<QMouseEvent *>(event)->buttons()!=Qt::NoButton;if (event->type()==QEvent::MouseButtonPress) ++presses;
+        }
+        else if (event->type()==QEvent::KeyPress) ++keys;
+        else if (event->type()==QEvent::ShortcutOverride) {
+            const auto *key=static_cast<QKeyEvent *>(event);const auto *widget=qobject_cast<QWidget *>(watched);
+            const bool inField=widget && (qobject_cast<const QAbstractSpinBox *>(widget) || qobject_cast<const QAbstractSpinBox *>(widget->parentWidget()));
+            const QKeySequence pressed(key->keyCombination());
+            if (inField && (pressed==QKeySequence("Ctrl+Z") || pressed==QKeySequence("Ctrl+Y") || pressed==QKeySequence("Ctrl+Shift+Z"))) return true;
+        }
+        return QObject::eventFilter(watched,event);
+    }
+};
 class SpinScrubber final : public QObject {
 public:
     static void attach(QWidget *label,QDoubleSpinBox *spin,double pixelStep) {
@@ -235,6 +256,53 @@ private:
     bool pressed_=false,dragging_=false;
 };
 
+// Covers the viewport and the timeline while a capture opens: says what is loading and for how
+// long, with a turning arc, and takes the clicks meant for what it covers. It appears only after
+// a moment, so a quick open does not flash.
+class LoadingOverlay final : public QWidget {
+public:
+    explicit LoadingOverlay(QWidget *parent) : QWidget(parent) {
+        setObjectName("loadingOverlay");setProperty("loading",false);hide();
+        parent->installEventFilter(this);setGeometry(parent->rect());
+        delay_.setSingleShot(true);delay_.setInterval(200);
+        connect(&delay_,&QTimer::timeout,this,[this] {setGeometry(parentWidget()->rect());raise();show();tick_.start();});
+        tick_.setInterval(40);connect(&tick_,&QTimer::timeout,this,[this] {update();});
+    }
+    void start(const QString &name) {
+        name_=name;clock_.start();setProperty("loading",true);
+        if (!cursor_) {QApplication::setOverrideCursor(Qt::BusyCursor);cursor_=true;}
+        delay_.start();
+    }
+    void stop() {
+        setProperty("loading",false);delay_.stop();tick_.stop();hide();
+        if (cursor_) {QApplication::restoreOverrideCursor();cursor_=false;}
+    }
+protected:
+    bool eventFilter(QObject *watched,QEvent *event) override {
+        if (watched==parent() && event->type()==QEvent::Resize) setGeometry(parentWidget()->rect());
+        return QWidget::eventFilter(watched,event);
+    }
+    void paintEvent(QPaintEvent *) override {
+        QPainter p(this);p.setRenderHint(QPainter::Antialiasing);p.fillRect(rect(),QColor(10,12,14,170));
+        const QPointF centre=QRectF(rect()).center()-QPointF(0,20);const double radius=18;
+        p.setPen(QPen(QColor(255,255,255,40),4));p.drawEllipse(centre,radius,radius);
+        const int angle=int(clock_.elapsed()*0.36)%360;
+        p.setPen(QPen(QColor("#e6e6e6"),4,Qt::SolidLine,Qt::RoundCap));p.drawArc(QRectF(centre.x()-radius,centre.y()-radius,2*radius,2*radius),-angle*16,100*16);
+        p.setPen(QColor("#e6e6e6"));auto font=p.font();font.setPointSizeF(font.pointSizeF()*1.15);p.setFont(font);
+        const QRectF text(0,centre.y()+radius+14,width(),26);
+        p.drawText(text,Qt::AlignCenter,tr("Loading %1…").arg(name_));
+        font.setPointSizeF(font.pointSizeF()/1.15);p.setFont(font);p.setPen(QColor("#9a9a9a"));
+        p.drawText(text.translated(0,26),Qt::AlignCenter,tr("%1 s").arg(clock_.elapsed()/1000.0,0,'f',1));
+    }
+    void mousePressEvent(QMouseEvent *event) override {event->accept();}
+    void wheelEvent(QWheelEvent *event) override {event->accept();}
+private:
+    QString name_;
+    QElapsedTimer clock_;
+    QTimer delay_,tick_;
+    bool cursor_=false;
+};
+
 class CenteredPlaybackLayout final : public QHBoxLayout {
 public:
     void setGeometry(const QRect &rect) override {
@@ -259,6 +327,7 @@ MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory) : QMainWi
     connect(this, &MainWindow::decodeRequested, worker_, &CaptureWorker::decode);
     connect(worker_, &CaptureWorker::opened, this, [this](CaptureInfo info, FramePtr frame, quint64 gen) {
         if (gen != openingGeneration_) return;
+        loadingOverlay_->stop();
         loading_ = false; loaded_ = true; decoding_ = pendingDecode_ = false;
         generation_ = gen; info_ = info;
         viewport_->setGhost(false); slider_->resetView(); // a newly opened capture is seen whole
@@ -287,6 +356,8 @@ MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory) : QMainWi
         if (!pendingProject_) {fitCrop();viewport_->setCropEditing(false);viewport_->setTransformMode(TransformMode::None);}
         setWindowModified(!pendingProject_.has_value());
         pendingProject_.reset(); refreshPresets(); syncUi(); title();
+        // What was opened is where the history starts: opening is not undone.
+        resetUndo();
         viewport_->setFrame(frame);
         if (project_.time > 0) requestFrame();
         else receiveFrame(frame);
@@ -300,6 +371,7 @@ MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory) : QMainWi
     connect(worker_, &CaptureWorker::failed, this, [this](QString message, quint64 gen, bool opening) {
         if (opening) {
             if (gen != openingGeneration_) return;
+            loadingOverlay_->stop();
             loading_ = false; pendingProject_.reset(); pendingProjectPath_.clear();
         } else {
             if (gen != generation_) return;
@@ -363,6 +435,16 @@ void MainWindow::buildUi() {
     saveAction_ = file->addAction(tr("Save project"), QKeySequence::Save, this, [this] { save(); });
     saveAsAction_ = file->addAction(tr("Save project as…"), QKeySequence::SaveAs, this, [this] { save(true); });
     file->addSeparator(); auto *exitAction = file->addAction(tr("Exit"), QKeySequence::Quit, this, &QWidget::close);
+    auto *edit = menuBar()->addMenu(tr("Edit")); edit->setToolTipsVisible(true);
+    undoAction_ = edit->addAction(tr("Undo"), this, [this] { stepUndo(false); }); undoAction_->setObjectName("editUndo");
+    undoAction_->setShortcut(QKeySequence("Ctrl+Z"));
+    undoAction_->setIcon(themeIcon(QIcon::ThemeIcon::EditUndo,style()->standardIcon(QStyle::SP_ArrowBack)));
+    undoAction_->setToolTip(tr("Undo the last edit to the project (Ctrl+Z): transform, modifiers and their settings, keys, the Start/End range or the export settings.\nThe view, the playhead and display options are not edits."));
+    redoAction_ = edit->addAction(tr("Redo"), this, [this] { stepUndo(true); }); redoAction_->setObjectName("editRedo");
+    redoAction_->setShortcuts({QKeySequence("Ctrl+Y"),QKeySequence("Ctrl+Shift+Z")});
+    redoAction_->setIcon(themeIcon(QIcon::ThemeIcon::EditRedo,style()->standardIcon(QStyle::SP_ArrowForward)));
+    redoAction_->setToolTip(tr("Redo the edit just undone (Ctrl+Y or Ctrl+Shift+Z)."));
+    qApp->installEventFilter(new UndoInput(this));
     // Everything that writes something other than the project.
     auto *exportMenu = menuBar()->addMenu(tr("Export")); exportMenu->setToolTipsVisible(true);
     exportAction_ = exportMenu->addAction(tr("Export capture\u2026"), QKeySequence("Ctrl+E"), this, &MainWindow::exportCapture);
@@ -460,6 +542,7 @@ void MainWindow::buildUi() {
     connect(modifierPanel_,&ModifierPanel::cropAdded,this,&MainWindow::fitCrop);
     connect(modifierPanel_,&ModifierPanel::seekFrame,this,[this](int frame) {play(false);setTime(frame/info_.fps,true);});
     layout->addWidget(timeline_); setCentralWidget(center);
+    loadingOverlay_ = new LoadingOverlay(center);
     auto *dock = new QDockWidget(tr("Tools"), this); dock->setObjectName("toolsDock");
     dock->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea);
     tools_ = new QWidget; auto *side = new QVBoxLayout(tools_); side->setContentsMargins(16,16,16,16);
@@ -565,7 +648,7 @@ void MainWindow::buildUi() {
     cropForm->addRow(tr("Shape"),cropShapeCombo_);
     // Static or Animated, switchable at any time: each keeps its own pose and the keys survive.
     cropAnimationCombo_=new QComboBox;cropAnimationCombo_->setObjectName("cropAnimation");cropAnimationCombo_->addItem(tr("Static"),0);cropAnimationCombo_->addItem(tr("Animated"),1);
-    cropAnimationCombo_->setToolTip(tr("Static: one pose and size for the whole capture. Animated: position, rotation, scale and size follow keys on the timeline, and editing the crop sets a key at the current frame. Switching keeps both the static pose and the keys. Shape, mode and the editing preview are never animated."));
+    cropAnimationCombo_->setToolTip(tr("Static: one pose and size for the whole capture. Animated: position, rotation, scale and size follow keys on the timeline. Switching adds no key: editing the crop or Set key adds one at the current frame. Switching keeps both the static pose and the keys. Shape, mode and the editing preview are never animated."));
     cropForm->addRow(tr("Animation"),cropAnimationCombo_);
     connect(cropAnimationCombo_,&QComboBox::activated,this,[this](int) {
         if (syncing_ || !project_.modifier() || project_.modifier()->type!=ModifierType::Crop) return;
@@ -610,7 +693,7 @@ void MainWindow::buildUi() {
         auto *m=project_.modifier();if (!m || m->type!=ModifierType::Crop || !m->cropAnimation.animated) return;keyCrop();syncUi();dirty();
     });
     connect(cropRemoveKey_,&QPushButton::clicked,this,[this] {
-        auto *m=project_.modifier();if (!m || m->type!=ModifierType::Crop || m->cropAnimation.keys.size()<2) return;
+        auto *m=project_.modifier();if (!m || m->type!=ModifierType::Crop || m->cropAnimation.keys.isEmpty()) return;
         const int row=cropKeyTable_->currentRow();const auto &keys=m->cropAnimation.keys;
         m->cropAnimation.removeKey(row>=0 && row<keys.size() ? keys[row].frame : currentFrame());syncUi();dirty();
     });
@@ -906,9 +989,9 @@ void MainWindow::setCropAnimated(bool animated) {
     auto *m=project_.modifier();if (!m || m->type!=ModifierType::Crop || m->cropAnimation.animated==animated) return;
     auto &a=m->cropAnimation;
     if (animated) {
-        // The static pose is set aside; a first key starts the animation where the crop is.
+        // The static pose is set aside. Switching adds no key: until the first edit or Set key
+        // the crop stays where it is, and that edit is the first key.
         a.still=m->crop;a.animated=true;
-        if (a.keys.isEmpty()) a.setKey(currentFrame(),m->crop);
         m->crop=a.evaluate(m->crop,currentFrame());
     } else {m->crop=m->staticCrop();a.animated=false;}
     viewport_->setCrop(m->crop);syncUi();dirty();
@@ -929,9 +1012,8 @@ void MainWindow::showCropKeys(const Modifier &m) {
         }
         if (key.frame==frame) cropKeyTable_->setCurrentCell(row,0);
     }
-    // An animated crop keeps one key at least; Static is how it stops animating.
-    cropRemoveKey_->setEnabled(keys.size()>1);
-    cropRemoveKey_->setToolTip(keys.size()>1 ? tr("Remove the selected key, or the key at the current frame.") : tr("An animated crop keeps at least one key.\nChoose Static to stop animating it. The keys are kept."));
+    cropRemoveKey_->setEnabled(!keys.isEmpty());
+    cropRemoveKey_->setToolTip(keys.isEmpty() ? tr("No keys yet.\nEdit the crop or press Set key to add the first one at the current frame.") : tr("Remove the selected key, or the key at the current frame."));
     cropKeyTable_->setFixedHeight(std::clamp(cropKeyTable_->horizontalHeader()->height()+4+28*std::max(1,int(keys.size())),100,220));
 }
 void MainWindow::syncUi() {
@@ -957,7 +1039,8 @@ void MainWindow::syncUi() {
     ghostButton_->setEnabled(loaded_ && !loading_);
     ghostOpacitySlider_->setEnabled(viewport_->ghostEnabled() && loaded_ && !loading_);
     if (selected) {cropProperties_->setTitle(tr("Crop: %1").arg(selected->name));greenProperties_->setTitle(tr("Remove green: %1").arg(selected->name));greenSaturation_->setValue(selected->green.minimumSaturation*100);greenHue_->setValue(selected->green.hueTolerance);greenLinearRgb_->setChecked(selected->green.linearRgb);}
-    tools_->setEnabled(true); timeline_->setEnabled(loaded_ && !loading_);
+    // Nothing is edited while a capture opens: what it would edit is about to be replaced.
+    tools_->setEnabled(!loading_); timeline_->setEnabled(loaded_ && !loading_);
     for (auto *group : tools_->findChildren<QGroupBox *>(QString(),Qt::FindDirectChildrenOnly))
         group->setEnabled(group==presetBox_ || (loaded_ && !loading_ && !(animation && !selected->enabled && group->property("transformGroup").toBool())));
     resetTransformButton_->setEnabled(loaded_ && !loading_ && !(animation && !selected->enabled));
@@ -1027,12 +1110,70 @@ void MainWindow::syncUi() {
         ? (project_.crop().showRemovedInRed ? tr("Editing the selected crop, colour coded: kept points lightened, deleted points red.") : tr("Editing the selected crop: what the crops would delete is hidden."))
         : tr("Keep crops preserve what is inside any of them. Remove crops delete what is inside them and win where they overlap, over the full timeline."));
     pointSize_->setValue(project_.pointSize); viewport_->setPointSize(float(project_.pointSize)); viewport_->setGrid(project_.grid);
+    updateUndoActions();
     syncing_ = false;
 }
 void MainWindow::title() {
     setWindowTitle(tr("%1[*] — VGS Editor").arg(projectPath_.isEmpty() ? tr("Untitled project") : QFileInfo(projectPath_).fileName()));
 }
-void MainWindow::dirty() { if (loaded_) setWindowModified(true); }
+void MainWindow::dirty() { if (loaded_) { setWindowModified(true); recordUndo(); } }
+// What an undo step restores, as the project file writes it: animated crops by their keys
+// and static pose, so moving the playhead, which shows them at another frame, is not an edit.
+QByteArray MainWindow::undoKey(const Project &project) {
+    const QJsonObject full=project.json({});
+    return QJsonDocument(QJsonObject{{"transform",full["transform"]},{"modifiers",full["modifiers"]},{"in",project.in},{"out",project.out},
+        {"captureSettings",full["captureSettings"]}}).toJson(QJsonDocument::Compact);
+}
+// Called after every change to the project. A change to what is undone becomes a step, the
+// project as it was before it; the rest (camera, playhead, selection) only refreshes that
+// "before". The edits of one drag, or of typing in one field without pausing, are one step.
+void MainWindow::recordUndo() {
+    if (!loaded_ || loading_) return;
+    const QByteArray key=undoKey(project_);
+    if (key==undoKey_) { undoBase_=project_; return; }
+    const bool pressed=UndoInput::held;
+    QWidget *focus=QApplication::focusWidget();const bool typing=focus && (qobject_cast<QAbstractSpinBox *>(focus) || qobject_cast<QAbstractSpinBox *>(focus->parentWidget()));
+    // Everything one action does before the event loop runs again is that action: adding a
+    // crop also fits it to the capture.
+    const bool merge=undoOpen_ && !undo_.isEmpty() && (undoBatch_ || (undoPress_==UndoInput::presses &&
+        // The release that ends a drag still belongs to it.
+        (pressed || (undoPressed_ && undoClock_.elapsed()<250) || (typing && focus==undoFocus_ && undoKeys_!=UndoInput::keys && undoClock_.elapsed()<1500))));
+    if (!merge) {
+        undo_.append({undoBase_,undoKey_});if (undo_.size()>200) undo_.removeFirst();
+        undoOpen_=true;
+    } else if (undo_.last().key==key) {
+        // A drag cancelled back to where it began leaves nothing to undo.
+        undo_.removeLast();undoOpen_=false;
+    }
+    redo_.clear();undoBase_=project_;undoKey_=key;
+    undoPress_=UndoInput::presses;undoKeys_=UndoInput::keys;undoPressed_=pressed;undoFocus_=focus;undoClock_.restart();
+    if (!undoBatch_) {undoBatch_=true;QMetaObject::invokeMethod(this,[this] {undoBatch_=false;},Qt::QueuedConnection);}
+    updateUndoActions();
+}
+void MainWindow::resetUndo() {
+    undo_.clear();redo_.clear();undoBase_=project_;undoKey_=undoKey(project_);undoOpen_=false;updateUndoActions();
+}
+void MainWindow::stepUndo(bool redo) {
+    auto &from=redo ? redo_ : undo_;auto &to=redo ? undo_ : redo_;
+    if (!loaded_ || loading_ || from.isEmpty()) return;
+    play(false);
+    to.append({project_,undoKey(project_)});
+    const Project target=from.takeLast().project;
+    // Only what is undone comes back; the view, the playhead and the display stay as they are.
+    if (project_.selectedModifier!=target.selectedModifier) viewport_->setTransformMode(TransformMode::None);
+    project_.transform=target.transform;project_.modifiers=target.modifiers;project_.selectedModifier=target.selectedModifier;
+    project_.in=target.in;project_.out=target.out;project_.captureSettings=target.captureSettings;
+    project_.time=std::clamp(project_.time,project_.in,project_.out);
+    if (viewport_->cropEditing() && !(project_.modifier() && project_.modifier()->type==ModifierType::Crop)) viewport_->setCropEditing(false);
+    project_.showCropsAtFrame(currentFrame());viewport_->setCrop(project_.crop());
+    undoBase_=project_;undoKey_=undoKey(project_);undoOpen_=false;
+    syncUi();setWindowModified(true);requestFrame();updateUndoActions();revealModifierProperties();
+    statusBar()->showMessage(redo ? tr("Redone.") : tr("Undone."),2000);
+}
+void MainWindow::updateUndoActions() {
+    if (!undoAction_) return;
+    undoAction_->setEnabled(loaded_ && !loading_ && !undo_.isEmpty());redoAction_->setEnabled(loaded_ && !loading_ && !redo_.isEmpty());
+}
 bool MainWindow::canDiscard() {
     if (!isWindowModified()) return true;
     const auto answer = QMessageBox::question(this, tr("Unsaved changes"), tr("Save changes to this project?"), QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Save);
@@ -1060,7 +1201,7 @@ void MainWindow::newProject() {
     viewport_->setCropEditing(false); viewport_->setCrop({});
     project_ = defaultProject(); info_ = {}; projectPath_.clear(); viewport_->setFrame({}); viewport_->setTransform({});
     for (int g=0; g<3; ++g) viewport_->setCoordinateSpace(TransformMode(g+1),project_.spaces[g]);
-    viewport_->setCamera(project_.camera); setWindowModified(false); refreshPresets(); syncUi(); title();
+    viewport_->setCamera(project_.camera); setWindowModified(false); refreshPresets(); syncUi(); title(); resetUndo();
     // Release the source and its caches in their owning thread.
     QMetaObject::invokeMethod(worker_, &CaptureWorker::clear, Qt::QueuedConnection);
 }
@@ -1073,6 +1214,7 @@ void MainWindow::openPath(const QString &path) {
         pendingProject_ = p; pendingProjectPath_ = QFileInfo(path).absoluteFilePath(); asset = p.asset;
     }
     play(false); viewport_->setTransformMode(TransformMode::None); viewport_->setCropEditing(false); loading_ = true; openingGeneration_ = ++serial_; syncUi();
+    loadingOverlay_->start(QFileInfo(asset).fileName());
     statusBar()->showMessage(tr("Loading %1…").arg(QFileInfo(asset).fileName()));
     emit openRequested(asset, openingGeneration_, true);
 }

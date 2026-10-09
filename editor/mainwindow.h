@@ -28,6 +28,7 @@ class QButtonGroup;
 class QComboBox;
 class QGroupBox;
 class QFormLayout;
+class LoadingOverlay;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -133,6 +134,26 @@ private:
     void keyCrop();
     void setCropAnimated(bool animated);
     void showCropKeys(const Modifier &m);
+    // Undo and redo of edits to the project: the capture transform, the modifiers, their
+    // parameters and keys, the Start/End range and the export settings. Not the view, the
+    // playhead, display options or opening a capture, which starts the history afresh.
+    struct UndoStep { Project project; QByteArray key; };
+    QVector<UndoStep> undo_, redo_;
+    Project undoBase_;   // the project as of the last edit recorded
+    QByteArray undoKey_; // and what of it is undone, to tell an edit from a view change
+    // One drag, or one burst of typing in a field, is one step.
+    bool undoOpen_ = false, undoPressed_ = false, undoBatch_ = false;
+    quint64 undoPress_ = 0, undoKeys_ = 0;
+    QWidget *undoFocus_ = nullptr;
+    QElapsedTimer undoClock_;
+    QAction *undoAction_ = nullptr, *redoAction_ = nullptr;
+    static QByteArray undoKey(const Project &project);
+    void recordUndo();
+    void resetUndo();
+    void stepUndo(bool redo);
+    void updateUndoActions();
+    // Over the viewport and timeline while a capture opens.
+    LoadingOverlay *loadingOverlay_ = nullptr;
     QComboBox *renderStyle_ = nullptr, *splatSh_ = nullptr;
     QFormLayout *cropForm_;
     QDoubleSpinBox *frameSpin_, *inFrame_, *outFrame_;

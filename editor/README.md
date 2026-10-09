@@ -11,6 +11,11 @@ scale transforms the entire capture without changing point size.
 - `Ctrl+O`: open a capture. Drag and drop or a command-line path also work.
 - `Ctrl+Shift+O`: open a `.vgsproj` project.
 - `Ctrl+S` / `Ctrl+Shift+S`: save project / save as. Project commands are in File; there is no Project toolbar.
+- `Ctrl+Z`: undo, `Ctrl+Y` or `Ctrl+Shift+Z`: redo (Edit menu). Undone are edits to the project:
+  the capture transform, adding, removing, reordering, renaming or toggling modifiers, their
+  parameters and keys, the Start/End range, presets loaded and the export settings. A drag, or
+  typing in one field without pausing, is one step. The camera, the playhead, display options
+  and Global/Local are not edits, and opening a capture or project starts the history afresh.
 - Space: play or pause. Arrow keys: previous or next frame.
 - Drag: orbit; right/middle drag or Shift+drag: pan; wheel: zoom.
 - `Numpad decimal` / `Numpad Del` / `F`: Focus visible. `Ctrl+E`: export the edited capture. `Ctrl+Shift+E`: export the viewport as PNG.
@@ -216,6 +221,9 @@ shared XYZ fields and G/R/S gizmos affect the cylinder instead of the capture.
 Radius/height configure Cylinder; width/height/depth configure Box. Local XYZ
 scale can also produce an elliptical cylinder. **Fit capture** (Ctrl+F) refits the volume to capture bounds, resets
 its transformation, enters Move mode and returns keyboard focus to the viewport.
+A crop's **Animation** can be Static or Animated at any time, each keeping its own pose. Switching
+to Animated adds no key: the crop stays where it is until it is edited or **Set key** is pressed,
+which adds the first key at the current frame.
 Press S afterwards to select Scale; pressing S again switches Global/Local.
 
 The two buttons next to Edit reset the cylinder's position, orientation, scale
