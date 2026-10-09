@@ -4,6 +4,7 @@
 #include <array>
 #include <QElapsedTimer>
 #include <QTimer>
+#include <QPainterPath>
 #include <QOpenGLFunctions_3_3_Core>
 #include <QOpenGLShaderProgram>
 #include <QOpenGLWidget>
@@ -71,6 +72,21 @@ public:
     // as the web viewer does. Any navigation cancels the glide.
     void focusOn(const QVector3D &point);
     bool focusing() const { return focusTimer_.isActive(); }
+    // Picking splats by hand for an Erase modifier. With a tool on, a left drag paints with a
+    // brush of `radius` pixels or draws a lasso; on release the records of the visible splats
+    // inside are sent with what the stroke does: replace the chunk's picks, add (Ctrl) or
+    // subtract (Alt). The right button orbits and the middle one pans meanwhile.
+    enum class SelectTool { None, Brush, Lasso };
+    enum class SelectMode { Replace, Add, Subtract };
+    void setSelectTool(SelectTool tool, float radius);
+    SelectTool selectTool() const { return selectTool_; }
+    // The records of the visible splats a region of the view covers.
+    std::vector<uint32_t> recordsInside(const QPainterPath &region) const;
+    // The region a brush stroke along `path` covers.
+    static QPainterPath brushRegion(const QPainterPath &path, float radius);
+    // The scene as it is drawn now, without the grid, gizmo, crop wires, ghost or help text:
+    // the centre square of the view, `side` pixels across. An export's thumbnail.
+    QImage cleanImage(int side = 256);
     bool setGhost(bool enabled);
     void setGhostOpacity(float opacity);
     float ghostOpacity() const {return ghostOpacity_;}
@@ -86,6 +102,7 @@ signals:
     void cropEdited(CropVolume crop);
     void frameRequested();
     void ghostChanged(bool enabled);
+    void selectionStroke(std::vector<uint32_t> records, Viewport::SelectMode mode);
 protected:
     bool event(QEvent *event) override;
     void initializeGL() override;
@@ -95,6 +112,7 @@ protected:
     void mouseReleaseEvent(QMouseEvent *event) override;
     void mouseDoubleClickEvent(QMouseEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
+    void keyReleaseEvent(QKeyEvent *event) override;
     void wheelEvent(QWheelEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
 private:
@@ -120,6 +138,13 @@ private:
     std::vector<QVector3D> visibleWorldPoints() const;
     void drawGhost(const QMatrix4x4 &viewProjection,const QSize &pixels,float dpr);
     Transform worldTransformed(const Transform &start,const QMatrix4x4 &delta) const;
+    bool cleanCapture_ = false;
+    SelectTool selectTool_ = SelectTool::None;
+    float brushRadius_ = 20;
+    bool selecting_ = false;
+    SelectMode strokeMode_ = SelectMode::Replace;
+    QPainterPath stroke_;
+    QPointF hover_{-1000,-1000};
     QTimer focusTimer_;
     QElapsedTimer focusClock_;
     QVector3D focusFrom_, focusTo_;

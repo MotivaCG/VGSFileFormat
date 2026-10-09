@@ -464,6 +464,41 @@ void bakeAntialiasing(vgs::DecodedChunk &c,double size) {
         else {vgs::DecodedPage page;page.descriptor.attribute=vgs::OpacityScales;page.descriptor.group=group;page.bytes=std::move(codes);c.pages.push_back(std::move(page));}
     }
 }
+// The Colour modifiers' matrix A on a native chunk. Colour is 0.5 + C0*sh0 plus the
+// view-dependent terms, all linear in the coefficients, so: every higher-order SH codebook
+// entry and every sh0 trajectory row becomes A times itself, and each splat's base sh0 becomes
+// A*sh0 + (A*0.5 - 0.5)/C0. The base is a per-channel index into one shared 256-entry table,
+// which a matrix mixing channels cannot keep: the table is rebuilt from the new values'
+// quantiles and every splat takes its nearest entries.
+void colourNative(vgs::DecodedChunk &c,const std::array<float,9> &a) {
+    constexpr double C0=0.28209479177387814;
+    auto mix=[&](uint8_t *rgb) {float v[3];for (int k=0;k<3;++k) v[k]=half(rgb+2*k);for (int r=0;r<3;++r) putHalf(rgb+2*r,a[r*3]*v[0]+a[r*3+1]*v[1]+a[r*3+2]*v[2]);};
+    for (auto &p:c.pages) if (p.descriptor.attribute==vgs::ShStaticBook || p.descriptor.attribute==vgs::ShTemporalBook || p.descriptor.attribute==vgs::Sh0Trajectories)
+        for (size_t at=0;at+6<=p.bytes.size();at+=6) mix(p.bytes.data()+at);
+    auto *lutPage=find(c,vgs::Sh0Lut);if (!lutPage) return;
+    std::vector<float> lut(lutPage->bytes.size()/2);for (size_t i=0;i<lut.size();++i) lut[i]=half(lutPage->bytes.data()+2*i);
+    float offset[3];for (int r=0;r<3;++r) offset[r]=float(((a[r*3]+a[r*3+1]+a[r*3+2])*0.5-0.5)/C0);
+    std::vector<std::vector<float>> bases;std::vector<float> all;
+    for (auto &p:c.pages) if (p.descriptor.attribute==vgs::Sh0Base && p.descriptor.group) {
+        std::vector<float> values(p.bytes.size());
+        for (size_t i=0;i+3<=p.bytes.size();i+=3) {const float v[3]={lut[p.bytes[i]],lut[p.bytes[i+1]],lut[p.bytes[i+2]]};
+            for (int r=0;r<3;++r) values[i+r]=a[r*3]*v[0]+a[r*3+1]*v[1]+a[r*3+2]*v[2]+offset[r];}
+        all.insert(all.end(),values.begin(),values.end());bases.push_back(std::move(values));
+    }
+    if (all.empty()) return;
+    std::sort(all.begin(),all.end());std::vector<float> table(lut.size());
+    for (size_t i=0;i<table.size();++i) table[i]=float(qfloat16(all[std::min(all.size()-1,size_t((i+0.5)*all.size()/table.size()))]));
+    for (size_t i=0;i<table.size();++i) putHalf(lutPage->bytes.data()+2*i,table[i]);
+    size_t next=0;
+    for (auto &p:c.pages) if (p.descriptor.attribute==vgs::Sh0Base && p.descriptor.group) {
+        const auto &values=bases[next++];
+        for (size_t i=0;i<values.size();++i) {
+            const auto above=std::lower_bound(table.begin(),table.end(),values[i]);size_t index=size_t(std::min<std::ptrdiff_t>(above-table.begin(),std::ptrdiff_t(table.size())-1));
+            if (index>0 && std::abs(table[index-1]-values[i])<=std::abs(table[index]-values[i])) --index;
+            p.bytes[i]=uint8_t(index);
+        }
+    }
+}
 void transformPositions(vgs::DecodedChunk &c,const Project &p) {
     const auto model=p.transform.matrix();const double scale=uniformScale(model);
     const bool simple=axisUniform(model);
@@ -624,6 +659,13 @@ vgs::DecodedChunk editNativeChunk(vgs::DecodedChunk chunk,const NativeChunkPlan 
         if (statistics) statistics->notes << QStringLiteral("Baked rotations are sampled at native frame times.");
     }
     transformPositions(chunk,project);
+    if (const CompiledModifiers colour(project);colour.colourChanges) {
+        colourNative(chunk,colour.colour);
+        // Opacity: the sum of the trajectory stages, clamped to 1 - so scaling every stage's
+        // rows scales the opacity, and the clamp keeps it at most 1.
+        if (colour.opacity!=1) for (auto &p:chunk.pages) if (p.descriptor.attribute==vgs::OpacityTrajectories)
+            for (size_t at=0;at+2<=p.bytes.size();at+=2) putHalf(p.bytes.data()+at,half(p.bytes.data()+at)*colour.opacity);
+    }
     bakeAntialiasing(chunk,project.antialiasingBake());
     compactRq(chunk,vgs::Sh0Terms,vgs::Sh0Trajectories,2,3);compactRq(chunk,vgs::OpacityTerms,vgs::OpacityTrajectories,3,1);
     compactResidual(chunk,true);compactResidual(chunk,false);compactSh(chunk,false);compactSh(chunk,true);

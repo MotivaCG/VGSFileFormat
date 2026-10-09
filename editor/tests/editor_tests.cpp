@@ -105,6 +105,79 @@ private slots:
         QVERIFY2(Project::fromJson(project.json(dir.filePath("scene.vgsproj")),dir.path(),&restored,&error),qPrintable(error));
         QCOMPARE(restored.modifiers[0].type,ModifierType::PruneLowContribution);QCOMPARE(restored.modifiers[0].prune.percent,22.);QCOMPARE(restored.modifiers[0].prune.protectAbove,0.4);
     }
+    void projectAtTheLimitsReadsBack() {
+        // A crop fitted to a single point sits at the 0.0001 m minimum; stored as a float it reads
+        // a rounding below it, and the project must still open.
+        QTemporaryDir dir;Project project;project.asset=dir.filePath("source.pgs");
+        auto &crop=project.modifiers[0].crop;crop.radius=crop.radiusZ=crop.height=crop.width=crop.depth=0.0001f;
+        Project back;QString error;QVERIFY2(Project::fromJson(project.json(dir.filePath("a.vgsproj")),dir.path(),&back,&error),qPrintable(error));
+        QVERIFY(back.modifiers[0].crop.height>=0.0001f*0.999f);
+    }
+    void audioModifierPersistsBesideTheProject() {
+        // A file is kept relative to the project, so a folder moved whole still finds it; the
+        // capture's own track has no file. The last active Audio modifier decides.
+        QTemporaryDir dir;Project project;project.modifiers.clear();project.asset=dir.filePath("source.vgs");
+        Modifier own;own.id=Project::newId();own.name="Own";own.type=ModifierType::Audio;own.audioOffset=-.5;
+        Modifier file=own;file.id=Project::newId();file.name="Song";file.audioFile=dir.filePath("music/song.mp3");file.audioOffset=1.25;
+        project.modifiers={own,file};QCOMPARE(project.audioModifier()->name,QString("Song"));
+        project.modifiers[1].enabled=false;QCOMPARE(project.audioModifier()->name,QString("Own"));project.modifiers[1].enabled=true;
+        const auto json=project.json(dir.filePath("scene.vgsproj"));
+        QCOMPARE(json["modifiers"].toArray()[1].toObject()["audio"].toObject()["file"].toString(),QString("music/song.mp3"));
+        Project restored;QString error;QVERIFY2(Project::fromJson(json,dir.path(),&restored,&error),qPrintable(error));
+        QCOMPARE(restored.modifiers[0].audioFile,QString());QCOMPARE(restored.modifiers[0].audioOffset,-.5);
+        QCOMPARE(QFileInfo(restored.modifiers[1].audioFile).absoluteFilePath(),QFileInfo(dir.filePath("music/song.mp3")).absoluteFilePath());QCOMPARE(restored.modifiers[1].audioOffset,1.25);
+    }
+    void colourModifierIsOneMatrix() {
+        Modifier m;m.type=ModifierType::Colour;
+        auto near=[](const std::array<float,9> &a,const std::array<float,9> &b) {for (int i=0;i<9;++i) if (std::abs(a[i]-b[i])>1e-6f) return false;return true;};
+        QVERIFY(near(m.colourMatrix(),{1,0,0,0,1,0,0,0,1}));
+        m.colourExposure=1;QVERIFY(near(m.colourMatrix(),{2,0,0,0,2,0,0,0,2}));m.colourExposure=0;
+        // No saturation: every channel is the luminance.
+        m.colourSaturation=0;const auto grey=m.colourMatrix();for (int r=0;r<3;++r) {QVERIFY(std::abs(grey[r*3]-.2126f)<1e-6f);QVERIFY(std::abs(grey[r*3+1]-.7152f)<1e-6f);QVERIFY(std::abs(grey[r*3+2]-.0722f)<1e-6f);}
+        m.colourSaturation=1;m.colourTemperature=1;const auto warm=m.colourMatrix();QVERIFY(warm[0]>1 && warm[8]<1 && std::abs(warm[4]-1)<1e-6f);m.colourTemperature=0;
+        // Two in the stack compose, in order; a disabled one does nothing; despill is reported.
+        Project p;p.modifiers.clear();Modifier a=m;a.id=Project::newId();a.name="Bright";a.colourExposure=1;Modifier b=m;b.id=Project::newId();b.name="Grey";b.colourSaturation=0;b.colourDespill=Modifier::DespillAlways;b.colourDespillStrength=.6;
+        p.modifiers={a,b};const CompiledModifiers both(p);QVERIFY(both.colourChanges && both.despill && both.despillPreview);QCOMPARE(both.despillStrength,.6);
+        std::array<float,9> expected{};const auto ma=a.colourMatrix(),mb=b.colourMatrix();for (int r=0;r<3;++r) for (int c=0;c<3;++c) for (int k=0;k<3;++k) expected[r*3+c]+=mb[r*3+k]*ma[k*3+c];
+        QVERIFY(near(both.colour,expected));
+        p.modifiers[0].enabled=p.modifiers[1].enabled=false;QVERIFY(!CompiledModifiers(p).colourChanges);
+        // Saved and read back.
+        p.modifiers[1].enabled=true;QTemporaryDir dir;p.asset=dir.filePath("source.mint");Project restored;QString error;
+        QVERIFY2(Project::fromJson(p.json(dir.filePath("a.vgsproj")),dir.path(),&restored,&error),qPrintable(error));
+        QCOMPARE(restored.modifiers[1].type,ModifierType::Colour);QCOMPARE(restored.modifiers[1].colourSaturation,0.);QCOMPARE(restored.modifiers[1].colourDespill,int(Modifier::DespillAlways));QCOMPARE(restored.modifiers[1].colourDespillStrength,.6);
+        QCOMPARE(restored.modifiers[0].colourExposure,1.);QCOMPARE(restored.modifiers[1].colourGreenGain,.97);QCOMPARE(restored.modifiers[1].colourViewChroma,.5);QVERIFY(restored.modifiers[1].colourRecoverSkin);
+    }
+    void erasePicksPersistPerChunk() {
+        Project project;project.modifiers.clear();
+        Modifier a;a.id=Project::newId();a.name="Floaters";a.type=ModifierType::Erase;a.erased[0]={1,2,3,4,10,200000};a.erased[7]={5};
+        Modifier b=a;b.id=Project::newId();b.name="More";b.erased.clear();b.erased[0]={4,6};
+        project.modifiers={a,b};const CompiledModifiers both(project);
+        QCOMPARE(both.erased.at(0),(std::vector<uint32_t>{1,2,3,4,6,10,200000}));QVERIFY(both.erases(7,5));QVERIFY(!both.erases(7,4));QVERIFY(!both.erases(3,1));
+        QCOMPARE(both.eraseKeep(0,8),(std::vector<uint8_t>{1,0,0,0,0,1,0,1}));QVERIFY(!both.showErased);
+        project.modifiers[1].enabled=false;QCOMPARE(CompiledModifiers(project).erased.at(0),a.erased[0]);project.modifiers[1].enabled=true;
+        // Runs keep the file small; read back exactly.
+        QTemporaryDir dir;project.asset=dir.filePath("source.vgs");const auto json=project.json(dir.filePath("a.vgsproj"));
+        QVERIFY(json["modifiers"].toArray()[0].toObject()["erase"].toObject()["chunks"].toArray()[0].toObject()["records"].toString().size()<40);
+        Project back;QString error;QVERIFY2(Project::fromJson(json,dir.path(),&back,&error),qPrintable(error));
+        QCOMPARE(back.modifiers[0].erased,a.erased);QCOMPARE(back.modifiers[1].erased,b.erased);
+        // Malformed runs are refused.
+        auto broken=json;auto modifiers=broken["modifiers"].toArray();auto item=modifiers[0].toObject();auto erase=item["erase"].toObject();
+        auto chunks=erase["chunks"].toArray();auto chunk=chunks[0].toObject();chunk["records"]="AAAA";chunks[0]=chunk;erase["chunks"]=chunks;item["erase"]=erase;modifiers[0]=item;broken["modifiers"]=modifiers;
+        QVERIFY(!Project::fromJson(broken,dir.path(),&back,&error));
+    }
+    void despillMovesFromExportSettingsToAModifier() {
+        // A project that despilled in its export settings reads with a Colour modifier that does.
+        QTemporaryDir dir;Project old;old.modifiers.clear();old.asset=dir.filePath("source.vgs");
+        old.captureSettings.despill=true;old.captureSettings.despillStrength=.7;old.captureSettings.greenGain=1.1;old.captureSettings.viewChromaScale=.3;old.captureSettings.recoverSkin=false;
+        Project read;QString error;QVERIFY2(Project::fromJson(old.json(dir.filePath("a.vgsproj")),dir.path(),&read,&error),qPrintable(error));
+        QVERIFY(!read.captureSettings.despill);QCOMPARE(read.modifiers.size(),1);const auto &m=read.modifiers[0];
+        QCOMPARE(m.type,ModifierType::Colour);QCOMPARE(m.name,QString("Despill"));QCOMPARE(m.colourDespill,int(Modifier::DespillOnExport));QCOMPARE(m.colourDespillStrength,.7);
+        QCOMPARE(m.colourGreenGain,1.1);QCOMPARE(m.colourViewChroma,.3);QVERIFY(!m.colourRecoverSkin);
+        // Read again, it stays one modifier.
+        Project again;QVERIFY(Project::fromJson(read.json(dir.filePath("a.vgsproj")),dir.path(),&again,&error));QCOMPARE(again.modifiers.size(),1);
+        // A Colour modifier's despill is off by default, with THE4DSCANNER's settings.
+        Modifier fresh;QCOMPARE(fresh.colourDespill,int(Modifier::DespillNone));QCOMPARE(fresh.colourDespillStrength,1.);QCOMPARE(fresh.colourGreenGain,.97);QCOMPARE(fresh.colourViewChroma,.5);QVERIFY(fresh.colourRecoverSkin);QCOMPARE(fresh.colourOpacity,1.);
+    }
     void isolationMatchesNthNeighbourMedianAndEdgeCases() {
         std::vector<QVector3D> points;for (int y=0;y<5;++y) for (int x=0;x<5;++x) points.push_back({x*.01f,y*.01f,0});points.push_back({100,100,100});points.push_back({101,100,100});
         IsolationFilter filter{4,300};std::vector<uint8_t> keep(points.size(),1);std::vector<float> expectedDistances;

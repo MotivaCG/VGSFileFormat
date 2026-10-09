@@ -39,7 +39,7 @@ keeps the mode active and alternates Global/Local reference space.
 The gizmo appears at the current target's origin or cylinder base. Each XYZ row
 has a **Global/Local** toggle directly after its Move/Rotate/Scale button; Global
 is the default. The space button has no checked/green state and is available only
-while that transform mode is active. F6/F7/F8 toggle
+while that transform mode is active. Repeating G/R/S toggles
 the position/orientation/scale reference space. Numeric fields use the chosen
 space as well. Global gizmos align with world axes; local gizmos follow the target.
 Global nonuniform scaling preserves its full affine result, including shear.
@@ -124,6 +124,12 @@ Numpad 0 resets perspective because this editor has no separate scene camera.
 
 ## Modifier stack
 
+The add list runs in the order a capture is usually worked on, with separators between the
+groups, and F1 to F10 add each kind directly (the key is in its name): clean it — Crop (F1),
+Remove green points (F2), Purge Isolated (F3), Eraser (F4); its look — Color (F5); its motion —
+Animate transform (F6), Walk (F7); its sound — Audio (F8); and delivery — Prune low
+contribution (F9), Bake anti-aliasing (F10).
+
 Modifiers form a flat list below all playback/timeline controls. Each row has a
 name, an eye toggle and a full-duration coloured bar without text. The eye switches
 between eye/eye-off icons; inactive modifiers and a disabled panel use grey icons.
@@ -185,6 +191,45 @@ share asked and how many splats it kept. The export summary gives the share remo
 whole capture and in how many chunks the protection limited it. On Gracia captures 15%
 measured about 14-15% smaller files with renders differing by 50 dB or more on average
 (at least 40 dB in the worst view); scoring adds about a second per chunk to the export.
+
+**Eraser** removes splats picked by hand. While it is selected (and enabled) the viewport picks:
+a left drag paints with the **Brush** (its radius in pixels) or draws a **Lasso**, and on release
+the visible splats inside replace the picks of the chunk on screen; **Ctrl** adds to them and
+**Alt** subtracts. The right button orbits and the middle one pans meanwhile. Picks show in pink
+while the modifier is selected; otherwise, and in every export, they are removed. A splat is
+itself only within one chunk of the source, so each chunk keeps its own picks, as record indices
+within it, stored in the project as runs; the panel counts them for the chunk on screen and for
+all, and clears either. Each stroke is one undo step.
+
+**Color** corrects the whole capture: **Opacity** first, every splat's opacity times a factor
+(at most opaque), the training-time opacity boost of SuperSplat and Spirula applied to a finished
+capture; then **Exposure** in stops, white balance (**Temperature**, positive warmer; **Tint**,
+positive greener) and **Saturation** about Rec.709 luminance. The colour changes are one 3x3
+matrix on the colour, base and view-dependent alike, so the viewport shows them as they are set
+(Color modifiers compose in stack order) and exports keep the capture's own representation:
+the native export applies the matrix to the SH codebooks and the base-colour trajectories,
+rebuilds the 256-entry base-colour table from the new values' quantiles, and scales the opacity
+trajectories; the sampled export applies them to each splat. **Apply despill** removes
+green-screen spill: **None**, **Only on export**, or **Always**, which shows it in the viewport too
+(the export's own despill on each decoded frame). Its settings start as THE4DSCANNER's and are
+disabled, labels included, with None. Despill lives only here now: Metadata and processing no
+longer has it, and a project, preset or task that despilled there reads with a Color modifier
+named Despill, only on export, with its settings.
+
+**Audio** plays a sound track with the timeline: the capture's own (a .vgs can carry one)
+or a file (MP3, AAC .m4a, Opus or WAV), with an **Offset** that slides it along the capture's
+timeline to line it up. The editor plays it at the timeline's speed, keeps it in step through
+seeks and loops, and is silent before the track starts and after it ends; disabling the
+modifier mutes it. Exports to VGS/PGS carry the track as delivered (never re-encoded): a .vgs
+source's own track whole, or the file instead, and the header's `startTick` says where the
+exported range starts on the track's timeline, which is where players start it. A range that
+begins before the track does starts with it, with a note. MINT cannot hold audio.
+
+Exports to VGS/PGS take the viewport, as it is when the export starts (or when an export task
+is made), as the capture's thumbnail: the centre square, 256 px, JPEG, without the grid, gizmo,
+crop wires, ghost or help text. They also write the editor's view (target, camera position and the
+45 degree vertical field of view, in the exported coordinates) as `view` in the second
+metadata block; the web viewer opens a capture from it when its scene defines no camera.
 
 **Purge Isolated** uses the exact Nth-neighbour distance, excluding self, and the
 global upper median of those distances among points surviving crops/colour filters.
@@ -303,6 +348,16 @@ it to another computer. This phase supports one capture per project. Selection,
 manual deletion, attribute editing, rigging, audio and Gaussian
 splat rendering are future work.
 
+## Estimate export size
+
+**Export > Estimate export size…** (Ctrl+Alt+S) says what a .vgs export of the Start/End range
+would weigh with every modifier and setting as they are, without writing it: four one-second
+windows spread over the range are exported for real to a temporary folder and their chunks
+extrapolated, and the header, metadata, thumbnail and audio are measured. A range of four
+seconds or less is exported whole and the figure is exact. It gives the size, the average data
+rate and that of the heaviest chunk sampled, and whether the capture streams without waiting at
+10, 25 and 50 Mbit/s (its peak within 80% of the link).
+
 ## Export tasks
 
 **Export > Export task…** asks for an output exactly as Export capture does (`.vgs`, `.pgs`
@@ -356,6 +411,14 @@ coordinates and tooltip placement; the editor sets no scale environment override
 Moving between monitors adapts control geometry using public widget APIs.
 The preference belongs to the application and is excluded from capture presets.
 Restart applies a preference change; disabling it restores normal widget geometry.
+
+## Autosave and recovery
+
+Every two minutes, while there are unsaved changes, the editor keeps a copy of the project in
+its local data folder (`autosave/`, one file per running editor). Saving, starting a new
+project, opening another one or closing without saving removes it. A copy still there when
+the editor starts without a file to open is from a session that ended unexpectedly: the editor
+offers it, and recovering opens it as unsaved changes to the project it came from.
 
 ## Recent files and preferences
 

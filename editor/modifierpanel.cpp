@@ -1,4 +1,5 @@
 #include "modifierpanel.h"
+#include <QShortcut>
 #include "editortheme.h"
 #include <QTreeWidget>
 #include <QToolButton>
@@ -42,6 +43,9 @@ QString typeName(const Modifier &modifier) {
     case ModifierType::Walk: return ModifierPanel::tr("Walk");
     case ModifierType::BakeAntialiasing: return ModifierPanel::tr("Bake anti-aliasing");
     case ModifierType::PruneLowContribution: return ModifierPanel::tr("Prune low contribution");
+    case ModifierType::Audio: return ModifierPanel::tr("Audio");
+    case ModifierType::Colour: return ModifierPanel::tr("Color");
+    case ModifierType::Erase: return ModifierPanel::tr("Eraser");
     }
     return {};
 }
@@ -55,6 +59,9 @@ QString typeDescription(ModifierType type) {
     case ModifierType::Walk: return ModifierPanel::tr("Marks the capture as walking at a speed along +Z.\nThe preview slides the floor under it.\nExports write the speed to the header and leave the data in place.");
     case ModifierType::BakeAntialiasing: return ModifierPanel::tr("Prepares a capture trained with anti-aliasing (every Gracia .mint)\nfor renderers that do not compensate for it.\nThin splats grow to about a pixel at a chosen viewing distance and fade by as much,\nso they no longer draw as solid lines.");
     case ModifierType::PruneLowContribution: return ModifierPanel::tr("Removes the splats that add least to the image:\nthe hidden, the faint and the tiny, measured by rendering each chunk\nfrom around the capture. Up to a share of them, and never one\nthat covers more than a set area.");
+    case ModifierType::Audio: return ModifierPanel::tr("The soundtrack: the capture's own or a file, with an offset.\nThe editor plays it with the timeline; VGS/PGS exports carry it in sync.\nMINT cannot hold audio.");
+    case ModifierType::Colour: return ModifierPanel::tr("Exposure, white balance and saturation for the whole capture,\nview-dependent colour included, and green spill removal.\nShown in the viewport; exports keep the capture's own colour tables.");
+    case ModifierType::Erase: return ModifierPanel::tr("Removes splats picked by hand with a brush or a lasso:\nfloaters, stray pieces, whatever the filters miss.\nA splat is itself only within one chunk, so each chunk keeps its own picks.");
     }
     return {};
 }
@@ -67,8 +74,33 @@ QColor modifierColour(ModifierType type) {
     case ModifierType::Walk: return {160,110,214};
     case ModifierType::BakeAntialiasing: return {185,133,114}; // #B98572
     case ModifierType::PruneLowContribution: return {31,209,174}; // #1FD1AE
+    case ModifierType::Audio: return {168,224,74}; // #A8E04A
+    case ModifierType::Colour: return {226,226,226}; // #E2E2E2
+    case ModifierType::Erase: return {163,33,79}; // #A3214F
     }
     return {75,80,86};
+}
+// The list's separators as the menus draw theirs, a thin line: the theme's item style would
+// otherwise paint them as rows like the others, and the groups would not show.
+class KindListDelegate : public QStyledItemDelegate {
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+    static bool separator(const QModelIndex &index) {return index.data(Qt::AccessibleDescriptionRole).toString()==QLatin1String("separator");}
+    void paint(QPainter *painter,const QStyleOptionViewItem &option,const QModelIndex &index) const override {
+        if (!separator(index)) {QStyledItemDelegate::paint(painter,option,index);return;}
+        painter->save();painter->setPen(QPen(QColor(70,73,77),1));const int y=option.rect.center().y();
+        painter->drawLine(option.rect.left()+6,y,option.rect.right()-6,y);painter->restore();
+    }
+    QSize sizeHint(const QStyleOptionViewItem &option,const QModelIndex &index) const override {
+        return separator(index) ? QSize(option.rect.width(),9) : QStyledItemDelegate::sizeHint(option,index);
+    }
+};
+// A kind's colour as a small rounded square: what its bar will look like, in front of its name.
+QIcon swatch(const QColor &colour) {
+    QPixmap pixmap(32,32);pixmap.setDevicePixelRatio(2);pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);painter.setRenderHint(QPainter::Antialiasing);painter.setPen(Qt::NoPen);painter.setBrush(colour);
+    painter.drawRoundedRect(QRectF(3.5,3.5,9,9),2.5,2.5);painter.end();
+    return QIcon(pixmap);
 }
 QIcon whiteIcon(const QIcon &source,const QColor &colour=Qt::white) {
     QIcon icon;for (auto mode:{QIcon::Normal,QIcon::Active,QIcon::Selected,QIcon::Disabled}) {
@@ -173,12 +205,35 @@ ModifierPanel::ModifierPanel(QWidget *parent):QWidget(parent) {
     auto button=[&](const QString &text,const QString &id,const QString &tip,auto action) {
         auto *b=new QToolButton;b->setText(text);b->setObjectName(id);b->setToolTip(tip);toolbar->addWidget(b);connect(b,&QToolButton::clicked,this,action);return b;
     };
-    type_=new QComboBox;type_->setObjectName("newModifierType");type_->addItem(tr("Crop"),0);type_->addItem(tr("Remove green points"),2);
-    type_->addItem(tr("Animate transform"),3);type_->addItem(tr("Purge Isolated"),4);type_->addItem(tr("Walk"),5);type_->addItem(tr("Bake anti-aliasing"),6);type_->addItem(tr("Prune low contribution"),7);toolbar->addWidget(type_);
-    {   // Each kind says what it does, in the list and in the context menu's Add modifier.
-        const ModifierType kinds[]={ModifierType::Crop,ModifierType::RemoveGreen,ModifierType::AnimateTransform,ModifierType::PurgeIsolated,ModifierType::Walk,ModifierType::BakeAntialiasing,ModifierType::PruneLowContribution};
-        for (int i=0;i<type_->count();++i) type_->setItemData(i,typeDescription(kinds[i]),Qt::ToolTipRole);
+    // The kinds in the order a capture is usually worked on - clean it, its look, its motion,
+    // its sound, then what prepares it for delivery - with separators between the groups. F1 to
+    // F10 add them in that order.
+    type_=new QComboBox;type_->setObjectName("newModifierType");type_->setItemDelegate(new KindListDelegate(type_));
+    {
+        struct Kind {QString name;int data;ModifierType type;};
+        const QVector<QVector<Kind>> groups{
+            {{tr("Crop"),0,ModifierType::Crop},{tr("Remove green points"),2,ModifierType::RemoveGreen},{tr("Purge Isolated"),4,ModifierType::PurgeIsolated},{tr("Eraser"),10,ModifierType::Erase}},
+            {{tr("Color"),9,ModifierType::Colour}},
+            {{tr("Animate transform"),3,ModifierType::AnimateTransform},{tr("Walk"),5,ModifierType::Walk}},
+            {{tr("Audio"),8,ModifierType::Audio}},
+            {{tr("Prune low contribution"),7,ModifierType::PruneLowContribution},{tr("Bake anti-aliasing"),6,ModifierType::BakeAntialiasing}}};
+        int key=1;
+        for (const auto &group:groups) {
+            if (type_->count()) type_->insertSeparator(type_->count());
+            for (const auto &kind:group) {
+                const QString shortcut=QStringLiteral("F%1").arg(key++);
+                type_->addItem(swatch(modifierColour(kind.type)),QStringLiteral("%1  (%2)").arg(kind.name,shortcut),kind.data);
+                // Each kind says what it does, in the list and in the context menu's Add modifier.
+                type_->setItemData(type_->count()-1,typeDescription(kind.type)+"\n"+tr("Shortcut: %1").arg(shortcut),Qt::ToolTipRole);
+                auto *add=new QShortcut(QKeySequence(shortcut),this);add->setContext(Qt::WindowShortcut);
+                connect(add,&QShortcut::activated,this,[this,data=kind.data] {if (!isEnabled()) return;type_->setCurrentIndex(type_->findData(data));addModifier();});
+            }
+        }
     }
+    // The swatches smaller here than in the menu, and the whole list open at once: ten kinds and
+    // the separators between their groups, no scrolling.
+    type_->setIconSize({12,12});type_->setMaxVisibleItems(type_->count());
+    toolbar->addWidget(type_);
     type_->setToolTip(tr("Choose a modifier to add.\nHover a kind to see what it does."));
     addModifier_=button(tr("+ Modifier"),"addModifier",tr("Add the selected modifier type to the stack. Modifiers affect the full capture timeline."),[this] {addModifier();});
     duplicate_=button(tr("Duplicate"),"duplicateModifier",tr("Duplicate the selected modifier."),[this] {duplicateSelection();});
@@ -221,7 +276,10 @@ ModifierPanel::ModifierPanel(QWidget *parent):QWidget(parent) {
     connect(tree_,&QTreeWidget::customContextMenuRequested,this,[this](const QPoint &position) {
         auto *item=tree_->itemAt(position);if (item) {tree_->setCurrentItem(item);item=tree_->currentItem();}
         QMenu menu(this);auto *add=menu.addMenu(tr("Add modifier"));add->setToolTipsVisible(true);
-        for (int type=0;type<type_->count();++type) add->addAction(type_->itemText(type),this,[this,type] {type_->setCurrentIndex(type);addModifier();})->setToolTip(type_->itemData(type,Qt::ToolTipRole).toString());
+        for (int type=0;type<type_->count();++type) {
+            if (!type_->itemData(type).isValid()) {add->addSeparator();continue;} // the list's separators
+            add->addAction(type_->itemIcon(type),type_->itemText(type),this,[this,type] {type_->setCurrentIndex(type);addModifier();})->setToolTip(type_->itemData(type,Qt::ToolTipRole).toString());
+        }
         if (item) {
             menu.addSeparator();const bool enabled=item->checkState(0)==Qt::Checked;
             menu.addAction(enabled ? tr("Disable temporarily") : tr("Enable"),this,[this,enabled] {if (auto *current=tree_->currentItem()) current->setCheckState(0,enabled ? Qt::Unchecked : Qt::Checked);});
@@ -333,7 +391,7 @@ void ModifierPanel::setTimeline(int frame,int maximum) {
 void ModifierPanel::addModifier() {
     Modifier m;m.id=Project::newId();const int type=type_->currentData().toInt();
     m.type=type==2 ? ModifierType::RemoveGreen : type==3 ? ModifierType::AnimateTransform : type==4 ? ModifierType::PurgeIsolated : type==5 ? ModifierType::Walk
-          : type==6 ? ModifierType::BakeAntialiasing : type==7 ? ModifierType::PruneLowContribution : ModifierType::Crop;
+          : type==6 ? ModifierType::BakeAntialiasing : type==7 ? ModifierType::PruneLowContribution : type==8 ? ModifierType::Audio : type==9 ? ModifierType::Colour : type==10 ? ModifierType::Erase : ModifierType::Crop;
     m.crop.enabled=true;m.crop.shape=CropShape::Cylinder; // Shape is chosen afterwards in the crop parameters.
     // The first of a kind keeps the bare name ("Crop"); later ones take the next free number ("Crop 2", "Crop 3"...).
     const QString base=m.type==ModifierType::Crop ? tr("Crop") : typeName(m);

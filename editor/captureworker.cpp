@@ -1,6 +1,7 @@
 #include "captureworker.h"
 #include "isolation.h"
 #include "pruning.h"
+#include "exportcapture.h"
 #include <QFile>
 #include <QFileInfo>
 #include <QElapsedTimer>
@@ -114,6 +115,14 @@ void CaptureWorker::open(const QString &path, quint64 generation, bool sh) {
             if (!candidate.vgs_->metadata().title.empty()) candidate.info_.title = QString::fromStdString(candidate.vgs_->metadata().title);
             bounds = candidate.vgs_->bounds();
             candidate.info_.antialiased = candidate.vgs_->antialiased();
+            candidate.info_.startSeconds = candidate.vgs_->startSeconds();
+            if (candidate.vgs_->hasAudio()) {
+                const auto track = candidate.vgs_->audio();
+                candidate.info_.audio = QByteArray(reinterpret_cast<const char *>(track.data()), qsizetype(track.size()));
+                using Format = vgsdec::Capture::AudioFormat;
+                const auto format = candidate.vgs_->audioFormat();
+                candidate.info_.audioSuffix = format == Format::Mp3 ? "mp3" : format == Format::Aac ? "m4a" : format == Format::Opus ? "opus" : format == Format::Wav ? "wav" : "";
+            }
         } else throw std::runtime_error("Unsupported format. Open a .vgs, .pgs or .mint file.");
         if (!std::isfinite(candidate.info_.duration) || candidate.info_.duration <= 0 ||
             !std::isfinite(candidate.info_.fps) || candidate.info_.fps <= 0 ||
@@ -136,15 +145,30 @@ void CaptureWorker::decode(double time, quint64 generation, bool sh,Project proj
     if (generation != generation_) { emit failed("Capture replaced.", generation, false); return; }
     try {
         QElapsedTimer processingTimer;processingTimer.start();auto out=frame(time,sh);CompiledModifiers modifiers(project.modifiersAtFrame(std::round(time*info_.fps)));
+        // A Colour modifier that despills always: the export's despill on what is shown.
+        if (modifiers.despillPreview) {
+            vgs::Frame f;f.count=out->records.size();f.active=out->active;f.shCoefficients=out->coefficients;f.shRest=out->sh;
+            for (const auto &r:out->records) {f.position.insert(f.position.end(),r.position,r.position+3);f.colorDc.insert(f.colorDc.end(),r.color,r.color+3);f.opacity.push_back(r.color[3]);}
+            CaptureSettings settings;settings.despillStrength=modifiers.despillStrength;settings.greenGain=modifiers.greenGain;settings.viewChromaScale=modifiers.viewChroma;settings.recoverSkin=modifiers.recoverSkin;
+            despillFrame(f,settings);
+            for (size_t i=0;i<out->records.size();++i) std::copy_n(f.colorDc.data()+i*3,3,out->records[i].color);
+            for (auto &p:out->points) std::copy_n(f.colorDc.data()+size_t(p.id)*3,3,p.color);
+            out->sh=f.shRest;
+        }
         // Pruning is decided for the whole chunk; Purge Isolated then sees only what it keeps.
         std::vector<uint8_t> pruned;
         if (!modifiers.prunes.isEmpty()) pruned=pruneKeep(pruneScores(out->chunkIndex),modifiers.prunes,&out->prune);
-        auto unpruned=[&](const PointVertex &p) {return pruned.empty() || pruned[size_t(p.id)];};
+        // Erase: what was picked by hand in this chunk goes too - or, while its picks are being
+        // edited, stays and is marked (visibility 0.75, drawn highlighted).
+        const bool erasing=!modifiers.erased.empty();
+        auto erasedHere=[&](const PointVertex &p) {return erasing && modifiers.erases(int(out->chunkIndex),uint32_t(p.id));};
+        auto unpruned=[&](const PointVertex &p) {return (pruned.empty() || pruned[size_t(p.id)]) && (modifiers.showErased || !erasedHere(p));};
         if (!modifiers.isolations.isEmpty()) {
             const auto model=project.transformAtFrame(std::round(out->seconds*info_.fps)).matrix();std::vector<QVector3D> positions(out->points.size());std::vector<uint8_t> keep(out->points.size());
             for (size_t i=0;i<positions.size();++i) {const auto &p=out->points[i];positions[i]=model.map({p.position[0],p.position[1],p.position[2]});keep[i]=unpruned(p) && modifiers.keeps(positions[i],{p.color[0],p.color[1],p.color[2]});}
             applyIsolation(positions,keep,modifiers.isolations);for (size_t i=0;i<keep.size();++i) out->points[i].modifierVisibility=keep[i] ? 1.f : 0.f;
-        } else if (!pruned.empty()) for (auto &p:out->points) p.modifierVisibility=unpruned(p) ? 1.f : 0.f;
+        } else if (!pruned.empty() || erasing) for (auto &p:out->points) p.modifierVisibility=unpruned(p) ? 1.f : 0.f;
+        if (erasing && modifiers.showErased) for (auto &p:out->points) if (p.modifierVisibility>=.5f && erasedHere(p)) p.modifierVisibility=.75f;
         out->decodeMs=processingTimer.nsecsElapsed()/1e6;emit decoded(out,generation);
     }
     catch (const std::exception &e) { emit failed(QString::fromUtf8(e.what()), generation, false); }

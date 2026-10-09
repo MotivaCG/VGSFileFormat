@@ -352,7 +352,10 @@ fetches only its own bytes. A file with none costs nothing beyond `extraCount = 
 
 Audio is carried as delivered and is not transcoded: a clip then travels as one file that
 already knows what it sounds like, and a player fetches the track with a single range
-request without touching a byte of splat data. The two metadata blocks are separate on
+request without touching a byte of splat data. The track's time zero is tick 0 of the
+external timeline: a player plays it from `startTick` seconds-worth in, plus the playback
+time. That is how an edited range of a longer take keeps its whole, untouched track and
+stays in sync - the editor writes the range's first source frame into `startTick`. The two metadata blocks are separate on
 purpose — block 1 belongs to whoever produced the capture, block 2 to whoever uses it, and
 neither has to parse or preserve the other's.
 

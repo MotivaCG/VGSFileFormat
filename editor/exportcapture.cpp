@@ -16,6 +16,7 @@
 #include <QSaveFile>
 #include <QJsonDocument>
 #include <QJsonArray>
+#include <QTemporaryDir>
 #include <qfloat16.h>
 #include <limits>
 #include <algorithm>
@@ -150,12 +151,18 @@ public:
                 opacityFactor=bakedOpacityFactor(ratios);}
             for (int c=0;c<3;++c) { out.position.push_back(world[c]);out.scale.push_back(scales[c]); }
             for (int c=0;c<4;++c) out.rotation.push_back(float(rotation.coeffs()[c]));
-            out.opacity.push_back(input.opacity[i]*opacityFactor);out.active.push_back(1);
+            out.opacity.push_back(std::min(1.f,input.opacity[i]*opacityFactor*modifiers.opacity));out.active.push_back(1);
             Eigen::Matrix<double,16,3> colours=Eigen::Matrix<double,16,3>::Zero();
             for (int c=0;c<3;++c) colours(0,c)=(input.colorDc[3*i+c]-.5)/C0;
             for (int k=0;k<input.shCoefficients;++k) for (int c=0;c<3;++c) colours(k+1,c)=input.shRest[(i*input.shCoefficients+k)*3+c];
             colours=(sh*colours).eval();
             if (!colours.allFinite() || !std::isfinite(input.opacity[i])) throw std::runtime_error("Non-finite Gaussian colour or opacity.");
+            // Colour modifiers: the matrix on the colour (0.5 + C0*DC) and on every SH term.
+            if (modifiers.colourChanges) {
+                const auto &a=modifiers.colour;Eigen::Matrix3d m;m<<a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7],a[8];
+                Eigen::Vector3d dc=(Eigen::Vector3d::Constant(.5)+C0*colours.row(0).transpose());dc=m*dc;colours.row(0)=((dc-Eigen::Vector3d::Constant(.5))/C0).transpose();
+                for (int k=1;k<16;++k) colours.row(k)=(m*colours.row(k).transpose()).transpose();
+            }
             for (int c=0;c<3;++c) out.colorDc.push_back(float(.5+C0*colours(0,c)));
             for (int k=0;k<coefficients;++k) for (int c=0;c<3;++c) out.shRest.push_back(float(colours(k+1,c)));
         }
@@ -360,6 +367,14 @@ std::array<double,256> exportShTransform(const Transform &transform) {
     for (int row=0;row<16;++row) for (int col=0;col<16;++col) result[row*16+col]=matrix(row,col);return result;
 }
 
+// Despill is the Colour modifier's: its settings become the export's, and without one that
+// despills there is none (projects that despilled in their export settings were given one
+// when they were read).
+static Project withModifierDespill(Project project) {
+    const CompiledModifiers compiled(project);auto &s=project.captureSettings;s.despill=compiled.despill;
+    if (compiled.despill) {s.despillStrength=compiled.despillStrength;s.greenGain=compiled.greenGain;s.viewChromaScale=compiled.viewChroma;s.recoverSkin=compiled.recoverSkin;}
+    return project;
+}
 // One scored chunk in the totals: with several prune modifiers, what all of them removed,
 // the largest share asked, and limited when any of them was.
 void countPruning(ExportResult &result,const std::vector<PruneStats> &stats,const std::vector<uint8_t> &keep) {
@@ -375,13 +390,17 @@ QString pruningNote(const ExportResult &result) {
     return QStringLiteral("Prune low contribution removed %1% of the splats, not the %2% asked: Protect above kept the rest in %3 of %4 chunks.")
         .arg(removed,0,'f',1).arg(asked,0,'f',1).arg(result.pruneLimited).arg(result.pruneChunks);
 }
+void despillFrame(vgs::Frame &frame,const CaptureSettings &settings) {CaptureSettings s=settings;s.despill=true;processColour(frame,s,{});}
 vgs::Frame bakeExportFrame(const vgs::Frame &frame,const Project &project,int degree,const ExportProgress &progress,double frameRate,const std::vector<uint8_t> *pruned) {
     if (degree<0 || degree>3) throw std::runtime_error("Invalid export SH degree.");
-    Project pose=project;pose.transform=project.transformAtFrame(frame.seconds*frameRate);pose.modifiers=project.modifiersAtFrame(std::round(frame.seconds*frameRate));
+    Project pose=withModifierDespill(project);pose.transform=project.transformAtFrame(frame.seconds*frameRate);pose.modifiers=project.modifiersAtFrame(std::round(frame.seconds*frameRate));
     return Baker(pose,degree).bake(frame,progress,pruned);
 }
 
-ExportResult exportCaptureFile(const Project &inputProject,const QString &destination,const ExportProgress &progress) {
+ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &destination,const ExportProgress &progress,const QByteArray &thumbnailJpeg) {
+    const Project inputProject=withModifierDespill(projectAsGiven);
+    const Modifier *audioModifier=inputProject.audioModifier();const bool audioFile=audioModifier && !audioModifier->audioFile.isEmpty();
+    const double audioOffset=audioModifier ? audioModifier->audioOffset : 0;
     Project project=inputProject;const bool animated=project.hasAnimatedMotion();if (!animated) project.transform=inputProject.transformAtFrame(0);
     const bool mintOutput=QFileInfo(destination).suffix().compare("mint",Qt::CaseInsensitive)==0;
     // .pgs is the plain container and .vgs the compressed one: the extension decides.
@@ -410,7 +429,10 @@ ExportResult exportCaptureFile(const Project &inputProject,const QString &destin
         if (mintOutput && vgs::declaresMotion(original)) throw std::runtime_error("This capture moves as a whole, and MINT cannot store that motion. Export to .vgs or .pgs instead.");
         header.motionType=original.motionType;header.movingSpeed=original.movingSpeed;sourceHeader=original;
         for (const auto &extra : original.extras) {
-            if (extra.type==vgs::ThumbnailExtra || extra.type==vgs::AudioExtra) continue;
+            // A new thumbnail replaces the source's; the audio is kept whole (startTick places it)
+            // unless an Audio modifier brings a file instead.
+            if (extra.type==vgs::ThumbnailExtra && !thumbnailJpeg.isEmpty()) continue;
+            if (extra.type==vgs::AudioExtra && audioFile) continue;
             vgs::Bytes bytes(size_t(extra.size));
             if (!source->read(extra.offset,bytes.size(),bytes.data()) || vgs::digest(bytes.data(),bytes.size())!=extra.digest) throw std::runtime_error(vgs::InvalidCapture);
             options.extras.push_back({extra.type,extra.format,std::move(bytes)});
@@ -422,6 +444,24 @@ ExportResult exportCaptureFile(const Project &inputProject,const QString &destin
     const int first=std::clamp(int(std::round(project.in*rate)),0,available-1),last=std::clamp(int(std::round(project.out*rate)),first,available-1);
     result.frames=last-first+1;
     const int degree=project.captureSettings.shDegree<0 ? sourceDegree : project.captureSettings.shDegree;
+    // Where the range starts on the audio's timeline, for players: the source's own track runs
+    // on the source's timeline; a file starts `offset` seconds into the capture's. Players
+    // cannot hold a track back, so a range that begins before the track does starts with it.
+    {
+        const qint64 shift=qint64(std::llround(audioOffset*rate)),start=qint64(audioFile ? 0 : (mint ? 0 : sourceHeader.startTick))+first-shift;
+        options.startTick=uint64_t(std::max<qint64>(0,start));
+        if (start<0 && (audioFile || (capture && capture->hasAudio())) && !mintOutput)
+            result.notes << QStringLiteral("The audio starts %1 s after the exported range begins; players start it with the range.").arg(-start/rate,0,'f',2);
+    }
+    if (audioFile && !mintOutput) {
+        QFile track(audioModifier->audioFile);if (!track.open(QIODevice::ReadOnly)) throw std::runtime_error(QStringLiteral("Cannot read the audio file %1.").arg(audioModifier->audioFile).toStdString());
+        const QByteArray bytes=track.readAll();const QString suffix=QFileInfo(audioModifier->audioFile).suffix().toLower();
+        const uint32_t format=suffix=="mp3" ? vgs::Mp3 : suffix=="m4a" || suffix=="aac" ? vgs::Aac : suffix=="opus" || suffix=="ogg" ? vgs::Opus : suffix=="wav" ? vgs::Wav : 0;
+        if (!format || bytes.isEmpty()) throw std::runtime_error("The audio file is not MP3, AAC (.m4a), Opus or WAV.");
+        options.extras.push_back({vgs::AudioExtra,format,vgs::Bytes(bytes.begin(),bytes.end())});
+        result.notes << QStringLiteral("The audio is %1, as delivered.").arg(QFileInfo(audioModifier->audioFile).fileName());
+    }
+    if (!thumbnailJpeg.isEmpty()) options.extras.push_back({vgs::ThumbnailExtra,vgs::Jpeg,vgs::Bytes(thumbnailJpeg.begin(),thumbnailJpeg.end())});
     // A capture that moves - animated here, or already moving in a .vgs source - keeps its
     // native blocks and stores the motion as samples beside them. The transform at the first
     // exported frame is baked into the data; every sample stores the rest of the way to the
@@ -463,7 +503,11 @@ ExportResult exportCaptureFile(const Project &inputProject,const QString &destin
     m.captureStudio=utf(s.studio);m.copyright=utf(s.copyright);m.softwareName=utf(s.softwareName);m.softwareVersion=utf(s.softwareVersion);
     for (const auto &tag : s.tags) m.tags.push_back(utf(tag));
     QJsonObject provenance{{"editorExportVersion",2},{"colourProcessingVersion",2},{"sampling",native ? "native-temporal" : "native-frame-hold"},{"sourceInFrame",first},{"sourceOutFrame",last},
-        {"transform",inputProject.json({})["transform"]},{"crop",project.json({})["crop"]},{"modifiers",project.modifierJson()},{"processing",s.json()}};
+        {"transform",inputProject.json({})["transform"]},{"crop",project.json({})["crop"]},{"modifiers",project.modifierJson()},{"processing",s.json()},
+        // The editor's view as the export was made: where players without a camera of their
+        // own look from. The exported data is in these coordinates, transform baked.
+        {"view",[&] {const auto &c=project.camera;const auto eye=c.position();
+            return QJsonObject{{"target",QJsonArray{c.target.x(),c.target.y(),c.target.z()}},{"position",QJsonArray{eye.x(),eye.y(),eye.z()}},{"verticalFov",45}};}()}};
     if (!s.extraJson.trimmed().isEmpty()) {const auto doc=QJsonDocument::fromJson(s.extraJson.toUtf8());provenance["userMetadata"]=doc.isArray() ? QJsonValue(doc.array()) : QJsonValue(doc.object());}
     for (const auto &extra : options.extras) if (extra.type==vgs::MetadataExtra2) provenance["sourceMetadata"]=QJsonDocument::fromJson(QByteArray(reinterpret_cast<const char *>(extra.bytes.data()),qsizetype(extra.bytes.size()))).object();
     options.extras.erase(std::remove_if(options.extras.begin(),options.extras.end(),[](const auto &e) {return e.type==vgs::MetadataExtra2;}),options.extras.end());
@@ -473,6 +517,7 @@ ExportResult exportCaptureFile(const Project &inputProject,const QString &destin
     auto innerProgress=[&](int,const QString &message) {report(progress,currentPercent,message);return true;};
     // Sampled export: each source chunk is scored once, as the preview scores it.
     const auto pruneFilters=CompiledModifiers(project).prunes;std::map<size_t,std::vector<uint8_t>> pruneCache;
+    const CompiledModifiers handErased(project); // Erase: the splats picked by hand, per source chunk
     auto sourcePruning=[&](size_t chunk) {
         double start,end;
         if (mint) {const auto &c=mint->chunks().at(qsizetype(chunk));start=c.start;end=c.start+c.duration;}
@@ -506,8 +551,9 @@ ExportResult exportCaptureFile(const Project &inputProject,const QString &destin
                     models.push_back(world);samples.push_back(similarityFrom(world*unbake,start+sample));
                 }
             }
-            // Scored once per source chunk, before colour processing, as the preview scores it.
-            const std::vector<uint8_t> *pruned=nullptr;
+            // Scored once per source chunk, before colour processing, as the preview scores it;
+            // with the splats an Erase modifier picked in that chunk.
+            std::vector<uint8_t> keepMask;const std::vector<uint8_t> *pruned=nullptr;
             if (!pruneFilters.isEmpty()) {
                 auto found=pruneCache.find(plan.sourceIndex);
                 if (found==pruneCache.end()) {
@@ -516,8 +562,14 @@ ExportResult exportCaptureFile(const Project &inputProject,const QString &destin
                                          [&] {report(progress,currentPercent,QStringLiteral("Prune low contribution: scoring splats"));return false;},&stats);
                     countPruning(result,stats,keep);found=pruneCache.emplace(plan.sourceIndex,std::move(keep)).first;
                 }
-                pruned=&found->second;
+                keepMask=found->second;
             }
+            if (!handErased.erased.empty()) {
+                size_t records=0;for (const auto &g:chunk.groups) if (g.type==1) records+=g.splats;
+                const auto erase=handErased.eraseKeep(int(plan.sourceIndex),records);
+                if (keepMask.empty()) keepMask=erase;else for (size_t i=0;i<keepMask.size() && i<erase.size();++i) keepMask[i]&=erase[i];
+            }
+            if (!keepMask.empty()) pruned=&keepMask;
             std::optional<vgs::DecodedChunk> classification;
             if (s.despill && !CompiledModifiers(project).greens.isEmpty()) classification=chunk;
             if (s.despill) {
@@ -534,12 +586,17 @@ ExportResult exportCaptureFile(const Project &inputProject,const QString &destin
         const double seconds=std::min(double(first+int(index))/rate,duration-1e-7);vgs::Frame frame;size_t sourceChunk=0;
         if (mint) {MintFrame decoded;if (!mint->decode(seconds,&decoded,true,&error)) throw std::runtime_error(error.toStdString());frame=copyFrame(decoded);sourceChunk=size_t(decoded.chunkIndex);}
         else {frame=copyFrame(capture->setTime(seconds,true));sourceChunk=capture->chunkAt(seconds);}
-        const std::vector<uint8_t> *pruned=nullptr;
+        std::vector<uint8_t> keepMask;const std::vector<uint8_t> *pruned=nullptr;
         if (!pruneFilters.isEmpty()) {
             auto found=pruneCache.find(sourceChunk);
             if (found==pruneCache.end()) found=pruneCache.emplace(sourceChunk,sourcePruning(sourceChunk)).first;
-            pruned=&found->second;
+            keepMask=found->second;
         }
+        if (!handErased.erased.empty()) {
+            const auto erase=handErased.eraseKeep(int(sourceChunk),frame.count);
+            if (keepMask.empty()) keepMask=erase;else for (size_t i=0;i<keepMask.size() && i<erase.size();++i) keepMask[i]&=erase[i];
+        }
+        if (!keepMask.empty()) pruned=&keepMask;
         auto baked=[&] {
             if (!animated && !animatedCrops) return baker.bake(frame,innerProgress,pruned);
             Project pose=project;if (animated) pose.transform=inputProject.transformAtFrame(first+int(index));
@@ -577,8 +634,42 @@ ExportResult exportCaptureFile(const Project &inputProject,const QString &destin
     if (moving) result.notes << QStringLiteral("The capture moves as a whole: its motion is stored as samples beside the native blocks, so the file stays the size of a static export. Readers built before motion samples refuse it rather than play it in place; MINT cannot store it.");
     const Matrix a=linear(project.transform.matrix()),metric=a.transpose()*a;
     if (!metric.isApprox(Matrix::Identity()*metric.trace()/3,1e-5)) result.notes << QStringLiteral("SH under nonuniform scale or shear is projected to the selected SH degree.");
-    if (capture && (capture->hasAudio() || capture->hasThumbnail())) result.notes << QStringLiteral("Source audio and thumbnail are omitted because timeline and framing may have changed.");
+    if (capture && capture->hasAudio() && !mintOutput && !audioFile) result.notes << QStringLiteral("The source audio is kept whole; players start it where the exported range begins.");
+    if (mintOutput && (audioFile || (capture && capture->hasAudio()))) result.notes << QStringLiteral("MINT cannot hold audio: the sound track is not exported.");
+    if (!thumbnailJpeg.isEmpty() && !mintOutput) result.notes << QStringLiteral("The thumbnail is the viewport as it was when the export started.");
     return result;
+}
+
+ExportEstimate estimateExportSize(const Project &project,const ExportProgress &progress,const QByteArray &thumbnailJpeg) {
+    double rate=0,duration=0;QString error;
+    if (QFileInfo(project.asset).suffix().compare("mint",Qt::CaseInsensitive)==0) {MintFile mint;if (!mint.open(project.asset,&error)) throw std::runtime_error(error.toStdString());rate=mint.frameRate();duration=mint.duration();}
+    else {FileSource source(project.asset);const auto capture=vgsdec::Capture::openStream(source);rate=capture.frameRate();duration=capture.duration();}
+    if (!(rate>0) || !(duration>0)) throw std::runtime_error("Invalid capture timeline.");
+    const int available=std::max(1,int(std::ceil(duration*rate-1e-6)));
+    const int first=std::clamp(int(std::round(project.in*rate)),0,available-1),last=std::clamp(int(std::round(project.out*rate)),first,available-1),frames=last-first+1;
+    ExportEstimate estimate;estimate.seconds=frames/rate;
+    const int window=std::max(1,int(std::round(rate)));
+    std::vector<int> starts;
+    if (frames<=4*window) {starts={first};estimate.exact=true;}
+    else for (int k=0;k<4;++k) starts.push_back(first+int(std::llround(double(frames-window)*k/3)));
+    QTemporaryDir dir;if (!dir.isValid()) throw std::runtime_error("Cannot create a temporary folder for the estimate.");
+    double chunkBytes=0,chunkSeconds=0,overhead=0;
+    for (size_t k=0;k<starts.size();++k) {
+        Project part=project;part.in=starts[k]/rate;part.out=(estimate.exact ? last : starts[k]+window-1)/rate;part.time=part.in;
+        const QString path=dir.filePath(QStringLiteral("window-%1.vgs").arg(k));part.captureSettings.plain=false;
+        exportCaptureFile(part,path,[&](int percent,const QString &message) {
+            return !progress || progress(int((k*100+percent)/starts.size()),QStringLiteral("Estimating: window %1 of %2 - %3").arg(k+1).arg(starts.size()).arg(message));},thumbnailJpeg);
+        const auto capture=vgsdec::Capture::openFile(path.toStdString());double inChunks=0;
+        for (size_t c=0;c<capture.chunkCount();++c) {
+            const auto &chunk=capture.chunk(c);inChunks+=double(chunk.size);
+            const double span=chunk.endSeconds-chunk.startSeconds;if (span>0) estimate.peakMbps=std::max(estimate.peakMbps,double(chunk.size)*8/span/1e6);
+        }
+        chunkBytes+=inChunks;chunkSeconds+=capture.duration();if (k==0) overhead=double(QFileInfo(path).size())-inChunks;
+        ++estimate.windows;
+    }
+    const double perSecond=chunkSeconds>0 ? chunkBytes/chunkSeconds : 0;
+    estimate.bytes=overhead+perSecond*estimate.seconds;estimate.averageMbps=perSecond*8/1e6;
+    return estimate;
 }
 
 void writePly(const vgs::Frame &frame,const QString &destination) {
@@ -612,23 +703,29 @@ ExportResult exportFramePly(const Project &project,double seconds,const QString 
     QString error;if (!project.captureSettings.validate(&error)) throw std::runtime_error(error.toStdString());
     report(progress,0,QStringLiteral("Decoding the frame"));
     vgs::Frame frame;double rate;int sourceDegree=3;
-    const auto filters=CompiledModifiers(project).prunes;std::vector<uint8_t> pruned;std::vector<PruneStats> pruneStats;
+    const auto filters=CompiledModifiers(project).prunes;std::vector<uint8_t> pruned;std::vector<PruneStats> pruneStats;int plyChunk=0;
     auto scoring=[&] {report(progress,10,QStringLiteral("Prune low contribution: scoring splats"));return false;};
     if (QFileInfo(project.asset).suffix().compare("mint",Qt::CaseInsensitive)==0) {
         MintFile mint;if (!mint.open(project.asset,&error)) throw std::runtime_error(error.toStdString());
         rate=mint.frameRate();MintFrame decoded;
         if (!mint.decode(std::min(seconds,mint.duration()-1e-7),&decoded,true,&error)) throw std::runtime_error(error.toStdString());
         frame=copyFrame(decoded);
+        plyChunk=decoded.chunkIndex;
         if (!filters.isEmpty()) {const auto &c=mint.chunks().at(decoded.chunkIndex);
             pruned=pruneChunk(c.start,c.start+c.duration,[&](double t) {MintFrame f;if (!mint.decode(t,&f,false,&error)) throw std::runtime_error(error.toStdString());return copyFrame(f);},true,filters,scoring,&pruneStats);}
     } else {
         FileSource source(project.asset);auto capture=vgsdec::Capture::openStream(source);
         const double at=std::min(seconds,capture.duration()-1e-7);
         rate=capture.frameRate();sourceDegree=capture.shDegree();frame=copyFrame(capture.setTime(at,true));
+        plyChunk=int(capture.chunkAt(at));
         if (!filters.isEmpty()) {const auto &c=capture.chunk(capture.chunkAt(at));
             pruned=pruneChunk(c.startSeconds,c.endSeconds,[&](double t) {return copyFrame(capture.setTime(t,false));},capture.antialiased(),filters,scoring,&pruneStats);}
     }
     const int degree=project.captureSettings.shDegree<0 ? sourceDegree : project.captureSettings.shDegree;
+    if (const CompiledModifiers stack(project);!stack.erased.empty()) {
+        const auto erase=stack.eraseKeep(plyChunk,frame.count);
+        if (pruned.empty()) pruned=erase;else for (size_t i=0;i<pruned.size() && i<erase.size();++i) pruned[i]&=erase[i];
+    }
     const auto baked=bakeExportFrame(frame,project,degree,progress,rate,pruned.empty() ? nullptr : &pruned);
     if (!baked.count) throw std::runtime_error("No Gaussian records remain at this frame after applying active modifiers.");
     report(progress,90,QStringLiteral("Writing the .ply"));writePly(baked,destination);

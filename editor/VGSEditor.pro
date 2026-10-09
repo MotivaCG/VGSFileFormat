@@ -1,4 +1,4 @@
-QT += core gui widgets opengl openglwidgets
+QT += core gui widgets opengl openglwidgets multimedia
 CONFIG += c++17
 DEFINES += VGS_AUTHORING
 TARGET = VGSEditor
@@ -29,8 +29,8 @@ SOURCES += $$PWD/nativeexport.cpp
 HEADERS += $$PWD/nativeexport.h
 
 SOURCES += $$PWD/modifiers.cpp
-SOURCES += $$PWD/isolation.cpp $$PWD/pruning.cpp $$PWD/animationpanel.cpp
-HEADERS += $$PWD/isolation.h $$PWD/pruning.h $$PWD/animationpanel.h
+SOURCES += $$PWD/audiopreview.cpp $$PWD/isolation.cpp $$PWD/pruning.cpp $$PWD/animationpanel.cpp
+HEADERS += $$PWD/audiopreview.h $$PWD/isolation.h $$PWD/pruning.h $$PWD/animationpanel.h
 SOURCES += $$PWD/mintwriter.cpp
 HEADERS += $$PWD/mintwriter.h
 

@@ -96,5 +96,6 @@ int main(int argc, char *argv[])
         if (paths.size() != 1) parser.showHelp(1);
         QTimer::singleShot(0,&w,[&] { w.smokeTest(paths.first(),parser.value(smoke)); });
     } else if (!paths.isEmpty()) QTimer::singleShot(0,&w,[&] { w.openPath(paths.first()); });
+    else QTimer::singleShot(0,&w,[&] { w.offerRecovery(); }); // what a session that ended unexpectedly left
     return a.exec();
 }

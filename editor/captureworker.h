@@ -40,6 +40,12 @@ struct CaptureInfo {
     // Trained with anti-aliasing: Gracia .mint captures always, a .vgs when its header says
     // so. Splats are then drawn with the matching opacity compensation.
     bool antialiased = false;
+    // A .vgs's own sound track, as delivered, and the suffix its format goes by ("mp3", "m4a",
+    // "opus", "wav"); and where the capture starts on its source's timeline, which is where
+    // that track starts playing.
+    QByteArray audio;
+    QString audioSuffix;
+    double startSeconds = 0;
     QVector3D minimum, maximum;
 };
 Q_DECLARE_METATYPE(CaptureInfo)

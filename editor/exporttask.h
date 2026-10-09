@@ -9,6 +9,7 @@ struct ExportTask {
     QString output;      // destination: .vgs, .pgs or .mint
     Project project;
     int frames = 0;      // how many frames it exports; 0 when not known
+    QByteArray thumbnail; // JPEG of the viewport when the task was made; may be empty
 };
 
 // Paths are kept absolute and also relative to the task, so a folder of tasks moved together

@@ -2,6 +2,7 @@
 #include <QJsonArray>
 #include <QUuid>
 #include <algorithm>
+#include <iterator>
 #include <cmath>
 #include <stdexcept>
 #include <QQuaternion>
@@ -81,6 +82,41 @@ double Modifier::bakeSize() const {
 double Project::antialiasingBake() const {
     double size=0;for (const auto &m:modifiers) if (m.active() && m.type==ModifierType::BakeAntialiasing) size=std::max(size,m.bakeSize());return size;
 }
+bool CompiledModifiers::erases(int chunk,uint32_t record) const {
+    const auto it=erased.find(chunk);return it!=erased.end() && std::binary_search(it->second.begin(),it->second.end(),record);
+}
+std::vector<uint8_t> CompiledModifiers::eraseKeep(int chunk,size_t records) const {
+    std::vector<uint8_t> keep(records,1);const auto it=erased.find(chunk);
+    if (it!=erased.end()) for (uint32_t r:it->second) if (r<records) keep[r]=0;
+    return keep;
+}
+// Sorted record indices as runs (start, length) of u32, little-endian, in base64: a stroke
+// over a body part picks long runs, so the project stays small.
+static QString packRecords(const std::vector<uint32_t> &records) {
+    QByteArray bytes;auto put=[&](uint32_t v) {for (int i=0;i<4;++i) bytes.append(char((v>>(8*i))&255));};
+    for (size_t i=0;i<records.size();) {size_t j=i+1;while (j<records.size() && records[j]==records[j-1]+1) ++j;put(records[i]);put(uint32_t(j-i));i=j;}
+    return QString::fromLatin1(bytes.toBase64());
+}
+bool unpackRecords(const QString &text,std::vector<uint32_t> *records) {
+    const QByteArray bytes=QByteArray::fromBase64(text.toLatin1());if (bytes.size()%8) return false;
+    auto get=[&](qsizetype at) {uint32_t v=0;for (int i=0;i<4;++i) v|=uint32_t(uint8_t(bytes[at+i]))<<(8*i);return v;};
+    records->clear();
+    for (qsizetype at=0;at<bytes.size();at+=8) {const uint32_t start=get(at),length=get(at+4);
+        if (!length || length>10000000 || (!records->empty() && start<=records->back())) return false;
+        for (uint32_t k=0;k<length;++k) records->push_back(start+k);}
+    return true;
+}
+std::array<float,9> Modifier::colourMatrix() const {
+    // White balance as per-channel gains, saturation about Rec.709 luminance, exposure last.
+    const double gain=std::exp2(colourExposure),warm=std::exp2(0.25*colourTemperature),green=std::exp2(0.25*colourTint);
+    const double balance[3]={warm,green,1/warm},luma[3]={0.2126,0.7152,0.0722},s=colourSaturation;
+    std::array<float,9> m{};
+    for (int r=0;r<3;++r) for (int c=0;c<3;++c) m[r*3+c]=float(gain*((r==c ? s : 0)+(1-s)*luma[c])*balance[c]);
+    return m;
+}
+const Modifier *Project::audioModifier() const {
+    const Modifier *found=nullptr;for (const auto &m:modifiers) if (m.active() && m.type==ModifierType::Audio) found=&m;return found;
+}
 double Project::walkSpeed() const {double speed=0;for (const auto &m:modifiers) if (m.active() && m.type==ModifierType::Walk) speed+=m.walkSpeed;return speed;}
 double Project::walkDistance(double seconds) const {return walkSpeed()*(seconds-in);}
 bool Project::hasAnimation() const {for (const auto &m:modifiers) if (m.active() && m.type==ModifierType::AnimateTransform && !m.animation.keys.isEmpty()) return true;return false;}
@@ -125,6 +161,19 @@ CompiledModifiers::CompiledModifiers(const QVector<Modifier> &modifiers) {
         if (modifier.type==ModifierType::RemoveGreen) greens.append(modifier.green);
         else if (modifier.type==ModifierType::PurgeIsolated) isolations.append(modifier.isolation);
         else if (modifier.type==ModifierType::PruneLowContribution) prunes.append(modifier.prune);
+        else if (modifier.type==ModifierType::Erase) {
+            showErased|=modifier.showErased;
+            for (const auto &[chunk,records]:modifier.erased) {
+                auto &merged=erased[chunk];std::vector<uint32_t> both;both.reserve(merged.size()+records.size());
+                std::set_union(merged.begin(),merged.end(),records.begin(),records.end(),std::back_inserter(both));merged=std::move(both);
+            }
+        }
+        else if (modifier.type==ModifierType::Colour) {
+            const auto m=modifier.colourMatrix();std::array<float,9> product{};
+            for (int r=0;r<3;++r) for (int c=0;c<3;++c) for (int k=0;k<3;++k) product[r*3+c]+=m[r*3+k]*colour[k*3+c];
+            colour=product;colourChanges=true;opacity*=float(modifier.colourOpacity);
+            if (modifier.colourDespill!=Modifier::DespillNone) {despill=true;despillPreview=modifier.colourDespill==Modifier::DespillAlways;despillStrength=modifier.colourDespillStrength;greenGain=modifier.colourGreenGain;viewChroma=modifier.colourViewChroma;recoverSkin=modifier.colourRecoverSkin;}
+        }
         else if (modifier.type==ModifierType::Crop) {
             bool valid=false;auto inverse=modifier.crop.transform.matrix().inverted(&valid);
             if (!valid) throw std::runtime_error("A crop modifier has a singular transform.");
@@ -157,6 +206,9 @@ QJsonArray Project::modifierJson() const {
             case ModifierType::Walk: type="walk";break;
             case ModifierType::BakeAntialiasing: type="bake-antialiasing";break;
             case ModifierType::PruneLowContribution: type="prune-low-contribution";break;
+            case ModifierType::Audio: type="audio";break;
+            case ModifierType::Colour: type="colour";break;
+            case ModifierType::Erase: type="erase";break;
             }
             QJsonObject item{{"id",m.id},{"name",m.name},{"enabled",m.active()},{"type",type},{"timeline","full"}};
             if (m.type==ModifierType::Crop) {const auto c=m.staticCrop();item["crop"]=QJsonObject{{"space","world"},{"shape",c.shape==CropShape::Box ? "box" : "cylinder"},
@@ -170,6 +222,13 @@ QJsonArray Project::modifierJson() const {
             else if (m.type==ModifierType::AnimateTransform) item["animation"]=QJsonObject{{"space","reference-offset"},{"interpolation","linear-slerp"},{"keys",m.animation.json()}};
             else if (m.type==ModifierType::Walk) item["walk"]=QJsonObject{{"speed",m.walkSpeed},{"axis","+z"},{"units","m/s"},{"display",m.walkKmh ? "km/h" : "m/s"}};
             else if (m.type==ModifierType::BakeAntialiasing) item["bake"]=QJsonObject{{"distance",m.bakeDistance},{"screenHeight",m.bakeScreenHeight},{"verticalFov",45}};
+            else if (m.type==ModifierType::Erase) {
+                QJsonArray chunks;for (const auto &[chunk,records]:m.erased) if (!records.empty()) chunks.append(QJsonObject{{"chunk",chunk},{"records",packRecords(records)}});
+                item["erase"]=QJsonObject{{"identity","source-chunk-record"},{"chunks",chunks}};
+            }
+            else if (m.type==ModifierType::Colour) item["colour"]=QJsonObject{{"opacity",m.colourOpacity},{"exposure",m.colourExposure},{"temperature",m.colourTemperature},{"tint",m.colourTint},{"saturation",m.colourSaturation},
+                {"despill",m.colourDespill!=Modifier::DespillNone},{"despillMode",m.colourDespill==Modifier::DespillAlways ? "always" : m.colourDespill==Modifier::DespillOnExport ? "export" : "none"},{"despillStrength",m.colourDespillStrength},{"greenGain",m.colourGreenGain},{"viewChroma",m.colourViewChroma},{"recoverSkin",m.colourRecoverSkin}};
+            else if (m.type==ModifierType::Audio) item["audio"]=QJsonObject{{"source",m.audioFile.isEmpty() ? "capture" : "file"},{"file",m.audioFile},{"offset",m.audioOffset}};
             else if (m.type==ModifierType::PruneLowContribution) item["prune"]=QJsonObject{{"percent",m.prune.percent},{"protectAbove",m.prune.protectAbove},{"protectUnit","px-1080p-mean"}};
             else if (m.type==ModifierType::PurgeIsolated) item["isolation"]=QJsonObject{{"neighbour",m.isolation.neighbour},{"medianPercent",m.isolation.medianPercent}};
             result.append(item);

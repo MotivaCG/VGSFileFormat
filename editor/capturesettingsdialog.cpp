@@ -51,7 +51,10 @@ CaptureSettingsDialog::CaptureSettingsDialog(const Project &project,PresetStore 
     gain_ = new QDoubleSpinBox; gain_->setRange(0,2); gain_->setDecimals(3); gain_->setSingleStep(0.01); options->addRow(tr("Green gain"),gain_);
     chroma_ = new QDoubleSpinBox; chroma_->setRange(0,1); chroma_->setDecimals(4); chroma_->setSingleStep(0.05); options->addRow(tr("View chroma"),chroma_);
     recoverSkin_ = new QCheckBox(tr("Recover skin colour")); recoverSkin_->setToolTip(tr("Recover skin tones from nearby clean skin while protecting neutral clothing.")); options->addRow(recoverSkin_);
-    auto *note = new QLabel(tr("Processing options are saved for export. The viewport continues to show source colours.")); note->setWordWrap(true); options->addRow(note);
+    // Despill is a Colour modifier's setting now; these stay only so a preset that carries it
+    // still reads, and are not shown.
+    for (QWidget *field : std::initializer_list<QWidget *>{despill_,strength_,gain_,chroma_,recoverSkin_}) options->setRowVisible(field,false);
+    auto *note = new QLabel(tr("Processing options are saved for export. Despill is in the Color modifier.")); note->setWordWrap(true); options->addRow(note);
     columns->addWidget(processing,1); layout->addLayout(columns,1);
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel); buttons->button(QDialogButtonBox::Ok)->setText(tr("Apply")); layout->addWidget(buttons);
     buttons->button(QDialogButtonBox::Ok)->setToolTip(tr("Apply metadata and processing options (Ctrl+Enter)."));
@@ -77,7 +80,9 @@ CaptureSettings CaptureSettingsDialog::settings() const {
     for (int i=0; i<9; ++i) *values[i] = fields_[i]->text().trimmed();
     for (const auto &tag : tags_->text().split(',',Qt::SkipEmptyParts)) if (!tag.trimmed().isEmpty()) s.tags.append(tag.trimmed());
     s.extraJson = extraJson_->toPlainText(); s.shDegree = shDegree_->currentData().toInt(); s.playbackMode = playback_->currentData().toInt();
-    s.despill = despill_->isChecked(); s.despillStrength = strength_->value(); s.greenGain = gain_->value(); s.viewChromaScale = chroma_->value(); s.recoverSkin = recoverSkin_->isChecked(); return s;
+    s.despill = despill_->isChecked(); s.despillStrength = strength_->value(); s.greenGain = gain_->value(); s.viewChromaScale = chroma_->value(); s.recoverSkin = recoverSkin_->isChecked();
+    s.despill = false; // a Colour modifier's setting now
+    return s;
 }
 void CaptureSettingsDialog::setSettings(const CaptureSettings &s) {
     const QString values[] = {s.title,s.catalogueId,s.author,s.projectName,s.takeName,s.studio,s.copyright,s.softwareName,s.softwareVersion};

@@ -252,6 +252,81 @@ private slots:
         project.modifiers[0].enabled=true;const auto ply=dir.filePath("frame.ply");const auto result=exportFramePly(project,1/25.,ply);QCOMPARE(result.kept,quint64(41));
         QVERIFY(result.notes.contains("Prune low contribution removed 14.6% of the splats, as asked."));
     }
+    void exportKeepsAudioInSyncAndTakesTheThumbnail() {
+        // A source with a track and a thumbnail: a range from frame 2 keeps the whole track,
+        // starts 2 frames into it, and takes the thumbnail it is given.
+        QTemporaryDir dir;const auto source=dir.filePath("source.vgs");
+        {vgs::Header h;h.frameCount=h.durationTicks=5;h.timeDenominator=25;h.chunks.resize(5);for (int i=0;i<5;++i) {h.chunks[i].startTick=i;h.chunks[i].intervals=1;}
+         vgs::EncodeOptions options;options.signer=vgs::authoringSigner();options.compression=vgs::Compression::None;
+         options.extras.push_back({vgs::AudioExtra,vgs::Mp3,vgs::Bytes{'I','D','3',4,0,0}});options.extras.push_back({vgs::ThumbnailExtra,vgs::Png,vgs::Bytes{0x89,'P','N','G'}});
+         QFile file(source);QVERIFY(file.open(QIODevice::WriteOnly));
+         vgs::encodeSequence(h,[&](size_t) {return packExportFrame(sample(),3);},[&](uint64_t offset,const uint8_t *data,size_t count) {file.seek(qint64(offset));file.write(reinterpret_cast<const char *>(data),qint64(count));},options);}
+        Project project;project.asset=source;project.in=2./25;project.out=4./25;project.time=project.in;project.modifiers.clear();
+        const auto kept=dir.filePath("kept.vgs");const auto result=exportCaptureFile(project,kept);
+        {auto capture=vgsdec::Capture::openFile(kept.toStdString());QVERIFY(capture.hasAudio());QCOMPARE(capture.audio(),(std::vector<uint8_t>{'I','D','3',4,0,0}));
+         QVERIFY(std::abs(capture.startSeconds()-2./25)<1e-9);QVERIFY(capture.hasThumbnail());QCOMPARE(capture.thumbnail(),(std::vector<uint8_t>{0x89,'P','N','G'}));}
+        QVERIFY(result.notes.contains("The source audio is kept whole; players start it where the exported range begins."));
+        // The editor's view travels with it, for players without a camera of their own.
+        {project.camera.target={0,1,0};project.camera.yaw=90;project.camera.pitch=0;project.camera.distance=3;const auto viewed=dir.filePath("viewed.vgs");exportCaptureFile(project,viewed);
+         const auto json=QJsonDocument::fromJson(QByteArray::fromStdString(vgsdec::Capture::openFile(viewed.toStdString()).metadataJson2())).object()["view"].toObject();
+         QCOMPARE(json["target"].toArray(),(QJsonArray{0,1,0}));QCOMPARE(json["verticalFov"].toInt(),45);
+         const auto eye=json["position"].toArray();QVERIFY(std::abs(eye[0].toDouble()-3)<1e-5 && std::abs(eye[1].toDouble()-1)<1e-5 && std::abs(eye[2].toDouble())<1e-5);}
+        const QByteArray jpeg("\xff\xd8\xff\xe0 viewport",14);const auto shot=dir.filePath("shot.vgs");exportCaptureFile(project,shot,{},jpeg);
+        {auto capture=vgsdec::Capture::openFile(shot.toStdString());QVERIFY(capture.hasThumbnail());const auto thumb=capture.thumbnail();QCOMPARE(QByteArray(reinterpret_cast<const char *>(thumb.data()),qsizetype(thumb.size())),jpeg);}
+        // A task carries the thumbnail it was made with.
+        ExportTask task;task.project=project;task.output=dir.filePath("task.vgs");task.path=dir.filePath("task.vgs.vgstask");task.frames=3;task.thumbnail=jpeg;QString error;
+        QVERIFY2(writeExportTask(task,&error),qPrintable(error));ExportTask read;QVERIFY2(readExportTask(task.path,&read,&error),qPrintable(error));QCOMPARE(read.thumbnail,jpeg);
+    }
+    void audioModifierBringsItsFileInSync() {
+        QTemporaryDir dir;const auto source=dir.filePath("source.pgs");sourceFile(source,5);
+        QFile song(dir.filePath("song.mp3"));QVERIFY(song.open(QIODevice::WriteOnly));song.write("ID3 song");song.close();
+        Project project;project.asset=source;project.in=2./25;project.out=4./25;project.time=project.in;project.modifiers.clear();
+        Modifier audio;audio.id=Project::newId();audio.name="Song";audio.type=ModifierType::Audio;audio.audioFile=song.fileName();audio.audioOffset=1./25;project.modifiers={audio};
+        // The song starts one frame into the capture; the range starts at frame 2, one frame into the song.
+        const auto path=dir.filePath("song.vgs");auto result=exportCaptureFile(project,path);
+        {auto capture=vgsdec::Capture::openFile(path.toStdString());QVERIFY(capture.hasAudio());QCOMPARE(capture.audioFormat(),vgsdec::Capture::AudioFormat::Mp3);
+         const auto track=capture.audio();QCOMPARE(QByteArray(reinterpret_cast<const char *>(track.data()),qsizetype(track.size())),QByteArray("ID3 song"));
+         QVERIFY(std::abs(capture.startSeconds()-1./25)<1e-9);}
+        QVERIFY(result.notes.contains("The audio is song.mp3, as delivered."));
+        // A song that starts after the range does: it plays from the range's start, and says so.
+        project.modifiers[0].audioOffset=5./25;result=exportCaptureFile(project,dir.filePath("late.vgs"));
+        QVERIFY2(result.notes.contains("The audio starts 0.12 s after the exported range begins; players start it with the range."),qPrintable(result.notes.join('\n')));
+        QCOMPARE(vgsdec::Capture::openFile(dir.filePath("late.vgs").toStdString()).startSeconds(),0.);
+        // MINT cannot hold it.
+        project.modifiers[0].audioOffset=0;result=exportCaptureFile(project,dir.filePath("song.mint"));QVERIFY(result.notes.contains("MINT cannot hold audio: the sound track is not exported."));
+        // Not a sound file the container knows.
+        QFile other(dir.filePath("song.flac"));QVERIFY(other.open(QIODevice::WriteOnly));other.write("fLaC");other.close();project.modifiers[0].audioFile=other.fileName();
+        QVERIFY_EXCEPTION_THROWN(exportCaptureFile(project,dir.filePath("flac.vgs")),std::runtime_error);
+    }
+    void estimateMatchesTheExport() {
+        // A short range is exported whole: the estimate is the file. A long one is sampled.
+        QTemporaryDir dir;const auto shortSource=dir.filePath("short.pgs");sourceFile(shortSource,5);
+        Project project;project.asset=shortSource;project.in=0;project.out=4./25;project.modifiers.clear();
+        const auto estimate=estimateExportSize(project);QVERIFY(estimate.exact);QCOMPARE(estimate.windows,1);
+        const auto real=dir.filePath("short.vgs");exportCaptureFile(project,real);
+        QVERIFY2(std::abs(estimate.bytes-double(QFileInfo(real).size()))<64,qPrintable(QString("%1 vs %2").arg(estimate.bytes).arg(QFileInfo(real).size())));
+        QVERIFY(std::abs(estimate.seconds-5./25)<1e-9);QVERIFY(estimate.averageMbps>0 && estimate.peakMbps>=estimate.averageMbps*0.99);
+        const auto longSource=dir.filePath("long.pgs");sourceFile(longSource,250);project.asset=longSource;project.out=249./25;
+        const auto sampled=estimateExportSize(project);QVERIFY(!sampled.exact);QCOMPARE(sampled.windows,4);
+        const auto full=dir.filePath("long.vgs");exportCaptureFile(project,full);const double size=double(QFileInfo(full).size());
+        QVERIFY2(std::abs(sampled.bytes-size)<0.15*size,qPrintable(QString("%1 vs %2").arg(sampled.bytes).arg(size)));
+    }
+    void erasedSplatsAreNotExported() {
+        // The fixture's chunks each hold three records (live at x=0 and x=3, and a dead one).
+        // Erasing the one at x=3 in the last chunk removes it there and nowhere else.
+        QTemporaryDir dir;const auto source=dir.filePath("source.pgs");sourceFile(source,3);
+        uint32_t atThree=0;{auto original=vgsdec::Capture::openFile(source.toStdString());const auto f=copy(original.setTime(2./25,false));
+            for (size_t i=0;i<f.count;++i) if (f.active[i] && std::abs(f.position[i*3]-3)<1e-3f) atThree=uint32_t(i);}
+        Project project;project.asset=source;project.in=0;project.out=2./25;project.modifiers.clear();
+        Modifier erase;erase.id=Project::newId();erase.name="Erase";erase.type=ModifierType::Erase;erase.erased[2]={atThree};project.modifiers={erase};
+        auto live=[&](const QString &path,double seconds) {auto capture=vgsdec::Capture::openFile(path.toStdString());const auto f=copy(capture.setTime(seconds,false));
+            std::vector<float> xs;for (size_t i=0;i<f.count;++i) if (f.active[i]) xs.push_back(f.position[i*3]);std::sort(xs.begin(),xs.end());return xs;};
+        const auto path=dir.filePath("erased.vgs");exportCaptureFile(project,path);
+        QCOMPARE(live(path,0).size(),size_t(2));QCOMPARE(live(path,2./25).size(),size_t(1));QVERIFY(std::abs(live(path,2./25)[0])<1e-4f);
+        // The frame as a .ply too.
+        QCOMPARE(exportFramePly(project,2./25,dir.filePath("frame.ply")).kept,quint64(1));
+        QCOMPARE(exportFramePly(project,0,dir.filePath("first.ply")).kept,quint64(2));
+    }
     void removeCropDeletesWhatIsInsideIt() {
         // The fixture's live splats sit at x=0 and x=3; a Remove cylinder at the origin takes the first.
         QTemporaryDir dir;const auto source=dir.filePath("source.pgs");sourceFile(source,3);
@@ -637,10 +712,58 @@ private slots:
         }
     }
     void despillActuallyChangesExportColours() {
-        auto f=sample();Project p;p.captureSettings.despill=true;p.captureSettings.recoverSkin=false;
+        auto f=sample();Project p;p.modifiers.clear();Modifier spill;spill.id=Project::newId();spill.name="Despill";spill.type=ModifierType::Colour;spill.colourDespill=Modifier::DespillOnExport;spill.colourRecoverSkin=false;p.modifiers={spill};
         auto processed=bakeExportFrame(f,p,3);QVERIFY(processed.colorDc[1]<f.colorDc[1]);QVERIFY(processed.colorDc[1]<=(processed.colorDc[0]+processed.colorDc[2])*.5f+1e-6f);
         for (int k=0;k<15;++k) QVERIFY(std::abs(processed.shRest[3*k+1]-(processed.shRest[3*k]+processed.shRest[3*k+2])*.5f)<1e-6f);
-        p.captureSettings.recoverSkin=true;QVERIFY(bakeExportFrame(f,p,3).count>0);
+        p.modifiers[0].colourRecoverSkin=true;QVERIFY(bakeExportFrame(f,p,3).count>0);
+        // The export settings no longer despill: only the modifier does.
+        Project settingsOnly;settingsOnly.modifiers.clear();settingsOnly.captureSettings.despill=true;QCOMPARE(bakeExportFrame(f,settingsOnly,3).colorDc,bakeExportFrame(f,Project{},3).colorDc);
+    }
+    void despillAlwaysShowsInThePreview() {
+        // Always: the preview's frame carries the export's despilled colour. Only on export: it
+        // carries the source's.
+        QTemporaryDir dir;const auto source=dir.filePath("source.pgs");sourceFile(source,3);
+        CaptureWorker worker;FramePtr shown;connect(&worker,&CaptureWorker::decoded,this,[&](FramePtr f,quint64) {shown=f;});
+        connect(&worker,&CaptureWorker::opened,this,[&](CaptureInfo,FramePtr,quint64) {});
+        worker.open(source,1,true);
+        Project project;project.modifiers.clear();Modifier spill;spill.id=Project::newId();spill.name="Despill";spill.type=ModifierType::Colour;spill.colourRecoverSkin=false;
+        auto green=[&](int mode) {project.modifiers={spill};project.modifiers[0].colourDespill=mode;shown.reset();worker.decode(0,1,true,project);
+            if (!shown) return -1.f;for (size_t i=0;i<shown->records.size();++i) if (shown->active[i] && std::abs(shown->records[i].position[0])<1e-3f) return shown->records[i].color[1];return -1.f;}; // the greenish splat at x=0
+        const float source0=green(Modifier::DespillNone),exportOnly=green(Modifier::DespillOnExport),always=green(Modifier::DespillAlways);
+        QVERIFY(source0>=0);QCOMPARE(exportOnly,source0);QVERIFY2(always<source0,qPrintable(QString("%1 vs %2").arg(always).arg(source0)));
+        // The same despill the export applies.
+        vgs::Frame f=sample();CaptureSettings settings;settings.recoverSkin=false;despillFrame(f,settings);QVERIFY(std::abs(always-f.colorDc[1])<2e-3f);
+    }
+    void colourModifierExportsTheColourItShows() {
+        // Half the exposure halves every colour, base and view-dependent, in the native and the
+        // sampled export alike.
+        QTemporaryDir dir;const auto source=dir.filePath("source.pgs");sourceFile(source,3);
+        Project project;project.asset=source;project.in=0;project.out=2./25;project.modifiers.clear();
+        const auto plainPath=dir.filePath("plain.vgs");exportCaptureFile(project,plainPath);
+        Modifier colour;colour.id=Project::newId();colour.name="Colour";colour.type=ModifierType::Colour;colour.colourExposure=-1;project.modifiers={colour};
+        const auto darkPath=dir.filePath("dark.vgs");exportCaptureFile(project,darkPath);
+        auto plain=vgsdec::Capture::openFile(plainPath.toStdString()),dark=vgsdec::Capture::openFile(darkPath.toStdString());
+        const auto a=copy(plain.setTime(0,true)),b=copy(dark.setTime(0,true));QCOMPARE(b.count,a.count);
+        for (size_t i=0;i<a.count;++i) if (a.active[i]) {
+            for (int c=0;c<3;++c) QVERIFY2(std::abs(b.colorDc[i*3+c]-a.colorDc[i*3+c]*.5f)<.01f,qPrintable(QString("%1 vs %2").arg(b.colorDc[i*3+c]).arg(a.colorDc[i*3+c]*.5f)));
+            for (int k=0;k<a.shCoefficients*3;++k) QVERIFY(std::abs(b.shRest[i*size_t(a.shCoefficients)*3+k]-a.shRest[i*size_t(a.shCoefficients)*3+k]*.5f)<2e-3f);
+        }
+        const auto f=sample();Project bare;bare.modifiers.clear();const auto base=bakeExportFrame(f,bare,3);Project shaded=bare;shaded.modifiers={colour};const auto halved=bakeExportFrame(f,shaded,3);
+        for (size_t i=0;i<base.colorDc.size();++i) QVERIFY(std::abs(halved.colorDc[i]-base.colorDc[i]*.5f)<1e-5f);
+        for (size_t i=0;i<base.shRest.size();++i) QVERIFY(std::abs(halved.shRest[i]-base.shRest[i]*.5f)<1e-5f);
+        // Despill is the modifier's, with its own settings: export settings that also ask for it
+        // change nothing.
+        Modifier spill;spill.id=Project::newId();spill.type=ModifierType::Colour;spill.colourDespill=Modifier::DespillOnExport;spill.colourDespillStrength=.6;spill.colourRecoverSkin=false;
+        Project modifierOnly=bare;modifierOnly.modifiers={spill};Project both=modifierOnly;both.captureSettings.despill=true;both.captureSettings.despillStrength=.1;both.captureSettings.greenGain=1.5;
+        const auto r1=bakeExportFrame(f,modifierOnly,3),r2=bakeExportFrame(f,both,3);
+        QCOMPARE(r2.colorDc,r1.colorDc);QCOMPARE(r2.shRest,r1.shRest);QVERIFY(r1.colorDc!=base.colorDc);
+        Project gained=bare;Modifier strong=spill;strong.colourGreenGain=1.5;gained.modifiers={strong};QVERIFY(bakeExportFrame(f,gained,3).colorDc!=r1.colorDc);
+        // Opacity scales every splat's, at most 1, in both exports.
+        Project boosted=bare;Modifier boost;boost.id=Project::newId();boost.name="Boost";boost.type=ModifierType::Colour;boost.colourOpacity=1.5;boosted.modifiers={boost};
+        const auto opaque=bakeExportFrame(f,boosted,3);for (size_t i=0;i<base.opacity.size();++i) QVERIFY(std::abs(opaque.opacity[i]-std::min(1.f,base.opacity[i]*1.5f))<1e-6f);
+        project.modifiers={boost};const auto boostPath=dir.filePath("boost.vgs");exportCaptureFile(project,boostPath);
+        {auto boostedCapture=vgsdec::Capture::openFile(boostPath.toStdString());const auto c=copy(boostedCapture.setTime(0,false)),a0=copy(plain.setTime(0,false));
+         for (size_t i=0;i<c.count;++i) if (c.active[i]) QVERIFY2(std::abs(c.opacity[i]-std::min(1.f,a0.opacity[i]*1.5f))<.01f,qPrintable(QString("%1 vs %2").arg(c.opacity[i]).arg(a0.opacity[i])));}
     }
     void compatibleSignedExportTrimMetadataCropAndEmptyFrame() {
         QTemporaryDir dir;QString source=dir.filePath("source.pgs");sourceFile(source);

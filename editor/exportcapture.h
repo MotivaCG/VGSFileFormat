@@ -20,8 +20,25 @@ using ExportProgress = std::function<bool(int, const QString &)>;
 vgs::Frame bakeExportFrame(const vgs::Frame &, const Project &, int degree,
                           const ExportProgress & = {},double frameRate = 30,
                           const std::vector<uint8_t> *pruned = nullptr);
+// `thumbnailJpeg`, when given, becomes the capture's thumbnail (VGS/PGS); without it a .vgs
+// source keeps its own. A .vgs source's audio travels whole, and the result's startTick says
+// where its range starts on the source's timeline, which is where players start the audio.
 ExportResult exportCaptureFile(const Project &, const QString &destination,
-                               const ExportProgress & = {});
+                               const ExportProgress & = {}, const QByteArray &thumbnailJpeg = {});
+
+// What a .vgs export of the project would weigh, without making it: a few one-second windows
+// spread over the range are exported for real, to a temporary folder, and their chunks
+// extrapolated to the whole range; the header, metadata, audio and thumbnail are measured.
+// A range of four seconds or less is exported whole, and the figure is exact.
+struct ExportEstimate {
+    double seconds = 0;     // the range's duration
+    double bytes = 0;       // the whole file
+    double averageMbps = 0; // the capture's data over its duration
+    double peakMbps = 0;    // the heaviest chunk sampled, over its own duration
+    int windows = 0;        // how many windows were exported
+    bool exact = false;     // the whole range was exported
+};
+ExportEstimate estimateExportSize(const Project &, const ExportProgress & = {}, const QByteArray &thumbnailJpeg = {});
 
 // One edited instant as a 3D Gaussian Splatting .ply (INRIA convention, binary little
 // endian): what Export capture bakes at that time - transform, modifiers, colour
@@ -29,6 +46,10 @@ ExportResult exportCaptureFile(const Project &, const QString &destination,
 ExportResult exportFramePly(const Project &, double seconds, const QString &destination,
                             const ExportProgress & = {});
 void writePly(const vgs::Frame &, const QString &destination);
+
+// The export's despill on one frame's colour (DC and SH), in place: also what the viewport
+// shows when a Colour modifier despills always.
+void despillFrame(vgs::Frame &, const CaptureSettings &);
 
 // Assemble standard encoding-0 attributes from an already baked native frame.
 vgs::DecodedChunk packExportFrame(const vgs::Frame &, int degree);

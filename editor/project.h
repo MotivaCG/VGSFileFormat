@@ -1,5 +1,8 @@
 #pragma once
 #include <QJsonObject>
+#include <array>
+#include <map>
+#include <vector>
 #include <QJsonArray>
 #include <QMatrix4x4>
 #include <QMetaType>
@@ -30,6 +33,8 @@ struct Camera {
     ViewPreset preset = ViewPreset::Free;
     bool orthographic = false;
     QMatrix4x4 viewMatrix() const;
+    // Where the camera is: `distance` from the target, along yaw and pitch.
+    QVector3D position() const;
 };
 enum class CropShape { Cylinder, Box };
 struct CropVolume {
@@ -48,7 +53,7 @@ struct CropVolume {
     bool contains(const QVector3D &worldPosition) const;
 };
 Q_DECLARE_METATYPE(CropVolume)
-enum class ModifierType { Crop, RemoveGreen, AnimateTransform, PurgeIsolated, Walk, BakeAntialiasing, PruneLowContribution };
+enum class ModifierType { Crop, RemoveGreen, AnimateTransform, PurgeIsolated, Walk, BakeAntialiasing, PruneLowContribution, Audio, Colour, Erase };
 struct GreenFilter {
     float minimumSaturation = 0.5f, hueTolerance = 45; // HSV: saturation 0..1, circular distance from 120 degrees.
     bool linearRgb = true; // Convert clamped sRGB base colour to linear RGB before HSV.
@@ -103,6 +108,32 @@ struct Modifier {
     CropVolume staticCrop() const;
     IsolationFilter isolation;
     PruneFilter prune;
+    // Audio: the track the capture plays with - a file, or with none the capture's own - and
+    // where it sits: `audioOffset` seconds of the capture's timeline before its first sound
+    // plays (negative: the track starts earlier). The editor plays it; exports carry it.
+    QString audioFile;
+    double audioOffset = 0;
+    // Colour: exposure in stops, white balance (temperature: + warmer, tint: + greener) and
+    // saturation (1 leaves it), all one 3x3 matrix on the colour - base and view-dependent
+    // alike - so it keeps the capture's own representation. And despill, the green spill
+    // removal Metadata and processing also offers, with the same settings: when on it
+    // overrides that one, so the export despills once.
+    double colourExposure = 0, colourTemperature = 0, colourTint = 0, colourSaturation = 1;
+    // Opacity: every splat's opacity times this, at most 1 - the training-time opacity boost
+    // (SuperSplat's and Spirula's) applied to a finished capture.
+    double colourOpacity = 1;
+    // None, only on export, or always - also in the viewport.
+    enum DespillMode { DespillNone = 0, DespillOnExport = 1, DespillAlways = 2 };
+    int colourDespill = DespillNone;
+    bool colourRecoverSkin = true;
+    double colourDespillStrength = 1, colourGreenGain = 0.97, colourViewChroma = 0.5;
+    std::array<float,9> colourMatrix() const; // row-major
+    // Erase: the splats picked by hand, which it removes. A splat is only itself within one
+    // chunk of the source, so the picks are kept per source chunk, as sorted record indices
+    // within it - the same records the preview and both exports read.
+    std::map<int, std::vector<uint32_t>> erased;
+    // While its selection is being edited the picks are shown, not removed. Never saved.
+    bool showErased = false;
     // Walk: metres per second along +Z of the exported capture. Preview only; export
     // writes it to the header as a walking capture instead of moving the data.
     double walkSpeed = 1;
@@ -146,6 +177,8 @@ struct Project {
     // The size the active Bake anti-aliasing modifiers widen every splat by (the largest of
     // them), in world units; 0 when none is active.
     double antialiasingBake() const;
+    // The active Audio modifier that decides the soundtrack (the last in the stack), or none.
+    const Modifier *audioModifier() const;
     static QString newId();
     CaptureSettings captureSettings;
     double time = 0, in = 0, out = 0, speed = 1;
@@ -174,4 +207,17 @@ public:
     QVector<GreenFilter> greens;
     QVector<IsolationFilter> isolations;
     QVector<PruneFilter> prunes;
+    // Every active Colour modifier's matrix, in stack order, as one (row-major); identity
+    // when there are none. And whether one of them despills, and how strongly.
+    std::array<float,9> colour{1,0,0,0,1,0,0,0,1};
+    bool colourChanges = false, despill = false, despillPreview = false, recoverSkin = true;
+    float opacity = 1; // every active Colour modifier's opacity factor, multiplied
+    double despillStrength = 1, greenGain = 0.97, viewChroma = 0.5;
+    // Erase: the source chunks' records it removes, all active Erase modifiers together;
+    // `showErased` when one of them shows its picks instead.
+    std::map<int, std::vector<uint32_t>> erased;
+    bool showErased = false;
+    bool erases(int chunk, uint32_t record) const;
+    // A chunk's records with nothing erased marked 1, for exports to filter with.
+    std::vector<uint8_t> eraseKeep(int chunk, size_t records) const;
 };

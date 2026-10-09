@@ -53,6 +53,10 @@ Transform Transform::rotatedLocal(int axis,float degrees) const {
     result.rotation = {qRadiansToDegrees(x),qRadiansToDegrees(y),qRadiansToDegrees(z)};
     return result;
 }
+QVector3D Camera::position() const {
+    const float y = qDegreesToRadians(yaw), p = qDegreesToRadians(pitch);
+    return target + QVector3D(std::sin(y)*std::cos(p),std::sin(p),std::cos(y)*std::cos(p))*distance;
+}
 QMatrix4x4 Camera::viewMatrix() const {
     const float y = qDegreesToRadians(yaw), p = qDegreesToRadians(pitch);
     const QVector3D direction(std::sin(y)*std::cos(p),std::sin(p),std::cos(y)*std::cos(p));
@@ -76,7 +80,11 @@ QJsonObject Project::json(const QString &path) const {
         {"crop", QJsonObject{{"enabled",crop().enabled},{"space","world"},{"shape",crop().shape==CropShape::Box ? "box" : "cylinder"},
             {"width",crop().width},{"depth",crop().depth},{"radius",crop().radius},{"height",crop().height},
             {"position",vec(crop().transform.position)},{"rotation",vec(crop().transform.rotation)},{"scale",vec(crop().transform.scale)}, {"shear",vec(crop().transform.shear)}}},
-        {"modifiers",modifierJson()},{"selection",QJsonObject{{"modifier",selectedModifier}}},
+        {"modifiers",[&] {
+            QJsonArray items=modifierJson();
+            for (qsizetype i=0;i<items.size();++i) {auto item=items[i].toObject();if (item["type"]!="audio" || item["audio"].toObject()["source"]!="file") continue;
+                auto audio=item["audio"].toObject();audio["file"]=QDir(QFileInfo(path).absolutePath()).relativeFilePath(audio["file"].toString());item["audio"]=audio;items[i]=item;}
+            return items;}()},{"selection",QJsonObject{{"modifier",selectedModifier}}},
         {"spaces",QJsonArray{int(spaces[0]),int(spaces[1]),int(spaces[2])}},
         {"captureSettings",captureSettings.json()},
         {"timeline", QJsonObject{{"time", time}, {"in", in}, {"out", out}, {"speed", speed}, {"loop", loop}}},
@@ -90,6 +98,7 @@ bool Project::write(const QString &path, QString *error) const {
     }
     return true;
 }
+bool unpackRecords(const QString &text,std::vector<uint32_t> *records); // modifiers.cpp
 bool Project::read(const QString &path, Project *result, QString *error) {
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) { *error = file.errorString(); return false; }
@@ -108,19 +117,24 @@ bool Project::fromJson(const QJsonObject &root,const QString &baseDirectory,Proj
     Project p;
     p.asset = QDir::cleanPath(QDir(baseDirectory).absoluteFilePath(root["asset"].toString()));
     bool valid = true;
+    // Values are stored as floats, so a limit written back reads a rounding off it (the
+    // 0.0001 m crop minimum as 9.99999975e-05): within a millionth it is the limit.
+    auto inRange = [](double n, double lo, double hi) {
+        return std::isfinite(n) && n >= lo - std::abs(lo)*1e-6 && n <= hi + std::abs(hi)*1e-6;
+    };
     auto number = [&](const QJsonObject &o, const char *key, double lo, double hi) {
         const auto value = o[key];
         const double n = value.toDouble();
-        valid &= value.isDouble() && std::isfinite(n) && n >= lo && n <= hi;
-        return n;
+        valid &= value.isDouble() && inRange(n, lo, hi);
+        return std::clamp(n, lo, hi);
     };
     auto vector = [&](const QJsonObject &o, const char *key, double lo, double hi) {
         const auto a = o[key].toArray(); QVector3D v;
         if (a.size() != 3) { valid = false; return v; }
         for (int i = 0; i < 3; ++i) {
             const double n = a[i].toDouble();
-            valid &= a[i].isDouble() && std::isfinite(n) && n >= lo && n <= hi;
-            v[i] = float(n);
+            valid &= a[i].isDouble() && inRange(n, lo, hi);
+            v[i] = float(std::clamp(n, lo, hi));
         }
         return v;
     };
@@ -218,6 +232,31 @@ bool Project::fromJson(const QJsonObject &root,const QString &baseDirectory,Proj
                 m.type=ModifierType::BakeAntialiasing;const auto b=item["bake"].toObject();
                 m.bakeDistance=number(b,"distance",.01,1000);const double height=number(b,"screenHeight",16,16384);
                 valid &= height==std::floor(height) && (!b.contains("verticalFov") || b["verticalFov"].toDouble()==45);m.bakeScreenHeight=int(height);
+            } else if (item["type"]=="erase") {
+                m.type=ModifierType::Erase;const auto e=item["erase"].toObject();valid &= e["identity"]=="source-chunk-record" && e["chunks"].isArray();
+                for (const auto &value:e["chunks"].toArray()) {
+                    const auto c=value.toObject();const double chunk=number(c,"chunk",0,10000000);valid &= chunk==std::floor(chunk) && !m.erased.count(int(chunk));
+                    std::vector<uint32_t> records;valid &= unpackRecords(c["records"].toString(),&records);if (valid) m.erased[int(chunk)]=std::move(records);
+                }
+            } else if (item["type"]=="colour") {
+                m.type=ModifierType::Colour;const auto c=item["colour"].toObject();
+                m.colourExposure=number(c,"exposure",-8,8);m.colourTemperature=number(c,"temperature",-4,4);m.colourTint=number(c,"tint",-4,4);m.colourSaturation=number(c,"saturation",0,4);
+                valid &= c["despill"].isBool();m.colourDespill=c["despill"].toBool() ? Modifier::DespillOnExport : Modifier::DespillNone;
+                if (c.contains("despillMode")) {const auto mode=c["despillMode"].toString();valid &= mode=="none" || mode=="export" || mode=="always";
+                    m.colourDespill=mode=="always" ? Modifier::DespillAlways : mode=="export" ? Modifier::DespillOnExport : Modifier::DespillNone;}m.colourDespillStrength=number(c,"despillStrength",0,1);
+                // Added after the first Colour modifiers were saved: those take the defaults.
+                if (c.contains("opacity")) m.colourOpacity=number(c,"opacity",0,16);
+                if (c.contains("greenGain")) m.colourGreenGain=number(c,"greenGain",0,2);
+                if (c.contains("viewChroma")) m.colourViewChroma=number(c,"viewChroma",0,1);
+                if (c.contains("recoverSkin")) {valid &= c["recoverSkin"].isBool();m.colourRecoverSkin=c["recoverSkin"].toBool();}
+            } else if (item["type"]=="audio") {
+                m.type=ModifierType::Audio;const auto a=item["audio"].toObject();m.audioOffset=number(a,"offset",-36000,36000);
+                valid &= a["source"]=="capture" || a["source"]=="file";
+                if (a["source"]=="file") {
+                    // Kept relative to the project, like the capture; an absolute path still works.
+                    const QString file=a["file"].toString();valid &= !file.isEmpty();
+                    m.audioFile=QFileInfo(file).isRelative() ? QDir(baseDirectory).absoluteFilePath(file) : file;
+                }
             } else if (item["type"]=="prune-low-contribution") {
                 m.type=ModifierType::PruneLowContribution;const auto p=item["prune"].toObject();
                 m.prune.percent=number(p,"percent",0,90);m.prune.protectAbove=number(p,"protectAbove",0,1000);valid &= p["protectUnit"]=="px-1080p-mean";
@@ -237,6 +276,13 @@ bool Project::fromJson(const QJsonObject &root,const QString &baseDirectory,Proj
     valid &= tl["loop"].isBool() && view["grid"].isBool() && view["sh"].isBool();
     // Keep reading version-1 projects, but their old SH toggle no longer affects rendering.
     p.loop = tl["loop"].toBool(); p.grid = view["grid"].toBool();
+    // Despill used to be an export setting; it is a Colour modifier's now. A project, preset or
+    // task that despilled keeps doing so, with the same settings, as a modifier at the end.
+    if (p.captureSettings.despill) {
+        Modifier despill;despill.id=newId();despill.name=QStringLiteral("Despill");despill.type=ModifierType::Colour;despill.colourDespill=Modifier::DespillOnExport;
+        const auto &s=p.captureSettings;despill.colourDespillStrength=s.despillStrength;despill.colourGreenGain=s.greenGain;despill.colourViewChroma=s.viewChromaScale;despill.colourRecoverSkin=s.recoverSkin;
+        p.modifiers.append(despill);p.captureSettings.despill=false;
+    }
     if (!valid || p.out < p.in || p.time < p.in || p.time > p.out) return fail();
     *result = p; return true;
 }

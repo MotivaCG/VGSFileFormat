@@ -8,10 +8,17 @@
 #include "exportcapture.h"
 #include "exporttask.h"
 #include "taskqueuedialog.h"
+#include "audiopreview.h"
 #include <QProgressDialog>
 #include <atomic>
 #include <QAction>
 #include <QApplication>
+#include <iterator>
+#include <QEventLoop>
+#include <QJsonObject>
+#include <QDateTime>
+#include <QStandardPaths>
+#include <QBuffer>
 #include <QCheckBox>
 #include <QButtonGroup>
 #include <QComboBox>
@@ -336,6 +343,9 @@ MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory) : QMainWi
         project_ = pendingProject_.value_or(defaultProject()); project_.asset = info.path;
         if (project_.captureSettings.title.isEmpty()) project_.captureSettings.title = info.title;
         projectPath_ = pendingProjectPath_;
+        const bool recovered=recovering_;
+        if (recovering_) {projectPath_=recoveredProject_;recovering_=false;QFile::remove(recoveryFile_);QFile::remove(recoveryFile_+".json");}
+        discardAutosave();
         history_.remember(projectPath_.isEmpty() ? info.path : projectPath_); updateRecentMenu();
         const double last = double(info.frames-1)/info.fps;
         if (!pendingProject_) project_.out = last;
@@ -354,7 +364,7 @@ MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory) : QMainWi
         else viewport_->fit(info.minimum, info.maximum);
         project_.camera = viewport_->camera();
         if (!pendingProject_) {fitCrop();viewport_->setCropEditing(false);viewport_->setTransformMode(TransformMode::None);}
-        setWindowModified(!pendingProject_.has_value());
+        setWindowModified(!pendingProject_.has_value() || recovered);
         pendingProject_.reset(); refreshPresets(); syncUi(); title();
         // What was opened is where the history starts: opening is not undone.
         resetUndo();
@@ -371,7 +381,7 @@ MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory) : QMainWi
     connect(worker_, &CaptureWorker::failed, this, [this](QString message, quint64 gen, bool opening) {
         if (opening) {
             if (gen != openingGeneration_) return;
-            loadingOverlay_->stop();
+            loadingOverlay_->stop();recovering_=false;
             loading_ = false; pendingProject_.reset(); pendingProjectPath_.clear();
         } else {
             if (gen != generation_) return;
@@ -408,6 +418,8 @@ MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory) : QMainWi
         }
         setTime(t, false);
     });
+    autosaveDirectory_=QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)+"/autosave";
+    autosave_.setInterval(2*60*1000);connect(&autosave_,&QTimer::timeout,this,&MainWindow::autosaveNow);autosave_.start();
     thread_.start(); syncUi(); title();
     restoreGeometry(settings_.value("geometry").toByteArray());
     restoreState(settings_.value("windowState").toByteArray());
@@ -452,6 +464,9 @@ void MainWindow::buildUi() {
     plyAction_ = exportMenu->addAction(tr("Export current frame as PLY\u2026"), QKeySequence("Ctrl+Alt+E"), this, &MainWindow::exportFrame);
     plyAction_->setToolTip(tr("Write the frame on screen as a 3D Gaussian Splatting .ply, edited as Export capture would write it: transform, modifiers, colour processing and SH degree (Ctrl+Alt+E)."));
     imageAction_ = exportMenu->addAction(tr("Export viewport image\u2026"), QKeySequence("Ctrl+Shift+E"), this, &MainWindow::exportImage);
+    estimateAction_ = exportMenu->addAction(tr("Estimate export size\u2026"), QKeySequence("Ctrl+Alt+S"), this, &MainWindow::estimateExport);
+    estimateAction_->setToolTip(tr("How much a .vgs export of the Start/End range would weigh, and the bitrate it needs to stream, with every modifier and setting as it is now (Ctrl+Alt+S).\nA few seconds are exported for real and extrapolated; short ranges are measured exactly."));
+    estimateAction_->setIcon(themeIcon(QIcon::ThemeIcon::DocumentProperties,style()->standardIcon(QStyle::SP_FileDialogInfoView)));
     exportMenu->addSeparator();
     taskAction_ = exportMenu->addAction(tr("Export task\u2026"), QKeySequence("Ctrl+T"), this, &MainWindow::exportTask);
     taskAction_->setToolTip(tr("Choose an output as for Export capture, and write a .vgstask beside it instead of exporting.\nThe task keeps a copy of the project as it is now. Run it later with Process tasks (Ctrl+T)."));
@@ -771,6 +786,87 @@ void MainWindow::buildUi() {
     SpinScrubber::attachFormLabel(prunePercent_,0.1);SpinScrubber::attachFormLabel(pruneProtect_,0.005);
     auto pruneChanged=[this] {if (syncing_ || !project_.modifier() || project_.modifier()->type!=ModifierType::PruneLowContribution) return;project_.modifier()->prune={prunePercent_->value(),pruneProtect_->value()};syncModifiers();dirty();};
     connect(prunePercent_,&QDoubleSpinBox::valueChanged,this,[pruneChanged](double) {pruneChanged();});connect(pruneProtect_,&QDoubleSpinBox::valueChanged,this,[pruneChanged](double) {pruneChanged();});
+    // Audio: the capture's own track or a file, and where it sits on the timeline.
+    audio_=new AudioPreview(this);
+    audioProperties_=new QGroupBox(tr("Audio"));audioProperties_->setObjectName("audioModifierProperties");auto *audioForm=new QFormLayout(audioProperties_);
+    audioProperties_->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Maximum);
+    audioSource_=new QLabel;audioSource_->setObjectName("audioSource");audioSource_->setWordWrap(true);audioForm->addRow(tr("Track"),audioSource_);
+    auto *audioButtons=new QWidget;auto *audioRow=new QHBoxLayout(audioButtons);audioRow->setContentsMargins(0,0,0,0);
+    auto *audioFile=new QPushButton(tr("Choose file\u2026"));audioFile->setObjectName("audioChooseFile");audioFile->setToolTip(tr("Play a sound file with the capture: MP3, AAC (.m4a), Opus or WAV.\nExports carry it as delivered, without re-encoding."));
+    audioCaptureTrack_=new QPushButton(tr("Use the capture's track"));audioCaptureTrack_->setObjectName("audioUseCapture");audioCaptureTrack_->setToolTip(tr("Play the sound track the capture carries."));
+    audioRow->addWidget(audioFile);audioRow->addWidget(audioCaptureTrack_);audioForm->addRow(audioButtons);
+    audioOffset_=new QDoubleSpinBox;audioOffset_->setObjectName("audioOffset");audioOffset_->setRange(-3600,3600);audioOffset_->setDecimals(3);audioOffset_->setSingleStep(0.04);audioOffset_->setSuffix(" s");
+    audioOffset_->setToolTip(tr("When the track starts on the capture's timeline: positive delays it, negative starts it earlier.\nUse it to line the sound up with the picture."));
+    audioForm->addRow(tr("Offset"),audioOffset_);
+    auto *audioNote=new QLabel(tr("Plays with the timeline, at its speed. Disable the modifier to mute it. VGS/PGS exports carry the track in sync with the exported range; MINT cannot hold audio."));
+    audioNote->setWordWrap(true);audioForm->addRow(audioNote);side->addWidget(audioProperties_);
+    SpinScrubber::attachFormLabel(audioOffset_,0.005);
+    connect(audioFile,&QPushButton::clicked,this,[this] {
+        auto *m=project_.modifier();if (!m || m->type!=ModifierType::Audio) return;
+        const QString path=QFileDialog::getOpenFileName(this,tr("Choose a sound file"),history_.openPath("Audio"),tr("Sound (*.mp3 *.m4a *.aac *.opus *.ogg *.wav)"));
+        if (path.isEmpty()) return;
+        m->audioFile=QFileInfo(path).absoluteFilePath();syncUi();dirty();viewport_->setFocus();
+    });
+    connect(audioCaptureTrack_,&QPushButton::clicked,this,[this] {auto *m=project_.modifier();if (!m || m->type!=ModifierType::Audio) return;m->audioFile.clear();syncUi();dirty();viewport_->setFocus();});
+    connect(audioOffset_,&QDoubleSpinBox::valueChanged,this,[this](double value) {auto *m=project_.modifier();if (syncing_ || !m || m->type!=ModifierType::Audio) return;m->audioOffset=value;syncAudio();dirty();});
+    // Colour: one matrix on the colour, shown in the viewport; despill at export.
+    colourProperties_=new QGroupBox(tr("Color"));colourProperties_->setObjectName("colourModifierProperties");auto *colourForm=new QFormLayout(colourProperties_);
+    colourProperties_->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Maximum);
+    auto colourSpin=[&](const char *name,double lo,double hi,double step,int decimals,const QString &suffix,const QString &tip) {
+        auto *spin=new QDoubleSpinBox;spin->setObjectName(name);spin->setRange(lo,hi);spin->setSingleStep(step);spin->setDecimals(decimals);spin->setSuffix(suffix);spin->setToolTip(tip);return spin;};
+    colourOpacity_=colourSpin("colourOpacity",0,8,0.05,2,tr(" \u00d7"),tr("Every splat's opacity times this, at most fully opaque: above 1 fills faint, hazy areas in, below 1 thins the capture out.\nThe opacity boost of SuperSplat and of Spirula's trainer, on a finished capture. Shown with Gaussian rendering."));
+    colourForm->addRow(tr("Opacity"),colourOpacity_);SpinScrubber::attachFormLabel(colourOpacity_,0.005);
+    colourExposure_=colourSpin("colourExposure",-4,4,0.1,2,tr(" EV"),tr("Brightness in stops: +1 doubles it, -1 halves it."));
+    colourTemperature_=colourSpin("colourTemperature",-2,2,0.05,2,QString(),tr("White balance: positive warmer (more red, less blue), negative cooler."));
+    colourTint_=colourSpin("colourTint",-2,2,0.05,2,QString(),tr("White balance: positive greener, negative more magenta."));
+    colourSaturation_=colourSpin("colourSaturation",0,300,1,0,tr(" %"),tr("100% leaves the colour as it is, 0% is grey, above 100% more vivid."));
+    colourForm->addRow(tr("Exposure"),colourExposure_);colourForm->addRow(tr("Temperature"),colourTemperature_);colourForm->addRow(tr("Tint"),colourTint_);colourForm->addRow(tr("Saturation"),colourSaturation_);
+    // Despill: the same settings as Metadata and processing; when on, these override those.
+    colourDespill_=new QComboBox;colourDespill_->setObjectName("colourDespill");
+    colourDespill_->addItem(tr("None"),int(Modifier::DespillNone));colourDespill_->addItem(tr("Only on export"),int(Modifier::DespillOnExport));colourDespill_->addItem(tr("Always"),int(Modifier::DespillAlways));
+    colourDespill_->setToolTip(tr("Remove green-screen spill from the colour.\nNone: never. Only on export: the viewport shows the source colour. Always: the viewport shows it too.\nThe settings start as THE4DSCANNER's."));
+    colourDespillStrength_=colourSpin("colourDespillStrength",0,1,0.05,4,QString(),tr("How much of the spill is removed."));
+    colourGreenGain_=colourSpin("colourGreenGain",0,2,0.01,3,QString(),tr("Gain on the green channel before the spill is measured."));
+    colourViewChroma_=colourSpin("colourViewChroma",0,1,0.05,4,QString(),tr("How much of the view-dependent colour's chroma is kept."));
+    colourRecoverSkin_=new QCheckBox(tr("Recover skin colour"));colourRecoverSkin_->setObjectName("colourRecoverSkin");colourRecoverSkin_->setToolTip(tr("Recover skin tones from nearby clean skin while protecting neutral clothing."));
+    colourForm->addRow(tr("Apply despill"),colourDespill_);colourForm->addRow(tr("Strength"),colourDespillStrength_);colourForm->addRow(tr("Green gain"),colourGreenGain_);colourForm->addRow(tr("View chroma"),colourViewChroma_);colourForm->addRow(colourRecoverSkin_);
+    colourNote_=new QLabel;colourNote_->setWordWrap(true);colourForm->addRow(colourNote_);side->addWidget(colourProperties_);
+    for (auto *spin:{colourExposure_,colourTemperature_,colourTint_}) SpinScrubber::attachFormLabel(spin,0.01);
+    SpinScrubber::attachFormLabel(colourSaturation_,0.5);
+    for (auto *spin:{colourDespillStrength_,colourGreenGain_,colourViewChroma_}) SpinScrubber::attachFormLabel(spin,0.002);
+    auto colourChanged=[this] {
+        auto *m=project_.modifier();if (syncing_ || !m || m->type!=ModifierType::Colour) return;
+        m->colourOpacity=colourOpacity_->value();m->colourExposure=colourExposure_->value();m->colourTemperature=colourTemperature_->value();m->colourTint=colourTint_->value();m->colourSaturation=colourSaturation_->value()/100;
+        m->colourDespill=colourDespill_->currentData().toInt();m->colourDespillStrength=colourDespillStrength_->value();m->colourGreenGain=colourGreenGain_->value();
+        m->colourViewChroma=colourViewChroma_->value();m->colourRecoverSkin=colourRecoverSkin_->isChecked();syncUi();dirty();
+    };
+    for (auto *spin:{colourOpacity_,colourExposure_,colourTemperature_,colourTint_,colourSaturation_,colourDespillStrength_,colourGreenGain_,colourViewChroma_}) connect(spin,&QDoubleSpinBox::valueChanged,this,[colourChanged](double) {colourChanged();});
+    connect(colourRecoverSkin_,&QCheckBox::toggled,this,[colourChanged](bool) {colourChanged();});
+    connect(colourDespill_,&QComboBox::activated,this,[colourChanged](int) {colourChanged();});
+    // Erase: pick splats with a brush or a lasso; they are removed, chunk by chunk.
+    eraseProperties_=new QGroupBox(tr("Eraser"));eraseProperties_->setObjectName("eraseModifierProperties");auto *eraseForm=new QFormLayout(eraseProperties_);
+    eraseProperties_->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Maximum);
+    auto *toolRow=new QWidget;auto *toolLayout=new QHBoxLayout(toolRow);toolLayout->setContentsMargins(0,0,0,0);
+    eraseBrush_=new QToolButton;eraseBrush_->setText(tr("Brush"));eraseBrush_->setObjectName("eraseBrush");eraseBrush_->setCheckable(true);eraseBrush_->setChecked(true);
+    eraseLasso_=new QToolButton;eraseLasso_->setText(tr("Lasso"));eraseLasso_->setObjectName("eraseLasso");eraseLasso_->setCheckable(true);
+    eraseBrush_->setToolTip(tr("Paint over the splats to pick them."));eraseLasso_->setToolTip(tr("Draw round the splats to pick them."));
+    auto *tools=new QButtonGroup(this);tools->addButton(eraseBrush_);tools->addButton(eraseLasso_);tools->setExclusive(true);
+    toolLayout->addWidget(eraseBrush_);toolLayout->addWidget(eraseLasso_);toolLayout->addStretch();eraseForm->addRow(tr("Tool"),toolRow);
+    eraseBrushSize_=new QDoubleSpinBox;eraseBrushSize_->setObjectName("eraseBrushSize");eraseBrushSize_->setRange(2,300);eraseBrushSize_->setDecimals(0);eraseBrushSize_->setSuffix(" px");
+    eraseBrushSize_->setValue(settings_.value("Erase/BrushRadius",20).toDouble());eraseBrushSize_->setToolTip(tr("The brush's radius on screen."));
+    eraseForm->addRow(tr("Brush radius"),eraseBrushSize_);SpinScrubber::attachFormLabel(eraseBrushSize_,0.5);
+    eraseStatus_=new QLabel;eraseStatus_->setObjectName("eraseStatus");eraseStatus_->setWordWrap(true);eraseForm->addRow(eraseStatus_);
+    auto *clearRow=new QWidget;auto *clearLayout=new QHBoxLayout(clearRow);clearLayout->setContentsMargins(0,0,0,0);
+    eraseClearChunk_=new QPushButton(tr("Clear this chunk"));eraseClearChunk_->setObjectName("eraseClearChunk");eraseClearAll_=new QPushButton(tr("Clear all"));eraseClearAll_->setObjectName("eraseClearAll");
+    clearLayout->addWidget(eraseClearChunk_);clearLayout->addWidget(eraseClearAll_);eraseForm->addRow(clearRow);
+    auto *eraseNote=new QLabel(tr("While this modifier is selected the picks show in pink; otherwise, and in exports, they are removed. "
+        "Drag to pick, replacing the picks of the chunk on screen; Ctrl adds, Alt subtracts. The right button orbits and the middle one pans. "
+        "A splat is itself only within one chunk, so each chunk keeps its own picks."));eraseNote->setWordWrap(true);eraseForm->addRow(eraseNote);side->addWidget(eraseProperties_);
+    connect(tools,&QButtonGroup::buttonClicked,this,[this](QAbstractButton *) {syncEraseTool();viewport_->setFocus();});
+    connect(eraseBrushSize_,&QDoubleSpinBox::valueChanged,this,[this](double value) {settings_.setValue("Erase/BrushRadius",value);syncEraseTool();});
+    connect(viewport_,&Viewport::selectionStroke,this,[this](std::vector<uint32_t> records,Viewport::SelectMode mode) {applyStroke(records,int(mode));});
+    connect(eraseClearChunk_,&QPushButton::clicked,this,[this] {auto *m=project_.modifier();if (!m || m->type!=ModifierType::Erase || screenChunk_<0) return;m->erased.erase(screenChunk_);syncUi();dirty();});
+    connect(eraseClearAll_,&QPushButton::clicked,this,[this] {auto *m=project_.modifier();if (!m || m->type!=ModifierType::Erase) return;m->erased.clear();syncUi();dirty();});
     walkProperties_=new QGroupBox(tr("Walk"));walkProperties_->setObjectName("walkModifierProperties");auto *walkForm=new QFormLayout(walkProperties_);
     walkProperties_->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Minimum);
     walkSpeed_=new QDoubleSpinBox;walkSpeed_->setObjectName("walkSpeed");walkSpeed_->setRange(0,100);walkSpeed_->setDecimals(2);walkSpeed_->setSingleStep(.1);walkSpeed_->setSuffix(" m/s");walkSpeed_->setValue(1);
@@ -963,15 +1059,14 @@ void MainWindow::buildUi() {
     shortcut("Ctrl+Alt+P",[this] { openPresetFolder(); });
     shortcut("Ctrl+M",[this] { editCaptureSettings(); });
     shortcut("L",[this] { if (loaded_ && !loading_) loop_->toggle(); });
-    for (int g=0; g<3; ++g) shortcut(QString("F%1").arg(g+6),[this,g] { toggleCoordinateSpace(g); });
     statusBar()->showMessage(tr("Open a capture to begin."));
 }
 
 void MainWindow::syncModifiers() {
-    viewport_->setModifiers(project_.modifiersAtFrame(currentFrame()));modifierPanel_->setProject(project_);
-    const CompiledModifiers compiled(project_);const bool purge=!compiled.isolations.isEmpty() || !compiled.prunes.isEmpty();
-    QJsonObject state;if (purge) state={{"modifiers",project_.modifierJson()},{"transform",project_.json({})["transform"]},{"cropEditing",viewport_->cropEditing()}};
-    if (state!=processingState_) {processingState_=state;if (purge) requestFrame();}
+    viewport_->setModifiers(project_.modifiersAtFrame(currentFrame()));modifierPanel_->setProject(project_);syncAudio();
+    const CompiledModifiers compiled(project_);const bool purge=!compiled.isolations.isEmpty() || !compiled.prunes.isEmpty() || !compiled.erased.empty() || compiled.despillPreview;
+    QJsonObject state;if (purge) state={{"modifiers",project_.modifierJson()},{"transform",project_.json({})["transform"]},{"cropEditing",viewport_->cropEditing()},{"selected",project_.selectedModifier}};
+    if (state!=processingState_) {processingState_=state;requestFrame();}
 }
 // The Walk speed in the unit its modifier shows: range, suffix and value, without
 // writing anything back.
@@ -984,7 +1079,7 @@ void MainWindow::showWalkSpeed(const Modifier &m) {
 void MainWindow::revealModifierProperties() {
     QTimer::singleShot(0,this,[this] {
         const auto *m=project_.modifier();auto *scroll=findChild<QScrollArea *>("toolsScrollArea");if (!m || !scroll) return;
-        QWidget *panel=m->type==ModifierType::AnimateTransform ? static_cast<QWidget *>(animationProperties_) : m->type==ModifierType::PurgeIsolated ? isolationProperties_ : m->type==ModifierType::Walk ? walkProperties_ : m->type==ModifierType::BakeAntialiasing ? bakeProperties_ : m->type==ModifierType::PruneLowContribution ? pruneProperties_ : m->type==ModifierType::Crop ? cropProperties_ : greenProperties_;
+        QWidget *panel=m->type==ModifierType::AnimateTransform ? static_cast<QWidget *>(animationProperties_) : m->type==ModifierType::PurgeIsolated ? isolationProperties_ : m->type==ModifierType::Walk ? walkProperties_ : m->type==ModifierType::BakeAntialiasing ? bakeProperties_ : m->type==ModifierType::PruneLowContribution ? pruneProperties_ : m->type==ModifierType::Audio ? audioProperties_ : m->type==ModifierType::Colour ? colourProperties_ : m->type==ModifierType::Erase ? eraseProperties_ : m->type==ModifierType::Crop ? cropProperties_ : greenProperties_;
         scroll->ensureWidgetVisible(panel,0,12);
     });
 }
@@ -1046,6 +1141,34 @@ void MainWindow::syncUi() {
     const bool walk=selected && selected->type==ModifierType::Walk;walkProperties_->setVisible(walk);
     const bool bake=selected && selected->type==ModifierType::BakeAntialiasing;bakeProperties_->setVisible(bake);
     const bool prune=selected && selected->type==ModifierType::PruneLowContribution;pruneProperties_->setVisible(prune);
+    const bool erase=selected && selected->type==ModifierType::Erase;eraseProperties_->setVisible(erase);
+    if (erase) {
+        eraseProperties_->setTitle(tr("Eraser: %1").arg(selected->name));
+        size_t total=0,here=0;for (const auto &[chunk,records]:selected->erased) {total+=records.size();if (chunk==screenChunk_) here=records.size();}
+        eraseStatus_->setText(tr("This chunk: %1 splats picked.\nAll chunks: %2 splats in %3 chunks.").arg(qulonglong(here)).arg(qulonglong(total)).arg(qulonglong(selected->erased.size())));
+        eraseClearChunk_->setEnabled(here>0);eraseClearAll_->setEnabled(total>0);
+    }
+    syncEraseTool();
+    const bool colour=selected && selected->type==ModifierType::Colour;colourProperties_->setVisible(colour);
+    if (colour) {
+        colourProperties_->setTitle(tr("Color: %1").arg(selected->name));colourOpacity_->setValue(selected->colourOpacity);colourExposure_->setValue(selected->colourExposure);colourTemperature_->setValue(selected->colourTemperature);
+        colourTint_->setValue(selected->colourTint);colourSaturation_->setValue(selected->colourSaturation*100);colourDespill_->setCurrentIndex(colourDespill_->findData(selected->colourDespill));
+        colourDespillStrength_->setValue(selected->colourDespillStrength);colourGreenGain_->setValue(selected->colourGreenGain);colourViewChroma_->setValue(selected->colourViewChroma);
+        colourRecoverSkin_->setChecked(selected->colourRecoverSkin);
+        // None turns the despill settings off, their labels with them.
+        auto *colourForm=static_cast<QFormLayout *>(colourProperties_->layout());const bool despills=selected->colourDespill!=Modifier::DespillNone;
+        for (QWidget *field:std::initializer_list<QWidget *>{colourDespillStrength_,colourGreenGain_,colourViewChroma_,colourRecoverSkin_}) {
+            field->setEnabled(despills);if (auto *label=colourForm->labelForField(field)) label->setEnabled(despills);}
+        colourNote_->setText(selected->colourDespill==Modifier::DespillOnExport ? tr("Opacity, exposure, white balance and saturation show in the viewport; despill only in exports.")
+                                                                                 : tr("Everything here shows in the viewport as it will be exported."));
+    }
+    const bool audio=selected && selected->type==ModifierType::Audio;audioProperties_->setVisible(audio);
+    if (audio) {
+        audioProperties_->setTitle(tr("Audio: %1").arg(selected->name));audioOffset_->setValue(selected->audioOffset);audioCaptureTrack_->setEnabled(!info_.audio.isEmpty() && !selected->audioFile.isEmpty());
+        audioSource_->setText(!selected->audioFile.isEmpty() ? (QFileInfo::exists(selected->audioFile) ? QFileInfo(selected->audioFile).fileName() : tr("%1 (not found)").arg(QFileInfo(selected->audioFile).fileName()))
+                             : !info_.audio.isEmpty() ? tr("The capture's own track (%1)").arg(info_.audioSuffix.toUpper()) : tr("None: the capture carries no track. Choose a file."));
+        audioSource_->setToolTip(selected->audioFile);
+    }
     if (prune) {pruneProperties_->setTitle(tr("Prune low contribution: %1").arg(selected->name));prunePercent_->setValue(selected->prune.percent);pruneProtect_->setValue(selected->prune.protectAbove);showPruneStatus();}
     if (bake) {bakeProperties_->setTitle(tr("Bake anti-aliasing: %1").arg(selected->name));bakeDistance_->setValue(selected->bakeDistance);bakeScreenHeight_->setValue(selected->bakeScreenHeight);
         bakeSizeLabel_->setText(tr("%1 mm").arg(selected->bakeSize()*1000,0,'f',2));}
@@ -1067,7 +1190,7 @@ void MainWindow::syncUi() {
     captureSettingsButton_->setEnabled(loaded_ && !loading_);
     savePresetButton_->setEnabled(loaded_ && !loading_); presetCombo_->setEnabled(loaded_ && !loading_ && presetCombo_->count()>1);
     presetFolderButton_->setEnabled(loaded_ && !loading_);
-    saveAction_->setEnabled(loaded_ && !loading_); saveAsAction_->setEnabled(loaded_ && !loading_); imageAction_->setEnabled(loaded_ && !loading_); exportAction_->setEnabled(loaded_ && !loading_); plyAction_->setEnabled(loaded_ && !loading_); taskAction_->setEnabled(loaded_ && !loading_);
+    saveAction_->setEnabled(loaded_ && !loading_); saveAsAction_->setEnabled(loaded_ && !loading_); imageAction_->setEnabled(loaded_ && !loading_); exportAction_->setEnabled(loaded_ && !loading_); plyAction_->setEnabled(loaded_ && !loading_); taskAction_->setEnabled(loaded_ && !loading_); estimateAction_->setEnabled(loaded_ && !loading_);
     assetLabel_->setText(loaded_ ? info_.title : tr("No capture"));
     assetLabel_->setToolTip(project_.asset);
     metadata_->setText(loaded_ ? tr("%1 · %2 fps\n%3 s · %4 frames").arg(info_.format).arg(info_.fps,0,'f',2).arg(info_.duration,0,'f',3).arg(info_.frames) : QString());
@@ -1107,7 +1230,7 @@ void MainWindow::syncUi() {
         spaceButtons_[g]->setIcon(editorButtonIcon(local ? ":/icons/local.png" : ":/icons/global.png",false));
         spaceButtons_[g]->setAccessibleName(local ? tr("Local reference space") : tr("Global reference space"));
         const QString modeKeys[]={"G","R","S"};
-        spaceButtons_[g]->setToolTip(tr("Toggle Global/Local reference space (F%1 or repeat %2 in this mode). Current: %3.").arg(g+6).arg(modeKeys[g],local ? tr("Local") : tr("Global")));
+        spaceButtons_[g]->setToolTip(tr("Toggle Global/Local reference space (repeat %1 in this mode). Current: %2.").arg(modeKeys[g],local ? tr("Local") : tr("Global")));
     }
     cropEditButton_->setChecked(viewport_->cropEditing());
     cropRadius_->setValue(project_.crop().radius); cropRadiusZ_->setValue(project_.crop().radiusZ); cropHeight_->setValue(project_.crop().height);
@@ -1133,6 +1256,37 @@ void MainWindow::syncUi() {
 }
 void MainWindow::title() {
     setWindowTitle(tr("%1[*] — VGS Editor").arg(projectPath_.isEmpty() ? tr("Untitled project") : QFileInfo(projectPath_).fileName()));
+}
+QString MainWindow::autosaveFile() const {return autosaveDirectory_+QStringLiteral("/recovery-%1.vgsproj").arg(QCoreApplication::applicationPid());}
+void MainWindow::autosaveNow() {
+    if (!loaded_ || loading_ || !isWindowModified() || autosaveDirectory_.isEmpty()) return;
+    QDir().mkpath(autosaveDirectory_);project_.camera=viewport_->camera();QString error;
+    if (!project_.write(autosaveFile(),&error)) {statusBar()->showMessage(tr("Autosave failed: %1").arg(error),5000);return;}
+    QFile about(autosaveFile()+".json");
+    if (about.open(QIODevice::WriteOnly)) about.write(QJsonDocument(QJsonObject{{"project",projectPath_},{"asset",project_.asset},{"saved",QDateTime::currentDateTime().toString(Qt::ISODate)}}).toJson());
+}
+void MainWindow::discardAutosave() {QFile::remove(autosaveFile());QFile::remove(autosaveFile()+".json");}
+void MainWindow::offerRecovery() {
+    QDir directory(autosaveDirectory_);
+    auto copies=directory.entryInfoList({"recovery-*.vgsproj"},QDir::Files,QDir::Time);
+    copies.erase(std::remove_if(copies.begin(),copies.end(),[&](const QFileInfo &f) {return f.absoluteFilePath()==QFileInfo(autosaveFile()).absoluteFilePath();}),copies.end());
+    if (copies.isEmpty()) return;
+    const QString copy=copies.front().absoluteFilePath();QFile aboutFile(copy+".json");QJsonObject about;
+    if (aboutFile.open(QIODevice::ReadOnly)) about=QJsonDocument::fromJson(aboutFile.readAll()).object();aboutFile.close();
+    const QString what=!about["project"].toString().isEmpty() ? QFileInfo(about["project"].toString()).fileName() : QFileInfo(about["asset"].toString()).fileName();
+    const QString when=QDateTime::fromString(about["saved"].toString(),Qt::ISODate).toString(QLocale().dateTimeFormat(QLocale::ShortFormat));
+    const auto answer=QMessageBox::question(this,tr("Recover unsaved changes"),tr("VGS Editor closed without saving %1. A copy was kept at %2.\n\nRecover it?").arg(what.isEmpty() ? tr("a project") : what,when),
+                                            QMessageBox::Yes|QMessageBox::No,QMessageBox::Yes);
+    if (answer==QMessageBox::Yes) recover(copy);
+    else {QFile::remove(copy);QFile::remove(copy+".json");}
+}
+bool MainWindow::recover(const QString &autosave) {
+    if (loading_ || !QFileInfo::exists(autosave)) return false;
+    QFile aboutFile(autosave+".json");QJsonObject about;if (aboutFile.open(QIODevice::ReadOnly)) about=QJsonDocument::fromJson(aboutFile.readAll()).object();
+    recoveredProject_=about["project"].toString();recoveryFile_=QFileInfo(autosave).absoluteFilePath();recovering_=true;
+    openPath(recoveryFile_);
+    if (!loading_) {recovering_=false;return false;}
+    return true;
 }
 void MainWindow::dirty() { if (loaded_) { setWindowModified(true); recordUndo(); } }
 // What an undo step restores, as the project file writes it: animated crops by their keys
@@ -1210,7 +1364,7 @@ bool MainWindow::save(bool saveAs) {
     project_.camera = viewport_->camera(); QString error;
     if (!project_.write(path, &error)) { showError(error); return false; }
     projectPath_ = QFileInfo(path).absoluteFilePath(); history_.remember(projectPath_); updateRecentMenu();
-    setWindowModified(false); title(); statusBar()->showMessage(tr("Project saved."),3000); return true;
+    setWindowModified(false); title(); discardAutosave(); statusBar()->showMessage(tr("Project saved."),3000); return true;
 }
 void MainWindow::newProject() {
     if (loading_ || !canDiscard()) return;
@@ -1219,7 +1373,7 @@ void MainWindow::newProject() {
     viewport_->setCropEditing(false); viewport_->setCrop({});
     project_ = defaultProject(); info_ = {}; projectPath_.clear(); viewport_->setFrame({}); viewport_->setTransform({});
     for (int g=0; g<3; ++g) viewport_->setCoordinateSpace(TransformMode(g+1),project_.spaces[g]);
-    viewport_->setCamera(project_.camera); setWindowModified(false); refreshPresets(); syncUi(); title(); resetUndo();
+    viewport_->setCamera(project_.camera); setWindowModified(false); refreshPresets(); syncUi(); title(); resetUndo(); discardAutosave();
     // Release the source and its caches in their owning thread.
     QMetaObject::invokeMethod(worker_, &CaptureWorker::clear, Qt::QueuedConnection);
 }
@@ -1245,10 +1399,23 @@ void MainWindow::setTime(double seconds, bool edited) {
     if (std::abs(project_.time-seconds) < 1e-8) return;
     project_.time = seconds; syncUi(); if (edited) dirty(); requestFrame();
 }
+// The Audio modifier's track at the timeline's time: a file sits `offset` seconds into the
+// capture's timeline; the capture's own track starts where the capture starts on its source's.
+void MainWindow::syncAudio() {
+    if (!audio_) return;
+    const auto *m=loaded_ && !loading_ ? project_.audioModifier() : nullptr;
+    if (!m) {audio_->clear();return;}
+    double at=project_.time-m->audioOffset;
+    if (!m->audioFile.isEmpty()) audio_->setFile(m->audioFile);
+    else if (!info_.audio.isEmpty()) {audio_->setBytes(info_.audio,info_.audioSuffix);at+=info_.startSeconds;}
+    else {audio_->clear();return;}
+    audio_->follow(at,playback_.isActive(),project_.speed);
+}
 void MainWindow::requestFrame() {
     if (!loaded_ || loading_) return;
     if (decoding_) { pendingDecode_ = true; return; }
     Project snapshot=project_;if (viewport_->cropEditing()) for (auto &m:snapshot.modifiers) if (m.type==ModifierType::Crop) m.enabled=false;
+    for (auto &m:snapshot.modifiers) if (m.type==ModifierType::Erase) m.showErased=m.id==project_.selectedModifier;
     decoding_ = true; emit decodeRequested(project_.time, generation_, true,snapshot);
 }
 void MainWindow::play(bool playing) {
@@ -1257,6 +1424,7 @@ void MainWindow::play(bool playing) {
         if (project_.time >= project_.out) setTime(project_.in,false);
         playStart_ = project_.time; clock_.restart(); playback_.start();
     } else playback_.stop();
+    syncAudio();
     playButton_->setIcon(transportIcon(style(),playing ? QStyle::SP_MediaPause : QStyle::SP_MediaPlay));
 }
 // The selected Prune low contribution's effect on the chunk on screen: the share removed, and
@@ -1276,8 +1444,24 @@ void MainWindow::showPruneStatus() {
     }
     pruneStatus_->setText(text);pruneStatus_->setStyleSheet(style);
 }
+// The pick tools are on while an enabled Erase modifier is selected and a capture is open.
+void MainWindow::syncEraseTool() {
+    const auto *m=project_.modifier();const bool on=loaded_ && !loading_ && m && m->type==ModifierType::Erase && m->enabled;
+    viewport_->setSelectTool(on ? (eraseLasso_->isChecked() ? Viewport::SelectTool::Lasso : Viewport::SelectTool::Brush) : Viewport::SelectTool::None,float(eraseBrushSize_->value()));
+}
+// A stroke's records on the picks of the chunk on screen: replace, add or subtract.
+void MainWindow::applyStroke(const std::vector<uint32_t> &records,int mode) {
+    auto *m=project_.modifier();if (!m || m->type!=ModifierType::Erase || screenChunk_<0) return;
+    auto &picks=m->erased[screenChunk_];std::vector<uint32_t> result;
+    if (mode==int(Viewport::SelectMode::Replace)) result=records;
+    else if (mode==int(Viewport::SelectMode::Add)) std::set_union(picks.begin(),picks.end(),records.begin(),records.end(),std::back_inserter(result));
+    else std::set_difference(picks.begin(),picks.end(),records.begin(),records.end(),std::back_inserter(result));
+    if (result.empty()) m->erased.erase(screenChunk_);else picks=std::move(result);
+    syncUi();dirty();
+}
 void MainWindow::receiveFrame(FramePtr frame) {
     viewport_->setFrame(frame);
+    if (frame && int(frame->chunkIndex)!=screenChunk_) {screenChunk_=int(frame->chunkIndex);if (const auto *m=project_.modifier();m && m->type==ModifierType::Erase) syncUi();}
     pruneStats_=frame->prune;showPruneStatus();
     if (smokeOutput_.isEmpty()) return;
     qInfo("%s: %llu points / %llu records, t=%.3f, decode %.2f ms, SH=%d",
@@ -1427,7 +1611,7 @@ void MainWindow::exportCapture() {
         showError(tr("Select a .vgs, .pgs or .mint destination."));return;
     }
     Project snapshot=project_;snapshot.captureSettings.plain=outputExtension=="pgs";
-    const qint64 originalBytes=QFileInfo(snapshot.asset).size();
+    const qint64 originalBytes=QFileInfo(snapshot.asset).size();const QByteArray thumbnail=outputExtension=="mint" ? QByteArray() : thumbnailJpeg();
     QProgressDialog progress(tr("Preparing export"),tr("Cancel"),0,100,this);
     progress.setWindowTitle(tr("Export capture"));progress.setWindowModality(Qt::ApplicationModal);
     progress.setAutoClose(false);progress.setAutoReset(false);progress.setMinimumDuration(0);
@@ -1438,7 +1622,7 @@ void MainWindow::exportCapture() {
             if (cancelled) return false;
             QMetaObject::invokeMethod(&progress,[&,value,message] {progress.setValue(value);progress.setLabelText(message);},Qt::QueuedConnection);
             return !cancelled.load();
-        }); }
+        },thumbnail); }
         catch (const std::exception &e) {failure=QString::fromUtf8(e.what());}
     });
     connect(job,&QThread::finished,&progress,&QDialog::accept);
@@ -1468,6 +1652,7 @@ void MainWindow::exportTask() {
     ExportTask task;task.output=QFileInfo(destination).absoluteFilePath();task.project=project_;
     task.path=exportTaskPath(destination);
     task.frames=exportFrameCount(project_,info_.fps);
+    if (QFileInfo(destination).suffix().compare("mint",Qt::CaseInsensitive)!=0) task.thumbnail=thumbnailJpeg();
     const QString problem=checkExportTask(task);
     if (!problem.isEmpty()) {showError(problem);return;}
     QString error;if (!writeExportTask(task,&error)) {showError(error);return;}
@@ -1506,6 +1691,36 @@ void MainWindow::exportFrame() {
     settings_.setValue("Export/PlyDirectory",QFileInfo(destination).absolutePath());
     statusBar()->showMessage(tr("Frame %1 saved to %2: %3 Gaussians, %4 removed by modifiers.").arg(frame).arg(destination).arg(result.kept).arg(result.removed),15000);
 }
+// The viewport as an export's thumbnail: the scene alone, its centre square, 256 px, JPEG.
+QByteArray MainWindow::thumbnailJpeg() {
+    const QImage image=viewport_->cleanImage(256);QByteArray bytes;QBuffer buffer(&bytes);
+    if (image.isNull() || !buffer.open(QIODevice::WriteOnly) || !image.save(&buffer,"JPG",88)) return {};
+    return bytes;
+}
+void MainWindow::estimateExport() {
+    if (!loaded_ || loading_) return;
+    play(false);const Project snapshot=project_;const QByteArray thumbnail=thumbnailJpeg();
+    QProgressDialog progress(tr("Estimating export size"),tr("Cancel"),0,100,this);
+    progress.setWindowTitle(tr("Estimate export size"));progress.setWindowModality(Qt::ApplicationModal);progress.setAutoClose(false);progress.setAutoReset(false);progress.setMinimumDuration(0);
+    std::atomic_bool cancelled{false};QString failure;ExportEstimate estimate;
+    connect(&progress,&QProgressDialog::canceled,&progress,[&] {cancelled=true;});
+    auto *job=QThread::create([&] {
+        try {estimate=estimateExportSize(snapshot,[&](int value,const QString &message) {
+            if (cancelled) return false;
+            QMetaObject::invokeMethod(&progress,[&,value,message] {progress.setValue(value);progress.setLabelText(message);},Qt::QueuedConnection);
+            return !cancelled.load();},thumbnail);}
+        catch (const std::exception &e) {failure=QString::fromUtf8(e.what());}
+    });
+    QEventLoop loop;connect(job,&QThread::finished,&loop,&QEventLoop::quit);job->start();loop.exec();job->wait();delete job;progress.close();
+    if (cancelled) return;
+    if (!failure.isEmpty()) {showError(failure);return;}
+    auto streams=[&](double mbps) {return estimate.peakMbps<=mbps*0.8 ? tr("plays without waiting") : estimate.averageMbps<=mbps*0.8 ? tr("plays, with short waits at the heaviest moments") : tr("needs to download ahead");};
+    QMessageBox::information(this,tr("Estimate export size"),
+        tr("%1 export of %2 s:\nabout %3 MB (%4)\n\nData rate: %5 Mbit/s on average, %6 Mbit/s at the heaviest chunk.\n\nStreaming at 10 Mbit/s: %7.\nAt 25 Mbit/s: %8.\nAt 50 Mbit/s: %9.")
+            .arg(".vgs").arg(estimate.seconds,0,'f',1).arg(estimate.bytes/1e6,0,'f',1)
+            .arg(estimate.exact ? tr("exact: the whole range was exported") : tr("extrapolated from %1 one-second windows").arg(estimate.windows))
+            .arg(estimate.averageMbps,0,'f',1).arg(estimate.peakMbps,0,'f',1).arg(streams(10),streams(25),streams(50)));
+}
 void MainWindow::exportImage() {
     QString path = QFileDialog::getSaveFileName(this,tr("Export image"),history_.savePath("Image",QFileInfo(project_.asset).completeBaseName()+".png"),tr("PNG image (*.png)"));
     if (path.isEmpty()) return;
@@ -1524,7 +1739,7 @@ void MainWindow::smokeTest(const QString &path, const QString &output) {
 void MainWindow::closeEvent(QCloseEvent *event) {
     if (!canDiscard()) { event->ignore(); return; }
     settings_.setValue("geometry",saveGeometry()); settings_.setValue("windowState",saveState()); settings_.sync();
-    event->accept();
+    discardAutosave(); event->accept();
 }
 void MainWindow::dragEnterEvent(QDragEnterEvent *event) {
     if (event->mimeData()->hasUrls() && event->mimeData()->urls().size() == 1 && event->mimeData()->urls().first().isLocalFile()) event->acceptProposedAction();
@@ -1537,6 +1752,7 @@ Project MainWindow::defaultProject() const {
     p.crop().enabled=true;
     const auto last = QJsonDocument::fromJson(settings_.value("CaptureSettings/Last").toByteArray()); QString error;
     if (last.isObject()) CaptureSettings::fromJson(last.object(),&p.captureSettings,&error);
+    p.captureSettings.despill=false; // despill is a Colour modifier's now
     p.pointSize = std::clamp(settings_.value("Display/PointSize",5).toDouble(),1.0,12.0);
     p.grid = settings_.value("Display/Grid",true).toBool();
     p.loop = settings_.value("Playback/Loop",true).toBool();

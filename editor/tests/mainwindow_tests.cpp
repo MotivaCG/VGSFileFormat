@@ -29,6 +29,7 @@
 #include <QCheckBox>
 #include <QTableWidget>
 #include <QLabel>
+#include <QMessageBox>
 #include <QFormLayout>
 #include <QSlider>
 #include <QWheelEvent>
@@ -159,10 +160,50 @@ private slots:
         QTest::keyClicks(radius,"2");QCOMPARE(radius->value(),2.);QCoreApplication::processEvents();QTest::keyClick(radius,Qt::Key_Up);QCOMPARE(radius->value(),2.05);
         QTest::keyClick(radius,Qt::Key_Z,Qt::ControlModifier);QCOMPARE(radius->value(),start+1);
         QTest::keyClick(radius,Qt::Key_Z,Qt::ControlModifier|Qt::ShiftModifier);QCOMPARE(radius->value(),2.05);
+        // Erase: strokes replace, add to or subtract from the picks of the chunk on screen.
+        {auto *kinds=window.findChild<QComboBox *>("newModifierType");QVERIFY(kinds);kinds->setCurrentIndex(kinds->findData(10));add->click();auto *viewport=window.findChild<Viewport *>();QVERIFY(viewport);
+         QCOMPARE(viewport->selectTool(),Viewport::SelectTool::Brush);
+         emit viewport->selectionStroke({0},Viewport::SelectMode::Replace);
+         auto *status=window.findChild<QLabel *>("eraseStatus");QVERIFY(status);QVERIFY2(status->text().startsWith("This chunk: 1 splats picked."),qPrintable(status->text()));
+         QCoreApplication::processEvents();emit viewport->selectionStroke({0},Viewport::SelectMode::Subtract);QVERIFY(status->text().startsWith("This chunk: 0 splats picked."));
+         undo->trigger();QVERIFY(status->text().startsWith("This chunk: 1 splats picked."));
+         tree->setCurrentItem(tree->topLevelItem(0));QCOMPARE(viewport->selectTool(),Viewport::SelectTool::None);}
         // Prune low contribution says what it did to the chunk on screen.
         auto *type=window.findChild<QComboBox *>("newModifierType");auto *status=window.findChild<QLabel *>("pruneStatus");QVERIFY(type && status);
-        type->setCurrentIndex(type->findData(7));add->click();QCOMPARE(tree->topLevelItemCount(),2);
+        type->setCurrentIndex(type->findData(7));add->click();QCOMPARE(tree->topLevelItemCount(),3);
         QTRY_VERIFY_WITH_TIMEOUT(status->text().startsWith("This chunk:"),10000);
+        // F4 adds an Eraser, selected, its tools on.
+        {const int before=tree->topLevelItemCount();QTest::keyClick(&window,Qt::Key_F4);QCOMPARE(tree->topLevelItemCount(),before+1);
+         QCOMPARE(window.findChild<Viewport *>()->selectTool(),Viewport::SelectTool::Brush);}
+        window.setWindowModified(false);
+    }
+    void autosaveIsRecoveredAsUnsavedChanges() {
+        QTemporaryDir dir;QVERIFY(dir.isValid());
+        QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());
+        vgs::Frame f;f.count=1;f.active={1};f.position={0,1,0};f.rotation={0,0,0,1};f.scale={.01f,.02f,.03f};f.colorDc={.5f,.5f,.5f};f.opacity={1};
+        vgs::Header h;h.shDegree=0;h.frameCount=h.durationTicks=5;h.chunks.resize(5);for (size_t i=0;i<5;++i) {h.chunks[i].startTick=i;h.chunks[i].intervals=1;}
+        vgs::EncodeOptions options;options.signer=vgs::authoringSigner();options.shDegree=0;options.compression=vgs::Compression::None;
+        const QString capture=dir.filePath("source.pgs");QFile file(capture);QVERIFY(file.open(QIODevice::WriteOnly));
+        vgs::encodeSequence(h,[&](size_t) {return packExportFrame(f,0);},[&](uint64_t offset,const uint8_t *data,size_t count) {file.seek(qint64(offset));file.write(reinterpret_cast<const char *>(data),qint64(count));},options);file.close();
+        const QString autosaves=dir.filePath("autosave");
+        double edited=0;QString copy;
+        {
+            MainWindow window(nullptr,dir.filePath("presets"));window.setAutosaveDirectory(autosaves);window.show();QVERIFY(QTest::qWaitForWindowExposed(&window));
+            window.openPath(capture);auto *edit=window.findChild<QPushButton *>("editCropVolume");QTRY_VERIFY_WITH_TIMEOUT(edit->isEnabled(),5000);
+            // Nothing to keep until something changes.
+            window.setWindowModified(false);window.autosaveNow();QVERIFY(!QFileInfo::exists(window.autosaveFile()));
+            auto *radius=window.findChild<QDoubleSpinBox *>("cropRadiusX");edited=radius->value()+0.75;radius->setValue(edited);
+            window.autosaveNow();copy=window.autosaveFile();QVERIFY(QFileInfo::exists(copy));QVERIFY(QFileInfo::exists(copy+".json"));
+            // As another session would leave it.
+            QFile::copy(copy,autosaves+"/recovery-0.vgsproj");QFile::copy(copy+".json",autosaves+"/recovery-0.vgsproj.json");
+            window.setWindowModified(false);
+        }
+        // Another session finds it and opens it as unsaved changes.
+        MainWindow window(nullptr,dir.filePath("presets"));window.setAutosaveDirectory(autosaves);window.show();QVERIFY(QTest::qWaitForWindowExposed(&window));
+        QVERIFY(window.recover(autosaves+"/recovery-0.vgsproj"));
+        auto *radius=window.findChild<QDoubleSpinBox *>("cropRadiusX");auto *edit=window.findChild<QPushButton *>("editCropVolume");
+        QTRY_VERIFY_WITH_TIMEOUT(edit->isEnabled(),5000);QCOMPARE(radius->value(),edited);QVERIFY(window.isWindowModified());
+        QVERIFY(!QFileInfo::exists(autosaves+"/recovery-0.vgsproj"));QVERIFY(!window.windowTitle().contains("recovery"));
         window.setWindowModified(false);
     }
     void taskQueueRunsWhatItCanAndReportsTheRest() {
@@ -237,7 +278,10 @@ private slots:
         QCOMPARE(modifiers->topLevelItem(0)->text(2),QString());
         auto *add=window.findChild<QToolButton *>("addModifier"),*remove=window.findChild<QToolButton *>("removeModifier"),*duplicate=window.findChild<QToolButton *>("duplicateModifier");QVERIFY(add);QVERIFY(remove);QVERIFY(duplicate);
         auto *newType=window.findChild<QComboBox *>("newModifierType");QVERIFY(newType);QCOMPARE(newType->findData(1),-1);
-        for (int i=0;i<newType->count();++i) QVERIFY2(newType->itemData(i,Qt::ToolTipRole).toString().size()>40,qPrintable(newType->itemText(i)));newType->setCurrentIndex(newType->findData(0));QCOMPARE(newType->currentText(),QString("Crop"));add->click();
+        for (int i=0;i<newType->count();++i) if (newType->itemData(i).isValid()) QVERIFY2(newType->itemData(i,Qt::ToolTipRole).toString().size()>40,qPrintable(newType->itemText(i)));
+        // Ten kinds, F1 to F10, in groups with separators between them.
+        {int kinds=0,separators=0;for (int i=0;i<newType->count();++i) (newType->itemData(i).isValid() ? kinds : separators)++;QCOMPARE(kinds,10);QCOMPARE(separators,4);
+         QCOMPARE(newType->itemText(0),QString("Crop  (F1)"));QCOMPARE(newType->itemText(newType->count()-1),QString("Bake anti-aliasing  (F10)"));}newType->setCurrentIndex(newType->findData(0));QCOMPARE(newType->currentText(),QString("Crop  (F1)"));add->click();
         QCOMPARE(modifiers->topLevelItem(0)->text(0),QString("Crop"));QCOMPARE(modifiers->topLevelItemCount(),2);QCOMPARE(modifiers->currentItem()->text(1),QString("Crop cylinder"));QCOMPARE(modifiers->currentItem()->text(0),QString("Crop 2"));
         auto *shape=window.findChild<QComboBox *>("cropShape");QVERIFY(shape);shape->setCurrentIndex(shape->findData(int(CropShape::Box)));
         QVERIFY(QMetaObject::invokeMethod(shape,"activated",Qt::DirectConnection,Q_ARG(int,shape->currentIndex())));QCOMPARE(modifiers->currentItem()->text(1),QString("Crop box"));

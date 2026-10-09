@@ -29,6 +29,7 @@ class QComboBox;
 class QGroupBox;
 class QFormLayout;
 class LoadingOverlay;
+class AudioPreview;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -37,6 +38,16 @@ public:
     ~MainWindow() override;
     void openPath(const QString &path);
     void smokeTest(const QString &path, const QString &output);
+    // Autosave: every two minutes while there are unsaved changes, a copy of the project in a
+    // file of this session's own, removed once the project is saved, replaced or closed
+    // without saving. A copy still there at start-up is from a session that ended unexpectedly.
+    void autosaveNow();
+    QString autosaveFile() const;
+    void setAutosaveDirectory(const QString &directory) { autosaveDirectory_ = directory; }
+    // Offers the newest copy another session left, once; recover() opens one as unsaved changes
+    // to the project it came from.
+    void offerRecovery();
+    bool recover(const QString &autosave);
 signals:
     void openRequested(QString path, quint64 generation, bool sh);
     void decodeRequested(double time, quint64 generation, bool sh,Project project);
@@ -60,6 +71,8 @@ private:
     void receiveFrame(FramePtr frame);
     void exportImage();
     void exportCapture();
+    QByteArray thumbnailJpeg();
+    void estimateExport();
     // The frame on screen, edited, as a 3D Gaussian Splatting .ply.
     void exportFrame();
     // A .vgstask beside the chosen output, and the queue that runs such tasks.
@@ -100,7 +113,10 @@ private:
     quint64 serial_ = 0, generation_ = 0, openingGeneration_ = 0;
     QThread thread_;
     CaptureWorker *worker_;
-    QTimer playback_;
+    QTimer playback_, autosave_;
+    QString autosaveDirectory_, recoveredProject_, recoveryFile_;
+    bool recovering_ = false;
+    void discardAutosave();
     QElapsedTimer clock_;
     double playStart_ = 0;
     Viewport *viewport_;
@@ -109,6 +125,29 @@ private:
     QGroupBox *isolationProperties_, *walkProperties_, *bakeProperties_, *pruneProperties_;
     QDoubleSpinBox *prunePercent_, *pruneProtect_;
     QLabel *pruneStatus_;
+    // Audio: its panel, and the track it plays along with the timeline.
+    QGroupBox *audioProperties_;
+    QLabel *audioSource_;
+    QPushButton *audioCaptureTrack_;
+    QDoubleSpinBox *audioOffset_;
+    AudioPreview *audio_ = nullptr;
+    // Colour: exposure, white balance, saturation and despill.
+    QGroupBox *colourProperties_;
+    QDoubleSpinBox *colourOpacity_, *colourExposure_, *colourTemperature_, *colourTint_, *colourSaturation_, *colourDespillStrength_, *colourGreenGain_, *colourViewChroma_;
+    QComboBox *colourDespill_;
+    QCheckBox *colourRecoverSkin_;
+    QLabel *colourNote_;
+    // Erase: the tools that pick splats, and the chunk on screen (picks are per source chunk).
+    QGroupBox *eraseProperties_;
+    QToolButton *eraseBrush_, *eraseLasso_;
+    QDoubleSpinBox *eraseBrushSize_;
+    QLabel *eraseStatus_;
+    QPushButton *eraseClearChunk_, *eraseClearAll_;
+    int screenChunk_ = -1;
+    void syncEraseTool();
+    void applyStroke(const std::vector<uint32_t> &records, int mode);
+    // What the Audio modifier plays, and where in it the timeline is now.
+    void syncAudio();
     // What the pruning did to the chunk on screen, from the last decoded frame.
     std::vector<PruneStats> pruneStats_;
     void showPruneStatus();
@@ -181,6 +220,7 @@ private:
     QPushButton *cropEditButton_;
     QPushButton *t4dsPresetButton_, *smnPresetButton_;
     QPushButton *cropFitButton_, *cropClearButton_;
+    QAction *estimateAction_ = nullptr;
     QAction *saveAction_, *saveAsAction_, *imageAction_, *exportAction_, *gridAction_, *plyAction_ = nullptr, *taskAction_ = nullptr;
     QMenu *recentMenu_;
     QString smokeOutput_;

@@ -42,7 +42,8 @@ bool writeExportTask(const ExportTask &task,QString *error) {
         {"output",output},{"outputRelative",relativeTo(task.path,output)},
         {"asset",asset},{"frames",task.frames},
         // The project as its own file would hold it, its capture relative to the task.
-        {"project",task.project.json(task.path)}};
+        {"project",task.project.json(task.path)},
+        {"thumbnail",QString::fromLatin1(task.thumbnail.toBase64())}};
     QSaveFile file(task.path);const auto bytes=QJsonDocument(root).toJson();
     if (!file.open(QIODevice::WriteOnly) || file.write(bytes)!=bytes.size() || !file.commit()) {*error=file.errorString();return false;}
     return true;
@@ -58,6 +59,7 @@ bool readExportTask(const QString &path,ExportTask *task,QString *error) {
     }
     if (root["version"].toInt()!=Version) {*error=QStringLiteral("This task was made by a newer VGS Editor.");return false;}
     ExportTask result;result.path=QFileInfo(path).absoluteFilePath();
+    result.thumbnail=QByteArray::fromBase64(root["thumbnail"].toString().toLatin1());
     if (!Project::fromJson(root["project"].toObject(),QFileInfo(path).absolutePath(),&result.project,error)) return false;
     result.project.asset=resolved(result.path,root["asset"].toString(),root["project"].toObject()["asset"].toString());
     result.output=resolved(result.path,root["output"].toString(),root["outputRelative"].toString());
@@ -87,7 +89,7 @@ QString checkExportTask(const ExportTask &task) {
 ExportResult runExportTask(const ExportTask &task,const ExportProgress &progress) {
     const QString problem=checkExportTask(task);
     if (!problem.isEmpty()) throw std::runtime_error(problem.toStdString());
-    return exportCaptureFile(task.project,task.output,progress);
+    return exportCaptureFile(task.project,task.output,progress,task.thumbnail);
 }
 
 StayAwake::StayAwake() {

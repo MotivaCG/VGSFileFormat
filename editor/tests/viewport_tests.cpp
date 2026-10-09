@@ -6,6 +6,7 @@
 #include <QMouseEvent>
 #include <QWheelEvent>
 #include <QSurfaceFormat>
+#include <QPainterPath>
 #include <QtTest>
 #include <cmath>
 #include <memory>
@@ -35,6 +36,30 @@ class ViewportTests : public QObject {
         return point;
     }
 private slots:
+    void brushAndLassoPickWhatTheyCover() {
+        // A row of five points across the view; the camera looks at the middle one.
+        Viewport viewport;viewport.resize(400,300);auto frame=std::make_shared<RenderFrame>();
+        for (int i=0;i<5;++i) {Splat s{};s.position[0]=(i-2)*.5f;s.rotation[3]=1;s.scale[0]=s.scale[1]=s.scale[2]=.01f;s.color[3]=1;s.id=float(i);frame->records.push_back(s);frame->active.push_back(1);
+            PointVertex p{};p.position[0]=s.position[0];p.id=s.id;frame->points.push_back(p);}
+        viewport.setFrame(frame);Camera camera;camera.target={0,0,0};camera.yaw=0;camera.pitch=0;camera.distance=4;viewport.setCamera(camera);
+        QPointF centre(200,150);
+        QPainterPath lasso;lasso.addRect(QRectF(centre.x()-60,centre.y()-20,120,40));QCOMPARE(viewport.recordsInside(lasso),(std::vector<uint32_t>{1,2,3}));
+        QPainterPath dab(centre);dab.lineTo(centre);QCOMPARE(viewport.recordsInside(Viewport::brushRegion(dab,10)),(std::vector<uint32_t>{2}));
+        QPainterPath sweep(QPointF(10,150));sweep.lineTo(QPointF(390,150));QCOMPARE(viewport.recordsInside(Viewport::brushRegion(sweep,8)),(std::vector<uint32_t>{0,1,2,3,4}));
+        // A stroke with the mouse: Ctrl adds, Alt subtracts, nothing replaces.
+        viewport.setSelectTool(Viewport::SelectTool::Brush,10);std::vector<uint32_t> got;Viewport::SelectMode mode{};
+        connect(&viewport,&Viewport::selectionStroke,this,[&](std::vector<uint32_t> r,Viewport::SelectMode m) {got=std::move(r);mode=m;});
+        QTest::mousePress(&viewport,Qt::LeftButton,Qt::ControlModifier,centre.toPoint());QTest::mouseRelease(&viewport,Qt::LeftButton,Qt::ControlModifier,centre.toPoint());
+        QCOMPARE(got,(std::vector<uint32_t>{2}));QCOMPARE(mode,Viewport::SelectMode::Add);
+        QTest::mousePress(&viewport,Qt::LeftButton,Qt::AltModifier,centre.toPoint());QTest::mouseRelease(&viewport,Qt::LeftButton,Qt::AltModifier,centre.toPoint());QCOMPARE(mode,Viewport::SelectMode::Subtract);
+        QTest::mousePress(&viewport,Qt::LeftButton,Qt::NoModifier,centre.toPoint());QTest::mouseRelease(&viewport,Qt::LeftButton,Qt::NoModifier,centre.toPoint());QCOMPARE(mode,Viewport::SelectMode::Replace);
+        // Picking does not orbit with the left button; the right one does.
+        const auto before=viewport.camera();
+        QTest::mousePress(&viewport,Qt::RightButton,Qt::NoModifier,{100,100});
+        QMouseEvent move(QEvent::MouseMove,QPointF(150,100),QPointF(viewport.mapToGlobal(QPoint(150,100))),Qt::NoButton,Qt::RightButton,Qt::NoModifier);QApplication::sendEvent(&viewport,&move);
+        QTest::mouseRelease(&viewport,Qt::RightButton,Qt::NoModifier,{150,100});QVERIFY(viewport.camera().yaw!=before.yaw);
+        viewport.setSelectTool(Viewport::SelectTool::None,10);
+    }
     void doubleClickGlidesThePivotToWhatIsSeen() {
         // Two splats on the line of sight: an opaque one in front and one behind it.
         Viewport viewport;viewport.resize(400,300);auto frame=std::make_shared<RenderFrame>();

@@ -4,7 +4,9 @@
 #include <QElapsedTimer>
 #include <QMouseEvent>
 #include <QKeyEvent>
+#include <QGuiApplication>
 #include <QPainter>
+#include <QPainterPathStroker>
 #include <QLabel>
 #include <QSurfaceFormat>
 #include <QOpenGLFramebufferObject>
@@ -35,10 +37,13 @@ uniform vec3 eyeLocal;
 uniform samplerBuffer shData;
 uniform int shCoefficients; // per record in shData
 uniform int shEvaluated;    // how many of them to use: 0, 3, 8 or 15 for SH0..SH3
+uniform mat3 colourMatrix;  // the Colour modifiers', on the colour as seen
 out vec4 rgba;
+// Splats an Erase modifier has picked, while its picks are edited: drawn hot pink.
+vec3 marked(vec3 c) { return usePurgeMask && abs(modifierVisibility-0.75)<0.1 ? mix(c,vec3(1.0,0.2,0.75),0.7) : c; }
 vec3 shadedColor() {
     vec3 result=color;
-    if(shCoefficients==0) return clamp(result,0.0,1.0);
+    if(shCoefficients==0) return marked(clamp(colourMatrix*result,0.0,1.0));
     vec3 d=normalize(position-eyeLocal);
     float x=d.x,y=d.y,z=d.z;
     float basis[15];
@@ -54,7 +59,7 @@ vec3 shadedColor() {
     basis[13]=1.4453057213*z*(x*x-y*y);
     basis[14]=-0.5900435899*x*(x*x-3*y*y);
     for(int k=0;k<min(shCoefficients,shEvaluated);k++) result+=basis[k]*texelFetch(shData,int(sourceId)*shCoefficients+k).rgb;
-    return clamp(result,0.0,1.0);
+    return marked(clamp(colourMatrix*result,0.0,1.0));
 }
 uniform float pointSize;
 uniform samplerBuffer modifierData;
@@ -118,6 +123,7 @@ uniform samplerBuffer splatData;
 vec3 position; vec3 color; float sourceId; float modifierVisibility;
 )GLSL";
 static const char *splatMain = R"GLSL(
+uniform float opacityScale; // the Colour modifiers' opacity factor
 uniform vec2 viewportPixels;
 uniform bool orthographic;
 uniform bool antialiased;
@@ -137,7 +143,7 @@ void main() {
     // Bake anti-aliasing, as the export writes it: every axis grows to sqrt(s^2+b^2), and the
     // opacity falls by the growth of the two largest - the footprint most views see, so a
     // flat splat seen face on keeps its opacity while needles and specks fade.
-    vec3 scale=s.xyz; float opacity=a.w;
+    vec3 scale=s.xyz; float opacity=min(1.0,a.w*opacityScale);
     if(bakeSize>0.0) {
         vec3 grown=sqrt(scale*scale+bakeSize*bakeSize), ratio=scale/max(grown,vec3(1e-30));
         opacity*=ratio.x*ratio.y*ratio.z/max(min(ratio.x,min(ratio.y,ratio.z)),1e-30); scale=grown;
@@ -517,7 +523,7 @@ void Viewport::paintGL() {
     const auto view = viewMatrix(), model = transform_.matrix();
     glDisable(GL_CULL_FACE); glDisable(GL_BLEND);
     glEnable(GL_DEPTH_TEST); glDepthMask(GL_TRUE);
-    if (grid_) {
+    if (grid_ && !cleanCapture_) {
         gridShader_->bind(); gridShader_->setUniformValue("mvp", projection * view);
         // On the light background darker greys stand out: minor lines ~0.71, major ~0.58.
         gridShader_->setUniformValue("greyMap",lightBackground_ ? QVector2D(-1.6f,0.93f) : QVector2D(1,0));
@@ -604,7 +610,9 @@ void Viewport::paintGL() {
         auto activeModifiers=modifiers_;
         if (!modifierStack_) {Modifier modifier;modifier.crop=crop_;activeModifiers={modifier};}
         CompiledModifiers modifiers(activeModifiers);std::vector<QVector4D> values;
-        shader->setUniformValue("usePurgeMask",!modifiers.isolations.isEmpty() || !modifiers.prunes.isEmpty());
+        shader->setUniformValue("usePurgeMask",!modifiers.isolations.isEmpty() || !modifiers.prunes.isEmpty() || !modifiers.erased.empty());
+        shader->setUniformValue("colourMatrix",QMatrix3x3(modifiers.colour.data()));
+        if (splats) shader->setUniformValue("opacityScale",modifiers.opacity);
         for (const auto &crop:modifiers.crops) {
             for (int col=0;col<4;++col) values.push_back(crop.inverse.column(col));
             values.push_back({float(int(crop.volume.shape)),crop.volume.height,crop.volume.radius,crop.volume.remove ? 1.f : 0.f});
@@ -629,7 +637,7 @@ void Viewport::paintGL() {
         if (values.empty()) values.push_back({0,0,0,0});
         glBindBuffer(GL_TEXTURE_BUFFER,modifierBuffer_);glBufferData(GL_TEXTURE_BUFFER,GLsizeiptr(values.size()*sizeof(QVector4D)),values.data(),GL_STREAM_DRAW);
         glActiveTexture(GL_TEXTURE1);glBindTexture(GL_TEXTURE_BUFFER,modifierTexture_);glTexBuffer(GL_TEXTURE_BUFFER,GL_RGBA32F,modifierBuffer_);
-        shader->setUniformValue("modifierData",1);shader->setUniformValue("cropCount",cpuFiltering ? 0 : int(modifiers.crops.size()));shader->setUniformValue("greenCount",cpuFiltering ? 0 : int(modifiers.greens.size()));shader->setUniformValue("editingCrop",cropEditing_);shader->setUniformValue("editShowsRed",crop_.showRemovedInRed);
+        shader->setUniformValue("modifierData",1);shader->setUniformValue("cropCount",cpuFiltering ? 0 : int(modifiers.crops.size()));shader->setUniformValue("greenCount",cpuFiltering ? 0 : int(modifiers.greens.size()));shader->setUniformValue("editingCrop",cropEditing_ && !cleanCapture_);shader->setUniformValue("editShowsRed",crop_.showRemovedInRed);
         const auto eye = view.inverted().map(QVector3D(0,0,0));
         shader->setUniformValue("eyeLocal", model.inverted().map(eye));
         shader->setUniformValue("shCoefficients", shCoefficients_);
@@ -686,15 +694,30 @@ void Viewport::paintGL() {
         }
         shader->release(); glDisable(GL_BLEND); glDepthMask(GL_TRUE);
     }
-    drawGhost(projection*view,QSize(int(size.x()),int(size.y())),dpr);
-    drawCrop(projection*view); drawGizmo(projection*view);
+    if (!cleanCapture_) {
+        drawGhost(projection*view,QSize(int(size.x()),int(size.y())),dpr);
+        drawCrop(projection*view); drawGizmo(projection*view);
+    }
     glBindVertexArray(0);
     glDisable(GL_DEPTH_TEST); glDisable(GL_PROGRAM_POINT_SIZE);
     painter.endNativePainting();
+    if (cleanCapture_) return;
+    if (selectTool_ != SelectTool::None) {
+        painter.setRenderHint(QPainter::Antialiasing);
+        // Pink picks; its inverse, green, while Alt is held or the stroke subtracts.
+        const bool subtracting = selecting_ ? strokeMode_==SelectMode::Subtract : (QGuiApplication::queryKeyboardModifiers() & Qt::AltModifier);
+        const QColor ink = subtracting ? QColor(0,204,64) : QColor(255,51,191);
+        if (selecting_ && selectTool_==SelectTool::Brush) { QColor fill=ink; fill.setAlpha(60); painter.fillPath(brushRegion(stroke_,brushRadius_),fill); }
+        if (selecting_ && selectTool_==SelectTool::Lasso) { QColor fill=ink; fill.setAlpha(40); QPainterPath closed=stroke_; closed.closeSubpath(); painter.fillPath(closed,fill); painter.setPen(QPen(ink,1.5)); painter.drawPath(stroke_); }
+        if (selectTool_==SelectTool::Brush) { painter.setPen(QPen(ink,1.5)); painter.setBrush(Qt::NoBrush); painter.drawEllipse(hover_,brushRadius_,brushRadius_); }
+        painter.setPen(overlayText()); painter.setFont(QFont("Segoe UI", 9));
+        painter.drawText(18, height()-18, tr("Drag: pick (replace)   ·   Ctrl: add   ·   Alt: subtract   ·   Right drag: orbit   ·   Middle drag: pan"));
+    } else {
     painter.setPen(overlayText()); painter.setFont(QFont("Segoe UI", 9));
     painter.drawText(18, height()-18, mode_ == TransformMode::None
         ? tr("Drag: orbit   ·   Right drag: pan   ·   Wheel: zoom   ·   G/R/S: transform")
         : tr("Drag a gizmo handle to transform   ·   Repeat G/R/S: Global/Local   ·   Esc: exit mode"));
+    }
     if (frame_) {
         QString text=tr("%1 source points\nDecode %2 ms   ·   upload %3 ms   ·   %4")
             .arg(qulonglong(frame_->points.size())).arg(frame_->decodeMs,0,'f',1).arg(uploadMs_,0,'f',1).arg(shCoefficients_ ? "SH" : "base colour");
@@ -751,7 +774,7 @@ std::vector<QVector3D> Viewport::visibleWorldPoints() const {
     std::vector<QVector3D> points;if (!frame_) return points;points.reserve(frame_->points.size());const auto model=transform_.matrix();
     auto stack=modifiers_;if (!modifierStack_) {Modifier m;m.crop=crop_;stack={m};}CompiledModifiers modifiers(stack);
     for (const auto &point:frame_->points) {
-        if ((!modifiers.isolations.isEmpty() || !modifiers.prunes.isEmpty()) && point.modifierVisibility<.5f) continue;
+        if ((!modifiers.isolations.isEmpty() || !modifiers.prunes.isEmpty() || !modifiers.erased.empty()) && point.modifierVisibility<.5f) continue;
         const auto world=model.map({point.position[0],point.position[1],point.position[2]});
         if (!std::isfinite(world.x()) || !std::isfinite(world.y()) || !std::isfinite(world.z())) continue;
         if ((cropEditing_ || modifiers.keepsPosition(world)) && !modifiers.removesColour({point.color[0],point.color[1],point.color[2]})) points.push_back(world);
@@ -798,6 +821,11 @@ void Viewport::drawGhost(const QMatrix4x4 &viewProjection,const QSize &pixels,fl
 }
 void Viewport::mousePressEvent(QMouseEvent *event) {
     focusTimer_.stop(); lastMouse_ = event->position().toPoint(); setFocus();
+    if (selectTool_ != SelectTool::None && event->button()==Qt::LeftButton) {
+        selecting_ = true; stroke_ = QPainterPath(event->position()); hover_ = event->position();
+        strokeMode_ = (event->modifiers() & Qt::AltModifier) ? SelectMode::Subtract : (event->modifiers() & Qt::ControlModifier) ? SelectMode::Add : SelectMode::Replace;
+        update(); event->accept(); return;
+    }
     if (event->button()==Qt::LeftButton && !(event->modifiers() & Qt::ShiftModifier)) {
         const int handle = pickHandle(event->position());
         if (handle >= 0) { beginManipulation(handle,event->position()); event->accept(); return; }
@@ -806,6 +834,15 @@ void Viewport::mousePressEvent(QMouseEvent *event) {
 }
 void Viewport::mouseMoveEvent(QMouseEvent *event) {
     const QPoint delta = event->position().toPoint() - lastMouse_; lastMouse_ = event->position().toPoint();
+    if (selectTool_ != SelectTool::None) {
+        hover_ = event->position();
+        if (selecting_) { stroke_.lineTo(event->position()); update(); return; }
+        // Picking: the right button orbits, the middle one pans.
+        if (event->buttons() & Qt::RightButton) orbit(-delta.x()*0.3f,delta.y()*0.3f);
+        else if (event->buttons() & Qt::MiddleButton) { const auto inv = viewMatrix().inverted(); camera_.target += inv.mapVector({-float(delta.x()),float(delta.y()),0}) * (camera_.distance*0.0015f); }
+        else { update(); return; }
+        viewCube_->setCamera(camera_); update(); emit cameraChanged(); return;
+    }
     if (event->buttons() & Qt::RightButton || event->buttons() & Qt::MiddleButton ||
         (event->buttons() & Qt::LeftButton && event->modifiers() & Qt::ShiftModifier)) {
         if (dragging_) { dragging_ = false; ignoreLeftUntilRelease_ = true; }
@@ -824,6 +861,13 @@ void Viewport::mouseMoveEvent(QMouseEvent *event) {
     viewCube_->setCamera(camera_); update(); emit cameraChanged();
 }
 void Viewport::mouseReleaseEvent(QMouseEvent *event) {
+    if (selecting_ && event->button()==Qt::LeftButton) {
+        selecting_ = false; stroke_.lineTo(event->position());
+        QPainterPath region = selectTool_==SelectTool::Lasso ? stroke_ : brushRegion(stroke_,brushRadius_);
+        if (selectTool_==SelectTool::Lasso) region.closeSubpath();
+        auto records = recordsInside(region); stroke_ = QPainterPath(); update();
+        emit selectionStroke(std::move(records),strokeMode_); event->accept(); return;
+    }
     if (event->button()==Qt::LeftButton) {
         if (dragging_) updateManipulation(event->position());
         dragging_ = false; ignoreLeftUntilRelease_ = false; hoverHandle_ = pickHandle(event->position()); update();
@@ -839,6 +883,41 @@ void Viewport::mouseDoubleClickEvent(QMouseEvent *event) {
     }
     QOpenGLWidget::mouseDoubleClickEvent(event);
 }
+QImage Viewport::cleanImage(int side) {
+    cleanCapture_ = true; QImage image = grabFramebuffer(); cleanCapture_ = false; update();
+    if (image.isNull()) return image;
+    const int square = std::min(image.width(),image.height());
+    image = image.copy((image.width()-square)/2,(image.height()-square)/2,square,square).convertToFormat(QImage::Format_RGB32);
+    return image.scaled(side,side,Qt::IgnoreAspectRatio,Qt::SmoothTransformation);
+}
+void Viewport::setSelectTool(SelectTool tool, float radius) {
+    if (tool!=SelectTool::None) { setTransformMode(TransformMode::None); setMouseTracking(true); }
+    if (selectTool_==tool && brushRadius_==radius) return;
+    selectTool_ = tool; brushRadius_ = std::max(1.f,radius); selecting_ = false; stroke_ = QPainterPath(); update();
+}
+QPainterPath Viewport::brushRegion(const QPainterPath &path, float radius) {
+    QPainterPathStroker stroker; stroker.setWidth(2*radius); stroker.setCapStyle(Qt::RoundCap); stroker.setJoinStyle(Qt::RoundJoin);
+    QPainterPath region = stroker.createStroke(path); region.addEllipse(path.pointAtPercent(0),radius,radius);
+    region.setFillRule(Qt::WindingFill); return region.simplified();
+}
+std::vector<uint32_t> Viewport::recordsInside(const QPainterPath &region) const {
+    std::vector<uint32_t> records; if (!frame_ || region.isEmpty()) return records;
+    const auto model = transform_.matrix(), viewProjection = projectionMatrix()*viewMatrix();
+    auto stack = modifiers_; if (!modifierStack_) { Modifier m; m.crop = crop_; stack = {m}; }
+    const CompiledModifiers modifiers(stack);
+    const bool masked = !modifiers.isolations.isEmpty() || !modifiers.prunes.isEmpty() || !modifiers.erased.empty();
+    const QRectF bounds = region.boundingRect();
+    for (const auto &point : frame_->points) {
+        if (masked && point.modifierVisibility<.5f) continue;
+        const QVector3D p = model.map({point.position[0],point.position[1],point.position[2]});
+        if (!(cropEditing_ || modifiers.keepsPosition(p)) || modifiers.removesColour({point.color[0],point.color[1],point.color[2]})) continue;
+        const QVector4D clip = viewProjection*QVector4D(p,1); if (clip.w()<=1e-5f || clip.z()<-clip.w() || clip.z()>clip.w()) continue;
+        const QPointF screen((clip.x()/clip.w()+1)*width()*0.5,(1-clip.y()/clip.w())*height()*0.5);
+        if (bounds.contains(screen) && region.contains(screen)) records.push_back(uint32_t(point.id));
+    }
+    std::sort(records.begin(),records.end()); records.erase(std::unique(records.begin(),records.end()),records.end());
+    return records;
+}
 void Viewport::focusOn(const QVector3D &point) {
     if (!std::isfinite(point.x()) || !std::isfinite(point.y()) || !std::isfinite(point.z())) return;
     focusFrom_ = camera_.target; focusTo_ = point; focusClock_.start(); focusTimer_.start();
@@ -848,7 +927,7 @@ bool Viewport::pickPoint(const QPointF &screen, QVector3D *world) const {
     const auto model = transform_.matrix(), view = viewMatrix(), viewProjection = projectionMatrix()*view;
     auto stack = modifiers_; if (!modifierStack_) { Modifier m; m.crop = crop_; stack = {m}; }
     const CompiledModifiers modifiers(stack);
-    const bool masked = !modifiers.isolations.isEmpty() || !modifiers.prunes.isEmpty();
+    const bool masked = !modifiers.isolations.isEmpty() || !modifiers.prunes.isEmpty() || !modifiers.erased.empty();
     const float modelScale = std::cbrt(std::abs(model.determinant()));
     const bool orthographic = camera_.orthographic && camera_.preset!=ViewPreset::Free;
     const float tangent = std::tan(qDegreesToRadians(22.5f)), pixelsAtUnitDepth = height()*0.5f/tangent;
@@ -883,7 +962,12 @@ bool Viewport::pickPoint(const QPointF &screen, QVector3D *world) const {
     const float z0 = -view.map(origin).z(), z1 = -view.map(origin+direction).z(); if (std::abs(z1-z0)<1e-9f) return false;
     *world = origin + direction*((picked-z0)/(z1-z0)); return true;
 }
+void Viewport::keyReleaseEvent(QKeyEvent *event) {
+    if (selectTool_!=SelectTool::None && event->key()==Qt::Key_Alt) update();
+    QOpenGLWidget::keyReleaseEvent(event);
+}
 void Viewport::keyPressEvent(QKeyEvent *event) {
+    if (selectTool_!=SelectTool::None && event->key()==Qt::Key_Alt) update();
     if (handleViewKey(event->key(),event->modifiers())) { event->accept(); return; }
     if (event->key()==Qt::Key_Escape) { setTransformMode(TransformMode::None); event->accept(); return; }
     if (!event->modifiers()) {
