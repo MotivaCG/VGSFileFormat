@@ -286,6 +286,10 @@ struct EncodeOptions {
   Compression compression = Compression::Auto;
   mgs::EntropySearch entropySearch = mgs::EntropySearch::Standard;
   bool splitTemporalShPages = false;
+  // Store each group's splats along a Morton curve inside their rank runs, which the
+  // plain model then codes as small steps (about 2% smaller). Readers see the same
+  // splats in another order.
+  bool spatialOrder = true;
 };
 using Progress = std::function<bool(int done, int total)>;
 

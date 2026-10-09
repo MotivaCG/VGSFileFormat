@@ -23,6 +23,7 @@ int usage() {
                "  --page-rows <n>        target rows per page (1024..1048576, default 65536)\n"
                "  --start-tick <n>       where the capture starts on an external timeline\n"
                "  --playback <mode>      how players run it: once, loop or pingpong (default loop)\n"
+               "  --no-spatial-order     keep the source's splat order (about 2%% larger)\n"
                "\n"
                "  --id <s>               catalogue identifier   (default: input name)\n"
                "  --title <s>            title                  (default: input name)\n"
@@ -116,6 +117,8 @@ int main(int argc, char **argv) {
       encoder.setEntropySearch(true);
     else if (flag == "--split-temporal-sh")
       encoder.setTemporalShPageSplit(true);
+    else if (flag == "--no-spatial-order")
+      encoder.setSpatialOrder(false);
     else if (flag == "--quiet")
       quiet = true;
     else if (flag == "--sh") {

@@ -14,6 +14,9 @@ struct ExportTask {
 // Paths are kept absolute and also relative to the task, so a folder of tasks moved together
 // with its captures and outputs still runs: whichever of the two exists is used.
 bool writeExportTask(const ExportTask &task, QString *error);
+// Where the task for an output is written: beside it, named after the whole file name with
+// its extension, so result.vgs and result.pgs get tasks of their own.
+QString exportTaskPath(const QString &output);
 bool readExportTask(const QString &path, ExportTask *task, QString *error);
 // The frames a project's Start/End range exports at a frame rate, as the export counts them.
 int exportFrameCount(const Project &project, double frameRate);

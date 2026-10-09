@@ -1288,7 +1288,7 @@ void MainWindow::exportTask() {
     if (destination.isEmpty()) return;
     if (QFileInfo(destination).suffix().isEmpty()) destination+=selectedFilter.contains("*.mint") ? ".mint" : selectedFilter.contains("*.pgs") ? ".pgs" : ".vgs";
     ExportTask task;task.output=QFileInfo(destination).absoluteFilePath();task.project=project_;
-    task.path=QFileInfo(destination).absolutePath()+"/"+QFileInfo(destination).completeBaseName()+".vgstask";
+    task.path=exportTaskPath(destination);
     task.frames=exportFrameCount(project_,info_.fps);
     const QString problem=checkExportTask(task);
     if (!problem.isEmpty()) {showError(problem);return;}

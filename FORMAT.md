@@ -63,13 +63,18 @@ its interval count, and written as the exact fraction that gives it back (1/30, 
 1001/30000). Every chunk must agree on it. Chunks have 1..255 intervals, one dictionary
 group followed by splat groups. Unknown nonzero header fields,
 nonempty auxiliary top-level records, unknown blocks, missing supported attributes and
-unsupported sampling/SH layouts fail explicitly. The source order and rank grouping are
-retained. Bounds are measured, not copied: the encoder decodes each chunk it has just written and takes the extent of its live splats over the chunk's own sample grid, which is exact because positions move linearly between samples; a moving capture's box is widened for its motion as Motion samples describes.
+unsupported sampling/SH layouts fail explicitly. The rank grouping is retained; inside
+each run of equal position and rotation rank the encoder stores splats along a Morton
+curve through their quantised positions (base position, or first sample), permuting
+every per-splat array together, so the plain model's row-to-row steps are small (about
+2% smaller files). Readers must not rely on splat order: it is any order the rank
+boundaries allow, and the same splat may sit at a different index in another chunk.
+`--no-spatial-order` keeps the source order. Bounds are measured, not copied: the encoder decodes each chunk it has just written and takes the extent of its live splats over the chunk's own sample grid, which is exact because positions move linearly between samples; a moving capture's box is widened for its motion as Motion samples describes.
 Positions are in source local space; rotations use the conventions below. A capture with
 motion samples moves as a whole on top of that, and its bounds are where it is after the
 motion; see Motion samples.
 
-Spatial page bounds/culling, Morton reorder, local dictionary dependencies, temporal
+Spatial page bounds/culling, local dictionary dependencies, temporal
 rotation checkpoints, lower SH degrees and GPU motion evaluation remain roadmap work.
 Pages are numerical work units, not spatial tiles. Each splat group depends on the
 chunk's shared dictionaries; no chunk depends on another chunk. The temporal SH entry

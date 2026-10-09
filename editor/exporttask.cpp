@@ -27,6 +27,9 @@ QString resolved(const QString &task,const QString &absolute,const QString &rela
 }
 } // namespace
 
+QString exportTaskPath(const QString &output) {
+    const QFileInfo info(output);return info.absolutePath()+"/"+info.fileName()+".vgstask";
+}
 int exportFrameCount(const Project &project,double frameRate) {
     if (!(frameRate>0)) return 0;
     return std::max(1,int(std::lround(project.out*frameRate))-int(std::lround(project.in*frameRate))+1);

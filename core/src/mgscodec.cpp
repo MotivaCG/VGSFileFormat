@@ -12,7 +12,7 @@ namespace mgs {
 namespace {
 
 const uint32_t kMagic = 0x3153474D;  // "MGS1"
-const uint32_t kVersion = 4;
+const uint32_t kVersion = 5;
 const uint32_t kRansL = 1u << 23;
 const uint64_t kMaxTableEntries = 1u << 24;
 
@@ -831,7 +831,7 @@ Meta parseMint(const uint8_t* data, size_t size)
 
 enum Kind { KF16, KU8, KPacked, KPlanes, KRotTerms, KPosTerms };
 enum Family { FPlain, FTime, FEntry, FChannels, FRuns, FLifetimes, FQuatBase, FQuatTime, FTerms, FPosTerms };
-const int kModelCount[] = {1, 2, 2, 2, 2, 2, 2, 2, 2, 4};
+const int kModelCount[] = {2, 2, 2, 2, 2, 2, 2, 2, 2, 4};
 
 const std::vector<int> kPos64 = {1, 21, 21, 21};
 const std::vector<int> kRq64 = {12, 12, 12, 12, 12, 4};
@@ -1384,6 +1384,17 @@ void encodeModel(Writer& w, const Item& it, int model, const std::vector<Col>& c
         return;
     }
     switch (it.family) {
+    case FPlain:
+        // Each row as its step from the one before, the first from zero: pays off when
+        // neighbouring rows hold neighbouring values, as splats in spatial order do. One
+        // stream without context, so decoding is order-0 plus a running sum.
+        for (const Col& c : cols) {
+            Col d(c.size());
+            for (size_t i = 0; i < c.size(); ++i)
+                d[i] = int32_t(zig(c[i] - (i ? c[i - 1] : 0)));
+            encodeWide(w, d);
+        }
+        return;
     case FTime:
         for (const Col& c : cols)
             encodeTime(w, c, it.S);
@@ -1504,6 +1515,17 @@ void decodeModel(Reader& r, const Item& it, int model, const Sink& emit)
         return;
     }
     switch (it.family) {
+    case FPlain: {
+        int32_t* buf = ints(SBuf, rows);
+        for (size_t k = 0; k < C; ++k) {
+            decodeWide(r, buf, rows);
+            int32_t previous = 0;
+            for (size_t i = 0; i < rows; ++i)
+                buf[i] = previous = previous + unzig(uint32_t(buf[i]));
+            emit(k, buf);
+        }
+        return;
+    }
     case FTime: {
         int32_t* buf = ints(SBuf, rows);
         uint8_t* ctx = bytes(BCtx, rows);

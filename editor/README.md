@@ -277,7 +277,8 @@ splat rendering are future work.
 ## Export tasks
 
 **Export > Export task…** asks for an output exactly as Export capture does (`.vgs`, `.pgs`
-or `.mint`), but writes a `.vgstask` beside it instead of exporting: a copy of the project as
+or `.mint`), but writes a `.vgstask` beside it instead of exporting (`result.vgs` gets
+`result.vgs.vgstask`, so the same project queued to `.vgs` and `.pgs` keeps both): a copy of the project as
 it is at that moment (capture, transform, modifiers, export settings and metadata), the
 output, and how many frames it exports. Later edits to the project do not change the task.
 Paths are stored absolute and relative to the task, so a folder of tasks moved together with

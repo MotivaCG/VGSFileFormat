@@ -46,6 +46,10 @@ VGS_ENCODER_API void vgs_encoder_set_temporal_sh_page_split(vgs_encoder *handle,
   self(handle)->encoder.setTemporalShPageSplit(enabled != 0);
 }
 
+VGS_ENCODER_API void vgs_encoder_set_spatial_order(vgs_encoder *handle, int enabled) {
+  self(handle)->encoder.setSpatialOrder(enabled != 0);
+}
+
 VGS_ENCODER_API vgs_encoder *vgs_encoder_create(void) {
   return reinterpret_cast<vgs_encoder *>(new (std::nothrow) Wrapper);
 }

@@ -149,6 +149,7 @@ void Encoder::setRenderHints(uint32_t hints) { state->options.renderHints = hint
 void Encoder::setPageRows(uint32_t rows) { state->options.pageRows = rows; }
 
 void Encoder::setTemporalShPageSplit(bool enabled) { state->options.splitTemporalShPages = enabled; }
+void Encoder::setSpatialOrder(bool enabled) { state->options.spatialOrder = enabled; }
 
 void Encoder::setId(std::string v) { state->options.metadata.id = std::move(v); }
 void Encoder::setTitle(std::string v) { state->options.metadata.title = std::move(v); }

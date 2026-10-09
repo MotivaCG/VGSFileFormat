@@ -1,4 +1,5 @@
 #include "exportcapture.h"
+#include "vgsframe.h"
 #include "exporttask.h"
 #include <QDir>
 #include "vgssign.h"
@@ -100,6 +101,27 @@ Eigen::Matrix<double,16,1> basis(const Eigen::Vector3d &d) {
         -.4570457994644658*x*(4*z*z-x*x-y*y),1.445305721320277*z*(x*x-y*y),
         -.5900435899266435*x*(x*x-3*y*y);return b;
 }
+// The encoder stores splats in spatial order, so an exported capture holds the frame's
+// splats in another order: this puts them back in the order of `expected`, pairing each
+// expected splat with the closest unused one by position, colour, opacity and life.
+vgs::Frame matchedTo(const vgs::Frame &actual,const vgs::Frame &expected) {
+    vgs::Frame out=actual;std::vector<bool> used(actual.count,false);
+    const size_t sh=size_t(actual.shCoefficients)*3;
+    auto move=[](auto &to,const auto &from,size_t width,size_t at,size_t row) {if (!from.empty()) std::copy_n(from.begin()+row*width,width,to.begin()+at*width);};
+    for (size_t at=0;at<std::min(actual.count,expected.count);++at) {
+        size_t best=0;double closest=1e300;
+        for (size_t i=0;i<actual.count;++i) if (!used[i]) {
+            double d=0;for (int c=0;c<3;++c) d+=std::abs(actual.position[i*3+c]-expected.position[at*3+c])+std::abs(actual.colorDc[i*3+c]-expected.colorDc[at*3+c]);
+            if (!actual.opacity.empty() && !expected.opacity.empty()) d+=std::abs(actual.opacity[i]-expected.opacity[at]);
+            if (!actual.active.empty() && !expected.active.empty()) d+=actual.active[i]!=expected.active[at];
+            if (d<closest) {closest=d;best=i;}
+        }
+        used[best]=true;
+        move(out.position,actual.position,3,at,best);move(out.rotation,actual.rotation,4,at,best);move(out.scale,actual.scale,3,at,best);
+        move(out.opacity,actual.opacity,1,at,best);move(out.colorDc,actual.colorDc,3,at,best);move(out.active,actual.active,1,at,best);move(out.shRest,actual.shRest,sh,at,best);
+    }
+    return out;
+}
 double colour(const vgs::Frame &f,const Eigen::Vector3d &direction,int c) {
     auto b=basis(direction);double out=f.colorDc[c];for (int i=0;i<f.shCoefficients;++i) out+=b[i+1]*f.shRest[3*i+c];return out;
 }
@@ -123,7 +145,7 @@ private slots:
             for (int sample=0;sample<3;++sample) {
                 const auto input=copy(original.setTime((sample+2)/25.,true));const auto expected=bakeExportFrame(input,project,3,{},25);vgs::Frame actual;
                 if (capture) actual=copy(capture->setTime((sample+.25)/25.,true));else {MintFrame frame;QVERIFY(mint.decode((sample+.25)/25.,&frame,true,&error));actual.count=frame.count;actual.position={frame.position.begin(),frame.position.end()};actual.rotation={frame.rotation.begin(),frame.rotation.end()};actual.scale={frame.scale.begin(),frame.scale.end()};actual.colorDc={frame.colorDc.begin(),frame.colorDc.end()};actual.shRest={frame.shRest.begin(),frame.shRest.end()};actual.shCoefficients=15;}
-                QCOMPARE(actual.count,expected.count);for (size_t row=0;row<actual.count;++row) {
+                QCOMPARE(actual.count,expected.count);actual=matchedTo(actual,expected);for (size_t row=0;row<actual.count;++row) {
                     for (int c=0;c<3;++c) QVERIFY(std::abs(actual.position[row*3+c]-expected.position[row*3+c])<1e-4f);
                     QVERIFY((covariance(actual.rotation.data()+row*4,actual.scale.data()+row*3)-covariance(expected.rotation.data()+row*4,expected.scale.data()+row*3)).norm()<.002);
                     for (int c=0;c<3;++c) QVERIFY(std::abs(actual.colorDc[row*3+c]-expected.colorDc[row*3+c])<.003);
@@ -160,7 +182,7 @@ private slots:
         auto compare=[&](vgsdec::Capture &capture,const Project &reference,double tolerance) {
             for (int sample=0;sample<3;++sample) {
                 const auto input=copy(original.setTime((sample+2)/25.,true));const auto expected=bakeExportFrame(input,reference,3,{},25);
-                const auto actual=copy(capture.setTime(sample/25.,true));QCOMPARE(actual.count,expected.count);
+                const auto actual=matchedTo(copy(capture.setTime(sample/25.,true)),expected);QCOMPARE(actual.count,expected.count);
                 for (size_t row=0;row<actual.count;++row) {
                     for (int c=0;c<3;++c) QVERIFY2(std::abs(actual.position[row*3+c]-expected.position[row*3+c])<tolerance,qPrintable(QString("sample %1 row %2").arg(sample).arg(row)));
                     QVERIFY((covariance(actual.rotation.data()+row*4,actual.scale.data()+row*3)-covariance(expected.rotation.data()+row*4,expected.scale.data()+row*3)).norm()<.002);
@@ -191,7 +213,7 @@ private slots:
         const auto twice=dir.filePath("twice.vgs");exportCaptureFile(again,twice);
         auto first=vgsdec::Capture::openFile(again.asset.toStdString()),second=vgsdec::Capture::openFile(twice.toStdString());QVERIFY(second.hasMotion());
         for (int sample=0;sample<3;++sample) {
-            const auto a=copy(first.setTime(sample/25.,true)),b=copy(second.setTime(sample/25.,true));QCOMPARE(b.count,a.count);
+            const auto a=copy(first.setTime(sample/25.,true)),b=matchedTo(copy(second.setTime(sample/25.,true)),a);QCOMPARE(b.count,a.count);
             for (size_t row=0;row<a.count;++row) for (int c=0;c<3;++c) QVERIFY(std::abs(b.position[row*3+c]-(a.position[row*3+c]+(c==1 ? .5f : 0.f)))<1e-4f);
         }
         // MINT has nowhere to put motion: refused, and the destination is left alone.
@@ -266,6 +288,8 @@ private slots:
         QTemporaryDir root;const QString first=root.filePath("first");QVERIFY(QDir().mkpath(first+"/out"));
         sourceFile(first+"/source.pgs",3);
         Project project;project.asset=first+"/source.pgs";project.in=0;project.out=2.0/25;project.transform.position={.5f,0,0};
+        // The same output name with another extension gets a task of its own.
+        QCOMPARE(exportTaskPath(first+"/out/result.vgs"),first+"/out/result.vgs.vgstask");QVERIFY(exportTaskPath(first+"/out/result.pgs")!=exportTaskPath(first+"/out/result.vgs"));
         ExportTask task;task.project=project;task.output=first+"/out/result.vgs";task.path=first+"/out/result.vgstask";task.frames=exportFrameCount(project,25);
         QCOMPARE(task.frames,3);QString error;QVERIFY2(writeExportTask(task,&error),qPrintable(error));
         // The project is a copy: editing it afterwards does not change the task.

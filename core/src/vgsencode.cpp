@@ -645,6 +645,140 @@ std::vector<InputPage> pages(const SourceChunk &c, const uint8_t *mint,
   }
   return out;
 }
+// Splats in a group may be stored in any order that keeps them sorted by position rank
+// and by rotation rank: those are runs, described by the rank boundaries. Inside the
+// runs this puts them along a Morton curve through their quantised positions, so that
+// neighbours in an array are neighbours in space and the plain model that codes each
+// row from the one before finds small steps. A reader sees the same splats in another
+// order, which nothing depends on: a renderer sorts them by depth anyway. A group
+// holding an attribute this does not know how to permute is left as it is.
+SourceChunk spatialOrder(const SourceChunk &c, const uint8_t *mint) {
+  SourceChunk out = c;
+  const uint64_t samples = uint64_t(c.entry.intervals) + 1;
+  for (uint32_t gi = 0; gi < c.groups.size(); ++gi) {
+    const Group &g = c.groups[gi];
+    const uint64_t n = g.splats;
+    if (g.type != 1 || n < 2)
+      continue;
+    std::vector<SourceArray *> arrays;
+    for (auto &a : out.arrays)
+      if (a.group == gi)
+        arrays.push_back(&a);
+    auto bytesOf = [&](const SourceArray &a) {
+      return a.data.empty() ? mint + a.offset : a.data.data();
+    };
+    auto find = [&](uint32_t id) -> const SourceArray * {
+      for (const auto *a : arrays)
+        if (a->attribute == id)
+          return a;
+      return nullptr;
+    };
+    bool known = true;
+    for (const auto *a : arrays)
+      switch (a->attribute) {
+      case ScaleIndices: case PositionSamples: case ShStaticIndices: case ShTemporalIndices:
+      case Lifetimes: case RotationSamples: case Sh0Terms: case Sh0Base: case OpacityTerms:
+      case RotationBase: case RotationTerms: case RotationRanks: case PositionBase:
+      case PositionTerms: case PositionRanks: case OpacityScales:
+        break;
+      default:
+        known = false;
+      }
+    // Where a splat is: its base position, or its first sample, both three 21-bit
+    // fields above a flag bit in one u64.
+    const SourceArray *where = find(PositionBase);
+    uint64_t whereStride = 8;
+    if (!where) {
+      where = find(PositionSamples);
+      whereStride = samples * 8;
+    }
+    if (!known || !where || where->size != n * whereStride)
+      continue;
+    // The run a splat is in: the first boundary past it, for positions and rotations.
+    auto runs = [&](uint32_t id, int count) {
+      std::vector<uint8_t> run(size_t(n), 0);
+      const SourceArray *a = find(id);
+      if (!a)
+        return run;
+      if (a->size < uint64_t(count) * 4)
+        throw Error("truncated rank boundaries");
+      const uint8_t *b = bytesOf(*a);
+      uint64_t begin = 0;
+      for (int k = 0; k < count; ++k) {
+        uint32_t end;
+        std::memcpy(&end, b + k * 4, 4);
+        for (uint64_t i = begin; i < std::min<uint64_t>(end, n); ++i)
+          run[size_t(i)] = uint8_t(k);
+        begin = std::max<uint64_t>(begin, end);
+      }
+      return run;
+    };
+    const auto positionRun = runs(PositionRanks, 4), rotationRun = runs(RotationRanks, 5);
+    std::vector<uint64_t> key(static_cast<size_t>(n));
+    const uint8_t *w = bytesOf(*where);
+    for (uint64_t i = 0; i < n; ++i) {
+      uint64_t word;
+      std::memcpy(&word, w + i * whereStride, 8);
+      uint64_t code = 0;
+      for (int bit = 20; bit >= 0; --bit)
+        for (int shift : {1, 22, 43})
+          code = code << 1 | ((word >> (shift + bit)) & 1);
+      key[size_t(i)] = code;
+    }
+    std::vector<uint32_t> order(static_cast<size_t>(n));
+    for (uint32_t i = 0; i < n; ++i)
+      order[i] = i;
+    std::stable_sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) {
+      if (positionRun[a] != positionRun[b]) return positionRun[a] < positionRun[b];
+      if (rotationRun[a] != rotationRun[b]) return rotationRun[a] < rotationRun[b];
+      return key[a] < key[b];
+    });
+    for (auto *a : arrays) {
+      if (a->attribute == PositionRanks || a->attribute == RotationRanks)
+        continue;
+      const uint8_t *from = bytesOf(*a);
+      Bytes to(size_t(a->size));
+      if (a->attribute == PositionTerms || a->attribute == RotationTerms) {
+        // Variable rows: each splat's terms move as a block, and its rank with them.
+        const auto &ranks = a->spec.ranks;
+        const size_t width = a->attribute == PositionTerms ? 4 : 2;
+        if (ranks.size() != n)
+          throw Error("terms do not match the group");
+        std::vector<uint64_t> start(size_t(n) + 1, 0);
+        for (size_t i = 0; i < n; ++i)
+          start[i + 1] = start[i] + ranks[i];
+        if (start[size_t(n)] * width != a->size)
+          throw Error("terms do not match the group");
+        std::vector<uint8_t> moved;
+        moved.reserve(size_t(n));
+        size_t at = 0;
+        for (uint32_t i : order) {
+          const size_t bytes = size_t(ranks[i]) * width;
+          std::memcpy(to.data() + at, from + start[i] * width, bytes);
+          at += bytes;
+          moved.push_back(ranks[i]);
+        }
+        a->spec.ranks = std::move(moved);
+      } else if (a->spec.kind == 3) {
+        // Plane-major: every plane is its own run of one word per splat.
+        if (a->size % (n * 4))
+          throw Error("SH indices do not match the group");
+        const uint64_t planes = a->size / (n * 4);
+        for (uint64_t plane = 0; plane < planes; ++plane)
+          for (uint64_t r = 0; r < n; ++r)
+            std::memcpy(to.data() + (plane * n + r) * 4, from + (plane * n + order[size_t(r)]) * 4, 4);
+      } else {
+        if (a->size % n)
+          throw Error("attribute does not match the group");
+        const uint64_t row = a->size / n;
+        for (uint64_t r = 0; r < n; ++r)
+          std::memcpy(to.data() + r * row, from + order[size_t(r)] * row, size_t(row));
+      }
+      a->data = std::move(to);
+    }
+  }
+  return out;
+}
 } // namespace
 // measured by decoding the chunk that was just written. Only the base layer is
 // decoded and spherical harmonics are skipped: this needs positions, nothing else.
@@ -753,10 +887,13 @@ static Bytes encodeSource(Source src, const uint8_t *mint, const EncodeOptions &
       throw Error("cancelled");
   };
   report(0);
-  SourceChunk provided;
+  SourceChunk provided, ordered;
   auto getChunk = [&](size_t index) -> const SourceChunk & {
-    if (!src.provider) return src.chunks[index];
-    provided = src.provider(index); return provided;
+    const SourceChunk &c = src.provider ? (provided = src.provider(index)) : src.chunks[index];
+    if (!options.spatialOrder)
+      return c;
+    ordered = spatialOrder(c, mint);
+    return ordered;
   };
   // First pass measures complete candidate cost over every page in the file.
   struct Costs {
@@ -1121,9 +1258,6 @@ void verifyMint(const uint8_t *coded, size_t size, const uint8_t *mint,
     const bool splitTemporalSh = std::any_of(d.pages.begin(), d.pages.end(), [](const Page& p) {
       return p.spec.family == 2 && p.spec.rows != p.totalRows;
     });
-    auto expected = pages(src.chunks[ci], mint, h.pageRows, splitTemporalSh);
-    if (d.pages.size() != expected.size())
-      throw Error("VGS page count mismatch");
     W ga, gb;
     for (const auto &g : d.groups)
       writeGroup(ga, g);
@@ -1131,21 +1265,37 @@ void verifyMint(const uint8_t *coded, size_t size, const uint8_t *mint,
       writeGroup(gb, g);
     if (ga.b != gb.b)
       throw Error("VGS group metadata mismatch");
+    // The encoder stores splats in spatial order unless told not to; either is the
+    // source, so the chunk has to match one of them exactly.
+    std::vector<Page> decoded;
+    std::vector<Bytes> logical;
     for (const auto &p : d.pages) {
-      auto it = std::find_if(
-          expected.begin(), expected.end(), [&](const InputPage &q) {
-            return q.page.attribute == p.attribute && q.page.group == p.group &&
-                   q.page.firstRow == p.firstRow;
-          });
-      if (it == expected.end())
-        throw Error("VGS unexpected page");
-      W sa, sb;
-      writeSpec(sa, p.spec);
-      writeSpec(sb, it->page.spec);
-      if (sa.b != sb.b || decodePage(h, p, coded + e.offset + p.offset,
-                                     size_t(p.size)) != it->data)
-        throw Error("VGS logical attribute mismatch");
+      decoded.push_back(p);
+      logical.push_back(decodePage(h, p, coded + e.offset + p.offset, size_t(p.size)));
     }
+    auto matches = [&](const SourceChunk &source) {
+      auto expected = pages(source, mint, h.pageRows, splitTemporalSh);
+      if (d.pages.size() != expected.size())
+        throw Error("VGS page count mismatch");
+      for (size_t pi = 0; pi < decoded.size(); ++pi) {
+        const auto &p = decoded[pi];
+        auto it = std::find_if(
+            expected.begin(), expected.end(), [&](const InputPage &q) {
+              return q.page.attribute == p.attribute && q.page.group == p.group &&
+                     q.page.firstRow == p.firstRow;
+            });
+        if (it == expected.end())
+          throw Error("VGS unexpected page");
+        W sa, sb;
+        writeSpec(sa, p.spec);
+        writeSpec(sb, it->page.spec);
+        if (sa.b != sb.b || logical[pi] != it->data)
+          return false;
+      }
+      return true;
+    };
+    if (!matches(spatialOrder(src.chunks[ci], mint)) && !matches(src.chunks[ci]))
+      throw Error("VGS logical attribute mismatch");
   }
 }
 } // namespace vgs

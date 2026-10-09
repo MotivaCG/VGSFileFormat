@@ -271,6 +271,10 @@ per page, and temporal SH splitting disabled. The source's SH degree is preserve
 by default (`--sh 3`). The temporal decoder loop optimization is always active in
 the updated decoder and also applies to existing captures; it needs no encoder flag.
 
+The encoder stores each group's splats in spatial (Morton) order inside their rank runs,
+which makes captures about 2% smaller at no measurable decode cost; `--no-spatial-order`,
+`setSpatialOrder(false)` or `vgs_encoder_set_spatial_order(e, 0)` keeps the source order.
+
 Two experimental opt-in encoder settings preserve decoded attributes and the existing stream syntax:
 `--entropy-search` compares more rANS precisions, bit splits and table representations;
 `--split-temporal-sh` divides the temporal SH dictionary into complete sample blocks

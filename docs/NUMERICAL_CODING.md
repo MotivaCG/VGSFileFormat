@@ -178,7 +178,7 @@ order-0", so it always applies.
 
 | Family | Models |
 |---|---|
-| plain | 0 order-0 |
+| plain | 0 order-0, 1 step from the previous row |
 | time | 0 order-0, 1 temporal delta |
 | entry | 0 order-0, 1 delta against the same entry one sample back |
 | channels | 0 order-0, 1 channel given the previous channel |
@@ -188,6 +188,11 @@ order-0", so it always applies.
 | quatTime | 0 order-0, 1 quaternion samples over time |
 | terms | 0 order-0, 1 first term plus gaps |
 | posTerms | `2·weights + indices`: indices 0 order-0 / 1 first plus gaps; weights 0 order-0 / 1 given the term slot |
+
+- plain model 1: row `i` is stored as `zigzag(v[i] - v[i-1])`, row 0 as `zigzag(v[0])`,
+  in one stream without context; decoding is order-0 followed by a running sum. It is
+  for rows whose neighbours hold neighbouring values, such as splats stored in spatial
+  order (`position_base`: 0.43 → 0.33 MB per 65536 rows, decode 0.7 → 1.1 ms).
 
 ### 7.1 Temporal models
 
@@ -344,6 +349,7 @@ misreading it. Every change so far was a re-encode of the same captures.
 | 2 | Chunk table inside each payload, so a reader never parses `.mint`. |
 | 3 | Absolute values and deltas in separate streams (7.1). |
 | 4 | Four interleaved rANS states; decoder no longer zero-fills its output. |
+| 5 | Plain family gains model 1, step from the previous row (7). |
 
 ## 11. Verifying a change
 

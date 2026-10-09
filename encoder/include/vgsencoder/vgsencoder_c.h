@@ -97,6 +97,8 @@ VGS_ENCODER_API void vgs_encoder_set_page_rows(vgs_encoder *, uint32_t rows);
 VGS_ENCODER_API void vgs_encoder_set_entropy_search(vgs_encoder *, int enabled);
   /** Experimental smaller SH tasks; decoder memory may grow. Default: disabled. */
 VGS_ENCODER_API void vgs_encoder_set_temporal_sh_page_split(vgs_encoder *, int enabled);
+/** Splats in spatial order inside each group: about 2% smaller. Default: enabled. */
+VGS_ENCODER_API void vgs_encoder_set_spatial_order(vgs_encoder *, int enabled);
 
 VGS_ENCODER_API void vgs_encoder_set_id(vgs_encoder *, const char *);
 VGS_ENCODER_API void vgs_encoder_set_title(vgs_encoder *, const char *);

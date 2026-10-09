@@ -113,6 +113,9 @@ public:
    *  Smaller tasks can improve scheduling but do not guarantee faster full decode
    *  or lower memory use. Off by default; decoded values and syntax are unchanged. */
   void setTemporalShPageSplit(bool enabled);
+  /** Store each group's splats in spatial (Morton) order, which makes the file about
+   *  2% smaller. On by default; readers get the same splats in another order. */
+  void setSpatialOrder(bool enabled);
 
   // ---- metadata ---------------------------------------------------------------
   //

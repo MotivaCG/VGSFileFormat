@@ -206,9 +206,7 @@ Header readHeader(const uint8_t *data, size_t size) {
     if (r.u32() || p.flags > OptionalAttribute ||
         (std::string(attributeName(p.attribute)) == "unknown" && !optional) ||
         !seen.insert(p.attribute).second || p.codec > Rans || p.family > 9 ||
-        p.model > (p.family == 9   ? 3u
-                   : p.family == 0 ? 0u
-                                   : 1u) ||
+        p.model > (p.family == 9 ? 3u : 1u) ||
         (p.codec == Raw && p.model))
       throw Error("invalid VGS policy");
     h.policies.push_back(p);
