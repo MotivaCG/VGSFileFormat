@@ -21,6 +21,7 @@
 #include <QLabel>
 #include <QMimeData>
 #include <QProgressBar>
+#include <QTimer>
 #include <QPushButton>
 #include <QSaveFile>
 #include <QSettings>
@@ -29,6 +30,11 @@
 #include <QVBoxLayout>
 
 namespace {
+// 0:42, 12:05, 1:03:20.
+QString duration(double seconds) {
+    const qint64 s=qMax<qint64>(0,qRound64(seconds)),h=s/3600,m=s/60%60,r=s%60;
+    return h ? QStringLiteral("%1:%2:%3").arg(h).arg(m,2,10,QChar('0')).arg(r,2,10,QChar('0')) : QStringLiteral("%1:%2").arg(m).arg(r,2,10,QChar('0'));
+}
 QString stateText(int state,const QString &message) {
     static const char *names[]={"Pending","Exporting","Done","Failed","Skipped","Canceled"};
     return message.isEmpty() ? QObject::tr(names[state]) : QObject::tr(names[state])+": "+message;
@@ -52,6 +58,7 @@ TaskQueueDialog::TaskQueueDialog(QWidget *parent) : QDialog(parent) {
     totalLabel_=new QLabel(tr("All tasks"));totalBar_=new QProgressBar;totalBar_->setObjectName("totalProgress");totalBar_->setRange(0,1000);totalBar_->setValue(0);totalBar_->setTextVisible(false);
     for (auto *label:{taskLabel_,totalLabel_}) label->setWordWrap(true);
     layout->addWidget(taskLabel_);layout->addWidget(taskBar_);layout->addWidget(totalLabel_);layout->addWidget(totalBar_);
+    tick_=new QTimer(this);tick_->setInterval(1000);connect(tick_,&QTimer::timeout,this,[this] {showProgress(lastPercent_,lastMessage_);});
     auto *buttons=new QHBoxLayout;
     start_=new QPushButton(tr("Start"));start_->setObjectName("startTasks");start_->setDefault(true);
     start_->setToolTip(tr("Export every pending task, one after another.\nExisting outputs are overwritten. A task that fails is reported and the queue goes on."));
@@ -123,7 +130,7 @@ void TaskQueueDialog::start() {
     }
     if (run_.isEmpty()) {refreshButtons();return;}
     awake_=std::make_unique<StayAwake>();runStarted_=QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss");
-    totalBar_->setValue(0);runNext();
+    totalBar_->setValue(0);runClock_.start();tick_->start();runNext();
 }
 
 void TaskQueueDialog::runNext() {
@@ -133,8 +140,8 @@ void TaskQueueDialog::runNext() {
         for (int i:run_) if (entries_[i].state==State::Pending) {entries_[i].state=State::Cancelled;refreshRow(i);}
         awake_.reset();writeLog();
         int done=0,failed=0,other=0;for (int i:run_) {const auto s=entries_[i].state;s==State::Done ? ++done : s==State::Failed ? ++failed : ++other;}
-        taskLabel_->setText(tr("Current task"));taskBar_->setValue(0);
-        totalLabel_->setText(tr("Finished: %1 done, %2 failed, %3 canceled or skipped.").arg(done).arg(failed).arg(other));
+        taskLabel_->setText(tr("Current task"));taskBar_->setValue(0);tick_->stop();
+        totalLabel_->setText(tr("Finished in %4: %1 done, %2 failed, %3 canceled or skipped.").arg(done).arg(failed).arg(other).arg(duration(runClock_.elapsed()/1000.0)));
         if (!stopAll_) totalBar_->setValue(totalBar_->maximum());
         refreshButtons();return;
     }
@@ -168,7 +175,7 @@ void TaskQueueDialog::finished(const QString &failure) {
 
 void TaskQueueDialog::showProgress(int percent,const QString &message) {
     if (current_<0) return;
-    const auto &e=entries_[current_];percent=std::clamp(percent,0,100);
+    const auto &e=entries_[current_];percent=std::clamp(percent,0,100);lastPercent_=percent;lastMessage_=message;
     taskBar_->setValue(percent);
     taskLabel_->setText(tr("%1 → %2%3").arg(QFileInfo(e.task.path).completeBaseName(),QFileInfo(e.task.output).fileName(),message.isEmpty() ? QString() : "\n"+message));
     // By frames when every task in the run says how many it exports, by task otherwise.
@@ -180,8 +187,13 @@ void TaskQueueDialog::showProgress(int percent,const QString &message) {
         else if (entries_[i].state!=State::Pending) done+=weight;
     }
     totalBar_->setValue(total>0 ? int(totalBar_->maximum()*done/total) : 0);
-    totalLabel_->setText(byFrames ? tr("Task %1 of %2 · %3 of %4 frames").arg(position).arg(run_.size()).arg(qRound(done)).arg(qRound(total))
-                                  : tr("Task %1 of %2").arg(position).arg(run_.size()));
+    // The time so far, and what is left at the pace so far: only once there is a pace to
+    // go by (a few seconds and a few percent in), as before that it would only jump about.
+    const double elapsed=runClock_.isValid() ? runClock_.elapsed()/1000.0 : 0,fraction=total>0 ? done/total : 0;
+    QString times=tr("%1 elapsed").arg(duration(elapsed));
+    times+=fraction>=0.02 && elapsed>=5 ? tr(" · about %1 left").arg(duration(elapsed*(1-fraction)/fraction)) : tr(" · estimating time left");
+    totalLabel_->setText((byFrames ? tr("Task %1 of %2 · %3 of %4 frames").arg(position).arg(run_.size()).arg(qRound(done)).arg(qRound(total))
+                                   : tr("Task %1 of %2").arg(position).arg(run_.size()))+" · "+times);
 }
 
 // One log per run, beside the first task: what each task did, and why when it did not.

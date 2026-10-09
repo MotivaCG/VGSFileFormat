@@ -11,6 +11,7 @@
 #pragma once
 #include "exporttask.h"
 #include <QDialog>
+#include <QElapsedTimer>
 #include <QStringList>
 #include <atomic>
 #include <memory>
@@ -20,10 +21,12 @@ class QProgressBar;
 class QPushButton;
 class QTreeWidget;
 class QThread;
+class QTimer;
 
 // Process tasks: a queue of .vgstask files run one after another. One bar follows the task
 // being exported, the other the whole queue - by frames when every task says how many it
-// exports, by task otherwise. A task that fails is reported and the queue goes on.
+// exports, by task otherwise - with the time the run has taken and an estimate of what is
+// left, from its pace so far. A task that fails is reported and the queue goes on.
 class TaskQueueDialog : public QDialog {
     Q_OBJECT
 public:
@@ -59,4 +62,8 @@ private:
     QString jobFailure_;
     std::unique_ptr<StayAwake> awake_;
     QString runStarted_;
+    QElapsedTimer runClock_;    // since the run started
+    QTimer *tick_;              // keeps the times moving between progress reports
+    int lastPercent_ = 0;
+    QString lastMessage_;
 };
