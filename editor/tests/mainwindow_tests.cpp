@@ -384,7 +384,7 @@ private slots:
             QTest::keyClick(viewport,Qt::Key_Escape);QVERIFY(!modeButton->isChecked());QVERIFY(!referenceSpace->isEnabled());
         }
         QVERIFY(!display->findChild<QCheckBox *>()); // the grid toggle lives in the View menu, not the view-cube panel
-        auto *grid=window.findChild<QAction *>("gridAndAxes");QVERIFY(grid);QVERIFY(grid->isCheckable());const bool gridBefore=grid->isChecked();
+        auto *grid=window.findChild<QAction *>("showGrid");QVERIFY(grid);QVERIFY(grid->isCheckable());const bool gridBefore=grid->isChecked();
         QTest::keyClick(viewport,Qt::Key_G);QCOMPARE(grid->isChecked(),gridBefore);QTest::keyClick(viewport,Qt::Key_Escape);
         QTest::keyClick(viewport,Qt::Key_G,Qt::ShiftModifier);QCOMPARE(grid->isChecked(),!gridBefore);QTest::keyClick(viewport,Qt::Key_G,Qt::ShiftModifier);QCOMPARE(grid->isChecked(),gridBefore);
         const auto moveBefore=viewport->coordinateSpace(TransformMode::Move),scaleBefore=viewport->coordinateSpace(TransformMode::Scale);

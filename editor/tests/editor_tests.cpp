@@ -125,17 +125,30 @@ private slots:
     }
     void audioModifierPersistsBesideTheProject() {
         // A file is kept relative to the project, so a folder moved whole still finds it; the
-        // capture's own track has no file. The last active Audio modifier decides.
+        // capture's own track has no file. Every active Audio modifier is mixed, each with its
+        // volume, looped or not.
         QTemporaryDir dir;Project project;project.modifiers.clear();project.asset=dir.filePath("source.vgs");
         Modifier own;own.id=Project::newId();own.name="Own";own.type=ModifierType::Audio;own.audioOffset=-.5;
-        Modifier file=own;file.id=Project::newId();file.name="Song";file.audioFile=dir.filePath("music/song.mp3");file.audioOffset=1.25;
-        project.modifiers={own,file};QCOMPARE(project.audioModifier()->name,QString("Song"));
-        project.modifiers[1].enabled=false;QCOMPARE(project.audioModifier()->name,QString("Own"));project.modifiers[1].enabled=true;
+        Modifier file=own;file.id=Project::newId();file.name="Song";file.audioFile=dir.filePath("music/song.mp3");file.audioOffset=1.25;file.audioVolume=.4;file.audioLoop=true;
+        project.modifiers={own,file};QCOMPARE(project.audioModifiers().size(),2);QCOMPARE(project.audioModifiers()[1]->name,QString("Song"));
+        project.modifiers[1].enabled=false;QCOMPARE(project.audioModifiers().size(),1);QCOMPARE(project.audioModifiers()[0]->name,QString("Own"));project.modifiers[1].enabled=true;
         const auto json=project.json(dir.filePath("scene.vgsproj"));
         QCOMPARE(json["modifiers"].toArray()[1].toObject()["audio"].toObject()["file"].toString(),QString("music/song.mp3"));
         Project restored;QString error;QVERIFY2(Project::fromJson(json,dir.path(),&restored,&error),qPrintable(error));
         QCOMPARE(restored.modifiers[0].audioFile,QString());QCOMPARE(restored.modifiers[0].audioOffset,-.5);
         QCOMPARE(QFileInfo(restored.modifiers[1].audioFile).absoluteFilePath(),QFileInfo(dir.filePath("music/song.mp3")).absoluteFilePath());QCOMPARE(restored.modifiers[1].audioOffset,1.25);
+        QCOMPARE(restored.modifiers[1].audioVolume,.4);QVERIFY(restored.modifiers[1].audioLoop);QCOMPARE(restored.modifiers[0].audioVolume,1.);QVERIFY(!restored.modifiers[0].audioLoop);
+    }
+    void removeGreenSeesTheColourOfItsPlaceInTheStack() {
+        // Top to bottom: a Remove green above Color tests the source's colour, despilled or
+        // not; one below it tests what Color leaves.
+        Modifier green;green.id=Project::newId();green.type=ModifierType::RemoveGreen;green.green.minimumSaturation=.3f;green.green.hueTolerance=45;green.green.linearRgb=false;
+        Modifier colour;colour.id=Project::newId();colour.type=ModifierType::Colour;colour.colourSaturation=0; // grey: nothing green is left
+        const QVector3D spill(.2f,.8f,.2f),despilled(.5f,.5f,.5f);
+        CompiledModifiers above(QVector<Modifier>{green,colour});QVERIFY(!above.greens[0].afterColour);
+        QVERIFY(above.removesColour(spill,despilled));QVERIFY(above.removesColour(spill));
+        CompiledModifiers below(QVector<Modifier>{colour,green});QVERIFY(below.greens[0].afterColour);QVERIFY(below.greensAfterColour());
+        QVERIFY(!below.removesColour(spill,despilled));QVERIFY(!below.removesColour(spill)); // saturation 0 greys it
     }
     void colourModifierIsOneMatrix() {
         Modifier m;m.type=ModifierType::Colour;
@@ -259,6 +272,20 @@ private slots:
         QVERIFY(!Project::fromJson(invalid,dir.path(),&restored,&error));
         for (int i=0;i<100;++i) {auto copy=right;copy.id=Project::newId();project.modifiers.append(copy);}
         QVERIFY(Project::fromJson(project.json(dir.filePath("many.vgsproj")),dir.path(),&restored,&error));QCOMPARE(restored.modifiers.size(),103);
+    }
+    void systemPresetsAreListedBesideTheUsers() {
+        // Presets beside the program are listed with the user's, marked as built in; one the
+        // user saves with the same name takes its place, and the built-in file is untouched.
+        QTemporaryDir directory;Project settings;QString path,error;
+        PresetStore shipped(directory.filePath("system"));QVERIFY2(shipped.save("Studio base",settings,&path,&error,PresetScope::Editor),qPrintable(error));
+        QVERIFY(QFile::rename(path,directory.filePath("system/Studio Base.preset")));
+        PresetStore store(directory.filePath("user"),directory.filePath("system"));
+        auto list=store.list();QCOMPARE(list.size(),1);QVERIFY(list[0].system);QCOMPARE(list[0].name,QString("Studio base"));
+        EditorPreset preset;QVERIFY2(store.read(list[0].path,PresetScope::Editor,&preset,&error),qPrintable(error));
+        QVERIFY2(store.save("Studio base",settings,&path,&error,PresetScope::Editor),qPrintable(error));
+        list=store.list();QCOMPARE(list.size(),1);QVERIFY(!list[0].system);QCOMPARE(list[0].path,path);
+        QVERIFY(QFileInfo::exists(directory.filePath("system/Studio Base.preset")));
+        QVERIFY(PresetStore(directory.filePath("user")).list().size()==1);
     }
     void reusablePresetStorage() {
         QTemporaryDir directory; PresetStore store(directory.filePath("presets")); Project settings;

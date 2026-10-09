@@ -9,6 +9,7 @@
 // Other uses require prior written authorisation, subject to mandatory law.
 
 #include "mainwindow.h"
+#include "licensemanagement.h"
 #include "displayscaling.h"
 #include "viewport.h"
 #include "viewcube.h"
@@ -40,6 +41,7 @@
 #include <QDir>
 #include <QDragEnterEvent>
 #include <QFileDialog>
+#include <set>
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QStyleOptionComboBox>
@@ -333,7 +335,7 @@ public:
     }
 };
 
-MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory) : QMainWindow(parent), presetStore_(presetDirectory), worker_(new CaptureWorker) {
+MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory,const QString &systemPresetDirectory) : QMainWindow(parent), presetStore_(presetDirectory,systemPresetDirectory), worker_(new CaptureWorker) {
     qRegisterMetaType<FramePtr>(); qRegisterMetaType<CaptureInfo>();
     qRegisterMetaType<Project>();
     project_ = defaultProject();
@@ -797,20 +799,25 @@ void MainWindow::buildUi() {
     auto pruneChanged=[this] {if (syncing_ || !project_.modifier() || project_.modifier()->type!=ModifierType::PruneLowContribution) return;project_.modifier()->prune={prunePercent_->value(),pruneProtect_->value()};syncModifiers();dirty();};
     connect(prunePercent_,&QDoubleSpinBox::valueChanged,this,[pruneChanged](double) {pruneChanged();});connect(pruneProtect_,&QDoubleSpinBox::valueChanged,this,[pruneChanged](double) {pruneChanged();});
     // Audio: the capture's own track or a file, and where it sits on the timeline.
-    audio_=new AudioPreview(this);
     audioProperties_=new QGroupBox(tr("Audio"));audioProperties_->setObjectName("audioModifierProperties");auto *audioForm=new QFormLayout(audioProperties_);
     audioProperties_->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Maximum);
     audioSource_=new QLabel;audioSource_->setObjectName("audioSource");audioSource_->setWordWrap(true);audioForm->addRow(tr("Track"),audioSource_);
     auto *audioButtons=new QWidget;auto *audioRow=new QHBoxLayout(audioButtons);audioRow->setContentsMargins(0,0,0,0);
-    auto *audioFile=new QPushButton(tr("Choose file\u2026"));audioFile->setObjectName("audioChooseFile");audioFile->setToolTip(tr("Play a sound file with the capture: MP3, AAC (.m4a), Opus or WAV.\nExports carry it as delivered, without re-encoding."));
+    auto *audioFile=new QPushButton(tr("Choose file\u2026"));audioFile->setObjectName("audioChooseFile");audioFile->setToolTip(tr("Play a sound file with the capture: MP3, AAC (.m4a), Opus or WAV.\nExports mix it with the other Audio modifiers into one AAC track, cut to the exported range."));
     audioCaptureTrack_=new QPushButton(tr("Use the capture's track"));audioCaptureTrack_->setObjectName("audioUseCapture");audioCaptureTrack_->setToolTip(tr("Play the sound track the capture carries."));
     audioRow->addWidget(audioFile);audioRow->addWidget(audioCaptureTrack_);audioForm->addRow(audioButtons);
     audioOffset_=new QDoubleSpinBox;audioOffset_->setObjectName("audioOffset");audioOffset_->setRange(-3600,3600);audioOffset_->setDecimals(3);audioOffset_->setSingleStep(0.04);audioOffset_->setSuffix(" s");
     audioOffset_->setToolTip(tr("When the track starts on the capture's timeline: positive delays it, negative starts it earlier.\nUse it to line the sound up with the picture."));
     audioForm->addRow(tr("Offset"),audioOffset_);
-    auto *audioNote=new QLabel(tr("Plays with the timeline, at its speed. Disable the modifier to mute it. VGS/PGS exports carry the track in sync with the exported range; MINT cannot hold audio."));
+    audioVolume_=new QDoubleSpinBox;audioVolume_->setObjectName("audioVolume");audioVolume_->setRange(0,100);audioVolume_->setDecimals(0);audioVolume_->setSingleStep(5);audioVolume_->setSuffix(" %");
+    audioVolume_->setToolTip(tr("This track's level in the mix: 100% as recorded, 0% silent.\nSeveral Audio modifiers play together, each at its own volume."));
+    audioForm->addRow(tr("Volume"),audioVolume_);
+    audioLoop_=new QCheckBox(tr("Loop"));audioLoop_->setObjectName("audioLoop");audioLoop_->setToolTip(tr("Repeat the track from its start whenever it ends, for as long as the capture plays."));
+    audioForm->addRow(audioLoop_);
+    auto *audioNote=new QLabel(tr("Plays with the timeline, at its speed; every enabled Audio modifier plays, mixed. Disable one to mute it. "
+                                  "VGS/PGS exports mix them into one AAC track cut to the exported range; MINT cannot hold audio."));
     audioNote->setWordWrap(true);audioForm->addRow(audioNote);side->addWidget(audioProperties_);
-    SpinScrubber::attachFormLabel(audioOffset_,0.005);
+    SpinScrubber::attachFormLabel(audioOffset_,0.005);SpinScrubber::attachFormLabel(audioVolume_,0.5);
     connect(audioFile,&QPushButton::clicked,this,[this] {
         auto *m=project_.modifier();if (!m || m->type!=ModifierType::Audio) return;
         const QString path=QFileDialog::getOpenFileName(this,tr("Choose a sound file"),history_.openPath("Audio"),tr("Sound (*.mp3 *.m4a *.aac *.opus *.ogg *.wav)"));
@@ -819,6 +826,8 @@ void MainWindow::buildUi() {
     });
     connect(audioCaptureTrack_,&QPushButton::clicked,this,[this] {auto *m=project_.modifier();if (!m || m->type!=ModifierType::Audio) return;m->audioFile.clear();syncUi();dirty();viewport_->setFocus();});
     connect(audioOffset_,&QDoubleSpinBox::valueChanged,this,[this](double value) {auto *m=project_.modifier();if (syncing_ || !m || m->type!=ModifierType::Audio) return;m->audioOffset=value;syncAudio();dirty();});
+    connect(audioVolume_,&QDoubleSpinBox::valueChanged,this,[this](double value) {auto *m=project_.modifier();if (syncing_ || !m || m->type!=ModifierType::Audio) return;m->audioVolume=value/100;syncAudio();dirty();});
+    connect(audioLoop_,&QCheckBox::toggled,this,[this](bool on) {auto *m=project_.modifier();if (syncing_ || !m || m->type!=ModifierType::Audio) return;m->audioLoop=on;syncAudio();dirty();});
     // Colour: one matrix on the colour, shown in the viewport; despill at export.
     colourProperties_=new QGroupBox(tr("Color"));colourProperties_->setObjectName("colourModifierProperties");auto *colourForm=new QFormLayout(colourProperties_);
     colourProperties_->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Maximum);
@@ -873,7 +882,7 @@ void MainWindow::buildUi() {
     eraseClearChunk_=new QPushButton(tr("Clear this chunk"));eraseClearChunk_->setObjectName("eraseClearChunk");eraseClearAll_=new QPushButton(tr("Clear all"));eraseClearAll_->setObjectName("eraseClearAll");
     clearLayout->addWidget(eraseClearChunk_);clearLayout->addWidget(eraseClearAll_);eraseForm->addRow(clearRow);
     auto *eraseNote=new QLabel(tr("While Edit is on (Tab) the picks show in pink; with it off, with the modifier not selected, and in exports, they are removed. "
-        "Drag to pick, replacing the picks of the chunk on screen; Ctrl adds, Alt subtracts. The right button orbits and the middle one pans. "
+        "Drag to add to the picks of the chunk on screen; Ctrl replaces them, Alt subtracts. The right button orbits and the middle one pans. "
         "A splat is itself only within one chunk, so each chunk keeps its own picks."));eraseNote->setWordWrap(true);eraseForm->addRow(eraseNote);side->addWidget(eraseProperties_);
     connect(tools,&QButtonGroup::buttonClicked,this,[this](QAbstractButton *) {syncEraseTool();viewport_->setFocus();});
     connect(eraseBrushSize_,&QDoubleSpinBox::valueChanged,this,[this](double value) {settings_.setValue("Erase/BrushRadius",value);syncEraseTool();});
@@ -1005,9 +1014,15 @@ void MainWindow::buildUi() {
     auto *density=viewMenu->addAction(tr("Compact controls on smaller screens"));density->setObjectName("compactInterfaceDensity");density->setCheckable(true);density->setChecked(settings_.value("Interface/CompactDensity",true).toBool());
     density->setToolTip(tr("Reduce control sizes and spacing on smaller screens while preserving readable text and native Windows DPI. Changes apply at the next launch."));
     connect(density,&QAction::toggled,this,[this](bool compact) {settings_.setValue("Interface/CompactDensity",compact);statusBar()->showMessage(tr("Interface density preference saved. Restart the editor to apply it."),7000);});
-    gridAction_ = viewMenu->addAction(tr("Grid and axes")); gridAction_->setObjectName("gridAndAxes"); gridAction_->setCheckable(true);
-    gridAction_->setShortcut(QKeySequence("Shift+G")); gridAction_->setToolTip(tr("Toggle the world grid and reference axes (Shift+G)."));
+    gridAction_ = viewMenu->addAction(tr("Grid")); gridAction_->setObjectName("showGrid"); gridAction_->setCheckable(true);
+    gridAction_->setShortcut(QKeySequence("Shift+G")); gridAction_->setToolTip(tr("Toggle the floor grid (Shift+G)."));
     connect(gridAction_, &QAction::toggled, this, [this](bool value) { if (!syncing_) { project_.grid = value; settings_.setValue("Display/Grid",value); viewport_->setGrid(value); dirty(); } });
+    axesAction_ = viewMenu->addAction(tr("Axes")); axesAction_->setObjectName("showAxes"); axesAction_->setCheckable(true);
+    axesAction_->setToolTip(tr("Toggle the coloured X (red), Y (green) and Z (blue) axes."));
+    connect(axesAction_, &QAction::toggled, this, [this](bool value) { if (!syncing_) { project_.axes = value; settings_.setValue("Display/Axes",value); viewport_->setAxes(value); dirty(); } });
+    markerAction_ = viewMenu->addAction(tr("Origin and front marker")); markerAction_->setObjectName("showFrontMarker"); markerAction_->setCheckable(true);
+    markerAction_->setToolTip(tr("Toggle the floor markers: a faint square round the origin, and a grey chevron just past a metre along +Z pointing the way the capture faces."));
+    connect(markerAction_, &QAction::toggled, this, [this](bool value) { if (!syncing_) { project_.frontMarker = value; settings_.setValue("Display/FrontMarker",value); viewport_->setFrontMarker(value); dirty(); } });
     auto *frameAction = viewMenu->addAction(tr("Focus visible"),this,&MainWindow::fitCurrentTarget);
     frameAction->setShortcuts({QKeySequence(Qt::KeypadModifier|Qt::Key_Delete),QKeySequence(Qt::KeypadModifier|Qt::Key_Period),QKeySequence(Qt::KeypadModifier|Qt::Key_Comma),QKeySequence("F")});
     frameAction->setToolTip(tr("Focus visible capture and ghost points (Numpad decimal / Numpad Del / F)."));
@@ -1020,9 +1035,9 @@ void MainWindow::buildUi() {
         dialog.setWindowTitle(tr("About VGS Editor"));
         dialog.setIconPixmap(QPixmap(":/icons/logo.png").scaled(64,64,Qt::KeepAspectRatio,Qt::SmoothTransformation));
         dialog.setTextFormat(Qt::RichText);
-        dialog.setText(tr("<h2>VGS Editor</h2><p>4D Gaussian capture editor</p>"
+        dialog.setText(tr("<h2>VGS Editor</h2><p>Version %1</p><p>4D Gaussian capture editor</p>"
                           "<p>Víctor M. Feliz</p>"
-                          "<p>The4DScanner · ScanMeNow</p>"));
+                          "<p>The4DScanner · ScanMeNow</p>").arg(QStringLiteral(VERSION_NAME)));
         dialog.exec();
     });
     helpMenu->addAction(tr("About Qt"), qApp, &QApplication::aboutQt);
@@ -1194,7 +1209,7 @@ void MainWindow::syncUi() {
     }
     const bool audio=selected && selected->type==ModifierType::Audio;audioProperties_->setVisible(audio);
     if (audio) {
-        audioProperties_->setTitle(tr("Audio: %1").arg(selected->name));audioOffset_->setValue(selected->audioOffset);audioCaptureTrack_->setEnabled(!info_.audio.isEmpty() && !selected->audioFile.isEmpty());
+        audioProperties_->setTitle(tr("Audio: %1").arg(selected->name));audioOffset_->setValue(selected->audioOffset);audioVolume_->setValue(selected->audioVolume*100);audioLoop_->setChecked(selected->audioLoop);audioCaptureTrack_->setEnabled(!info_.audio.isEmpty() && !selected->audioFile.isEmpty());
         audioSource_->setText(!selected->audioFile.isEmpty() ? (QFileInfo::exists(selected->audioFile) ? QFileInfo(selected->audioFile).fileName() : tr("%1 (not found)").arg(QFileInfo(selected->audioFile).fileName()))
                              : !info_.audio.isEmpty() ? tr("The capture's own track (%1)").arg(info_.audioSuffix.toUpper()) : tr("None: the capture carries no track. Choose a file."));
         audioSource_->setToolTip(selected->audioFile);
@@ -1249,7 +1264,7 @@ void MainWindow::syncUi() {
     modifierPanel_->setTimeline(frame,maximum);
     viewport_->setPlaybackTime(project_.time,info_.duration);
     viewport_->setFloorScroll(project_.walkSpeed()>0,project_.walkDistance(project_.time));
-    speed_->setValue(project_.speed); loop_->setChecked(project_.loop); gridAction_->setChecked(project_.grid);
+    speed_->setValue(project_.speed); loop_->setChecked(project_.loop); gridAction_->setChecked(project_.grid); axesAction_->setChecked(project_.axes); markerAction_->setChecked(project_.frontMarker);
     syncTransformButtons();
     // The group title names what the fields edit: the capture, or the selected crop/animation modifier.
     transformBox_->setTitle(tr("Transform · %1").arg(viewport_->cropEditing() || animation ? (selected ? selected->name : tr("Crop")) : tr("Capture")));
@@ -1280,12 +1295,12 @@ void MainWindow::syncUi() {
     cropStatus_->setText(!project_.crop().enabled ? tr("Modifier disabled. Its settings are kept, and Edit adjusts this volume.") : viewport_->cropEditing()
         ? (project_.crop().showRemovedInRed ? tr("Editing the selected crop, color coded: kept points lightened, deleted points red.") : tr("Editing the selected crop: what the crops would delete is hidden."))
         : tr("Keep crops preserve what is inside any of them. Remove crops delete what is inside them and win where they overlap, over the full timeline."));
-    pointSize_->setValue(project_.pointSize); viewport_->setPointSize(float(project_.pointSize)); viewport_->setGrid(project_.grid);
+    pointSize_->setValue(project_.pointSize); viewport_->setPointSize(float(project_.pointSize)); viewport_->setGrid(project_.grid); viewport_->setAxes(project_.axes); viewport_->setFrontMarker(project_.frontMarker);
     updateUndoActions();
     syncing_ = false;
 }
 void MainWindow::title() {
-    setWindowTitle(tr("%1[*] — VGS Editor").arg(projectPath_.isEmpty() ? tr("Untitled project") : QFileInfo(projectPath_).fileName()));
+    setWindowTitle(tr("%1[*] — VGS Editor %2").arg(projectPath_.isEmpty() ? tr("Untitled project") : QFileInfo(projectPath_).fileName(),QStringLiteral(VERSION_NAME)));
 }
 QString MainWindow::autosaveFile() const {return autosaveDirectory_+QStringLiteral("/recovery-%1.vgsproj").arg(QCoreApplication::applicationPid());}
 void MainWindow::autosaveNow() {
@@ -1429,17 +1444,24 @@ void MainWindow::setTime(double seconds, bool edited) {
     if (std::abs(project_.time-seconds) < 1e-8) return;
     project_.time = seconds; syncUi(); if (edited) dirty(); requestFrame();
 }
-// The Audio modifier's track at the timeline's time: a file sits `offset` seconds into the
-// capture's timeline; the capture's own track starts where the capture starts on its source's.
+// Each active Audio modifier's track at the timeline's time: a file sits `offset` seconds into
+// the capture's timeline; the capture's own track starts where the capture starts on its
+// source's. A player goes with the modifier that had it.
 void MainWindow::syncAudio() {
-    if (!audio_) return;
-    const auto *m=loaded_ && !loading_ ? project_.audioModifier() : nullptr;
-    if (!m) {audio_->clear();return;}
-    double at=project_.time-m->audioOffset;
-    if (!m->audioFile.isEmpty()) audio_->setFile(m->audioFile);
-    else if (!info_.audio.isEmpty()) {audio_->setBytes(info_.audio,info_.audioSuffix);at+=info_.startSeconds;}
-    else {audio_->clear();return;}
-    audio_->follow(at,playback_.isActive(),project_.speed);
+    std::set<QString> live;
+    if (loaded_ && !loading_) for (const auto *m:project_.audioModifiers()) {
+        auto *&player=audio_[m->id];if (!player) player=new AudioPreview(this);
+        live.insert(m->id);double at=project_.time-m->audioOffset;
+        if (!m->audioFile.isEmpty()) player->setFile(m->audioFile);
+        else if (!info_.audio.isEmpty()) {player->setBytes(info_.audio,info_.audioSuffix);at+=info_.startSeconds;}
+        else {player->clear();continue;}
+        player->setVolume(m->audioVolume);player->setLoop(m->audioLoop);
+        player->follow(at,playback_.isActive(),project_.speed);
+    }
+    for (auto it=audio_.begin();it!=audio_.end();) {
+        if (live.count(it->first)) {++it;continue;}
+        it->second->clear();it->second->deleteLater();it=audio_.erase(it);
+    }
 }
 void MainWindow::requestFrame() {
     if (!loaded_ || loading_) return;
@@ -1791,6 +1813,8 @@ Project MainWindow::defaultProject() const {
     p.captureSettings.despill=false; // despill is a Colour modifier's now
     p.pointSize = std::clamp(settings_.value("Display/PointSize",5).toDouble(),1.0,12.0);
     p.grid = settings_.value("Display/Grid",true).toBool();
+    p.axes = settings_.value("Display/Axes",false).toBool();
+    p.frontMarker = settings_.value("Display/FrontMarker",true).toBool();
     p.loop = settings_.value("Playback/Loop",true).toBool();
     p.speed = std::clamp(settings_.value("Playback/Speed",1).toDouble(),0.1,4.0);
     return p;
@@ -1832,7 +1856,10 @@ void MainWindow::refreshPresets(const QString &requestedPath) {
     if (!presetCombo_) return;
     const QString selected = requestedPath;
     QSignalBlocker blocker(presetCombo_); presetCombo_->clear(); presetCombo_->addItem(tr("Load preset…"),QString());
-    for (const auto &entry : presetStore_.list()) presetCombo_->addItem(entry.name,entry.path);
+    for (const auto &entry : presetStore_.list()) {
+        presetCombo_->addItem(entry.name,entry.path);
+        if (entry.system) presetCombo_->setItemData(presetCombo_->count()-1,tr("Built-in preset, shipped with the editor."),Qt::ToolTipRole);
+    }
     const int index = presetCombo_->findData(selected); presetCombo_->setCurrentIndex(index>=0 ? index : 0);
     presetCombo_->setEnabled(loaded_ && !loading_ && presetCombo_->count()>1);
 }
@@ -1843,7 +1870,9 @@ void MainWindow::savePreset() {
     const QString name = QInputDialog::getText(this,tr("Save preset"),tr("Preset name:"),QLineEdit::Normal,initial,&accepted).trimmed();
     if (!accepted) { viewport_->setFocus(); return; }
     for (const auto &entry : presetStore_.list()) if (entry.name.compare(name,Qt::CaseInsensitive)==0) {
-        if (QMessageBox::question(this,tr("Replace preset"),tr("A preset named '%1' already exists. Replace it?").arg(entry.name),QMessageBox::Yes | QMessageBox::No,QMessageBox::No)!=QMessageBox::Yes) return;
+        const QString question = entry.system ? tr("'%1' is a built-in preset. Save yours with that name? It takes the built-in one's place in the list; the built-in one is kept.").arg(entry.name)
+                                              : tr("A preset named '%1' already exists. Replace it?").arg(entry.name);
+        if (QMessageBox::question(this,tr("Replace preset"),question,QMessageBox::Yes | QMessageBox::No,QMessageBox::No)!=QMessageBox::Yes) return;
         break;
     }
     project_.camera = viewport_->camera(); QString path,error;

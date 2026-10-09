@@ -9,6 +9,7 @@
 // Other uses require prior written authorisation, subject to mandatory law.
 
 #include "mainwindow.h"
+#include "licensemanagement.h"
 #include "exportcapture.h"
 #include "exporttask.h"
 #include <QDir>
@@ -39,6 +40,7 @@ int main(int argc, char *argv[])
     QLocale::setDefault(QLocale(QLocale::English, QLocale::UnitedKingdom));
     QApplication a(argc, argv);
     a.setApplicationName("VGS Editor"); a.setOrganizationName("THE4DSCANNER");
+    a.setApplicationVersion(QStringLiteral(VERSION_NAME).mid(1)); // "v1.0.0" -> "1.0.0"
     a.setWindowIcon(QIcon(":/icons/logo.png"));
     EditorTheme::install();
     QCommandLineParser parser; parser.addHelpOption();
@@ -93,7 +95,8 @@ int main(int argc, char *argv[])
     if (parser.isSet(smoke)) qInstallMessageHandler([](QtMsgType, const QMessageLogContext &, const QString &message) {
         const auto bytes = message.toUtf8(); std::fprintf(stderr,"%s\n",bytes.constData()); std::fflush(stderr);
     });
-    MainWindow w(nullptr,smokeSettings ? smokeSettings->path()+"/presets" : QString());
+    // Built-in presets ship in `presets` beside the program; the smoke run keeps to its own.
+    MainWindow w(nullptr,smokeSettings ? smokeSettings->path()+"/presets" : QString(),smokeSettings ? QString() : QCoreApplication::applicationDirPath()+"/presets");
     w.show();
     if (parser.isSet(smoke) && parser.isSet(smokeScreen)) {
         bool valid=false;const int index=parser.value(smokeScreen).toInt(&valid);const auto screens=QGuiApplication::screens();

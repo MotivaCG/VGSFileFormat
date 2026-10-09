@@ -155,7 +155,10 @@ void CaptureWorker::decode(double time, quint64 generation, bool sh,Project proj
     if (generation != generation_) { emit failed("Capture replaced.", generation, false); return; }
     try {
         QElapsedTimer processingTimer;processingTimer.start();auto out=frame(time,sh);CompiledModifiers modifiers(project.modifiersAtFrame(std::round(time*info_.fps)));
-        // A Colour modifier that despills always: the export's despill on what is shown.
+        // A Colour modifier that despills always: the export's despill on what is shown. The
+        // source's colours are kept for Remove green above it, which tests them, not these.
+        std::vector<std::array<float,3>> sourceColours;
+        if (modifiers.despillPreview && !modifiers.greens.isEmpty()) {sourceColours.resize(out->points.size());for (size_t i=0;i<out->points.size();++i) std::copy_n(out->points[i].color,3,sourceColours[i].data());}
         if (modifiers.despillPreview) {
             vgs::Frame f;f.count=out->records.size();f.active=out->active;f.shCoefficients=out->coefficients;f.shRest=out->sh;
             for (const auto &r:out->records) {f.position.insert(f.position.end(),r.position,r.position+3);f.colorDc.insert(f.colorDc.end(),r.color,r.color+3);f.opacity.push_back(r.color[3]);}
@@ -173,11 +176,14 @@ void CaptureWorker::decode(double time, quint64 generation, bool sh,Project proj
         const bool erasing=!modifiers.erased.empty();
         auto erasedHere=[&](const PointVertex &p) {return erasing && modifiers.erases(int(out->chunkIndex),uint32_t(p.id));};
         auto unpruned=[&](const PointVertex &p) {return (pruned.empty() || pruned[size_t(p.id)]) && (modifiers.showErased || !erasedHere(p));};
+        const bool greensHere=!sourceColours.empty();out->greensApplied=greensHere;
+        auto sourceRgb=[&](size_t i) {const auto &p=out->points[i];return greensHere ? QVector3D(sourceColours[i][0],sourceColours[i][1],sourceColours[i][2]) : QVector3D(p.color[0],p.color[1],p.color[2]);};
+        auto greenGone=[&](size_t i) {const auto &p=out->points[i];return greensHere && modifiers.removesColour(sourceRgb(i),{p.color[0],p.color[1],p.color[2]});};
         if (!modifiers.isolations.isEmpty()) {
             const auto model=project.transformAtFrame(std::round(out->seconds*info_.fps)).matrix();std::vector<QVector3D> positions(out->points.size());std::vector<uint8_t> keep(out->points.size());
-            for (size_t i=0;i<positions.size();++i) {const auto &p=out->points[i];positions[i]=model.map({p.position[0],p.position[1],p.position[2]});keep[i]=unpruned(p) && modifiers.keeps(positions[i],{p.color[0],p.color[1],p.color[2]});}
+            for (size_t i=0;i<positions.size();++i) {const auto &p=out->points[i];positions[i]=model.map({p.position[0],p.position[1],p.position[2]});keep[i]=unpruned(p) && modifiers.keeps(positions[i],sourceRgb(i),{p.color[0],p.color[1],p.color[2]});}
             applyIsolation(positions,keep,modifiers.isolations);for (size_t i=0;i<keep.size();++i) out->points[i].modifierVisibility=keep[i] ? 1.f : 0.f;
-        } else if (!pruned.empty() || erasing) for (auto &p:out->points) p.modifierVisibility=unpruned(p) ? 1.f : 0.f;
+        } else if (!pruned.empty() || erasing || greensHere) for (size_t i=0;i<out->points.size();++i) out->points[i].modifierVisibility=unpruned(out->points[i]) && !greenGone(i) ? 1.f : 0.f;
         if (erasing && modifiers.showErased) for (auto &p:out->points) if (p.modifierVisibility>=.5f && erasedHere(p)) p.modifierVisibility=.75f;
         out->decodeMs=processingTimer.nsecsElapsed()/1e6;emit decoded(out,generation);
     }

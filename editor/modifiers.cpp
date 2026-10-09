@@ -124,8 +124,8 @@ std::array<float,9> Modifier::colourMatrix() const {
     for (int r=0;r<3;++r) for (int c=0;c<3;++c) m[r*3+c]=float(gain*((r==c ? s : 0)+(1-s)*luma[c])*balance[c]);
     return m;
 }
-const Modifier *Project::audioModifier() const {
-    const Modifier *found=nullptr;for (const auto &m:modifiers) if (m.active() && m.type==ModifierType::Audio) found=&m;return found;
+QVector<const Modifier *> Project::audioModifiers() const {
+    QVector<const Modifier *> found;for (const auto &m:modifiers) if (m.active() && m.type==ModifierType::Audio) found.append(&m);return found;
 }
 double Project::walkSpeed() const {double speed=0;for (const auto &m:modifiers) if (m.active() && m.type==ModifierType::Walk) speed+=m.walkSpeed;return speed;}
 double Project::walkDistance(double seconds) const {return walkSpeed()*(seconds-in);}
@@ -167,8 +167,9 @@ bool GreenFilter::matches(const QVector3D &rgb) const {
 }
 CompiledModifiers::CompiledModifiers(const Project &project):CompiledModifiers(project.modifiers) {}
 CompiledModifiers::CompiledModifiers(const QVector<Modifier> &modifiers) {
+    bool colourAbove=false; // the stack runs top to bottom
     for (const auto &modifier:modifiers) if (modifier.active()) {
-        if (modifier.type==ModifierType::RemoveGreen) greens.append(modifier.green);
+        if (modifier.type==ModifierType::RemoveGreen) {greens.append(modifier.green);greens.back().afterColour=colourAbove;}
         else if (modifier.type==ModifierType::PurgeIsolated) isolations.append(modifier.isolation);
         else if (modifier.type==ModifierType::PruneLowContribution) prunes.append(modifier.prune);
         else if (modifier.type==ModifierType::Erase) {
@@ -179,7 +180,7 @@ CompiledModifiers::CompiledModifiers(const QVector<Modifier> &modifiers) {
             }
         }
         else if (modifier.type==ModifierType::Colour) {
-            const auto m=modifier.colourMatrix();std::array<float,9> product{};
+            colourAbove=true;const auto m=modifier.colourMatrix();std::array<float,9> product{};
             for (int r=0;r<3;++r) for (int c=0;c<3;++c) for (int k=0;k<3;++k) product[r*3+c]+=m[r*3+k]*colour[k*3+c];
             colour=product;colourChanges=true;opacity*=float(modifier.colourOpacity);
             if (modifier.colourDespill!=Modifier::DespillNone) {despill=true;despillPreview=modifier.colourDespill==Modifier::DespillAlways;despillStrength=modifier.colourDespillStrength;greenGain=modifier.colourGreenGain;viewChroma=modifier.colourViewChroma;recoverSkin=modifier.colourRecoverSkin;}
@@ -203,7 +204,13 @@ bool CompiledModifiers::keepsPosition(const QVector3D &world) const {
     }
     return !anyKeep || insideKeep;
 }
-bool CompiledModifiers::removesColour(const QVector3D &rgb) const {for (const auto &filter:greens) if (filter.matches(rgb)) return true;return false;}
+QVector3D CompiledModifiers::coloured(const QVector3D &rgb) const {
+    QVector3D out;for (int r=0;r<3;++r) out[r]=colour[r*3]*rgb.x()+colour[r*3+1]*rgb.y()+colour[r*3+2]*rgb.z();return out;
+}
+bool CompiledModifiers::removesColour(const QVector3D &source,const QVector3D &processed) const {
+    for (const auto &filter:greens) if (filter.matches(filter.afterColour ? coloured(processed) : source)) return true;
+    return false;
+}
 QJsonArray Project::modifierJson() const {
     auto vector=[](const QVector3D &v) {return QJsonArray{v.x(),v.y(),v.z()};};QJsonArray result;
     for (const auto &m:modifiers) {
@@ -238,7 +245,7 @@ QJsonArray Project::modifierJson() const {
             }
             else if (m.type==ModifierType::Colour) item["colour"]=QJsonObject{{"opacity",m.colourOpacity},{"exposure",m.colourExposure},{"temperature",m.colourTemperature},{"tint",m.colourTint},{"saturation",m.colourSaturation},
                 {"despill",m.colourDespill!=Modifier::DespillNone},{"despillMode",m.colourDespill==Modifier::DespillAlways ? "always" : m.colourDespill==Modifier::DespillOnExport ? "export" : "none"},{"despillStrength",m.colourDespillStrength},{"greenGain",m.colourGreenGain},{"viewChroma",m.colourViewChroma},{"recoverSkin",m.colourRecoverSkin}};
-            else if (m.type==ModifierType::Audio) item["audio"]=QJsonObject{{"source",m.audioFile.isEmpty() ? "capture" : "file"},{"file",m.audioFile},{"offset",m.audioOffset}};
+            else if (m.type==ModifierType::Audio) item["audio"]=QJsonObject{{"source",m.audioFile.isEmpty() ? "capture" : "file"},{"file",m.audioFile},{"offset",m.audioOffset},{"volume",m.audioVolume},{"loop",m.audioLoop}};
             else if (m.type==ModifierType::PruneLowContribution) item["prune"]=QJsonObject{{"percent",m.prune.percent},{"protectAbove",m.prune.protectAbove},{"protectUnit","px-1080p-mean"}};
             else if (m.type==ModifierType::PurgeIsolated) item["isolation"]=QJsonObject{{"neighbour",m.isolation.neighbour},{"medianPercent",m.isolation.medianPercent}};
             result.append(item);

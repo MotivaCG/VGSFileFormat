@@ -13,6 +13,7 @@
 #include "mintwriter.h"
 #include "isolation.h"
 #include "pruning.h"
+#include "audiomix.h"
 #include "mintfile.h"
 #include "mintskinrecovery.h"
 #include "despillcolor.h"
@@ -135,15 +136,18 @@ public:
     vgs::Frame bake(const vgs::Frame &source,const ExportProgress &progress,const std::vector<uint8_t> *pruned=nullptr) const {
         std::vector<QVector3D> worldPositions(size_t(source.count));std::vector<uint8_t> keep(size_t(source.count));
         if (pruned && pruned->size()!=source.count) throw std::runtime_error("The pruning does not match the frame's records.");
-        for (size_t i=0;i<source.count;++i) {worldPositions[i]=model.map({source.position[3*i],source.position[3*i+1],source.position[3*i+2]});keep[i]=source.active[i] && (!pruned || (*pruned)[i]) && modifiers.keeps(worldPositions[i],{source.colorDc[3*i],source.colorDc[3*i+1],source.colorDc[3*i+2]});}
-        applyIsolation(worldPositions,keep,modifiers.isolations,[&] {report(progress,0,QStringLiteral("Purge Isolated: searching neighbors"));return false;});
+        // The colour processing first: a Remove green below a Color modifier tests its result.
         vgs::Frame input=source; processColour(input,project.captureSettings,progress);
+        auto sourceRgb=[&](size_t i) {return QVector3D(source.colorDc[3*i],source.colorDc[3*i+1],source.colorDc[3*i+2]);};
+        auto processedRgb=[&](size_t i) {return QVector3D(input.colorDc[3*i],input.colorDc[3*i+1],input.colorDc[3*i+2]);};
+        for (size_t i=0;i<source.count;++i) {worldPositions[i]=model.map({source.position[3*i],source.position[3*i+1],source.position[3*i+2]});keep[i]=source.active[i] && (!pruned || (*pruned)[i]) && modifiers.keeps(worldPositions[i],sourceRgb(i),processedRgb(i));}
+        applyIsolation(worldPositions,keep,modifiers.isolations,[&] {report(progress,0,QStringLiteral("Purge Isolated: searching neighbors"));return false;});
         vgs::Frame out;out.shCoefficients=coefficients;out.seconds=source.seconds;
         for (size_t i=0;i<input.count;++i) {
             if ((i%8192)==0) report(progress,0,QStringLiteral("Baking transforms and crop"));
             if (!keep[i]) continue;
             const QVector3D world=model.map(QVector3D(input.position[3*i],input.position[3*i+1],input.position[3*i+2]));
-            if (!modifiers.keeps(world,{source.colorDc[3*i],source.colorDc[3*i+1],source.colorDc[3*i+2]})) continue;
+            if (!modifiers.keeps(world,sourceRgb(i),processedRgb(i))) continue;
             Eigen::Quaterniond q(input.rotation[4*i+3],input.rotation[4*i],input.rotation[4*i+1],input.rotation[4*i+2]);
             Eigen::Vector3d scale(input.scale[3*i],input.scale[3*i+1],input.scale[3*i+2]);
             if (!world.isNull() && (!std::isfinite(world.x()) || !std::isfinite(world.y()) || !std::isfinite(world.z()))) throw std::runtime_error("Non-finite Gaussian position.");
@@ -409,8 +413,14 @@ vgs::Frame bakeExportFrame(const vgs::Frame &frame,const Project &project,int de
 
 ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &destination,const ExportProgress &progress,const QByteArray &thumbnailJpeg) {
     const Project inputProject=withModifierDespill(projectAsGiven);
-    const Modifier *audioModifier=inputProject.audioModifier();const bool audioFile=audioModifier && !audioModifier->audioFile.isEmpty();
+    const auto audioModifiers=inputProject.audioModifiers();
+    // Without ffmpeg the soundtrack cannot be mixed or cut: the last Audio modifier's file
+    // travels as delivered, or the source's track whole, as before ffmpeg was used.
+    const bool mixing=!ffmpegPath().isEmpty();
+    const Modifier *audioModifier=audioModifiers.isEmpty() ? nullptr : audioModifiers.back();
+    const bool audioFile=audioModifier && !audioModifier->audioFile.isEmpty();
     const double audioOffset=audioModifier ? audioModifier->audioOffset : 0;
+    vgs::Bytes sourceAudio;uint32_t sourceAudioFormat=0;
     Project project=inputProject;const bool animated=project.hasAnimatedMotion();if (!animated) project.transform=inputProject.transformAtFrame(0);
     const bool mintOutput=QFileInfo(destination).suffix().compare("mint",Qt::CaseInsensitive)==0;
     // .pgs is the plain container and .vgs the compressed one: the extension decides.
@@ -424,6 +434,9 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
     ExportResult result;
     double rate,duration;int sourceDegree=3;vgs::Header header,sourceHeader;vgs::EncodeOptions options;
     std::unique_ptr<vgs::MintLogicalSource> nativeMint;bool native=supportsNativeTransform(project);
+    // Native blocks test Remove green on the source's colours; one below a despilling Color
+    // modifier needs the despilled ones, which only the sampled path has.
+    if (native && project.captureSettings.despill && CompiledModifiers(project).greensAfterColour()) {native=false;result.notes << QStringLiteral("A Remove green below a despilling Color modifier tests despilled colours, so the export is sampled.");}
     if (QFileInfo(project.asset).suffix().compare("mint",Qt::CaseInsensitive)==0) {
         mint=std::make_unique<MintFile>();if (!mint->open(project.asset,&error)) throw std::runtime_error(error.toStdString());
         if (!mint->frameRateProblem().isEmpty()) {native=false;result.notes << QStringLiteral("The source uses varying sample rates and is resampled at the timeline frame rate.");}
@@ -442,9 +455,11 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
             // A new thumbnail replaces the source's; the audio is kept whole (startTick places it)
             // unless an Audio modifier brings a file instead.
             if (extra.type==vgs::ThumbnailExtra && !thumbnailJpeg.isEmpty()) continue;
-            if (extra.type==vgs::AudioExtra && audioFile) continue;
+            if (extra.type==vgs::AudioExtra && audioFile && !mixing) continue;
             vgs::Bytes bytes(size_t(extra.size));
             if (!source->read(extra.offset,bytes.size(),bytes.data()) || vgs::digest(bytes.data(),bytes.size())!=extra.digest) throw std::runtime_error(vgs::InvalidCapture);
+            // Mixing, the source's track is one of the inputs rather than an extra of its own.
+            if (extra.type==vgs::AudioExtra && mixing) {sourceAudio=std::move(bytes);sourceAudioFormat=extra.format;continue;}
             options.extras.push_back({extra.type,extra.format,std::move(bytes)});
         }
     }
@@ -457,13 +472,48 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
     // Where the range starts on the audio's timeline, for players: the source's own track runs
     // on the source's timeline; a file starts `offset` seconds into the capture's. Players
     // cannot hold a track back, so a range that begins before the track does starts with it.
-    {
+    // With ffmpeg the soundtrack is made for the range: every active Audio modifier's track (or,
+    // with none, the source's own) placed where it plays, at its volume, mixed and cut to the
+    // range's length as AAC, so it starts with the range and nothing outside it is stored.
+    QTemporaryDir audioDir;
+    if (mixing && !mintOutput) {
+        const double rangeStart=first/rate,length=result.frames/rate,sourceStart=mint ? 0. : sourceHeader.startTick/rate;
+        QString ownTrack;
+        auto own=[&]() -> QString {
+            if (sourceAudio.empty()) return {};
+            if (ownTrack.isEmpty()) {
+                const QString suffix=sourceAudioFormat==vgs::Mp3 ? "mp3" : sourceAudioFormat==vgs::Aac ? "m4a" : sourceAudioFormat==vgs::Opus ? "ogg" : "wav";
+                QFile file(audioDir.filePath("source."+suffix));
+                if (!audioDir.isValid() || !file.open(QIODevice::WriteOnly) || file.write(reinterpret_cast<const char *>(sourceAudio.data()),qint64(sourceAudio.size()))!=qint64(sourceAudio.size()))
+                    throw std::runtime_error("Cannot write the source's audio for mixing.");
+                ownTrack=file.fileName();
+            }
+            return ownTrack;
+        };
+        QVector<AudioInput> inputs;int silent=0;
+        if (audioModifiers.isEmpty()) {if (const auto path=own();!path.isEmpty()) inputs.append({path,rangeStart+sourceStart,1,false});}
+        else for (const auto *m:audioModifiers) {
+            if (!m->audioFile.isEmpty()) inputs.append({m->audioFile,rangeStart-m->audioOffset,m->audioVolume,m->audioLoop});
+            else if (const auto path=own();!path.isEmpty()) inputs.append({path,rangeStart+sourceStart-m->audioOffset,m->audioVolume,m->audioLoop});
+            else ++silent;
+        }
+        if (silent) result.notes << QStringLiteral("%1 Audio modifier(s) use the capture's own track, and it has none.").arg(silent);
+        if (!inputs.isEmpty()) {
+            report(progress,0,QStringLiteral("Mixing the soundtrack"));
+            const QByteArray bytes=mixAudioAac(inputs,length,[&] {return progress && !progress(0,QStringLiteral("Mixing the soundtrack"));});
+            options.extras.push_back({vgs::AudioExtra,vgs::Aac,vgs::Bytes(bytes.begin(),bytes.end())});options.startTick=0;
+            result.notes << (inputs.size()>1 ? QStringLiteral("The soundtrack mixes %1 tracks, cut to the exported range (%2 s), as AAC.").arg(inputs.size()).arg(length,0,'f',2)
+                                             : QStringLiteral("The soundtrack is cut to the exported range (%1 s), as AAC.").arg(length,0,'f',2));
+        }
+    } else {
         const qint64 shift=qint64(std::llround(audioOffset*rate)),start=qint64(audioFile ? 0 : (mint ? 0 : sourceHeader.startTick))+first-shift;
         options.startTick=uint64_t(std::max<qint64>(0,start));
         if (start<0 && (audioFile || (capture && capture->hasAudio())) && !mintOutput)
             result.notes << QStringLiteral("The audio starts %1 s after the exported range begins; players start it with the range.").arg(-start/rate,0,'f',2);
+        if (!mintOutput && (audioFile || (capture && capture->hasAudio())))
+            result.notes << QStringLiteral("ffmpeg was not found beside the editor (tools/ffmpeg.exe): the audio is not cut to the range, and only one track is kept.");
     }
-    if (audioFile && !mintOutput) {
+    if (audioFile && !mintOutput && !mixing) {
         QFile track(audioModifier->audioFile);if (!track.open(QIODevice::ReadOnly)) throw std::runtime_error(QStringLiteral("Cannot read the audio file %1.").arg(audioModifier->audioFile).toStdString());
         const QByteArray bytes=track.readAll();const QString suffix=QFileInfo(audioModifier->audioFile).suffix().toLower();
         const uint32_t format=suffix=="mp3" ? vgs::Mp3 : suffix=="m4a" || suffix=="aac" ? vgs::Aac : suffix=="opus" || suffix=="ogg" ? vgs::Opus : suffix=="wav" ? vgs::Wav : 0;
@@ -644,7 +694,7 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
     if (moving) result.notes << QStringLiteral("The capture moves as a whole: its motion is stored as samples beside the native blocks, so the file stays the size of a static export. Readers built before motion samples refuse it rather than play it in place; MINT cannot store it.");
     const Matrix a=linear(project.transform.matrix()),metric=a.transpose()*a;
     if (!metric.isApprox(Matrix::Identity()*metric.trace()/3,1e-5)) result.notes << QStringLiteral("SH under nonuniform scale or shear is projected to the selected SH degree.");
-    if (capture && capture->hasAudio() && !mintOutput && !audioFile) result.notes << QStringLiteral("The source audio is kept whole; players start it where the exported range begins.");
+    if (capture && capture->hasAudio() && !mintOutput && !audioFile && !mixing) result.notes << QStringLiteral("The source audio is kept whole; players start it where the exported range begins.");
     if (mintOutput && (audioFile || (capture && capture->hasAudio()))) result.notes << QStringLiteral("MINT cannot hold audio: the sound track is not exported.");
     if (!thumbnailJpeg.isEmpty() && !mintOutput) result.notes << QStringLiteral("The thumbnail is the viewport as it was when the export started.");
     return result;

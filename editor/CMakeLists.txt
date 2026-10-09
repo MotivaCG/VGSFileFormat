@@ -29,7 +29,7 @@ add_library(editor_authoring STATIC ${VGS_ROOT}/core/src/vgsencode.cpp ${VGS_ROO
 target_compile_definitions(editor_authoring PRIVATE VGS_AUTHORING)
 target_include_directories(editor_authoring PUBLIC ${VGS_ROOT}/core/include/vgs ${VGS_ROOT}/core/crypto PRIVATE ${VGS_ROOT}/core/src)
 target_link_libraries(editor_authoring PUBLIC editor_decoder)
-add_library(editor_support STATIC editortheme.cpp displayscaling.cpp isolation.cpp pruning.cpp mintwriter.cpp modifiers.cpp nativeexport.cpp exportcapture.cpp exporttask.cpp dependencies/mint/mintskinrecovery.cpp project.cpp capturesettings.cpp captureworker.cpp filehistory.cpp presetstore.cpp dependencies/mint/mintfile.cpp)
+add_library(editor_support STATIC editortheme.cpp displayscaling.cpp isolation.cpp pruning.cpp audiomix.cpp mintwriter.cpp modifiers.cpp nativeexport.cpp exportcapture.cpp exporttask.cpp dependencies/mint/mintskinrecovery.cpp project.cpp capturesettings.cpp captureworker.cpp filehistory.cpp presetstore.cpp dependencies/mint/mintfile.cpp)
 target_include_directories(editor_support PUBLIC . dependencies/mint dependencies/eigen)
 target_link_libraries(editor_support PUBLIC Qt6::Widgets editor_decoder editor_authoring)
 if(WIN32)
@@ -37,6 +37,11 @@ if(WIN32)
 endif()
 qt_add_executable(VGSEditor main.cpp audiopreview.cpp audiopreview.h animationpanel.cpp animationpanel.h modifierpanel.cpp modifierpanel.h taskqueuedialog.cpp taskqueuedialog.h mainwindow.cpp viewport.cpp viewcube.cpp capturesettingsdialog.cpp mainwindow.h viewport.h viewcube.h capturesettingsdialog.h rangeslider.cpp rangeslider.h resources.qrc)
 if(WIN32)
+    # The version is set once, in licensemanagement.h ("v1.0.0").
+    file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/licensemanagement.h VGS_EDITOR_VERSION_LINE REGEX "#define[ \t]+VERSION_NAME")
+    string(REGEX REPLACE ".*\"v([0-9.]+)\".*" "\\1" VGS_EDITOR_VERSION "${VGS_EDITOR_VERSION_LINE}")
+    string(REPLACE "." "," VGS_EDITOR_VERSION_COMMAS "${VGS_EDITOR_VERSION},0")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/licensemanagement.h)
     configure_file(appicon.rc.in ${CMAKE_CURRENT_BINARY_DIR}/appicon.rc @ONLY)
     target_sources(VGSEditor PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/appicon.rc)
 endif()
@@ -45,6 +50,19 @@ if(MSVC)
     target_compile_options(editor_decoder PRIVATE /bigobj)
     target_compile_options(editor_support PRIVATE /utf-8)
     target_compile_options(VGSEditor PRIVATE /utf-8)
+endif()
+# Beside the program: the built-in presets, and the ffmpeg exports mix and cut the
+# soundtrack with (tools/ffmpeg.exe). ffmpeg is not in the repository; point VGS_FFMPEG at
+# one. Without it exports still work, keeping one audio track as delivered.
+set(VGS_FFMPEG "D:/Trabajos/THE4DSCANNER/GraciaConverter/Gracia4DGSConverter/build/Desktop_Qt_6_8_0_MSVC2022_64bit-Release/release/tools/ffmpeg.exe" CACHE FILEPATH "ffmpeg copied beside the editor")
+add_custom_command(TARGET VGSEditor POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/presets $<TARGET_FILE_DIR:VGSEditor>/presets)
+if(EXISTS "${VGS_FFMPEG}")
+    add_custom_command(TARGET VGSEditor POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:VGSEditor>/tools
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${VGS_FFMPEG} $<TARGET_FILE_DIR:VGSEditor>/tools/)
+else()
+    message(WARNING "VGS_FFMPEG not found (${VGS_FFMPEG}): exports will not mix or cut audio.")
 endif()
 option(EDITOR_BUILD_TESTS "Build project and decoder integration tests" ON)
 if(EDITOR_BUILD_TESTS)

@@ -13,13 +13,16 @@
 #include <QVector>
 
 enum class PresetScope { Editor, Metadata };
-struct PresetEntry { QString name, path; bool legacy = false; };
+struct PresetEntry { QString name, path; bool legacy = false; bool system = false; };
 struct EditorPreset { QString name; Project settings; PresetScope scope = PresetScope::Editor; bool legacy = false; bool hasMetadata = false; };
 
 // Portable configuration only: no capture path or capture-specific frame range.
+// Presets live in the user's folder; a system folder - `presets` beside the program - adds
+// read-only ones shipped with it. A user preset of the same name hides the system one.
 class PresetStore {
 public:
-    explicit PresetStore(const QString &directory = {});
+    explicit PresetStore(const QString &directory = {}, const QString &systemDirectory = {});
+    QString systemDirectory() const { return systemDirectory_; }
     QString directory() const { return directory_; }
     bool ensureDirectory(QString *error) const;
     QVector<PresetEntry> list(PresetScope scope = PresetScope::Editor) const;
@@ -30,5 +33,5 @@ private:
     QString presetPath(const QString &name,PresetScope scope) const;
     bool writePreset(const QString &path,const QString &name,const Project &settings,PresetScope scope,QString *error) const;
     void migrateLegacyPresets() const;
-    QString directory_;
+    QString directory_, systemDirectory_;
 };

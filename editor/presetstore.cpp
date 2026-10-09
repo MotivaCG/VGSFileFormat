@@ -31,8 +31,10 @@ QJsonArray appliesTo(PresetScope scope,int version=6) {
 }
 }
 
-PresetStore::PresetStore(const QString &directory) {
+PresetStore::PresetStore(const QString &directory,const QString &systemDirectory) {
     directory_ = QDir::cleanPath(directory.isEmpty() ? QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)+"/presets" : QFileInfo(directory).absoluteFilePath());
+    if (!systemDirectory.isEmpty()) systemDirectory_ = QDir::cleanPath(QFileInfo(systemDirectory).absoluteFilePath());
+    if (systemDirectory_.compare(directory_,Qt::CaseInsensitive)==0) systemDirectory_.clear();
 }
 bool PresetStore::ensureDirectory(QString *error) const {
     if (QDir().mkpath(directory_)) return true;
@@ -136,13 +138,18 @@ void PresetStore::migrateLegacyPresets() const {
 QVector<PresetEntry> PresetStore::list(PresetScope scope) const {
     migrateLegacyPresets();
     QVector<PresetEntry> result;
-    const auto files = QDir(directory_).entryInfoList({"*."+suffix(scope)},QDir::Files | QDir::NoSymLinks,QDir::Name);
-    for (const auto &file : files) {
-        EditorPreset preset; QString error;
-        if (!read(file.absoluteFilePath(),scope,&preset,&error)) continue;
-        bool duplicate = false;
-        for (const auto &entry : result) duplicate |= entry.name.compare(preset.name,Qt::CaseInsensitive)==0;
-        if (!duplicate) result.append({preset.name,file.absoluteFilePath()});
+    // The user's first, so theirs wins over a system preset of the same name.
+    for (const bool system : {false,true}) {
+        const QString folder = system ? systemDirectory_ : directory_;
+        if (folder.isEmpty()) continue;
+        const auto files = QDir(folder).entryInfoList({"*."+suffix(scope)},QDir::Files | QDir::NoSymLinks,QDir::Name);
+        for (const auto &file : files) {
+            EditorPreset preset; QString error;
+            if (!read(file.absoluteFilePath(),scope,&preset,&error)) continue;
+            bool duplicate = false;
+            for (const auto &entry : result) duplicate |= entry.name.compare(preset.name,Qt::CaseInsensitive)==0;
+            if (!duplicate) result.append({preset.name,file.absoluteFilePath(),false,system});
+        }
     }
     std::sort(result.begin(),result.end(),[](const PresetEntry &a,const PresetEntry &b) { return a.name.compare(b.name,Qt::CaseInsensitive)<0; });
     return result;
@@ -152,7 +159,8 @@ bool PresetStore::save(const QString &requestedName,const Project &settings,QStr
     const QString name = requestedName.trimmed();
     if (name.isEmpty() || name.size()>120) { *error = QStringLiteral("Enter a preset name between 1 and 120 characters."); return false; }
     QString path;
-    for (const auto &entry : list(scope)) if (entry.name.compare(name,Qt::CaseInsensitive)==0) { path = entry.path; break; }
+    // A built-in preset is never written: the user's own copy goes in their folder instead.
+    for (const auto &entry : list(scope)) if (!entry.system && entry.name.compare(name,Qt::CaseInsensitive)==0) { path = entry.path; break; }
     if (path.isEmpty()) path = presetPath(name,scope);
     if (!writePreset(path,name,settings,scope,error)) return false;
     if (resultPath) *resultPath = path; return true;

@@ -31,8 +31,10 @@ vgs::Frame bakeExportFrame(const vgs::Frame &, const Project &, int degree,
                           const ExportProgress & = {},double frameRate = 30,
                           const std::vector<uint8_t> *pruned = nullptr);
 // `thumbnailJpeg`, when given, becomes the capture's thumbnail (VGS/PGS); without it a .vgs
-// source keeps its own. A .vgs source's audio travels whole, and the result's startTick says
-// where its range starts on the source's timeline, which is where players start the audio.
+// source keeps its own. The soundtrack - every active Audio modifier's track mixed at its
+// volume, or with none the source's own - is cut to the range as AAC with ffmpeg (audiomix.h),
+// starting with it. Without ffmpeg one track travels as delivered, and startTick says where
+// the range starts on it.
 ExportResult exportCaptureFile(const Project &, const QString &destination,
                                const ExportProgress & = {}, const QByteArray &thumbnailJpeg = {});
 

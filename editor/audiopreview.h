@@ -31,6 +31,9 @@ public:
     void setBytes(const QByteArray &bytes, const QString &suffix);
     void clear();
     bool hasTrack() const { return !key_.isEmpty(); }
+    // 0 silent to 1 as recorded. Looped, the track repeats from its start once it ends.
+    void setVolume(double volume);
+    void setLoop(bool loop) { loop_ = loop; }
     // `seconds` into the track, playing or not, at the timeline's speed.
     void follow(double seconds, bool playing, double rate);
     bool isPlaying() const;
@@ -40,4 +43,5 @@ private:
     QBuffer *buffer_ = nullptr;
     QByteArray bytes_;
     QString key_;
+    bool loop_ = false;
 };

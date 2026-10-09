@@ -1,0 +1,162 @@
+{
+    "appliesTo": [
+        "capture-transform",
+        "modifiers",
+        "playback",
+        "reference-spaces"
+    ],
+    "configuration": {
+        "crop": {
+            "depth": 2,
+            "enabled": true,
+            "height": 2.5,
+            "position": [
+                0,
+                0,
+                0
+            ],
+            "radius": 2,
+            "rotation": [
+                0,
+                0,
+                0
+            ],
+            "scale": [
+                1,
+                1,
+                1
+            ],
+            "shape": "cylinder",
+            "shear": [
+                0,
+                0,
+                0
+            ],
+            "space": "world",
+            "width": 2
+        },
+        "modifiers": [
+            {
+                "crop": {
+                    "depth": 2,
+                    "editPreview": "red",
+                    "height": 2.5,
+                    "mode": "keep",
+                    "position": [
+                        0,
+                        0,
+                        0
+                    ],
+                    "radius": 2,
+                    "radiusZ": 2,
+                    "rotation": [
+                        0,
+                        0,
+                        0
+                    ],
+                    "scale": [
+                        1,
+                        1,
+                        1
+                    ],
+                    "shape": "cylinder",
+                    "shear": [
+                        0,
+                        0,
+                        0
+                    ],
+                    "space": "world",
+                    "width": 2
+                },
+                "enabled": true,
+                "id": "be7afa80-f71f-493c-bd90-352c0b840bb3",
+                "name": "Crop",
+                "timeline": "full",
+                "type": "crop"
+            },
+            {
+                "enabled": true,
+                "green": {
+                    "colourSource": "dc",
+                    "colourSpace": "linear-rgb",
+                    "hueTolerance": 45,
+                    "minimumSaturation": 0.30000001192092896,
+                    "targetHue": 120
+                },
+                "id": "3cda84f0-8d01-48b5-a835-9c0fabc9595f",
+                "name": "Remove green",
+                "timeline": "full",
+                "type": "remove-green"
+            },
+            {
+                "enabled": true,
+                "id": "387bd41a-86c3-473d-a45d-efee8bf23be3",
+                "isolation": {
+                    "medianPercent": 1200,
+                    "neighbour": 4
+                },
+                "name": "Purge Isolated",
+                "timeline": "full",
+                "type": "purge-isolated"
+            },
+            {
+                "colour": {
+                    "despill": true,
+                    "despillMode": "export",
+                    "despillStrength": 1,
+                    "exposure": 0,
+                    "greenGain": 0.97,
+                    "opacity": 1.25,
+                    "recoverSkin": true,
+                    "saturation": 1,
+                    "temperature": 0,
+                    "tint": 0,
+                    "viewChroma": 0.5
+                },
+                "enabled": true,
+                "id": "a27566d0-55c6-41aa-8fae-0082b369000c",
+                "name": "Color",
+                "timeline": "full",
+                "type": "colour"
+            }
+        ],
+        "playback": {
+            "loop": true,
+            "speed": 1
+        },
+        "selection": {
+            "modifier": "be7afa80-f71f-493c-bd90-352c0b840bb3"
+        },
+        "spaces": [
+            0,
+            0,
+            0
+        ],
+        "transform": {
+            "position": [
+                0,
+                0,
+                0
+            ],
+            "rotation": [
+                0,
+                0,
+                0
+            ],
+            "scale": [
+                1,
+                1,
+                1
+            ],
+            "shear": [
+                0,
+                0,
+                0
+            ]
+        }
+    },
+    "format": "vgs-editor-preset",
+    "name": "THE4DSCANNER_BASE",
+    "scope": "editor",
+    "version": 6
+}

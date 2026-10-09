@@ -98,7 +98,8 @@ int removedByModifiers() {
     vec3 baseRgb=clamp(color,0.0,1.0);
     for(int i=0;i<greenCount;++i) {
         vec4 filter=texelFetch(modifierData,cropCount*6+i);
-        vec3 rgb=filter.w>0.5 ? mix(baseRgb/12.92,pow((baseRgb+0.055)/1.055,vec3(2.4)),greaterThan(baseRgb,vec3(0.04045))) : baseRgb;
+        vec3 tested=filter.z>0.5 ? clamp(colourMatrix*color,0.0,1.0) : baseRgb; // below a Color modifier: as Color leaves it
+        vec3 rgb=filter.w>0.5 ? mix(tested/12.92,pow((tested+0.055)/1.055,vec3(2.4)),greaterThan(tested,vec3(0.04045))) : tested;
         float maximum=max(rgb.r,max(rgb.g,rgb.b)),minimum=min(rgb.r,min(rgb.g,rgb.b)),chroma=maximum-minimum;
         if(chroma<=0.0 || maximum<=0.0) continue;
         float hue=maximum==rgb.r ? (rgb.g-rgb.b)/chroma : maximum==rgb.g ? 2.0+(rgb.b-rgb.r)/chroma : 4.0+(rgb.r-rgb.g)/chroma;
@@ -397,6 +398,7 @@ void Viewport::cleanup() {
     glDeleteBuffers(1,&modifierBuffer_);glDeleteTextures(1,&modifierTexture_);
     glDeleteTextures(1, &shTexture_); glDeleteVertexArrays(1, &vao_);
     glDeleteBuffers(1, &gridBuffer_); glDeleteVertexArrays(1, &gridVao_);
+    glDeleteBuffers(1, &markerBuffer_); glDeleteVertexArrays(1, &markerVao_);
     glDeleteBuffers(1, &fineBuffer_); glDeleteVertexArrays(1, &fineVao_);
     glDeleteBuffers(1, &gizmoBuffer_); glDeleteVertexArrays(1, &gizmoVao_);
     initialized_ = false; doneCurrent();
@@ -466,6 +468,29 @@ void Viewport::initializeGL() {
     glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(lines.size() * sizeof(LineVertex)), lines.data(), GL_STATIC_DRAW);
     glEnableVertexAttribArray(0); glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(LineVertex), nullptr);
     glEnableVertexAttribArray(1); glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(LineVertex), reinterpret_cast<void *>(3*sizeof(float)));
+    // The front marker: a chevron flat on the floor pointing +Z, 20 cm wide, in the middle of
+    // the cell past the metre line (z 1.23 to 1.43) so it touches no cross line; the centre
+    // line runs along its axis. A 4 cm band, solid so it holds its weight at any distance, a
+    // lighter grey than the major lines. It sits a few millimetres up and is drawn after the
+    // floor, so the line beneath it never shows through.
+    const float markerGrey = 0.3f, lift = 0.004f, halfWidth = 0.1f, back = 1.27f, depth = 0.16f, band = 0.04f;
+    const QVector3D outerLeft(-halfWidth,lift,back),tip(0,lift,back+depth),outerRight(halfWidth,lift,back);
+    const QVector3D innerLeft(-halfWidth,lift,back-band),innerTip(0,lift,back+depth-band),innerRight(halfWidth,lift,back-band);
+    std::vector<LineVertex> marker;
+    for (const auto &p:{outerLeft,tip,innerTip, outerLeft,innerTip,innerLeft, tip,outerRight,innerRight, tip,innerRight,innerTip})
+        marker.push_back({{p.x(),p.y(),p.z()},{markerGrey,markerGrey,markerGrey}});
+    markerVertices_=int(marker.size());
+    // The origin: a 10 cm square round 0 0 0, square to the grid and drawn like its lines -
+    // one pixel, the minor lines' grey - so it marks the spot without weighing on the
+    // capture's feet; the centre lines cross inside it.
+    const float originHalf=0.05f,originGrey=0.14f;
+    const QVector3D originCorners[4]={{-originHalf,lift,-originHalf},{originHalf,lift,-originHalf},{originHalf,lift,originHalf},{-originHalf,lift,originHalf}};
+    for (int i=0;i<4;++i) for (const auto &p:{originCorners[i],originCorners[(i+1)%4]}) marker.push_back({{p.x(),p.y(),p.z()},{originGrey,originGrey,originGrey}});
+    glGenVertexArrays(1,&markerVao_);glGenBuffers(1,&markerBuffer_);
+    glBindVertexArray(markerVao_);glBindBuffer(GL_ARRAY_BUFFER,markerBuffer_);
+    glBufferData(GL_ARRAY_BUFFER,GLsizeiptr(marker.size()*sizeof(LineVertex)),marker.data(),GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,sizeof(LineVertex),nullptr);
+    glEnableVertexAttribArray(1);glVertexAttribPointer(1,3,GL_FLOAT,GL_FALSE,sizeof(LineVertex),reinterpret_cast<void *>(3*sizeof(float)));
     // Quarter-metre lines between the metre ones, shown only while a capture walks.
     std::vector<LineVertex> fine;
     for (int i = -80; i <= 80; ++i) {
@@ -533,11 +558,16 @@ void Viewport::paintGL() {
     const auto view = viewMatrix(), model = transform_.matrix();
     glDisable(GL_CULL_FACE); glDisable(GL_BLEND);
     glEnable(GL_DEPTH_TEST); glDepthMask(GL_TRUE);
-    if (grid_ && !cleanCapture_) {
+    // The grid buffer ends with the two grid segments the X and Z axes cover (4 vertices) and
+    // the three axes (6). Coloured axes are left out of orthographic views.
+    const bool axes = axes_ && !camera_.orthographic;
+    if ((grid_ || axes || frontMarker_) && !cleanCapture_) {
         gridShader_->bind(); gridShader_->setUniformValue("mvp", projection * view);
         // On the light background darker greys stand out: minor lines ~0.71, major ~0.58.
         gridShader_->setUniformValue("greyMap",lightBackground_ ? QVector2D(-1.6f,0.93f) : QVector2D(1,0));
-        if (walking_) {
+        if (!grid_) {
+            if (axes) {glBindVertexArray(gridVao_);glDrawArrays(GL_LINES,gridVertices_-6,6);}
+        } else if (walking_) {
             // A treadmill: the capture stays and the floor slides back under its feet, by the
             // distance walked modulo the major-line period so the loop has no seam. A planted
             // foot then stays on the grid exactly when the speed is right. The axes stay put.
@@ -551,16 +581,17 @@ void Viewport::paintGL() {
             glBindVertexArray(gridVao_); glDrawArrays(GL_LINES, 0, gridVertices_-6);
             gridShader_->setUniformValue("offset", QVector3D());
             gridShader_->setUniformValue("fade", QVector2D());
-            glDepthFunc(GL_LEQUAL);glDrawArrays(GL_LINES,gridVertices_-6,6);glDepthFunc(GL_LESS);
+            if (axes) {glDepthFunc(GL_LEQUAL);glDrawArrays(GL_LINES,gridVertices_-6,6);glDepthFunc(GL_LESS);}
         } else {
             glBindVertexArray(gridVao_); glDrawArrays(GL_LINES, 0, gridVertices_-10);
-            if (camera_.orthographic) {
+            if (!axes) {
                 glDrawArrays(GL_LINES,gridVertices_-10,4);
             } else {
                 // No grid segment runs beneath X/Z; equal depth also covers crossings.
                 glDepthFunc(GL_LEQUAL);glDrawArrays(GL_LINES,gridVertices_-6,6);glDepthFunc(GL_LESS);
             }
         }
+        if (frontMarker_) {glBindVertexArray(markerVao_);glDrawArrays(GL_TRIANGLES,0,markerVertices_);glDrawArrays(GL_LINES,markerVertices_,8);}
         gridShader_->setUniformValue("greyMap",QVector2D(1,0)); // crop and gizmo lines share this shader
         gridShader_->release();
     }
@@ -628,7 +659,9 @@ void Viewport::paintGL() {
             values.push_back({float(int(crop.volume.shape)),crop.volume.height,crop.volume.radius,crop.volume.remove ? 1.f : 0.f});
             values.push_back({crop.volume.width*.5f,crop.volume.depth*.5f,crop.volume.radiusZ,0});
         }
-        for (const auto &green:modifiers.greens) values.push_back({green.minimumSaturation,green.hueTolerance,120,green.linearRgb ? 1.f : 0.f});
+        // The worker has already decided Remove green when the colours shown are despilled.
+        if (frame_->greensApplied) modifiers.greens.clear();
+        for (const auto &green:modifiers.greens) values.push_back({green.minimumSaturation,green.hueTolerance,green.afterColour ? 1.f : 0.f,green.linearRgb ? 1.f : 0.f});
         GLint maximum=0;glGetIntegerv(GL_MAX_TEXTURE_BUFFER_SIZE,&maximum);size_t drawCount=frame_->points.size();
         const bool cpuFiltering=values.size()>size_t(maximum);
         std::vector<uint8_t> cpuKeep;
@@ -762,6 +795,8 @@ void Viewport::setDisplayControls(QWidget *controls) {
     displayControls_=controls;viewCube_->setDisplayControls(controls);
 }
 void Viewport::setGrid(bool enabled) { if (grid_ != enabled) { grid_ = enabled; update(); } }
+void Viewport::setAxes(bool enabled) { if (axes_ != enabled) { axes_ = enabled; update(); } }
+void Viewport::setFrontMarker(bool enabled) { if (frontMarker_ != enabled) { frontMarker_ = enabled; update(); } }
 QColor Viewport::overlayText() const { return lightBackground_ ? QColor(64,66,70) : EditorTheme::mutedText(); }
 void Viewport::setLightBackground(bool light) {
     if (lightBackground_==light) return;
@@ -833,7 +868,7 @@ void Viewport::mousePressEvent(QMouseEvent *event) {
     focusTimer_.stop(); lastMouse_ = event->position().toPoint(); setFocus();
     if (selectTool_ != SelectTool::None && event->button()==Qt::LeftButton) {
         selecting_ = true; stroke_ = QPainterPath(event->position()); hover_ = event->position();
-        strokeMode_ = (event->modifiers() & Qt::AltModifier) ? SelectMode::Subtract : (event->modifiers() & Qt::ControlModifier) ? SelectMode::Add : SelectMode::Replace;
+        strokeMode_ = (event->modifiers() & Qt::AltModifier) ? SelectMode::Subtract : (event->modifiers() & Qt::ControlModifier) ? SelectMode::Replace : SelectMode::Add;
         update(); event->accept(); return;
     }
     if (event->button()==Qt::LeftButton && !(event->modifiers() & Qt::ShiftModifier)) {

@@ -17,6 +17,7 @@
 #include "rangeslider.h"
 #include "mintfile.h"
 #include "mintskinrecovery.h"
+#include "audiomix.h"
 #include "nativeexport.h"
 #include "captureworker.h"
 #include <Eigen/Geometry>
@@ -136,6 +137,24 @@ double colour(const vgs::Frame &f,const Eigen::Vector3d &direction,int c) {
     auto b=basis(direction);double out=f.colorDc[c];for (int i=0;i<f.shCoefficients;++i) out+=b[i+1]*f.shRest[3*i+c];return out;
 }
 }
+namespace {
+    // Without ffmpeg: what the audio does then, with a fake track no ffmpeg could read anyway.
+    struct NoFfmpeg {NoFfmpeg() {qputenv("VGS_FFMPEG","no-ffmpeg-here.exe");} ~NoFfmpeg() {qunsetenv("VGS_FFMPEG");}};
+void writeTone(const QString &path,double seconds,double hertz) {
+        const int rate=48000,count=int(seconds*rate);QByteArray pcm;pcm.reserve(count*2);
+        for (int i=0;i<count;++i) {const qint16 v=qint16(8000*std::sin(2*3.14159265358979*hertz*i/rate));pcm.append(char(v&0xff));pcm.append(char((v>>8)&0xff));}
+        auto u32=[](QByteArray &b,quint32 v) {for (int k=0;k<4;++k) b.append(char((v>>(8*k))&0xff));};auto u16=[](QByteArray &b,quint16 v) {b.append(char(v&0xff));b.append(char(v>>8));};
+        QByteArray wav("RIFF");u32(wav,36+pcm.size());wav+="WAVEfmt ";u32(wav,16);u16(wav,1);u16(wav,1);u32(wav,rate);u32(wav,rate*2);u16(wav,2);u16(wav,16);wav+="data";u32(wav,pcm.size());wav+=pcm;
+        QFile file(path);if (file.open(QIODevice::WriteOnly)) file.write(wav);
+    }
+    // An .m4a's length from its movie header.
+double m4aSeconds(const QByteArray &bytes) {
+        const qsizetype at=bytes.indexOf("mvhd");if (at<0) return -1;
+        auto be32=[&](qsizetype i) {return (quint32(quint8(bytes[i]))<<24)|(quint32(quint8(bytes[i+1]))<<16)|(quint32(quint8(bytes[i+2]))<<8)|quint32(quint8(bytes[i+3]));};
+        if (bytes[at+4]!=0) return -1;return double(be32(at+20))/be32(at+16);
+    }
+}
+
 class ExportTests : public QObject {
     Q_OBJECT
 private slots:
@@ -262,9 +281,32 @@ private slots:
         project.modifiers[0].enabled=true;const auto ply=dir.filePath("frame.ply");const auto result=exportFramePly(project,1/25.,ply);QCOMPARE(result.kept,quint64(41));
         QVERIFY(result.notes.contains("Prune low contribution removed 14.6% of the splats, as asked."));
     }
+    void soundtrackIsMixedAndCutToTheRange() {
+        if (ffmpegPath().isEmpty()) QSKIP("No ffmpeg beside the tests (tools/ffmpeg.exe).");
+        // Two modifiers - a song and a short looped jingle at a lower volume - mix into one AAC
+        // track exactly as long as the range, which players start with it.
+        QTemporaryDir dir;const auto source=dir.filePath("source.pgs");sourceFile(source,5);
+        writeTone(dir.filePath("song.wav"),3,440);writeTone(dir.filePath("jingle.wav"),.05,880);
+        Project project;project.asset=source;project.in=1./25;project.out=4./25;project.time=project.in;project.modifiers.clear();
+        Modifier song;song.id=Project::newId();song.name="Song";song.type=ModifierType::Audio;song.audioFile=dir.filePath("song.wav");song.audioOffset=-1;
+        Modifier jingle=song;jingle.id=Project::newId();jingle.name="Jingle";jingle.audioFile=dir.filePath("jingle.wav");jingle.audioOffset=.5;jingle.audioVolume=.3;jingle.audioLoop=true;
+        project.modifiers={song,jingle};
+        const auto path=dir.filePath("mixed.vgs");const auto result=exportCaptureFile(project,path);
+        QVERIFY2(result.notes.contains("The soundtrack mixes 2 tracks, cut to the exported range (0.16 s), as AAC."),qPrintable(result.notes.join('\n')));
+        auto capture=vgsdec::Capture::openFile(path.toStdString());QVERIFY(capture.hasAudio());QCOMPARE(capture.audioFormat(),vgsdec::Capture::AudioFormat::Aac);
+        QCOMPARE(capture.startSeconds(),0.);
+        const auto track=capture.audio();const QByteArray m4a(reinterpret_cast<const char *>(track.data()),qsizetype(track.size()));
+        QVERIFY(m4a.mid(4,4)=="ftyp");QVERIFY2(std::abs(m4aSeconds(m4a)-4./25)<.03,qPrintable(QString::number(m4aSeconds(m4a))));
+        // The direct mix too: a track that comes in late is padded, and the length holds.
+        const auto alone=mixAudioAac({{dir.filePath("jingle.wav"),-.5,1,false}},1.);QVERIFY(std::abs(m4aSeconds(alone)-1)<.03);
+        // Disabled, a modifier is out of the mix; with none left the file has no track.
+        project.modifiers[0].enabled=project.modifiers[1].enabled=false;exportCaptureFile(project,dir.filePath("silent.vgs"));
+        QVERIFY(!vgsdec::Capture::openFile(dir.filePath("silent.vgs").toStdString()).hasAudio());
+    }
     void exportKeepsAudioInSyncAndTakesTheThumbnail() {
         // A source with a track and a thumbnail: a range from frame 2 keeps the whole track,
         // starts 2 frames into it, and takes the thumbnail it is given.
+        NoFfmpeg noFfmpeg;
         QTemporaryDir dir;const auto source=dir.filePath("source.vgs");
         {vgs::Header h;h.frameCount=h.durationTicks=5;h.timeDenominator=25;h.chunks.resize(5);for (int i=0;i<5;++i) {h.chunks[i].startTick=i;h.chunks[i].intervals=1;}
          vgs::EncodeOptions options;options.signer=vgs::authoringSigner();options.compression=vgs::Compression::None;
@@ -288,6 +330,7 @@ private slots:
         QVERIFY2(writeExportTask(task,&error),qPrintable(error));ExportTask read;QVERIFY2(readExportTask(task.path,&read,&error),qPrintable(error));QCOMPARE(read.thumbnail,jpeg);
     }
     void audioModifierBringsItsFileInSync() {
+        NoFfmpeg noFfmpeg;
         QTemporaryDir dir;const auto source=dir.filePath("source.pgs");sourceFile(source,5);
         QFile song(dir.filePath("song.mp3"));QVERIFY(song.open(QIODevice::WriteOnly));song.write("ID3 song");song.close();
         Project project;project.asset=source;project.in=2./25;project.out=4./25;project.time=project.in;project.modifiers.clear();

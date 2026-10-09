@@ -65,7 +65,11 @@ public:
     int splatShDegree() const { return splatShDegree_; }
     void setDisplayControls(QWidget *controls);
     void setPlaybackTime(double seconds,double duration);
+    // Display aids, each on its own: the floor grid, the coloured X/Y/Z axes and a grey
+    // chevron on the floor just past a metre along +Z, pointing that way (where the capture faces).
     void setGrid(bool enabled);
+    void setAxes(bool enabled);
+    void setFrontMarker(bool enabled);
     // Preview of a walking capture: it stays where it is and the floor slides under it,
     // by `distance` along -Z, with a finer grid to read the feet against.
     void setFloorScroll(bool walking, double distance);
@@ -177,6 +181,9 @@ private:
     QPoint lastMouse_;
     bool walking_ = false;
     double walkDistance_ = 0;
+    bool axes_ = false, frontMarker_ = true;
+    GLuint markerVao_ = 0, markerBuffer_ = 0;
+    int markerVertices_ = 0;
     bool grid_ = true, frameDirty_ = true, initialized_ = false, lightBackground_ = false;
     QColor overlayText() const;
     GLuint vao_ = 0, buffer_ = 0, shBuffer_ = 0, shTexture_ = 0;

@@ -98,7 +98,7 @@ QJsonObject Project::json(const QString &path) const {
         {"spaces",QJsonArray{int(spaces[0]),int(spaces[1]),int(spaces[2])}},
         {"captureSettings",captureSettings.json()},
         {"timeline", QJsonObject{{"time", time}, {"in", in}, {"out", out}, {"speed", speed}, {"loop", loop}}},
-        {"view", QJsonObject{{"grid", grid}, {"sh", true}, {"pointSize", pointSize}}}};
+        {"view", QJsonObject{{"grid", grid}, {"axes", axes}, {"frontMarker", frontMarker}, {"sh", true}, {"pointSize", pointSize}}}};
 }
 bool Project::write(const QString &path, QString *error) const {
     QSaveFile file(path);
@@ -261,6 +261,8 @@ bool Project::fromJson(const QJsonObject &root,const QString &baseDirectory,Proj
                 if (c.contains("recoverSkin")) {valid &= c["recoverSkin"].isBool();m.colourRecoverSkin=c["recoverSkin"].toBool();}
             } else if (item["type"]=="audio") {
                 m.type=ModifierType::Audio;const auto a=item["audio"].toObject();m.audioOffset=number(a,"offset",-36000,36000);
+                if (a.contains("volume")) m.audioVolume=number(a,"volume",0,1);
+                if (a.contains("loop")) {valid &= a["loop"].isBool();m.audioLoop=a["loop"].toBool();}
                 valid &= a["source"]=="capture" || a["source"]=="file";
                 if (a["source"]=="file") {
                     // Kept relative to the project, like the capture; an absolute path still works.
@@ -286,6 +288,9 @@ bool Project::fromJson(const QJsonObject &root,const QString &baseDirectory,Proj
     valid &= tl["loop"].isBool() && view["grid"].isBool() && view["sh"].isBool();
     // Keep reading version-1 projects, but their old SH toggle no longer affects rendering.
     p.loop = tl["loop"].toBool(); p.grid = view["grid"].toBool();
+    // Projects from before these were separate get the defaults: axes off, marker on.
+    p.axes = view.contains("axes") && view["axes"].toBool(); p.frontMarker = !view.contains("frontMarker") || view["frontMarker"].toBool();
+    valid &= !view.contains("axes") || view["axes"].isBool();valid &= !view.contains("frontMarker") || view["frontMarker"].isBool();
     // Despill used to be an export setting; it is a Colour modifier's now. A project, preset or
     // task that despilled keeps doing so, with the same settings, as a modifier at the end.
     if (p.captureSettings.despill) {

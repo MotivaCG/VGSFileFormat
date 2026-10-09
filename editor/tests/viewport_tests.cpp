@@ -56,13 +56,13 @@ private slots:
         QPainterPath lasso;lasso.addRect(QRectF(centre.x()-60,centre.y()-20,120,40));QCOMPARE(viewport.recordsInside(lasso),(std::vector<uint32_t>{1,2,3}));
         QPainterPath dab(centre);dab.lineTo(centre);QCOMPARE(viewport.recordsInside(Viewport::brushRegion(dab,10)),(std::vector<uint32_t>{2}));
         QPainterPath sweep(QPointF(10,150));sweep.lineTo(QPointF(390,150));QCOMPARE(viewport.recordsInside(Viewport::brushRegion(sweep,8)),(std::vector<uint32_t>{0,1,2,3,4}));
-        // A stroke with the mouse: Ctrl adds, Alt subtracts, nothing replaces.
+        // A stroke with the mouse: nothing adds, Ctrl replaces, Alt subtracts.
         viewport.setSelectTool(Viewport::SelectTool::Brush,10);std::vector<uint32_t> got;Viewport::SelectMode mode{};
         connect(&viewport,&Viewport::selectionStroke,this,[&](std::vector<uint32_t> r,Viewport::SelectMode m) {got=std::move(r);mode=m;});
         QTest::mousePress(&viewport,Qt::LeftButton,Qt::ControlModifier,centre.toPoint());QTest::mouseRelease(&viewport,Qt::LeftButton,Qt::ControlModifier,centre.toPoint());
-        QCOMPARE(got,(std::vector<uint32_t>{2}));QCOMPARE(mode,Viewport::SelectMode::Add);
+        QCOMPARE(got,(std::vector<uint32_t>{2}));QCOMPARE(mode,Viewport::SelectMode::Replace);
         QTest::mousePress(&viewport,Qt::LeftButton,Qt::AltModifier,centre.toPoint());QTest::mouseRelease(&viewport,Qt::LeftButton,Qt::AltModifier,centre.toPoint());QCOMPARE(mode,Viewport::SelectMode::Subtract);
-        QTest::mousePress(&viewport,Qt::LeftButton,Qt::NoModifier,centre.toPoint());QTest::mouseRelease(&viewport,Qt::LeftButton,Qt::NoModifier,centre.toPoint());QCOMPARE(mode,Viewport::SelectMode::Replace);
+        QTest::mousePress(&viewport,Qt::LeftButton,Qt::NoModifier,centre.toPoint());QTest::mouseRelease(&viewport,Qt::LeftButton,Qt::NoModifier,centre.toPoint());QCOMPARE(mode,Viewport::SelectMode::Add);
         // Picking does not orbit with the left button; the right one does.
         const auto before=viewport.camera();
         QTest::mousePress(&viewport,Qt::RightButton,Qt::NoModifier,{100,100});
@@ -141,7 +141,7 @@ private slots:
         QCOMPARE(frame->points.size(),size_t(3));
     }
     void orthographicBackgroundHasNoColouredAxes() {
-        Viewport viewport;viewport.resize(600,450);viewport.show();QVERIFY(QTest::qWaitForWindowExposed(&viewport));
+        Viewport viewport;viewport.resize(600,450);viewport.setAxes(true);viewport.show();QVERIFY(QTest::qWaitForWindowExposed(&viewport));
         auto coloured=[&] {const auto image=viewport.grabFramebuffer();int count=0;for (int y=0;y<image.height();++y) for (int x=0;x<400;++x) {const auto c=image.pixelColor(x,y);if (std::max({c.red(),c.green(),c.blue()})-std::min({c.red(),c.green(),c.blue()})>70) ++count;}return count;};
         QVERIFY(coloured()>10);viewport.setViewPreset(ViewPreset::Top,true);QCOMPARE(coloured(),0);viewport.setViewPreset(ViewPreset::Front,true);QCOMPARE(coloured(),0);
     }

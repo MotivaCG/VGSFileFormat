@@ -67,6 +67,9 @@ enum class ModifierType { Crop, RemoveGreen, AnimateTransform, PurgeIsolated, Wa
 struct GreenFilter {
     float minimumSaturation = 0.5f, hueTolerance = 45; // HSV: saturation 0..1, circular distance from 120 degrees.
     bool linearRgb = true; // Convert clamped sRGB base colour to linear RGB before HSV.
+    // Set when compiled: a Color modifier is above it in the stack, so it tests the colour as
+    // Color leaves it (despilled, then its matrix) rather than the source's.
+    bool afterColour = false;
     bool matches(const QVector3D &sourceRgb) const;
 };
 struct TransformKeyframe {int frame=0;Transform offset;};
@@ -121,8 +124,11 @@ struct Modifier {
     // Audio: the track the capture plays with - a file, or with none the capture's own - and
     // where it sits: `audioOffset` seconds of the capture's timeline before its first sound
     // plays (negative: the track starts earlier). The editor plays it; exports carry it.
+    // Several mix: each at its own `audioVolume` (0 silent, 1 as recorded), and a looped one
+    // repeats from its start for as long as the capture lasts.
     QString audioFile;
-    double audioOffset = 0;
+    double audioOffset = 0, audioVolume = 1;
+    bool audioLoop = false;
     // Colour: exposure in stops, white balance (temperature: + warmer, tint: + greener) and
     // saturation (1 leaves it), all one 3x3 matrix on the colour - base and view-dependent
     // alike - so it keeps the capture's own representation. And despill, the green spill
@@ -187,13 +193,13 @@ struct Project {
     // The size the active Bake anti-aliasing modifiers widen every splat by (the largest of
     // them), in world units; 0 when none is active.
     double antialiasingBake() const;
-    // The active Audio modifier that decides the soundtrack (the last in the stack), or none.
-    const Modifier *audioModifier() const;
+    // The active Audio modifiers, mixed into the soundtrack, in stack order.
+    QVector<const Modifier *> audioModifiers() const;
     static QString newId();
     CaptureSettings captureSettings;
     double time = 0, in = 0, out = 0, speed = 1;
     double pointSize = 5;
-    bool loop = true, grid = true;
+    bool loop = true, grid = true, axes = false, frontMarker = true;
     CoordinateSpace spaces[3] = {CoordinateSpace::Global,CoordinateSpace::Global,CoordinateSpace::Global};
     QJsonObject json(const QString &projectPath) const;
     static bool read(const QString &path, Project *project, QString *error);
@@ -210,8 +216,15 @@ public:
     explicit CompiledModifiers(const Project &);
     explicit CompiledModifiers(const QVector<Modifier> &);
     bool keepsPosition(const QVector3D &world) const;
-    bool removesColour(const QVector3D &sourceRgb) const;
+    // The stack runs top to bottom: a Remove green above every Color modifier tests the
+    // source's colour, one below them the colour they make - `processed` (the source's
+    // despilled, when one despills) through their matrix. With one colour it is both.
+    bool removesColour(const QVector3D &sourceRgb, const QVector3D &processedRgb) const;
+    bool removesColour(const QVector3D &sourceRgb) const { return removesColour(sourceRgb, sourceRgb); }
     bool keeps(const QVector3D &world,const QVector3D &sourceRgb) const { return keepsPosition(world) && !removesColour(sourceRgb); }
+    bool keeps(const QVector3D &world,const QVector3D &sourceRgb,const QVector3D &processedRgb) const { return keepsPosition(world) && !removesColour(sourceRgb,processedRgb); }
+    QVector3D coloured(const QVector3D &rgb) const; // through the Color matrix
+    bool greensAfterColour() const { for (const auto &g:greens) if (g.afterColour) return true; return false; }
     struct Crop {QMatrix4x4 inverse;CropVolume volume;};
     QVector<Crop> crops;
     QVector<GreenFilter> greens;

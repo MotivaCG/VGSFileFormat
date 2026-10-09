@@ -40,6 +40,9 @@ struct RenderFrame {
     double decodeMs = 0;
     // What each active Prune low contribution did to this frame's chunk, in stack order.
     std::vector<PruneStats> prune;
+    // Remove green already decided into modifierVisibility, because the colours shown are
+    // despilled and a filter above Color must test the source's: the viewport skips it.
+    bool greensApplied = false;
 };
 using FramePtr = std::shared_ptr<RenderFrame>;
 Q_DECLARE_METATYPE(FramePtr)

@@ -15,6 +15,7 @@
 #include <QFileInfo>
 #include <QMediaPlayer>
 #include <QUrl>
+#include <algorithm>
 #include <cmath>
 
 AudioPreview::AudioPreview(QObject *parent) : QObject(parent), player_(new QMediaPlayer(this)), output_(new QAudioOutput(this)) {
@@ -42,11 +43,14 @@ void AudioPreview::clear() {
     if (buffer_) { buffer_->deleteLater(); buffer_ = nullptr; }
     bytes_.clear(); key_.clear();
 }
+void AudioPreview::setVolume(double volume) { output_->setVolume(float(std::clamp(volume, 0.0, 1.0))); }
 bool AudioPreview::isPlaying() const { return player_->playbackState() == QMediaPlayer::PlayingState; }
 
 void AudioPreview::follow(double seconds, bool playing, double rate) {
     if (key_.isEmpty()) return;
-    const qint64 duration = player_->duration(), wanted = qint64(std::llround(seconds * 1000));
+    const qint64 duration = player_->duration();
+    qint64 wanted = qint64(std::llround(seconds * 1000));
+    if (loop_ && duration > 0 && wanted >= duration) wanted %= duration;
     const bool inside = wanted >= 0 && (duration <= 0 || wanted < duration);
     if (!playing || !inside) {
         if (isPlaying()) player_->pause();

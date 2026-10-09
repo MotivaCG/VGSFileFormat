@@ -30,7 +30,10 @@ scale transforms the entire capture without changing point size.
   it), keeping the angle and distance, as the web viewer does; any navigation cancels the glide.
 - `Numpad decimal` / `Numpad Del` / `F`: Focus visible. `Ctrl+E`: export the edited capture. `Ctrl+Shift+E`: export the viewport as PNG.
 - `G` / `R` / `S`: activate Move / Rotate / Scale. Repeat the active mode's key to switch Global/Local. `Esc`: leave all transform modes, and what `Tab` entered (crop or Eraser editing).
-- `Shift+G` or **View > Grid and axes**: toggle the world grid and reference axes.
+- `Shift+G` or **View > Grid**: toggle the floor grid. **View > Axes** toggles the coloured
+  X/Y/Z axes and **View > Origin and front marker** a faint square round the origin and a grey chevron on
+  the floor just past a metre along +Z,
+  pointing the way the capture faces; each on its own (grid and marker on, axes off at first).
 
 The timeline uses Gracia Converter's range control: drag the upper Start marker, lower End marker, or white playhead. Above it, the clock toggle comes first, followed by Start/Frame/End on the left; transport buttons are centred and Loop/Speed sit on the right. The frame field reads **Frame X of Y**, with a zero-based index and the full capture frame count. The clock switches all three fields to seconds; typed values snap to the nearest valid frame. Start and End are inclusive and define the export range. Current time / full duration appears below decode statistics in the viewport. The unit preference is remembered without changing the project range.
 The single **Transform** group provides Position, Rotation (XYZ Euler degrees)
@@ -80,6 +83,11 @@ and a folder button (Ctrl+Alt+P). Give the preset a name; saving over an existin
 name asks before replacement within that scope. Selecting an entry restores capture and crop
 position, orientation, scale/shear, cylinder dimensions and crop state, reference
 spaces and playback settings. Viewport camera and display controls are excluded.
+
+Built-in presets ship in a `presets` folder beside the program (the build copies
+`editor/presets` there) and are listed with the user's, read-only: the folder button opens
+only the user's folder, and saving under a built-in preset's name writes the user's own copy,
+which then takes its place in the list while the built-in file stays as it is.
 The loaded capture path and its
 current time/range and metadata remain unchanged, so presets work across captures.
 
@@ -131,6 +139,10 @@ editing their values. Navigation mappings follow the
 Numpad 0 resets perspective because this editor has no separate scene camera.
 
 ## Modifier stack
+
+The stack runs top to bottom. A Remove green above a Color modifier tests the capture's own
+colours, whatever Color then does to them (despill shown in the viewport included); one below
+it tests the colours Color leaves. The viewport and every export agree on this.
 
 The add list runs in the order a capture is usually worked on, with separators between the
 groups, and F1 to F10 add each kind directly (the key is in its name): clean it — Crop (F1),
@@ -205,8 +217,8 @@ measured about 14-15% smaller files with renders differing by 50 dB or more on a
 **Eraser** removes splats picked by hand. While it is selected (and enabled) with **Edit** on —
 the default; **Tab** toggles it — the viewport picks:
 a left drag paints with the **Brush** (its radius in pixels; Ctrl + wheel changes it) or draws a **Lasso**, and on release
-the visible splats inside replace the picks of the chunk on screen; **Ctrl** adds to them and
-**Alt** subtracts. The right button orbits and the middle one pans meanwhile. Picks show in pink
+the visible splats inside are added to the picks of the chunk on screen; with **Ctrl** they
+replace them and with **Alt** they are subtracted. The right button orbits and the middle one pans meanwhile. Picks show in pink
 while Edit is on; with it off the viewport shows the result, the picks removed, with the usual
 navigation, as it does when the modifier is not selected and in every export. A splat is
 itself only within one chunk of the source, so each chunk keeps its own picks, as record indices
@@ -230,12 +242,20 @@ named Despill, only on export, with its settings.
 
 **Audio** plays a sound track with the timeline: the capture's own (a .vgs can carry one)
 or a file (MP3, AAC .m4a, Opus or WAV), with an **Offset** that slides it along the capture's
-timeline to line it up. The editor plays it at the timeline's speed, keeps it in step through
-seeks and loops, and is silent before the track starts and after it ends; disabling the
-modifier mutes it. Exports to VGS/PGS carry the track as delivered (never re-encoded): a .vgs
-source's own track whole, or the file instead, and the header's `startTick` says where the
-exported range starts on the track's timeline, which is where players start it. A range that
-begins before the track does starts with it, with a note. MINT cannot hold audio.
+timeline to line it up, a **Volume** (100% as recorded) and **Loop**, which repeats the track
+from its start whenever it ends. Every enabled Audio modifier plays, mixed, so a voice, music
+and effects can each have their own level. The editor plays them at the timeline's speed,
+keeps them in step through seeks and loops, and a track is silent before it starts and, unless
+looped, after it ends; disabling a modifier mutes it.
+
+Exports to VGS/PGS make the soundtrack with ffmpeg (`tools/ffmpeg.exe` beside the program, or
+`VGS_FFMPEG`): every enabled Audio modifier's track - or, with none, the source's own - placed
+where it plays, at its volume, mixed and cut to exactly the exported range as AAC (.m4a,
+160 kb/s, which every browser and iOS play), so nothing outside the range is stored and the
+track starts with it (`startTick` 0). Without ffmpeg the last Audio modifier's file travels as
+delivered, or a .vgs source's own track whole, with `startTick` saying where the range starts
+on it, and a note says so. MINT cannot hold audio. The build copies ffmpeg beside the editor
+from the CMake cache path `VGS_FFMPEG`; it is not part of the repository.
 
 Exports to VGS/PGS take the viewport, as it is when the export starts (or when an export task
 is made), as the capture's thumbnail: the centre square, 256 px, JPEG, without the grid, gizmo,
@@ -447,8 +467,8 @@ the viewport background, grid contrast and overlay text; the rest of the
 interface is unchanged and the choice is never saved in projects, presets or
 settings. The full-width Point size field follows and stays enabled before
 opening a capture. Point size starts at **5 px**; projects and user settings
-retain overrides. The world grid and reference axes are toggled from
-**View > Grid and axes** (`Shift+G`). The top-left viewport statistics remain unobstructed.
+retain overrides. The floor grid (`Shift+G`), the axes and the front marker are
+toggled separately from **View**, and saved with the project. The top-left viewport statistics remain unobstructed.
 The small **Ghost comparison** toggle below Point size starts off. Turning it
 on freezes the currently visible points in world space as a white reference with
 a 15%-opacity interior by default and a soft, brighter outline. The unlabelled,
@@ -490,6 +510,23 @@ Requires OpenGL 3.3. CMake's `VGS_ROOT` overrides the VGSFileFormat source direc
 its default is the parent folder. qmake compiles the same sources directly, so
 Debug and Release use their respective runtimes without prebuilt `.lib` files.
 Use `windeployqt` to run outside Qt Creator.
+
+## Version, deploy and installer
+
+The version is set once, in `licensemanagement.h` (`VERSION_NAME`, e.g. `"v1.0.0"`). The
+window title and About show it, the exe's version information carries it (qmake and CMake
+read the header), and the installer reads it too.
+
+`deploy.ps1 -BuildDir <qmake Release build folder>` makes `<build>\deploy`: the editor,
+windeployqt's Qt libraries and plugins with the MSVC runtime, the built-in presets, ffmpeg
+and the licence. In Qt Creator it is a Custom Process Step under Deploy (Command
+`powershell.exe`, Arguments `-NoProfile -ExecutionPolicy Bypass -File "<editor>\deploy.ps1"
+-BuildDir "%{buildDir}"`, Working directory the editor folder).
+
+`installer/VGSEditor_InnoSetup.iss` (Inno Setup 6) packages that folder into
+`installer/Output/VGSEditorInstaller_<version>.exe`: Program Files install, Start menu and
+optional desktop shortcut, `.vgsproj` opening in the editor, the licence shown before
+installing. Updates replace the built-in presets; the user's own stay in their AppData.
 
 ## Data and rendering
 

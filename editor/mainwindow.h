@@ -17,6 +17,7 @@
 #include <QMainWindow>
 #include <QThread>
 #include <QTimer>
+#include <map>
 #include <optional>
 
 class Viewport;
@@ -44,7 +45,7 @@ class AudioPreview;
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
-    explicit MainWindow(QWidget *parent = nullptr,const QString &presetDirectory = {});
+    explicit MainWindow(QWidget *parent = nullptr,const QString &presetDirectory = {},const QString &systemPresetDirectory = {});
     ~MainWindow() override;
     void openPath(const QString &path);
     void smokeTest(const QString &path, const QString &output);
@@ -135,12 +136,14 @@ private:
     QGroupBox *isolationProperties_, *walkProperties_, *bakeProperties_, *pruneProperties_;
     QDoubleSpinBox *prunePercent_, *pruneProtect_;
     QLabel *pruneStatus_;
-    // Audio: its panel, and the track it plays along with the timeline.
+    // Audio: its panel, and a player per active Audio modifier, by its id, all following the
+    // timeline together.
     QGroupBox *audioProperties_;
     QLabel *audioSource_;
     QPushButton *audioCaptureTrack_;
-    QDoubleSpinBox *audioOffset_;
-    AudioPreview *audio_ = nullptr;
+    QDoubleSpinBox *audioOffset_, *audioVolume_;
+    QCheckBox *audioLoop_;
+    std::map<QString,AudioPreview *> audio_;
     // Colour: exposure, white balance, saturation and despill.
     QGroupBox *colourProperties_;
     QDoubleSpinBox *colourOpacity_, *colourExposure_, *colourTemperature_, *colourTint_, *colourSaturation_, *colourDespillStrength_, *colourGreenGain_, *colourViewChroma_;
@@ -236,7 +239,7 @@ private:
     QPushButton *t4dsPresetButton_, *smnPresetButton_;
     QPushButton *cropFitButton_, *cropClearButton_;
     QAction *estimateAction_ = nullptr;
-    QAction *saveAction_, *saveAsAction_, *imageAction_, *exportAction_, *gridAction_, *plyAction_ = nullptr, *taskAction_ = nullptr;
+    QAction *saveAction_, *saveAsAction_, *imageAction_, *exportAction_, *gridAction_, *axesAction_, *markerAction_, *plyAction_ = nullptr, *taskAction_ = nullptr;
     QMenu *recentMenu_;
     QString smokeOutput_;
     int smokeStage_ = 0;
