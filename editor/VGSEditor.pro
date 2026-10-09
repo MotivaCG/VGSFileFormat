@@ -36,3 +36,5 @@ HEADERS += $$PWD/mintwriter.h
 
 SOURCES += $$PWD/modifierpanel.cpp
 HEADERS += $$PWD/modifierpanel.h
+SOURCES += $$PWD/exporttask.cpp $$PWD/taskqueuedialog.cpp
+HEADERS += $$PWD/exporttask.h $$PWD/taskqueuedialog.h

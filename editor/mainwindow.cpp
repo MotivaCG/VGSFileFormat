@@ -6,6 +6,8 @@
 #include "animationpanel.h"
 #include "capturesettingsdialog.h"
 #include "exportcapture.h"
+#include "exporttask.h"
+#include "taskqueuedialog.h"
 #include <QProgressDialog>
 #include <atomic>
 #include <QAction>
@@ -368,6 +370,13 @@ void MainWindow::buildUi() {
     plyAction_ = exportMenu->addAction(tr("Export current frame as PLY\u2026"), QKeySequence("Ctrl+Alt+E"), this, &MainWindow::exportFrame);
     plyAction_->setToolTip(tr("Write the frame on screen as a 3D Gaussian Splatting .ply, edited as Export capture would write it: transform, modifiers, colour processing and SH degree (Ctrl+Alt+E)."));
     imageAction_ = exportMenu->addAction(tr("Export viewport image\u2026"), QKeySequence("Ctrl+Shift+E"), this, &MainWindow::exportImage);
+    exportMenu->addSeparator();
+    taskAction_ = exportMenu->addAction(tr("Export task\u2026"), QKeySequence("Ctrl+T"), this, &MainWindow::exportTask);
+    taskAction_->setToolTip(tr("Choose an output as for Export capture, and write a .vgstask beside it instead of exporting.\nThe task keeps a copy of the project as it is now. Run it later with Process tasks (Ctrl+T)."));
+    auto *processAction = exportMenu->addAction(tr("Process tasks\u2026"), QKeySequence("Ctrl+Shift+T"), this, &MainWindow::processTasks);
+    processAction->setToolTip(tr("Open one or more .vgstask files and export them one after another (Ctrl+Shift+T)."));
+    taskAction_->setIcon(themeIcon(QIcon::ThemeIcon::ListAdd,style()->standardIcon(QStyle::SP_FileDialogNewFolder)));
+    processAction->setIcon(themeIcon(QIcon::ThemeIcon::MediaPlaybackStart,style()->standardIcon(QStyle::SP_MediaPlay)));
     imageAction_->setToolTip(tr("Save the viewport as it looks now as a PNG (Ctrl+Shift+E)."));
     newAction->setIcon(themeIcon(QIcon::ThemeIcon::DocumentNew,style()->standardIcon(QStyle::SP_FileIcon)));
     openAction->setIcon(themeIcon(QIcon::ThemeIcon::DocumentOpen,style()->standardIcon(QStyle::SP_DirOpenIcon)));
@@ -957,7 +966,7 @@ void MainWindow::syncUi() {
     captureSettingsButton_->setEnabled(loaded_ && !loading_);
     savePresetButton_->setEnabled(loaded_ && !loading_); presetCombo_->setEnabled(loaded_ && !loading_ && presetCombo_->count()>1);
     presetFolderButton_->setEnabled(loaded_ && !loading_);
-    saveAction_->setEnabled(loaded_ && !loading_); saveAsAction_->setEnabled(loaded_ && !loading_); imageAction_->setEnabled(loaded_ && !loading_); exportAction_->setEnabled(loaded_ && !loading_); plyAction_->setEnabled(loaded_ && !loading_);
+    saveAction_->setEnabled(loaded_ && !loading_); saveAsAction_->setEnabled(loaded_ && !loading_); imageAction_->setEnabled(loaded_ && !loading_); exportAction_->setEnabled(loaded_ && !loading_); plyAction_->setEnabled(loaded_ && !loading_); taskAction_->setEnabled(loaded_ && !loading_);
     assetLabel_->setText(loaded_ ? info_.title : tr("No capture"));
     assetLabel_->setToolTip(project_.asset);
     metadata_->setText(loaded_ ? tr("%1 · %2 fps\n%3 s · %4 frames").arg(info_.format).arg(info_.fps,0,'f',2).arg(info_.duration,0,'f',3).arg(info_.frames) : QString());
@@ -1266,6 +1275,31 @@ void MainWindow::exportCapture() {
         .arg(result.frames).arg(result.kept).arg(result.removed).arg(result.notes.join("\n")));
 }
 
+// The output is chosen as for Export capture; the task is written beside it, named after it.
+void MainWindow::exportTask() {
+    if (!loaded_ || loading_) return;
+    play(false);
+    const QString last=QFileInfo(settings_.value("Export/LastFile").toString()).suffix().toLower();
+    const QString extension=last=="pgs" || last=="mint" ? last : "vgs";
+    const QString suggested=QDir(settings_.value("Export/Directory",QFileInfo(project_.asset).absolutePath()).toString()).filePath(QFileInfo(project_.asset).completeBaseName()+"_edited."+extension);
+    QString selectedFilter=extension=="pgs" ? tr("Plain Gaussian capture (*.pgs)") : extension=="mint" ? tr("Gracia MINT capture (*.mint)") : tr("Compressed Gaussian capture (*.vgs)");
+    QString destination=QFileDialog::getSaveFileName(this,tr("Export task: choose the output"),suggested,
+        tr("Compressed Gaussian capture (*.vgs);;Plain Gaussian capture (*.pgs);;Gracia MINT capture (*.mint)"),&selectedFilter);
+    if (destination.isEmpty()) return;
+    if (QFileInfo(destination).suffix().isEmpty()) destination+=selectedFilter.contains("*.mint") ? ".mint" : selectedFilter.contains("*.pgs") ? ".pgs" : ".vgs";
+    ExportTask task;task.output=QFileInfo(destination).absoluteFilePath();task.project=project_;
+    task.path=QFileInfo(destination).absolutePath()+"/"+QFileInfo(destination).completeBaseName()+".vgstask";
+    task.frames=exportFrameCount(project_,info_.fps);
+    const QString problem=checkExportTask(task);
+    if (!problem.isEmpty()) {showError(problem);return;}
+    QString error;if (!writeExportTask(task,&error)) {showError(error);return;}
+    settings_.setValue("Export/Directory",QFileInfo(destination).absolutePath());settings_.setValue("Tasks/Directory",QFileInfo(task.path).absolutePath());
+    statusBar()->showMessage(tr("Task saved: %1 (%2 frames to %3)").arg(QDir::toNativeSeparators(task.path)).arg(task.frames).arg(QFileInfo(destination).fileName()),15000);
+}
+void MainWindow::processTasks() {
+    play(false);
+    auto *dialog=new TaskQueueDialog(this);dialog->setAttribute(Qt::WA_DeleteOnClose);dialog->show();
+}
 void MainWindow::exportFrame() {
     if (!loaded_ || loading_) return;
     play(false);

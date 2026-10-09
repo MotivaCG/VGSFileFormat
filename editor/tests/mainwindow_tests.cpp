@@ -2,6 +2,9 @@
 #include "viewport.h"
 #include "viewcube.h"
 #include "rangeslider.h"
+#include "taskqueuedialog.h"
+#include "exporttask.h"
+#include <QProgressBar>
 #include "modifierpanel.h"
 #include "exportcapture.h"
 #include "vgssign.h"
@@ -113,6 +116,25 @@ private slots:
         // Reopening shows the timeline whole again: the zoom is not saved.
         slider->zoomAt(10,slider->trackRect().left());QCOMPARE(slider->zoom(),2.);window.setWindowModified(false);
         window.openPath(capture);QTRY_COMPARE(slider->zoom(),1.);QTRY_VERIFY(edit->isEnabled());QCOMPARE(panel->view(),qMakePair(0.,4.));
+    }
+    void taskQueueRunsWhatItCanAndReportsTheRest() {
+        QTemporaryDir dir;QVERIFY(dir.isValid());
+        QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());
+        vgs::Frame f;f.count=1;f.active={1};f.position={0,1,0};f.rotation={0,0,0,1};f.scale={.01f,.02f,.03f};f.colorDc={.5f,.5f,.5f};f.opacity={1};
+        vgs::Header h;h.shDegree=0;h.frameCount=h.durationTicks=5;h.chunks.resize(5);for (size_t i=0;i<5;++i) {h.chunks[i].startTick=i;h.chunks[i].intervals=1;}
+        vgs::EncodeOptions options;options.signer=vgs::authoringSigner();options.shDegree=0;options.compression=vgs::Compression::None;
+        QFile file(dir.filePath("source.pgs"));QVERIFY(file.open(QIODevice::WriteOnly));
+        vgs::encodeSequence(h,[&](size_t) {return packExportFrame(f,0);},[&](uint64_t offset,const uint8_t *data,size_t count) {file.seek(qint64(offset));file.write(reinterpret_cast<const char *>(data),qint64(count));},options);file.close();
+        Project project;project.asset=dir.filePath("source.pgs");project.in=0;project.out=4.0/30;
+        ExportTask good;good.project=project;good.output=dir.filePath("good.vgs");good.path=dir.filePath("good.vgstask");good.frames=5;
+        ExportTask broken=good;broken.project.asset=dir.filePath("gone.pgs");broken.output=dir.filePath("broken.vgs");broken.path=dir.filePath("broken.vgstask");
+        QString error;QVERIFY(writeExportTask(good,&error));QVERIFY(writeExportTask(broken,&error));
+        TaskQueueDialog queue;queue.show();queue.addTasks({good.path,broken.path,good.path});QCOMPARE(queue.list()->topLevelItemCount(),2); // no duplicates
+        queue.start();QTRY_VERIFY_WITH_TIMEOUT(!queue.running(),20000);
+        QVERIFY2(queue.list()->topLevelItem(0)->text(3).startsWith("Done"),qPrintable(queue.list()->topLevelItem(0)->text(3)));
+        QVERIFY(queue.list()->topLevelItem(1)->text(3).startsWith("Skipped"));QVERIFY(queue.list()->topLevelItem(1)->text(3).contains("missing"));
+        QVERIFY(QFile::exists(good.output));auto *total=queue.findChild<QProgressBar *>("totalProgress");QCOMPARE(total->value(),total->maximum());
+        QVERIFY(!QDir(dir.path()).entryList({"vgstasks-*.log"}).isEmpty());
     }
     void timelineTicksFollowDurationAndZoom() {
         // A tick each second in a light green, one per frame halfway to the track's green, and

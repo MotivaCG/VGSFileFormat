@@ -61,6 +61,9 @@ private:
     void exportCapture();
     // The frame on screen, edited, as a 3D Gaussian Splatting .ply.
     void exportFrame();
+    // A .vgstask beside the chosen output, and the queue that runs such tasks.
+    void exportTask();
+    void processTasks();
     void showError(const QString &message);
     void updateRecentMenu();
     void setTransformMode(TransformMode mode);
@@ -152,7 +155,7 @@ private:
     QPushButton *cropEditButton_;
     QPushButton *t4dsPresetButton_, *smnPresetButton_;
     QPushButton *cropFitButton_, *cropClearButton_;
-    QAction *saveAction_, *saveAsAction_, *imageAction_, *exportAction_, *gridAction_, *plyAction_ = nullptr;
+    QAction *saveAction_, *saveAsAction_, *imageAction_, *exportAction_, *gridAction_, *plyAction_ = nullptr, *taskAction_ = nullptr;
     QMenu *recentMenu_;
     QString smokeOutput_;
     int smokeStage_ = 0;

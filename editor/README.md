@@ -274,6 +274,32 @@ it to another computer. This phase supports one capture per project. Selection,
 manual deletion, attribute editing, rigging, audio and Gaussian
 splat rendering are future work.
 
+## Export tasks
+
+**Export > Export task…** asks for an output exactly as Export capture does (`.vgs`, `.pgs`
+or `.mint`), but writes a `.vgstask` beside it instead of exporting: a copy of the project as
+it is at that moment (capture, transform, modifiers, export settings and metadata), the
+output, and how many frames it exports. Later edits to the project do not change the task.
+Paths are stored absolute and relative to the task, so a folder of tasks moved together with
+its captures still runs.
+
+**Export > Process tasks…** opens one or more `.vgstask` files (or takes them dropped on the
+window) and exports them one after another. Every task is checked before anything runs: a
+missing capture, an output folder that cannot be written or a combination the export refuses
+(an animated transform to MINT) is skipped with the reason. One bar follows the task being
+exported, the other the whole queue by frames. Existing outputs are overwritten. A task that
+fails is reported and the queue goes on; Cancel task moves on to the next, Cancel all stops,
+and neither leaves a half-written file. The computer is kept from sleeping while it runs, and
+a `vgstasks-<date>.log` beside the first task records what each task did.
+
+The same from a command line, without opening the window:
+
+```
+VGSEditor.exe --process-tasks a.vgstask b.vgstask
+```
+
+It prints progress to stderr and returns 1 when any task failed.
+
 ## Appearance and resources
 
 Application text and numeric formatting use English. Open/save dialogs use the

@@ -1,5 +1,7 @@
 #include "mainwindow.h"
 #include "exportcapture.h"
+#include "exporttask.h"
+#include <QDir>
 #include "displayscaling.h"
 #include "editortheme.h"
 
@@ -34,7 +36,25 @@ int main(int argc, char *argv[])
     QCommandLineOption smoke("smoke-test", "Open, seek, verify a project and save a PNG preview.", "output");
     QCommandLineOption smokeScreen("smoke-screen", "Maximise an automated preview on the specified screen index.", "index");
     QCommandLineOption exportOption("export-capture", "Export a .vgsproj to VGS/PGS/MINT without opening the editor window.", "output");
-    parser.addOption(smoke);parser.addOption(smokeScreen); parser.addOption(exportOption); parser.process(a);
+    QCommandLineOption tasksOption("process-tasks", "Export the .vgstask files given, one after another, without opening the editor window.");
+    parser.addOption(smoke);parser.addOption(smokeScreen); parser.addOption(exportOption); parser.addOption(tasksOption); parser.process(a);
+    if (parser.isSet(tasksOption)) {
+        const auto paths=parser.positionalArguments();
+        if (paths.isEmpty()) {std::fprintf(stderr,"Give one or more .vgstask files.\n");return 2;}
+        StayAwake awake;int done=0,failed=0;
+        for (int i=0;i<paths.size();++i) {
+            ExportTask task;QString error;
+            std::fprintf(stderr,"[%d/%d] %s\n",i+1,int(paths.size()),qPrintable(QDir::toNativeSeparators(paths[i])));
+            if (!readExportTask(paths[i],&task,&error)) {std::fprintf(stderr,"  failed: %s\n",qPrintable(error));++failed;continue;}
+            try {
+                int last=-1;const auto result=runExportTask(task,[&](int percent,const QString &message) {
+                    if (percent!=last) {std::fprintf(stderr,"  %3d%% %s\n",percent,qPrintable(message));std::fflush(stderr);last=percent;}return true;
+                });
+                std::fprintf(stderr,"  done: %d frames to %s, %lld bytes\n",result.frames,qPrintable(QDir::toNativeSeparators(task.output)),static_cast<long long>(QFileInfo(task.output).size()));++done;
+            } catch (const std::exception &e) {std::fprintf(stderr,"  failed: %s\n",e.what());++failed;}
+        }
+        std::fprintf(stderr,"%d done, %d failed.\n",done,failed);return failed ? 1 : 0;
+    }
     if (parser.isSet(exportOption)) {
         const auto paths=parser.positionalArguments();Project project;QString error;
         if (paths.size()!=1 || !Project::read(paths.first(),&project,&error)) {

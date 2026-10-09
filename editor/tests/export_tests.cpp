@@ -1,4 +1,6 @@
 #include "exportcapture.h"
+#include "exporttask.h"
+#include <QDir>
 #include "vgssign.h"
 #include "vgsdecoder/vgsdecoder.h"
 #include "rangeslider.h"
@@ -259,6 +261,32 @@ private slots:
         // The sampled MINT carries the same splats, baked into its own tables.
         int live=0;for (int i=0;i<int(mintFrame.count);++i) if (mintFrame.active[i]) {++live;QVERIFY(mintFrame.opacity[i]<=o0[0]+1e-3f);}
         QCOMPARE(live,checked);QVERIFY(!result.notes.isEmpty());
+    }
+    void exportTasksKeepTheProjectAndFollowAMovedFolder() {
+        QTemporaryDir root;const QString first=root.filePath("first");QVERIFY(QDir().mkpath(first+"/out"));
+        sourceFile(first+"/source.pgs",3);
+        Project project;project.asset=first+"/source.pgs";project.in=0;project.out=2.0/25;project.transform.position={.5f,0,0};
+        ExportTask task;task.project=project;task.output=first+"/out/result.vgs";task.path=first+"/out/result.vgstask";task.frames=exportFrameCount(project,25);
+        QCOMPARE(task.frames,3);QString error;QVERIFY2(writeExportTask(task,&error),qPrintable(error));
+        // The project is a copy: editing it afterwards does not change the task.
+        project.transform.position={9,9,9};
+        ExportTask read;QVERIFY2(readExportTask(task.path,&read,&error),qPrintable(error));
+        QCOMPARE(read.project.transform.position,QVector3D(.5f,0,0));QCOMPARE(read.frames,3);QCOMPARE(QFileInfo(read.output).absoluteFilePath(),QFileInfo(task.output).absoluteFilePath());
+        QCOMPARE(checkExportTask(read),QString());
+        // Run twice: the second run overwrites the first.
+        QCOMPARE(runExportTask(read).frames,3);QVERIFY(QFile::exists(read.output));const auto firstWrite=QFileInfo(read.output).lastModified();
+        QTest::qWait(1100);runExportTask(read);QVERIFY(QFileInfo(read.output).lastModified()>firstWrite);
+        // The whole folder moved: the absolute paths are gone, the relative ones lead home.
+        const QString moved=root.filePath("moved");QVERIFY(QDir().rename(first,moved));
+        QVERIFY2(readExportTask(moved+"/out/result.vgstask",&read,&error),qPrintable(error));
+        QCOMPARE(QFileInfo(read.project.asset).absoluteFilePath(),QFileInfo(moved+"/source.pgs").absoluteFilePath());
+        QCOMPARE(QFileInfo(read.output).absoluteFilePath(),QFileInfo(moved+"/out/result.vgs").absoluteFilePath());QCOMPARE(checkExportTask(read),QString());
+        // What cannot run says why, before anything runs.
+        ExportTask missing=read;missing.project.asset=moved+"/nowhere.pgs";QVERIFY(checkExportTask(missing).contains("missing"));
+        ExportTask animated=read;animated.output=moved+"/out/result.mint";Modifier move;move.id=Project::newId();move.type=ModifierType::AnimateTransform;
+        Transform a,b;b.position={1,0,0};move.animation.setKey(0,a);move.animation.setKey(2,b);animated.project.modifiers.append(move);
+        QVERIFY(checkExportTask(animated).contains("MINT"));
+        QFile junk(moved+"/junk.vgstask");QVERIFY(junk.open(QIODevice::WriteOnly));junk.write("{}");junk.close();QVERIFY(!readExportTask(moved+"/junk.vgstask",&read,&error));
     }
     void currentFrameIsWrittenAsAnEditedPly() {
         // Frame 0 has live splats at x=0 and x=3; the capture moves 1 m along X and keeps SH1.
