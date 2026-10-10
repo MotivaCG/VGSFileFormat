@@ -281,6 +281,23 @@ private slots:
         project.modifiers[0].enabled=true;const auto ply=dir.filePath("frame.ply");const auto result=exportFramePly(project,1/25.,ply);QCOMPARE(result.kept,quint64(41));
         QVERIFY(result.notes.contains("Prune low contribution removed 14.6% of the splats, as asked."));
     }
+    void plySequenceIsNumberedByTheSourceFrame() {
+        // A range from frame 2 to 4 of a 5-frame source: name0002.ply to name0004.ply, each
+        // the frame Export current frame as PLY writes, and nothing else beside them.
+        QTemporaryDir dir;const auto source=dir.filePath("source.pgs");sourceFile(source,5);
+        Project project;project.asset=source;project.in=2./25;project.out=4./25;project.time=project.in;project.modifiers.clear();
+        const auto destination=dir.filePath("take.ply");const auto result=exportCaptureFile(project,destination);
+        QCOMPARE(result.frames,3);QVERIFY(!QFileInfo::exists(destination));QVERIFY(result.bytes>0);
+        for (int f:{2,3,4}) QVERIFY2(QFileInfo::exists(dir.filePath(QString("take%1.ply").arg(f,4,10,QChar('0')))),qPrintable(QString::number(f)));
+        QVERIFY(!QFileInfo::exists(dir.filePath("take0001.ply")) && !QFileInfo::exists(dir.filePath("take0005.ply")));
+        QVERIFY2(result.notes.contains("3 .ply files, take0002.ply to take0004.ply, numbered by the source's frame."),qPrintable(result.notes.join('\n')));
+        QFile one(dir.filePath("take0003.ply"));QVERIFY(one.open(QIODevice::ReadOnly));
+        exportFramePly(project,3./25,dir.filePath("single.ply"));QFile single(dir.filePath("single.ply"));QVERIFY(single.open(QIODevice::ReadOnly));
+        QCOMPARE(one.readAll(),single.readAll());
+        QCOMPARE(plySequenceFile(destination,12345,5),dir.filePath("take12345.ply"));
+        // A task may write one too.
+        ExportTask task;task.project=project;task.output=destination;task.path=dir.filePath("take.ply.vgstask");QCOMPARE(checkExportTask(task),QString());
+    }
     void soundtrackIsMixedAndCutToTheRange() {
         if (ffmpegPath().isEmpty()) QSKIP("No ffmpeg beside the tests (tools/ffmpeg.exe).");
         // Two modifiers - a song and a short looped jingle at a lower volume - mix into one AAC

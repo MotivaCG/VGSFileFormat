@@ -22,6 +22,7 @@ struct ExportResult {
     // asked for, what went, and in how many chunks the protection kept more than the share.
     quint64 pruneRecords = 0, pruneAsked = 0, pruneRemoved = 0;
     int pruneChunks = 0, pruneLimited = 0;
+    quint64 bytes = 0; // what was written, every file of a .ply sequence together
 };
 using ExportProgress = std::function<bool(int, const QString &)>;
 
@@ -58,6 +59,12 @@ ExportEstimate estimateExportSize(const Project &, const ExportProgress & = {}, 
 ExportResult exportFramePly(const Project &, double seconds, const QString &destination,
                             const ExportProgress & = {});
 void writePly(const vgs::Frame &, const QString &destination);
+
+// The range as a .ply sequence: for `name.ply`, one file per frame beside it, numbered by
+// the source's frame - name0030.ply first when the range starts at frame 30 - with at least
+// four digits. exportCaptureFile writes one when given a .ply destination.
+ExportResult exportPlySequence(const Project &, const QString &destination, const ExportProgress & = {});
+QString plySequenceFile(const QString &destination, int frame, int digits = 4);
 
 // The export's despill on one frame's colour (DC and SH), in place: also what the viewport
 // shows when a Colour modifier despills always.

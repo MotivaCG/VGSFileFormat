@@ -1657,19 +1657,19 @@ void MainWindow::exportCapture() {
     play(false);
     // The format is the extension chosen here; the dialog offers the last one used.
     const QString last=QFileInfo(settings_.value("Export/LastFile").toString()).suffix().toLower();
-    const QString extension=last=="pgs" || last=="mint" ? last : "vgs";
+    const QString extension=last=="pgs" || last=="mint" || last=="ply" ? last : "vgs";
     const QString suggested=QDir(settings_.value("Export/Directory",QFileInfo(project_.asset).absolutePath()).toString()).filePath(QFileInfo(project_.asset).completeBaseName()+"_edited."+extension);
-    QString selectedFilter=extension=="pgs" ? tr("Plain Gaussian capture (*.pgs)") : extension=="mint" ? tr("Gracia MINT capture (*.mint)") : tr("Compressed Gaussian capture (*.vgs)");
+    QString selectedFilter=extension=="pgs" ? tr("Plain Gaussian capture (*.pgs)") : extension=="mint" ? tr("Gracia MINT capture (*.mint)") : extension=="ply" ? tr("3DGS frame sequence (*.ply)") : tr("Compressed Gaussian capture (*.vgs)");
     QString destination=QFileDialog::getSaveFileName(this,tr("Export capture"),suggested,
-        tr("Compressed Gaussian capture (*.vgs);;Plain Gaussian capture (*.pgs);;Gracia MINT capture (*.mint)"),&selectedFilter);
+        tr("Compressed Gaussian capture (*.vgs);;Plain Gaussian capture (*.pgs);;Gracia MINT capture (*.mint);;3DGS frame sequence (*.ply)"),&selectedFilter);
     if (destination.isEmpty()) return;
-    if (QFileInfo(destination).suffix().isEmpty()) destination+=selectedFilter.contains("*.mint") ? ".mint" : selectedFilter.contains("*.pgs") ? ".pgs" : ".vgs";
+    if (QFileInfo(destination).suffix().isEmpty()) destination+=selectedFilter.contains("*.mint") ? ".mint" : selectedFilter.contains("*.pgs") ? ".pgs" : selectedFilter.contains("*.ply") ? ".ply" : ".vgs";
     const auto outputExtension=QFileInfo(destination).suffix().toLower();
-    if (outputExtension!="vgs" && outputExtension!="pgs" && outputExtension!="mint") {
-        showError(tr("Select a .vgs, .pgs or .mint destination."));return;
+    if (outputExtension!="vgs" && outputExtension!="pgs" && outputExtension!="mint" && outputExtension!="ply") {
+        showError(tr("Select a .vgs, .pgs, .mint or .ply destination."));return;
     }
     Project snapshot=project_;snapshot.captureSettings.plain=outputExtension=="pgs";
-    const qint64 originalBytes=QFileInfo(snapshot.asset).size();const QByteArray thumbnail=outputExtension=="mint" ? QByteArray() : thumbnailJpeg();
+    const qint64 originalBytes=QFileInfo(snapshot.asset).size();const QByteArray thumbnail=outputExtension=="mint" || outputExtension=="ply" ? QByteArray() : thumbnailJpeg();
     QProgressDialog progress(tr("Preparing export"),tr("Cancel"),0,100,this);
     progress.setWindowTitle(tr("Export capture"));progress.setWindowModality(Qt::ApplicationModal);
     progress.setAutoClose(false);progress.setAutoReset(false);progress.setMinimumDuration(0);
@@ -1691,7 +1691,7 @@ void MainWindow::exportCapture() {
     settings_.setValue("CaptureSettings/Last",QJsonDocument(snapshot.captureSettings.json()).toJson(QJsonDocument::Compact));
     statusBar()->showMessage(tr("Exported %1 frames to %2").arg(result.frames).arg(destination),15000);
     QMessageBox::information(this,tr("Export complete"),tr("Saved %1\nOriginal size: %2 MB  \u00b7  Exported size: %3 MB\n%4 frames \u00b7 %5 Gaussian samples kept \u00b7 %6 cropped.\n\n%7")
-        .arg(destination).arg(originalBytes/1000000.0,0,'f',2).arg(QFileInfo(destination).size()/1000000.0,0,'f',2)
+        .arg(destination).arg(originalBytes/1000000.0,0,'f',2).arg((result.bytes ? double(result.bytes) : double(QFileInfo(destination).size()))/1000000.0,0,'f',2)
         .arg(result.frames).arg(result.kept).arg(result.removed).arg(result.notes.join("\n")));
 }
 
@@ -1700,17 +1700,17 @@ void MainWindow::exportTask() {
     if (!loaded_ || loading_) return;
     play(false);
     const QString last=QFileInfo(settings_.value("Export/LastFile").toString()).suffix().toLower();
-    const QString extension=last=="pgs" || last=="mint" ? last : "vgs";
+    const QString extension=last=="pgs" || last=="mint" || last=="ply" ? last : "vgs";
     const QString suggested=QDir(settings_.value("Export/Directory",QFileInfo(project_.asset).absolutePath()).toString()).filePath(QFileInfo(project_.asset).completeBaseName()+"_edited."+extension);
-    QString selectedFilter=extension=="pgs" ? tr("Plain Gaussian capture (*.pgs)") : extension=="mint" ? tr("Gracia MINT capture (*.mint)") : tr("Compressed Gaussian capture (*.vgs)");
+    QString selectedFilter=extension=="pgs" ? tr("Plain Gaussian capture (*.pgs)") : extension=="mint" ? tr("Gracia MINT capture (*.mint)") : extension=="ply" ? tr("3DGS frame sequence (*.ply)") : tr("Compressed Gaussian capture (*.vgs)");
     QString destination=QFileDialog::getSaveFileName(this,tr("Export task: choose the output"),suggested,
-        tr("Compressed Gaussian capture (*.vgs);;Plain Gaussian capture (*.pgs);;Gracia MINT capture (*.mint)"),&selectedFilter);
+        tr("Compressed Gaussian capture (*.vgs);;Plain Gaussian capture (*.pgs);;Gracia MINT capture (*.mint);;3DGS frame sequence (*.ply)"),&selectedFilter);
     if (destination.isEmpty()) return;
-    if (QFileInfo(destination).suffix().isEmpty()) destination+=selectedFilter.contains("*.mint") ? ".mint" : selectedFilter.contains("*.pgs") ? ".pgs" : ".vgs";
+    if (QFileInfo(destination).suffix().isEmpty()) destination+=selectedFilter.contains("*.mint") ? ".mint" : selectedFilter.contains("*.pgs") ? ".pgs" : selectedFilter.contains("*.ply") ? ".ply" : ".vgs";
     ExportTask task;task.output=QFileInfo(destination).absoluteFilePath();task.project=project_;
     task.path=exportTaskPath(destination);
     task.frames=exportFrameCount(project_,info_.fps);
-    if (QFileInfo(destination).suffix().compare("mint",Qt::CaseInsensitive)!=0) task.thumbnail=thumbnailJpeg();
+    if (QFileInfo(destination).suffix().compare("mint",Qt::CaseInsensitive)!=0 && QFileInfo(destination).suffix().compare("ply",Qt::CaseInsensitive)!=0) task.thumbnail=thumbnailJpeg();
     const QString problem=checkExportTask(task);
     if (!problem.isEmpty()) {showError(problem);return;}
     QString error;if (!writeExportTask(task,&error)) {showError(error);return;}

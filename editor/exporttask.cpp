@@ -83,7 +83,7 @@ bool readExportTask(const QString &path,ExportTask *task,QString *error) {
 QString checkExportTask(const ExportTask &task) {
     if (!QFileInfo(task.project.asset).isFile()) return QStringLiteral("The capture is missing: %1").arg(QDir::toNativeSeparators(task.project.asset));
     const QString extension=QFileInfo(task.output).suffix().toLower();
-    if (extension!="vgs" && extension!="pgs" && extension!="mint") return QStringLiteral("The output must be a .vgs, .pgs or .mint file.");
+    if (extension!="vgs" && extension!="pgs" && extension!="mint" && extension!="ply") return QStringLiteral("The output must be a .vgs, .pgs or .mint file, or .ply for a sequence.");
     if (QFileInfo(task.output).absoluteFilePath().compare(QFileInfo(task.project.asset).absoluteFilePath(),Qt::CaseInsensitive)==0)
         return QStringLiteral("The output would overwrite its own capture.");
     if (extension=="mint" && task.project.hasAnimatedMotion()) return QStringLiteral("MINT cannot store an animated transform. Export to .vgs or .pgs.");

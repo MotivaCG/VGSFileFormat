@@ -21,6 +21,7 @@
 #include "vgssign.h"
 #include <Eigen/Eigenvalues>
 #include <Eigen/Geometry>
+#include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QTemporaryFile>
@@ -412,6 +413,7 @@ vgs::Frame bakeExportFrame(const vgs::Frame &frame,const Project &project,int de
 }
 
 ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &destination,const ExportProgress &progress,const QByteArray &thumbnailJpeg) {
+    if (QFileInfo(destination).suffix().compare("ply",Qt::CaseInsensitive)==0) return exportPlySequence(projectAsGiven,destination,progress);
     const Project inputProject=withModifierDespill(projectAsGiven);
     const auto audioModifiers=inputProject.audioModifiers();
     // Without ffmpeg the soundtrack cannot be mixed or cut: the last Audio modifier's file
@@ -759,38 +761,112 @@ void writePly(const vgs::Frame &frame,const QString &destination) {
     if (file.write(block)!=block.size() || !file.commit()) throw std::runtime_error(file.errorString().toStdString());
 }
 
+namespace {
+// What a .ply export reads: the source opened once, a frame at a time, with what Prune low
+// contribution and Eraser keep of its chunk - pruning scored once per chunk, not per frame.
+class PlySource {
+public:
+    PlySource(const Project &project,const ExportProgress &progress) : project_(project),progress_(progress),prunes_(CompiledModifiers(project).prunes) {
+        QString error;
+        if (QFileInfo(project.asset).suffix().compare("mint",Qt::CaseInsensitive)==0) {
+            mint_=std::make_unique<MintFile>();if (!mint_->open(project.asset,&error)) throw std::runtime_error(error.toStdString());
+            rate=mint_->frameRate();duration=mint_->duration();antialiased_=true;
+        } else {
+            source_=std::make_unique<FileSource>(project.asset);capture_=std::make_unique<vgsdec::Capture>(vgsdec::Capture::openStream(*source_));
+            rate=capture_->frameRate();duration=capture_->duration();sourceDegree=capture_->shDegree();antialiased_=capture_->antialiased();
+        }
+        if (!(rate>0) || !(duration>0)) throw std::runtime_error("Invalid capture timeline.");
+    }
+    // The frame at `seconds`, and in `keep` what survives pruning and erasing (empty: all).
+    vgs::Frame frame(double seconds,std::vector<uint8_t> *keep,ExportResult &result) {
+        QString error;vgs::Frame frame;int chunk=0;double chunkStart=0,chunkEnd=0;
+        const double at=std::min(seconds,duration-1e-7);
+        if (mint_) {
+            MintFrame decoded;if (!mint_->decode(at,&decoded,true,&error)) throw std::runtime_error(error.toStdString());
+            frame=copyFrame(decoded);chunk=decoded.chunkIndex;
+            const auto &c=mint_->chunks().at(decoded.chunkIndex);chunkStart=c.start;chunkEnd=c.start+c.duration;
+        } else {
+            frame=copyFrame(capture_->setTime(at,true));chunk=int(capture_->chunkAt(at));
+            const auto &c=capture_->chunk(size_t(chunk));chunkStart=c.startSeconds;chunkEnd=c.endSeconds;
+        }
+        keep->clear();
+        if (!prunes_.isEmpty()) {
+            auto found=pruned_.find(chunk);
+            if (found==pruned_.end()) {
+                std::vector<PruneStats> stats;
+                auto scoring=[&] {report(progress_,10,QStringLiteral("Prune low contribution: scoring splats"));return false;};
+                auto pruned=pruneChunk(chunkStart,chunkEnd,[&](double t) {
+                    if (mint_) {MintFrame f;if (!mint_->decode(t,&f,false,&error)) throw std::runtime_error(error.toStdString());return copyFrame(f);}
+                    return copyFrame(capture_->setTime(t,false));},antialiased_,prunes_,scoring,&stats);
+                countPruning(result,stats,pruned);found=pruned_.emplace(chunk,std::move(pruned)).first;
+            }
+            *keep=found->second;
+        }
+        if (const CompiledModifiers stack(project_);!stack.erased.empty()) {
+            const auto erase=stack.eraseKeep(chunk,frame.count);
+            if (keep->empty()) *keep=erase;else for (size_t i=0;i<keep->size() && i<erase.size();++i) (*keep)[i]&=erase[i];
+        }
+        return frame;
+    }
+    double rate=0,duration=0;int sourceDegree=3;
+private:
+    const Project &project_;ExportProgress progress_;QVector<PruneFilter> prunes_;
+    std::unique_ptr<MintFile> mint_;std::unique_ptr<FileSource> source_;std::unique_ptr<vgsdec::Capture> capture_;
+    bool antialiased_=true;std::map<int,std::vector<uint8_t>> pruned_;
+};
+}
+
 ExportResult exportFramePly(const Project &project,double seconds,const QString &destination,const ExportProgress &progress) {
     QString error;if (!project.captureSettings.validate(&error)) throw std::runtime_error(error.toStdString());
     report(progress,0,QStringLiteral("Decoding the frame"));
-    vgs::Frame frame;double rate;int sourceDegree=3;
-    const auto filters=CompiledModifiers(project).prunes;std::vector<uint8_t> pruned;std::vector<PruneStats> pruneStats;int plyChunk=0;
-    auto scoring=[&] {report(progress,10,QStringLiteral("Prune low contribution: scoring splats"));return false;};
-    if (QFileInfo(project.asset).suffix().compare("mint",Qt::CaseInsensitive)==0) {
-        MintFile mint;if (!mint.open(project.asset,&error)) throw std::runtime_error(error.toStdString());
-        rate=mint.frameRate();MintFrame decoded;
-        if (!mint.decode(std::min(seconds,mint.duration()-1e-7),&decoded,true,&error)) throw std::runtime_error(error.toStdString());
-        frame=copyFrame(decoded);
-        plyChunk=decoded.chunkIndex;
-        if (!filters.isEmpty()) {const auto &c=mint.chunks().at(decoded.chunkIndex);
-            pruned=pruneChunk(c.start,c.start+c.duration,[&](double t) {MintFrame f;if (!mint.decode(t,&f,false,&error)) throw std::runtime_error(error.toStdString());return copyFrame(f);},true,filters,scoring,&pruneStats);}
-    } else {
-        FileSource source(project.asset);auto capture=vgsdec::Capture::openStream(source);
-        const double at=std::min(seconds,capture.duration()-1e-7);
-        rate=capture.frameRate();sourceDegree=capture.shDegree();frame=copyFrame(capture.setTime(at,true));
-        plyChunk=int(capture.chunkAt(at));
-        if (!filters.isEmpty()) {const auto &c=capture.chunk(capture.chunkAt(at));
-            pruned=pruneChunk(c.startSeconds,c.endSeconds,[&](double t) {return copyFrame(capture.setTime(t,false));},capture.antialiased(),filters,scoring,&pruneStats);}
-    }
-    const int degree=project.captureSettings.shDegree<0 ? sourceDegree : project.captureSettings.shDegree;
-    if (const CompiledModifiers stack(project);!stack.erased.empty()) {
-        const auto erase=stack.eraseKeep(plyChunk,frame.count);
-        if (pruned.empty()) pruned=erase;else for (size_t i=0;i<pruned.size() && i<erase.size();++i) pruned[i]&=erase[i];
-    }
-    const auto baked=bakeExportFrame(frame,project,degree,progress,rate,pruned.empty() ? nullptr : &pruned);
+    PlySource source(project,progress);ExportResult result;std::vector<uint8_t> keep;
+    const auto frame=source.frame(seconds,&keep,result);
+    const int degree=project.captureSettings.shDegree<0 ? source.sourceDegree : project.captureSettings.shDegree;
+    const auto baked=bakeExportFrame(frame,project,degree,progress,source.rate,keep.empty() ? nullptr : &keep);
     if (!baked.count) throw std::runtime_error("No Gaussian records remain at this frame after applying active modifiers.");
     report(progress,90,QStringLiteral("Writing the .ply"));writePly(baked,destination);
-    ExportResult result;result.frames=1;result.kept=baked.count;countPruning(result,pruneStats,pruned);
+    result.frames=1;result.kept=baked.count;result.bytes=quint64(QFileInfo(destination).size());
     if (const auto note=pruningNote(result);!note.isEmpty()) result.notes << note;
     result.removed=quint64(std::count(frame.active.begin(),frame.active.end(),uint8_t(1)))-baked.count;
+    return result;
+}
+
+QString plySequenceFile(const QString &destination,int frame,int digits) {
+    const QFileInfo info(destination);
+    return info.dir().filePath(QStringLiteral("%1%2.ply").arg(info.completeBaseName()).arg(frame,digits,10,QChar('0')));
+}
+
+ExportResult exportPlySequence(const Project &projectAsGiven,const QString &destination,const ExportProgress &progress) {
+    const Project project=withModifierDespill(projectAsGiven);
+    QString error;if (!project.captureSettings.validate(&error)) throw std::runtime_error(error.toStdString());
+    report(progress,0,QStringLiteral("Opening source capture"));
+    PlySource source(project,progress);
+    const double rate=source.rate;
+    if (source.duration*rate>1000000) throw std::runtime_error("Invalid or excessive export timeline.");
+    // The range in the source's own frame numbers, which name the files: a range that starts
+    // at frame 30 writes name0030.ply first.
+    const int available=std::max(1,int(std::ceil(source.duration*rate-1e-6)));
+    const int first=std::clamp(int(std::round(project.in*rate)),0,available-1),last=std::clamp(int(std::round(project.out*rate)),first,available-1);
+    const int digits=std::max(4,int(QString::number(last).size()));
+    const int degree=project.captureSettings.shDegree<0 ? source.sourceDegree : project.captureSettings.shDegree;
+    ExportResult result;std::vector<uint8_t> keep;int empty=0;
+    for (int f=first;f<=last;++f) {
+        const int percent=int(100.0*(f-first)/std::max(1,last-first+1));
+        report(progress,percent,QStringLiteral("Frame %1 of %2").arg(f-first+1).arg(last-first+1));
+        const auto frame=source.frame(f/rate,&keep,result);
+        // Each frame through its own pose and keyframed modifiers, as the capture export does;
+        // the progress of baking it stays inside the frame's step.
+        const auto baked=bakeExportFrame(frame,project,degree,[&](int,const QString &message) {return !progress || progress(percent,message);},rate,keep.empty() ? nullptr : &keep);
+        if (!baked.count) ++empty;
+        const QString file=plySequenceFile(destination,f,digits);writePly(baked,file);
+        result.kept+=baked.count;result.removed+=quint64(std::count(frame.active.begin(),frame.active.end(),uint8_t(1)))-baked.count;
+        result.bytes+=quint64(QFileInfo(file).size());++result.frames;
+    }
+    report(progress,100,QStringLiteral("Finishing export"));
+    result.notes << QStringLiteral("%1 .ply files, %2 to %3, numbered by the source's frame.").arg(result.frames)
+        .arg(QFileInfo(plySequenceFile(destination,first,digits)).fileName(),QFileInfo(plySequenceFile(destination,last,digits)).fileName());
+    if (empty) result.notes << QStringLiteral("%1 frame(s) kept no Gaussian records and are empty .ply files.").arg(empty);
+    if (const auto note=pruningNote(result);!note.isEmpty()) result.notes << note;
+    result.notes << QStringLiteral("A .ply holds no audio, thumbnail, metadata or motion samples: an animated transform is baked into each frame.");
     return result;
 }

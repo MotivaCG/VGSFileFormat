@@ -167,7 +167,7 @@ void TaskQueueDialog::finished(const QString &failure) {
     auto &e=entries_[current_];
     if (failure.isEmpty()) {
         e.state=State::Done;e.result=jobResult_;
-        e.message=tr("%1 frames, %2 MB").arg(jobResult_.frames).arg(QFileInfo(e.task.output).size()/1e6,0,'f',1);
+        e.message=tr("%1 frames, %2 MB").arg(jobResult_.frames).arg((jobResult_.bytes ? double(jobResult_.bytes) : double(QFileInfo(e.task.output).size()))/1e6,0,'f',1);
     } else if (stopTask_) {e.state=State::Cancelled;e.message.clear();}
     else {e.state=State::Failed;e.message=failure;}
     refreshRow(current_);showProgress(100,QString());runNext();

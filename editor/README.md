@@ -359,6 +359,12 @@ or PGS (plain), with baked positions, full affine covariance, SH colour and the 
 crop, for the inclusive Start/End range. It runs off the UI thread with progress/cancel,
 checks every output frame with the decoder and atomically publishes the verified file.
 
+A `.ply` destination writes the range as a sequence of 3D Gaussian Splatting `.ply` files
+instead, one per frame beside it, numbered by the source's own frame with at least four
+digits: `take.ply` over a range starting at frame 30 gives `take0030.ply`, `take0031.ply`…
+Each is what **Export current frame as PLY** writes for that frame (transform and keyframes,
+modifiers, colour processing, SH degree); a `.ply` holds no audio, thumbnail or metadata.
+
 For constant-rate sources, translation, rotation, reflection and uniform scale use
 native temporal chunks. Crop removes unused rows, splits rows only on visibility
 reentry, and compacts unused dictionaries instead of duplicating the capture for
@@ -392,8 +398,8 @@ rate and that of the heaviest chunk sampled, and whether the capture streams wit
 
 ## Export tasks
 
-**Export > Export task…** asks for an output exactly as Export capture does (`.vgs`, `.pgs`
-or `.mint`), but writes a `.vgstask` beside it instead of exporting (`result.vgs` gets
+**Export > Export task…** asks for an output exactly as Export capture does (`.vgs`, `.pgs`,
+`.mint` or a `.ply` sequence), but writes a `.vgstask` beside it instead of exporting (`result.vgs` gets
 `result.vgs.vgstask`, so the same project queued to `.vgs` and `.pgs` keeps both): a copy of the project as
 it is at that moment (capture, transform, modifiers, export settings and metadata), the
 output, and how many frames it exports. Later edits to the project do not change the task.
