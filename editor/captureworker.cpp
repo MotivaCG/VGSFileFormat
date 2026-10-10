@@ -11,7 +11,9 @@
 #include "captureworker.h"
 #include "isolation.h"
 #include "pruning.h"
+#ifndef VGS_VIEWER // the viewer never despills, and must not link the export (it carries the encoder)
 #include "exportcapture.h"
+#endif
 #include <QFile>
 #include <QFileInfo>
 #include <QElapsedTimer>
@@ -163,7 +165,9 @@ void CaptureWorker::decode(double time, quint64 generation, bool sh,Project proj
             vgs::Frame f;f.count=out->records.size();f.active=out->active;f.shCoefficients=out->coefficients;f.shRest=out->sh;
             for (const auto &r:out->records) {f.position.insert(f.position.end(),r.position,r.position+3);f.colorDc.insert(f.colorDc.end(),r.color,r.color+3);f.opacity.push_back(r.color[3]);}
             CaptureSettings settings;settings.despillStrength=modifiers.despillStrength;settings.greenGain=modifiers.greenGain;settings.viewChromaScale=modifiers.viewChroma;settings.recoverSkin=modifiers.recoverSkin;
+#ifndef VGS_VIEWER
             despillFrame(f,settings);
+#endif
             for (size_t i=0;i<out->records.size();++i) std::copy_n(f.colorDc.data()+i*3,3,out->records[i].color);
             for (auto &p:out->points) std::copy_n(f.colorDc.data()+size_t(p.id)*3,3,p.color);
             out->sh=f.shRest;

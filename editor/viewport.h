@@ -68,6 +68,8 @@ public:
     // Display aids, each on its own: the floor grid, the coloured X/Y/Z axes and a grey
     // chevron on the floor just past a metre along +Z, pointing that way (where the capture faces).
     void setGrid(bool enabled);
+    // The viewer's: no statistics, no transform keys, only the navigation hint.
+    void setViewerMode(bool viewer) { viewerMode_ = viewer; update(); }
     void setAxes(bool enabled);
     void setFrontMarker(bool enabled);
     // Preview of a walking capture: it stays where it is and the floor slides under it,
@@ -181,7 +183,7 @@ private:
     QPoint lastMouse_;
     bool walking_ = false;
     double walkDistance_ = 0;
-    bool axes_ = false, frontMarker_ = true;
+    bool axes_ = false, frontMarker_ = true, viewerMode_ = false;
     GLuint markerVao_ = 0, markerBuffer_ = 0;
     int markerVertices_ = 0;
     bool grid_ = true, frameDirty_ = true, initialized_ = false, lightBackground_ = false;

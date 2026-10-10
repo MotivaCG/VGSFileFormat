@@ -754,13 +754,17 @@ void Viewport::paintGL() {
         if (selecting_ && selectTool_==SelectTool::Lasso) { QColor fill=ink; fill.setAlpha(40); QPainterPath closed=stroke_; closed.closeSubpath(); painter.fillPath(closed,fill); painter.setPen(QPen(ink,1.5)); painter.drawPath(stroke_); }
         if (selectTool_==SelectTool::Brush) { painter.setPen(QPen(ink,1.5)); painter.setBrush(Qt::NoBrush); painter.drawEllipse(hover_,brushRadius_,brushRadius_); }
         painter.setPen(overlayText()); painter.setFont(QFont("Segoe UI", 9));
-        painter.drawText(18, height()-18, tr("Drag: pick (replace)   ·   Ctrl: add   ·   Alt: subtract   ·   Right drag: orbit   ·   Middle drag: pan"));
+        painter.drawText(18, height()-18, tr("Drag: pick (add)   ·   Ctrl: replace   ·   Alt: subtract   ·   Right drag: orbit   ·   Middle drag: pan"));
+    } else if (viewerMode_) {
+    painter.setPen(overlayText()); painter.setFont(QFont("Segoe UI", 9));
+    painter.drawText(18, height()-18, tr("Drag: orbit   ·   Right drag: pan   ·   Wheel: zoom   ·   Double-click: focus"));
     } else {
     painter.setPen(overlayText()); painter.setFont(QFont("Segoe UI", 9));
     painter.drawText(18, height()-18, mode_ == TransformMode::None
         ? tr("Drag: orbit   ·   Right drag: pan   ·   Wheel: zoom   ·   G/R/S: transform")
         : tr("Drag a gizmo handle to transform   ·   Repeat G/R/S: Global/Local   ·   Esc: exit mode"));
     }
+    statistics_->setVisible(!viewerMode_);
     if (frame_) {
         QString text=tr("%1 source points\nDecode %2 ms   ·   upload %3 ms   ·   %4")
             .arg(qulonglong(frame_->points.size())).arg(frame_->decodeMs,0,'f',1).arg(uploadMs_,0,'f',1).arg(shCoefficients_ ? "SH" : "base color");
@@ -1015,7 +1019,7 @@ void Viewport::keyPressEvent(QKeyEvent *event) {
     if (selectTool_!=SelectTool::None && event->key()==Qt::Key_Alt) update();
     if (handleViewKey(event->key(),event->modifiers())) { event->accept(); return; }
     if (event->key()==Qt::Key_Escape) { setTransformMode(TransformMode::None); emit escapePressed(); event->accept(); return; }
-    if (!event->modifiers()) {
+    if (!event->modifiers() && !viewerMode_) {
         if (event->isAutoRepeat() && (event->key()==Qt::Key_G || event->key()==Qt::Key_R || event->key()==Qt::Key_S)) { event->accept(); return; }
         if (event->key()==Qt::Key_G) { activateTransformShortcut(TransformMode::Move); event->accept(); return; }
         if (event->key()==Qt::Key_R) { activateTransformShortcut(TransformMode::Rotate); event->accept(); return; }

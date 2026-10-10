@@ -64,6 +64,23 @@ if(EXISTS "${VGS_FFMPEG}")
 else()
     message(WARNING "VGS_FFMPEG not found (${VGS_FFMPEG}): exports will not mix or cut audio.")
 endif()
+# VGS Viewer: opens and plays .vgs/.pgs, nothing else. It compiles the shared display sources
+# itself and links the decoder only - never editor_support or editor_authoring, which carry
+# the encoder and the signing key (the keyleak_viewer check in tests/ guards that).
+set(VGS_UI_SOURCES editortheme.cpp displayscaling.cpp viewport.cpp viewcube.cpp rangeslider.cpp audiopreview.cpp
+    captureworker.cpp isolation.cpp pruning.cpp project.cpp modifiers.cpp capturesettings.cpp
+    dependencies/mint/mintfile.cpp dependencies/mint/mintskinrecovery.cpp)
+qt_add_executable(VGSViewer WIN32 viewer/viewermain.cpp viewer/viewerwindow.cpp viewer/viewerwindow.h viewer/viewerversion.h ${VGS_UI_SOURCES} resources.qrc)
+target_compile_definitions(VGSViewer PRIVATE VGS_VIEWER)
+target_include_directories(VGSViewer PRIVATE . viewer dependencies/mint dependencies/eigen ${VGS_ROOT}/core/include/vgs ${VGS_ROOT}/core/crypto ${VGS_ROOT}/core/src)
+target_link_libraries(VGSViewer PRIVATE editor_decoder Qt6::Widgets Qt6::OpenGLWidgets Qt6::OpenGL Qt6::Multimedia)
+if(WIN32)
+    target_sources(VGSViewer PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/appicon.rc)
+    target_link_libraries(VGSViewer PRIVATE user32)
+endif()
+if(MSVC)
+    target_compile_options(VGSViewer PRIVATE /utf-8)
+endif()
 option(EDITOR_BUILD_TESTS "Build project and decoder integration tests" ON)
 if(EDITOR_BUILD_TESTS)
     enable_testing()

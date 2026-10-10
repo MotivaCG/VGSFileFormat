@@ -16,6 +16,9 @@
 # The result is <BuildDir>\deploy, emptied first. Qt Creator runs it as a deploy step.
 param(
     [Parameter(Mandatory = $true)][string]$BuildDir,
+    # VGSEditor or VGSViewer; by default whichever the build folder holds. The viewer gets no
+    # presets and no ffmpeg, and the decoder licence.
+    [ValidateSet("", "VGSEditor", "VGSViewer")][string]$App = "",
     [string]$Configuration = "release",
     [string]$QtBin = "C:\Qt\Qt6.8.1\6.8.0\msvc2022_64\bin",
     [string]$Ffmpeg = "D:\Trabajos\THE4DSCANNER\GraciaConverter\Gracia4DGSConverter\build\Desktop_Qt_6_8_0_MSVC2022_64bit-Release\release\tools\ffmpeg.exe"
@@ -23,7 +26,8 @@ param(
 $ErrorActionPreference = "Stop"
 $source = $PSScriptRoot
 $built = Join-Path $BuildDir $Configuration
-$exe = Join-Path $built "VGSEditor.exe"
+if (-not $App) { $App = if (Test-Path (Join-Path $built "VGSViewer.exe")) { "VGSViewer" } else { "VGSEditor" } }
+$exe = Join-Path $built "$App.exe"
 $out = Join-Path $BuildDir "deploy"
 if (-not (Test-Path $exe)) { throw "Build the $Configuration configuration first: $exe is missing." }
 $windeployqt = Join-Path $QtBin "windeployqt.exe"
@@ -36,8 +40,14 @@ Copy-Item $exe $out
 # windeployqt needs the compiler's environment for --compiler-runtime; Qt Creator provides it,
 # and without it the runtime is simply not copied.
 $mode = if ($Configuration -eq "debug") { "--debug" } else { "--release" }
-& $windeployqt $mode --compiler-runtime --no-translations (Join-Path $out "VGSEditor.exe")
+& $windeployqt $mode --compiler-runtime --no-translations (Join-Path $out "$App.exe")
 if ($LASTEXITCODE -ne 0) { throw "windeployqt failed ($LASTEXITCODE)." }
+
+if ($App -eq "VGSViewer") {
+    Copy-Item (Join-Path $source "..\decoder\LICENSE.md") $out
+    Write-Host "Deployed to $out"
+    return
+}
 
 # Built-in presets, read-only beside the program.
 New-Item -ItemType Directory -Force (Join-Path $out "presets") | Out-Null
