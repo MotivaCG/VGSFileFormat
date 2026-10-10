@@ -15,14 +15,35 @@ VGS Decoder licence. The GPL notice for the Python code does not relicense that
 library or grant access to its source code. Its integration and redistribution
 permissions and restrictions must be followed separately.
 
+## Native decoder architecture and separation
+
+The VGS native playback library is an independently developed, proprietary
+decoding component. It implements VGS capture decoding through its own native
+C interface and does not depend on Blender's Python API or internal rendering
+functionality.
+
+The GPL-licensed Python add-on loads the native library through `ctypes`,
+obtains decoded Gaussian Splatting data through that interface, and transfers
+those data into Blender's native data structures for rendering.
+
+The native library does not incorporate Blender code or link against Blender
+libraries. Its decoding functionality is independent of Blender and may be
+used in other applications under the separate VGS Decoder licence.
+
+The separation of these components does not modify the licensing obligations
+applicable to Blender or any third-party software. The additional permission
+below applies only to code for which the granting copyright holder has the
+necessary rights.
+
 ## 1. Additional permission under GPLv3 section 7
 
-For the add-on code in which Víctor M. Feliz holds the relevant copyright, he
-grants additional permission to link or combine that code, including modified
-versions of it, with the separately supplied **VGS native playback bridge
-(`vgsblender.dll`, `vgsblender.so` or `vgsblender.dylib`) and its incorporated
-VGS Decoder**, through their native interface, and to convey the resulting
-combination while that native component remains under the VGS Decoder licence.
+For the add-on code in which Víctor M. Feliz holds the relevant copyright,
+he grants additional permission under section 7 of GPLv3 to link or combine
+that code, including modified versions, with the separately supplied
+**VGS native playback bridge (`vgsblender.dll`, `vgsblender.so` or
+`vgsblender.dylib`) and its incorporated VGS Decoder**, through its native
+C interface, and to convey the resulting combination while that native
+component remains under the VGS Decoder licence.
 
 When exercising this permission, comply with the GPL for all GPL-covered parts
 and with the VGS Decoder licence for the native component. Solely as a result of
