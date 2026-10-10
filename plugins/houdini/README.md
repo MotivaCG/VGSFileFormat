@@ -1,7 +1,7 @@
 # The Houdini plugin — working notes
 
 An HDK plugin for Houdini 22.0: a **VGS Capture** object and a **VGS Capture** SOP. The
-same player as the Blender add-on (`plugins/vgsblender`) is compiled into it, so it plays
+same player as the Blender add-on (`plugins/vgsbridge`) is compiled into it, so it plays
 captures the same way; what differs is how the frames get into the host.
 
 Proprietary and free of charge, including for commercial use, under

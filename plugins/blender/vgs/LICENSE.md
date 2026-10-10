@@ -40,8 +40,8 @@ necessary rights.
 For the add-on code in which Víctor M. Feliz holds the relevant copyright,
 he grants additional permission under section 7 of GPLv3 to link or combine
 that code, including modified versions, with the separately supplied
-**VGS native playback bridge (`vgsblender.dll`, `vgsblender.so` or
-`vgsblender.dylib`) and its incorporated VGS Decoder**, through its native
+**VGS native playback bridge (`vgsbridge.dll`, `vgsbridge.so` or
+`vgsbridge.dylib`) and its incorporated VGS Decoder**, through its native
 C interface, and to convey the resulting combination while that native
 component remains under the VGS Decoder licence.
 

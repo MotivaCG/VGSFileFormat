@@ -4,7 +4,7 @@
 #ifndef SOP_VGSCAPTURE_H
 #define SOP_VGSCAPTURE_H
 
-#include "vgsblender.h"
+#include "vgsbridge.h"
 
 #include <SOP/SOP_Node.h>
 #include <UT/UT_String.h>

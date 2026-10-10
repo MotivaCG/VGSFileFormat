@@ -9,7 +9,7 @@
 #ifndef VGS_PARAMETERS_H
 #define VGS_PARAMETERS_H
 
-#include "vgsblender.h"
+#include "vgsbridge.h"
 
 #include <OP/OP_Value.h>
 #include <PRM/PRM_Template.h>

@@ -3,7 +3,7 @@
 
 """The decoder library, loaded from bin/ next to this file.
 
-A thin mirror of vgsblender.h. The structs below must match it field for field; the
+A thin mirror of vgsbridge.h. The structs below must match it field for field; the
 library reports its API version, and a mismatch refuses to load rather than read a struct
 wrongly.
 """
@@ -66,10 +66,10 @@ _library = None
 
 def _library_name():
     if sys.platform == "win32":
-        return "vgsblender.dll"
+        return "vgsbridge.dll"
     if sys.platform == "darwin":
-        return "vgsblender.dylib"
-    return "vgsblender.so"
+        return "vgsbridge.dylib"
+    return "vgsbridge.so"
 
 
 def library():
@@ -160,7 +160,7 @@ def _view(pointer, length):
 
 
 class Frame:
-    """One decoded instant, as views over the library's slot. See vgsblender.h."""
+    """One decoded instant, as views over the library's slot. See vgsbridge.h."""
 
     def __init__(self, raw):
         n = raw.count
@@ -220,5 +220,5 @@ class Player:
         self._lib.vgsb_set_include_sh(self._handle, int(include_sh))
 
     def set_density(self, density):
-        """The fraction of splats frames carry, 0.01 to 1. See vgsblender.h."""
+        """The fraction of splats frames carry, 0.01 to 1. See vgsbridge.h."""
         self._lib.vgsb_set_density(self._handle, float(density))

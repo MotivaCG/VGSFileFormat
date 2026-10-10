@@ -88,11 +88,11 @@ vgs_core_quiet_vendor_sources()
 add_library(vgshoudini_player STATIC
     ${VGS_CORE_SHARED_SOURCES}
     ${CMAKE_SOURCE_DIR}/decoder/src/vgsdecoder.cpp
-    ${CMAKE_SOURCE_DIR}/plugins/vgsblender/src/vgsblender.cpp)
+    ${CMAKE_SOURCE_DIR}/plugins/vgsbridge/src/vgsbridge.cpp)
 target_include_directories(vgshoudini_player
-    PUBLIC ${CMAKE_SOURCE_DIR}/plugins/vgsblender/include
+    PUBLIC ${CMAKE_SOURCE_DIR}/plugins/vgsbridge/include
     PRIVATE ${CMAKE_SOURCE_DIR}/decoder/include ${VGS_CORE_INCLUDE_DIRS})
-target_compile_definitions(vgshoudini_player PUBLIC VGSBLENDER_STATIC)
+target_compile_definitions(vgshoudini_player PUBLIC VGSBRIDGE_STATIC)
 set_target_properties(vgshoudini_player PROPERTIES
     MSVC_RUNTIME_LIBRARY "MultiThreadedDLL"
     POSITION_INDEPENDENT_CODE ON)

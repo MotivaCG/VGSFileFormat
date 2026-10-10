@@ -6,7 +6,7 @@ las opciones de densidad, los valores de los frames ni los shaders.
 
 ## Implementación
 
-`plugins/vgsblender/src/framepack.h` contiene la conversión privada de un frame del
+`plugins/vgsbridge/src/framepack.h` contiene la conversión privada de un frame del
 decoder al formato de atributos de los hosts. `Slot` conserva esos buffers y
 `decodeInto()` utiliza la conversión. Houdini compila el mismo player, de modo que
 recibe ambos cambios al reconstruir su DSO:
@@ -108,7 +108,7 @@ cmake --build build_plugin_decode --config Release --parallel 4
 ctest --test-dir build_plugin_decode -C Release --output-on-failure
 build_plugin_decode/tests/Release/vgs_framepack.exe build_entropy_audit/boxing_standard.vgs
 python tests/player_compare.py build_plugin_decode/reference/vgsblender_before.dll `
-  build_plugin_decode/plugins/vgsblender/Release/vgsblender.dll `
+  build_plugin_decode/plugins/vgsbridge/Release/vgsbridge.dll `
   build_entropy_audit/boxing_standard.vgs build_plugin_decode/results/boxing_vgs.json
 ```
 

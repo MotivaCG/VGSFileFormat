@@ -1,8 +1,17 @@
-#ifndef VGSBLENDER_H
-#define VGSBLENDER_H
+#ifndef VGSBRIDGE_H
+#define VGSBRIDGE_H
 
 /*
- * Playing VFGS captures inside a host that pulls frames: Blender, through its add-on.
+ * vgsbridge: playing VFGS captures inside a host that pulls frames.
+ *
+ * It is the native component a host integration loads to play captures, and the boundary
+ * between the closed VGS code and the integration's own: everything that reads the format
+ * is in here, behind this small C interface, and the integration only calls it and copies
+ * what it hands back. That is what lets an integration that must be free software - the
+ * Blender add-on, GPL like everything written against Blender's API, or a plugin for any
+ * other GPL host - stay entirely its own source while using a separately supplied library
+ * under the VGS Decoder licence (see LICENSE.md beside this folder). Blender is the first
+ * host; the frame layout below is shaped for it.
  *
  * The decoder hands over one instant at a time and belongs to one thread. A host like
  * Blender asks for a frame on its main thread when the playhead moves and wants it at
@@ -40,18 +49,18 @@
  * add-on calls them all from Blender's main thread, or from the render thread while
  * rendering.
  *
- * The Houdini plugin compiles this same player into its SOP, with VGSBLENDER_STATIC
+ * The Houdini plugin compiles this same player into its SOP, with VGSBRIDGE_STATIC
  * defined, and reshapes each frame into Houdini's GSplat attributes as it copies it.
  */
 
 #include <stddef.h>
 #include <stdint.h>
 
-#if defined(VGSBLENDER_STATIC)
+#if defined(VGSBRIDGE_STATIC)
 /* Compiled into another module, as the Houdini plugin does: nothing to export. */
 #  define VGSB_API
 #elif defined(_WIN32)
-#  ifdef VGSBLENDER_BUILD
+#  ifdef VGSBRIDGE_BUILD
 #    define VGSB_API __declspec(dllexport)
 #  else
 #    define VGSB_API __declspec(dllimport)

@@ -1,7 +1,7 @@
 #pragma once
 // Frozen pre-optimization host conversion. Keep independent of packFrame so changes
 // to selection, float arithmetic, ordering and SH layout are checked against it.
-#include "../plugins/vgsblender/src/framepack.h"
+#include "../plugins/vgsbridge/src/framepack.h"
 namespace legacy {
 constexpr float C0 = 0.28209479177387814f;
 constexpr float SmallestScale = 1e-6f;

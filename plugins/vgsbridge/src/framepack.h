@@ -1,5 +1,5 @@
-#ifndef VGSBLENDER_FRAMEPACK_H
-#define VGSBLENDER_FRAMEPACK_H
+#ifndef VGSBRIDGE_FRAMEPACK_H
+#define VGSBRIDGE_FRAMEPACK_H
 
 #include "vgsdecoder/vgsdecoder.h"
 

@@ -14,8 +14,9 @@ Blender 5.3 or later, Windows x64.
 
 - **Install:** drag `vgs-<version>.zip` onto Blender, or *Edit > Preferences > Get
   Extensions > ▾ > Install from Disk*. After reinstalling, **restart Blender**: a running
-  Blender keeps the old `vgsblender.dll` loaded, and the new Python can end up talking to
-  the old library.
+  Blender keeps the old `vgsbridge.dll` loaded, and the new Python can end up talking to
+  the old library. Add-ons from before the library was renamed carry `bin/vgsblender.dll`
+  instead; the new add-on never loads it, and reinstalling over it leaves it unused.
 - **Import:** *File > Import > VGS (.vgs, .pgs)*, or drop one or more captures on the 3D
   viewport. Each becomes a point cloud of type Gaussian Splat. Import options: harmonics,
   loop mode, up axis (Y Up by default: +90° about X, which is how captures
@@ -167,7 +168,7 @@ Test capture: `D:\Trabajos\ScanMeNow\SMNWebviewer\Playcanvas\dist\data\boxing_de
   link ending in `?repository=<url of index.json>` can then be dragged from a browser into
   Blender to install. Could be a CMake target that leaves the folder ready to upload.
 - **`website`** (and perhaps `copyright`) in `blender_manifest.toml`.
-- **Signing `vgsblender.dll`** with a code-signing certificate, which quietens some
+- **Signing `vgsbridge.dll`** with a code-signing certificate, which quietens some
   antivirus products about an unsigned DLL.
 - **Linux and macOS**: the library already builds as `.so`/`.dylib` names and `native.py`
   looks for them; the zip would be one per platform, with `platforms` set to match.

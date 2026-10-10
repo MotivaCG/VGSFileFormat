@@ -3,7 +3,7 @@
 <!-- SPDX-License-Identifier: LicenseRef-VGS-Decoder-Proprietary -->
 
 VGS Decoder: the supplied native libraries (including the VGS native playback
-bridge, `vgsblender`), WebAssembly modules, public headers, accompanying
+bridge, `vgsbridge`), WebAssembly modules, public headers, accompanying
 documentation, and example source code (collectively, the "Software").
 
 Copyright © 2026 Víctor M. Feliz. All rights reserved.

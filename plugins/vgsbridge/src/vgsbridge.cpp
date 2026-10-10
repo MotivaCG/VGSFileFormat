@@ -1,6 +1,6 @@
-// vgsblender - a capture player for hosts that pull frames. vgsblender.h says what and why.
+// vgsbridge - a capture player for hosts that pull frames. vgsbridge.h says what and why.
 
-#include "vgsblender.h"
+#include "vgsbridge.h"
 #include "framepack.h"
 
 #include "vgsdecoder/vgsdecoder.h"
@@ -270,7 +270,7 @@ int pickVictim(const vgsb_player &player) {
 }
 
 /**
- * Decodes the instant at `seconds` into `slot`, in the layout vgsblender.h promises.
+ * Decodes the instant at `seconds` into `slot`, in the layout vgsbridge.h promises.
  * Runs on a lane without the lock: the slot is marked Filling, so nothing else reads
  * or writes it meanwhile.
  */

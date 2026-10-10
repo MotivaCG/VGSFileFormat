@@ -43,15 +43,15 @@ add_custom_target(vgs_blender_addon ALL
     COMMAND ${CMAKE_COMMAND} -E remove_directory ${stage}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${stage}/bin
     COMMAND ${CMAKE_COMMAND} -E copy ${addon_sources} ${stage}
-    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:vgsblender> ${stage}/bin
+    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:vgsbridge> ${stage}/bin
     COMMAND ${CMAKE_COMMAND} -E copy ${decoder_license} ${stage}/bin/LICENSE.md
     COMMAND ${CMAKE_COMMAND} -E chdir ${stage}
             ${CMAKE_COMMAND} -E tar cf ${zip} --format=zip --
-            ${addon_files} bin/$<TARGET_FILE_NAME:vgsblender> bin/LICENSE.md
-    DEPENDS vgsblender ${addon_sources} ${decoder_license}
+            ${addon_files} bin/$<TARGET_FILE_NAME:vgsbridge> bin/LICENSE.md
+    DEPENDS vgsbridge ${addon_sources} ${decoder_license}
     COMMENT "Packaging the Blender add-on ${addon} ${addon_version}"
     VERBATIM)
-add_dependencies(vgs_blender_addon vgsblender)
+add_dependencies(vgs_blender_addon vgsbridge)
 
 # Beside INSTALL/decoder and INSTALL/encoder, as its own component:
 #

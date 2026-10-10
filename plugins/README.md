@@ -1,9 +1,10 @@
 # plugins/ — host integrations
 
 ```
-vgsblender/     the native library: the decoder, and the threads that play ahead of Blender
-  include/vgsblender.h    its C interface, and why it is shaped the way it is
-  src/vgsblender.cpp
+vgsbridge/      the native library integrations load (GPL ones included): the decoder, and
+                the threads that play ahead of the host
+  include/vgsbridge.h    its C interface, and why it is shaped the way it is
+  src/vgsbridge.cpp
 blender/        the Blender add-on, and the build step that packages it
   vgs/                    the add-on itself (Python)
   INSTALL.txt             how a user installs it, in English; installed beside the zip
@@ -60,11 +61,11 @@ Blender beyond the attribute layout it fills.
 
 The library compiles the decoder's source list itself rather than linking libvgsdecoder,
 so that it can use the static C runtime and load on a machine without the Visual C++
-redistributable. It is therefore its own artefact, and `keyleak_blender` checks it for
+redistributable. It is therefore its own artefact, and `keyleak_bridge` checks it for
 the signing key like the other decoder builds.
 
 The Houdini plugin is proprietary under [its own free-use licence](houdini/LICENSE.md).
-It compiles the same player (`vgsblender.cpp`, with `VGSBLENDER_STATIC`) into its
+It compiles the same player (`vgsbridge.cpp`, with `VGSBRIDGE_STATIC`) into its
 DSO and includes the native components' licence as `vgs/DECODER-LICENSE.md` in
 the package, so `keyleak_houdini` checks that too.
 
