@@ -7,11 +7,11 @@
 ; libraries, the MSVC runtime and the decoder licence. Run the deploy first, then
 ; compile this script (Inno Setup IDE, or ISCC.exe VGSViewer_InnoSetup.iss).
 ;
-; The version is not set here: it is read from ..\viewer\viewerversion.h, where the viewer
+; The version is not set here: it is read from ..\viewerversion.h, where the viewer
 ; takes it from too, so the installer and the program always agree.
 
 ; ---- Version, from viewerversion.h (#define VIEWER_VERSION_NAME "v1.0.0") ----
-#define VersionHeader AddBackslash(SourcePath) + "..\viewer\viewerversion.h"
+#define VersionHeader AddBackslash(SourcePath) + "..\viewerversion.h"
 #if !FileExists(VersionHeader)
   #error viewerversion.h not found beside the installer folder
 #endif
@@ -38,7 +38,9 @@
 ; ---- What and where ----
 #define MyAppName "VGS Viewer"
 #define MyAppExeName "VGSViewer.exe"
-#define MyAppPathToInclude AddBackslash(SourcePath) + "..\viewer\build\Desktop_Qt_6_8_0_MSVC2022_64bit-Release\deploy"
+#ifndef MyAppPathToInclude
+  #define MyAppPathToInclude AddBackslash(SourcePath) + "..\build\Desktop_Qt_6_8_0_MSVC2022_64bit-Release\deploy"
+#endif
 #define MyAppOutputPath AddBackslash(SourcePath) + "Output"
 #define MyAppInstallerFile "VGSViewerInstaller_" + MyAppVersion
 
@@ -69,7 +71,7 @@ DefaultDirName={autopf}\VGS Viewer
 DefaultGroupName={#MyAppName}
 UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName} {#MyAppVersion}
-SetupIconFile=..\assets\gracia\logo.ico
+SetupIconFile=..\..\editor\assets\gracia\logo.ico
 LicenseFile=..\..\decoder\LICENSE.md
 ; 64-bit only, installed in the 64-bit Program Files.
 ArchitecturesAllowed=x64compatible

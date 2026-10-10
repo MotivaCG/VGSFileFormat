@@ -9,8 +9,8 @@ QT += core gui widgets opengl openglwidgets multimedia
 CONFIG += c++17
 TARGET = VGSViewer
 DEFINES += VGS_VIEWER
-EDITOR = $$clean_path($$PWD/..)
-VGS_ROOT = $$clean_path($$PWD/../..)
+EDITOR = $$clean_path($$PWD/../editor)
+VGS_ROOT = $$clean_path($$PWD/..)
 INCLUDEPATH += $$PWD $$EDITOR $$EDITOR/dependencies/mint $$EDITOR/dependencies/eigen \
     $$VGS_ROOT/decoder/include $$VGS_ROOT/core/include/vgs $$VGS_ROOT/core/crypto $$VGS_ROOT/core/src
 

@@ -1,8 +1,10 @@
 # VGS Viewer: plan
 
-Not started. A separate program that only opens and plays `.vgs` and `.pgs` captures,
-looking and behaving like the editor's viewport and timeline, with nothing that edits,
-saves or re-encodes. This note records what was decided and the tasks, in order.
+The original plan for the standalone `.vgs`/`.pgs` player. The implemented viewer
+now lives in `viewer/`, beside `editor/`, with its own CMake and qmake projects,
+deploy script and installer. See [../README.md](../README.md) for current build
+and packaging instructions. This note retains the intended behaviour and task
+breakdown; extracting a shared TransportBar and `vgsui.pri` remains a proposal.
 
 ## Decisions
 
@@ -10,9 +12,9 @@ saves or re-encodes. This note records what was decided and the tasks, in order.
   encoder and the signing code (`vgsencode`, `vgssign`), which carry the private key. The
   viewer links the decoder only, which carries the public key, so the key protection
   stays as it is. A `keyleak_viewer` test checks every build.
-- **Shared `.cpp` files, not a library.** Both projects compile the same sources, listed
-  once in `editor/vgsui.pri` (qmake) and in a CMake variable (`VGS_UI_SOURCES`). Same
-  look by construction: `EditorTheme::install()`, the same widgets, the same icons.
+- **Shared `.cpp` files, not a library.** The viewer compiles display sources from
+  `editor/` directly, with `VGS_VIEWER` defined, without linking editor_support
+  or editor_authoring. Both use `EditorTheme::install()`, the same widgets and icons.
 - **Licence.** The viewer can go out under the VGS Decoder licence (free,
   redistributable), unlike the editor (internal use).
 - **Errors.** A capture whose signature or digests fail - not authentic, or damaged -
@@ -44,7 +46,7 @@ MINT, PLY, PNG), tasks, autosave, undo, MINT sources, ffmpeg. In the viewport: n
 statistics text (points, decode time…), no Gaussian/points switch, no SH selector, no
 ghost.
 
-## Tasks
+## Original task breakdown
 
 1. **Shared sources** - no behaviour change in the editor.
    - Create `editor/vgsui.pri` and `VGS_UI_SOURCES` with what both use: `editortheme`,
@@ -66,13 +68,14 @@ ghost.
      step with the slider's zoom and pan. Main window tests still pass.
 3. **`Viewport` options** for the viewer: hide the statistics text; force Gaussian and
    full SH; no ghost. Defaults keep the editor exactly as it is.
-4. **The viewer** - `editor/viewer/` with `VGSViewer.pro`, a CMake target, `main.cpp`
+4. **The viewer** - `viewer/` with `VGSViewer.pro`, its own CMake project, `viewermain.cpp`
    and a small main window: viewport, ViewCube with the background button, transport
    bar, View menu, Open/recent files, drag and drop, the error dialog.
 5. **What the file carries:** audio through `AudioPreview`, the initial camera, the play
    mode, the information panel.
-6. **Safety:** `keyleak_viewer` in `tests/CMakeLists.txt` (`vgs_keyleak --absent` on the
-   viewer's executable), as `keyleak_bridge` and `keyleak_houdini` do.
+6. **Safety:** `keyleak_viewer` in `viewer/CMakeLists.txt` runs the existing
+   `tests/keyleak.cpp` checker on the viewer's executable. The checker is excluded
+   from deployment, as are all encoder and signing targets.
 7. **Distribution:** a deploy script (windeployqt, MSVC runtime, licence; no ffmpeg, no
    presets) and its own Inno Setup installer associating `.vgs` and `.pgs` (asked, as the
    editor's installer does), with its own AppId and the version from its own header.

@@ -43,11 +43,13 @@ grant a general right to use, modify or distribute its contents.
   charge, including for commercial use. Both plugins include warranty and
   liability limitations. Dependencies retain their own licences.
 
-## The three projects
+## Projects
 
     core/        the codec: container, entropy coding, frame evaluation, crypto
     encoder/     libvgsencoder  + vgsencode                   writes captures
     decoder/     libvgsdecoder  + vgsinfo, vgsplay, vgsdump, vgsexport, vgspagecost, WebAssembly
+    editor/      Qt desktop editor, with its own build and installer
+    viewer/      Qt desktop player, with its own build, deploy and installer (viewer/README.md)
     tests/       the conformance and separation tests
     cmake/       package files for find_package
     logo.png     the mark, full size, on white; docs/logo.png is a copy for documents
@@ -155,6 +157,8 @@ signing key - and builds `decoder/wasm/` instead of the static library. See
 | `VGS_BUILD_TESTS` | `ON` | the test programs, run with `ctest` |
 | `VGS_BUILD_WASM` | `OFF` | build the WebAssembly decoder instead of the libraries |
 | `VGS_BUILD_SHARED` | `OFF` | build DLLs (`.so`) exporting the C interface, instead of static libraries |
+| `VGS_BUILD_EDITOR` | `OFF` | build the desktop editor in `editor/`; requires Qt 6.5+ |
+| `VGS_BUILD_VIEWER` | `OFF` | build the desktop player in `viewer/`; requires Qt 6.5+ |
 | `VGS_ENTROPY_EXPERIMENT` | `OFF` | native per-page entropy profiling and search comparison tool |
 | `VGS_CACHE_BEHIND` | per target | decoded chunks kept behind the one being played |
 | `VGS_CACHE_AHEAD` | per target | decoded chunks kept ahead of it |

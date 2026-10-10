@@ -16,24 +16,30 @@
 # The result is <BuildDir>\deploy, emptied first. Qt Creator runs it as a deploy step.
 param(
     [Parameter(Mandatory = $true)][string]$BuildDir,
-    # VGSEditor or VGSViewer; by default whichever the build folder holds. The viewer gets no
-    # presets and no ffmpeg, and the decoder licence.
-    [ValidateSet("", "VGSEditor", "VGSViewer")][string]$App = "",
+    [ValidateSet("VGSEditor")][string]$App = "VGSEditor",
     [string]$Configuration = "release",
     [string]$QtBin = "C:\Qt\Qt6.8.1\6.8.0\msvc2022_64\bin",
     [string]$Ffmpeg = "D:\Trabajos\THE4DSCANNER\GraciaConverter\Gracia4DGSConverter\build\Desktop_Qt_6_8_0_MSVC2022_64bit-Release\release\tools\ffmpeg.exe"
 )
 $ErrorActionPreference = "Stop"
+$BuildDir = (Resolve-Path -LiteralPath $BuildDir).Path
 $source = $PSScriptRoot
 $built = Join-Path $BuildDir $Configuration
-if (-not $App) { $App = if (Test-Path (Join-Path $built "VGSViewer.exe")) { "VGSViewer" } else { "VGSEditor" } }
 $exe = Join-Path $built "$App.exe"
-$out = Join-Path $BuildDir "deploy"
+$out = [System.IO.Path]::GetFullPath((Join-Path $BuildDir "deploy"))
 if (-not (Test-Path $exe)) { throw "Build the $Configuration configuration first: $exe is missing." }
 $windeployqt = Join-Path $QtBin "windeployqt.exe"
 if (-not (Test-Path $windeployqt)) { throw "windeployqt not found in $QtBin." }
 
-if (Test-Path $out) { Remove-Item -Recurse -Force $out }
+if (-not $out.StartsWith($BuildDir.TrimEnd('\') + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "The deploy directory must be inside the selected build directory."
+}
+if (Test-Path -LiteralPath $out) {
+    if ((Get-Item -LiteralPath $out).Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+        throw "The deploy directory must not be a symbolic link or junction: $out"
+    }
+    Remove-Item -LiteralPath $out -Recurse -Force
+}
 New-Item -ItemType Directory -Force $out | Out-Null
 Copy-Item $exe $out
 
@@ -42,12 +48,6 @@ Copy-Item $exe $out
 $mode = if ($Configuration -eq "debug") { "--debug" } else { "--release" }
 & $windeployqt $mode --compiler-runtime --no-translations (Join-Path $out "$App.exe")
 if ($LASTEXITCODE -ne 0) { throw "windeployqt failed ($LASTEXITCODE)." }
-
-if ($App -eq "VGSViewer") {
-    Copy-Item (Join-Path $source "..\decoder\LICENSE.md") $out
-    Write-Host "Deployed to $out"
-    return
-}
 
 # Built-in presets, read-only beside the program.
 New-Item -ItemType Directory -Force (Join-Path $out "presets") | Out-Null

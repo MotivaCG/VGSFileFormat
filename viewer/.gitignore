@@ -1,0 +1,10 @@
+build*/
+*.pro.user*
+CMakeLists.txt.user*
+Makefile*
+/.qmake.cache
+/.qmake.stash
+moc_*.cpp
+qrc_*.cpp
+*_resource.rc
+*.res

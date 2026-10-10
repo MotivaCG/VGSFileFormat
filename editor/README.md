@@ -519,6 +519,14 @@ Use `windeployqt` to run outside Qt Creator.
 
 ## Version, deploy and installer
 
+The standalone viewer has its own project, deploy script and installer in
+[../viewer/](../viewer/README.md). This directory's build and deployment target
+VGS Editor.
+
+The repository's root CMake project can also build the editor with
+`-DVGS_BUILD_EDITOR=ON` and the Qt prefix. `VGS_BUILD_VIEWER` independently
+controls the sibling viewer; both options are off by default.
+
 The version is set once, in `licensemanagement.h` (`VERSION_NAME`, e.g. `"v1.0.0"`). The
 window title and About show it, the exe's version information carries it (qmake and CMake
 read the header), and the installer reads it too.
