@@ -39,7 +39,7 @@ int main(int argc, char *argv[])
     QApplication::setDesktopSettingsAware(false);
     QLocale::setDefault(QLocale(QLocale::English, QLocale::UnitedKingdom));
     QApplication a(argc, argv);
-    a.setApplicationName("VGS Editor"); a.setOrganizationName("THE4DSCANNER");
+    a.setApplicationName("VGS Editor"); a.setOrganizationName("VGS");
     a.setApplicationVersion(QStringLiteral(VERSION_NAME).mid(1)); // "v1.0.0" -> "1.0.0"
     a.setWindowIcon(QIcon(":/icons/logo.png"));
     EditorTheme::install();

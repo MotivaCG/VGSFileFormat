@@ -49,7 +49,7 @@
 #define MyAppOutputPath AddBackslash(SourcePath) + "Output"
 #define MyAppInstallerFile "VGSEditorInstaller_" + MyAppVersion
 
-#define MyAppPublisher "Victor M. Feliz"
+#define MyAppPublisher "VGS"
 #define MyAppURL "https://www.the4dscanner.com"
 
 ; Projects always open in the editor. Captures (.vgs, .pgs, .mint) always appear in Explorer's

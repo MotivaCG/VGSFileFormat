@@ -85,6 +85,7 @@ ViewerWindow::ViewerWindow() : worker_(new CaptureWorker) {
     toggle(tr("Origin and front marker"),"Display/FrontMarker",true,&Viewport::setFrontMarker);
     auto *help=menuBar()->addMenu(tr("Help"));
     help->addAction(tr("About VGS Viewer"),this,[this] {QMessageBox::about(this,tr("About VGS Viewer"),tr("<h2>VGS Viewer</h2><p>Version %1</p><p>Víctor M. Feliz</p><p>The4DScanner · ScanMeNow</p>").arg(VIEWER_VERSION_NAME));});
+    help->addAction(tr("About Qt"),qApp,&QApplication::aboutQt);
     auto key=[&](const QKeySequence &sequence,auto action) {auto *s=new QShortcut(sequence,this);connect(s,&QShortcut::activated,this,action);};
     key(Qt::Key_Space,[this] {play(!playback_.isActive());});
     key(Qt::Key_Left,[this] {play(false);setTime(time_s_-1/info_.fps);});

@@ -42,7 +42,7 @@
 #define MyAppOutputPath AddBackslash(SourcePath) + "Output"
 #define MyAppInstallerFile "VGSViewerInstaller_" + MyAppVersion
 
-#define MyAppPublisher "Victor M. Feliz"
+#define MyAppPublisher "VGS"
 #define MyAppURL "https://www.the4dscanner.com"
 
 
