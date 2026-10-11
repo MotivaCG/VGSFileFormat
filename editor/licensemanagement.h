@@ -11,7 +11,7 @@
 #ifndef LICENSEMANAGEMENT_H
 #define LICENSEMANAGEMENT_H
 
-#define VERSION_NAME					"v1.0.0"
-#define VERSION_NUMBER					"1000" // ie. v1.2 is 1.2.0.0 -> 1200
+#define VERSION_NAME					"v1.0.1"
+#define VERSION_NUMBER					"1010" // ie. v1.2 is 1.2.0.0 -> 1200
 
 #endif // LICENSEMANAGEMENT_H

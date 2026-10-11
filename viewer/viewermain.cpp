@@ -23,7 +23,7 @@ int main(int argc, char *argv[]) {
     app.setApplicationVersion(QStringLiteral(VIEWER_VERSION_NAME).mid(1));
     app.setWindowIcon(QIcon(":/icons/logo.png"));
     EditorTheme::install();
-    ViewerWindow window; window.show();
+    ViewerWindow window; window.showMaximized();
     if (app.arguments().size() > 1) window.openFile(app.arguments().at(1));
     return app.exec();
 }

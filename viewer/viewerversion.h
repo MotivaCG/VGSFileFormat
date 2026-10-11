@@ -5,6 +5,6 @@
 #ifndef VIEWERVERSION_H
 #define VIEWERVERSION_H
 
-#define VIEWER_VERSION_NAME "v1.0.0"
+#define VIEWER_VERSION_NAME "v1.0.1"
 
 #endif

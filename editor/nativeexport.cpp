@@ -481,6 +481,10 @@ void bakeAntialiasing(vgs::DecodedChunk &c,double size) {
 // which a matrix mixing channels cannot keep: the table is rebuilt from the new values'
 // quantiles and every splat takes its nearest entries.
 void colourNative(vgs::DecodedChunk &c,const std::array<float,9> &a) {
+    // A neutral Color (including despill-only or opacity-only) must retain the
+    // original LUT. Rebuilding it by frequency can discard rare base values and
+    // reintroduce green after despill, even with an identity colour matrix.
+    if (a==std::array<float,9>{1,0,0,0,1,0,0,0,1}) return;
     constexpr double C0=0.28209479177387814;
     auto mix=[&](uint8_t *rgb) {float v[3];for (int k=0;k<3;++k) v[k]=half(rgb+2*k);for (int r=0;r<3;++r) putHalf(rgb+2*r,a[r*3]*v[0]+a[r*3+1]*v[1]+a[r*3+2]*v[2]);};
     for (auto &p:c.pages) if (p.descriptor.attribute==vgs::ShStaticBook || p.descriptor.attribute==vgs::ShTemporalBook || p.descriptor.attribute==vgs::Sh0Trajectories)

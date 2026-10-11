@@ -99,14 +99,14 @@ int removedByModifiers() {
     }
     vec3 baseRgb=clamp(color,0.0,1.0);
     for(int i=0;i<greenCount;++i) {
-        vec4 filter=texelFetch(modifierData,cropCount*6+i);
-        vec3 tested=filter.z>0.5 ? clamp(colourMatrix*color,0.0,1.0) : baseRgb; // below a Color modifier: as Color leaves it
-        vec3 rgb=filter.w>0.5 ? mix(tested/12.92,pow((tested+0.055)/1.055,vec3(2.4)),greaterThan(tested,vec3(0.04045))) : tested;
+        vec4 greenFilter=texelFetch(modifierData,cropCount*6+i);
+        vec3 tested=greenFilter.z>0.5 ? clamp(colourMatrix*color,0.0,1.0) : baseRgb; // below a Color modifier: as Color leaves it
+        vec3 rgb=greenFilter.w>0.5 ? mix(tested/12.92,pow((tested+0.055)/1.055,vec3(2.4)),greaterThan(tested,vec3(0.04045))) : tested;
         float maximum=max(rgb.r,max(rgb.g,rgb.b)),minimum=min(rgb.r,min(rgb.g,rgb.b)),chroma=maximum-minimum;
         if(chroma<=0.0 || maximum<=0.0) continue;
         float hue=maximum==rgb.r ? (rgb.g-rgb.b)/chroma : maximum==rgb.g ? 2.0+(rgb.b-rgb.r)/chroma : 4.0+(rgb.r-rgb.g)/chroma;
         hue*=60.0;if(hue<0.0) hue+=360.0;float distance=abs(hue-120.0);distance=min(distance,360.0-distance);
-        if(chroma/maximum>=filter.x && distance<=filter.y) return 1;
+        if(chroma/maximum>=greenFilter.x && distance<=greenFilter.y) return 1;
     }
     return 0;
 }

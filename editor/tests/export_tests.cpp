@@ -26,6 +26,7 @@
 #include <QFile>
 #include <QtTest>
 #include <cstring>
+#include <qfloat16.h>
 
 namespace {
 void word32(uint8_t *p,uint32_t v) {for (int i=0;i<4;++i) p[i]=uint8_t(v>>(i*8));}
@@ -794,6 +795,112 @@ private slots:
         for (int i=0;i<40;++i) {
             QVector3D world=QVector3D(std::sin(i*.7f),std::cos(i*.3f),std::sin(i*1.3f)).normalized();auto local=inverse.mapVector(world).normalized();
             for (int c=0;c<3;++c) QVERIFY(std::abs(colour(baked,{world.x(),world.y(),world.z()},c)-colour(f,{local.x(),local.y(),local.z()},c))<2e-6);
+        }
+    }
+    void neutralColourModifierPreservesDespill() {
+        // A rare R value must survive a neutral Colour modifier. Rebuilding the
+        // shared LUT by frequency drops it and makes this neutral-green boundary
+        // splat green, even though every input splat satisfies G <= (R+B)/2.
+        auto chunk=temporalFixture(false);
+        for (auto &page:chunk.pages) {
+            if (page.descriptor.attribute==vgs::Sh0Trajectories || page.descriptor.attribute==vgs::ShStaticBook || page.descriptor.attribute==vgs::ShTemporalBook)
+                std::fill(page.bytes.begin(),page.bytes.end(),0);
+            if (page.descriptor.attribute==vgs::Sh0Lut) {
+                for (size_t i=0;i<page.bytes.size()/2;++i) {
+                    const qfloat16 value(i==0 ? -1.f : i==1 ? 0.f : i==2 ? .5f : 1.f);
+                    uint16_t bits;std::memcpy(&bits,&value,2);page.bytes[2*i]=uint8_t(bits);page.bytes[2*i+1]=uint8_t(bits>>8);
+                }
+            }
+            if (page.descriptor.attribute==vgs::Sh0Base) {
+                for (size_t i=0;i<page.bytes.size()/3;++i) for (int c=0;c<3;++c) page.bytes[3*i+c]=uint8_t(i%3);
+                page.bytes[0]=3;page.bytes[1]=1;page.bytes[2]=0;
+            }
+        }
+        Project p;p.modifiers.clear();Modifier colour;colour.id=Project::newId();colour.type=ModifierType::Colour;
+        colour.colourDespill=Modifier::DespillOnExport;p.modifiers={colour};
+        const auto before=vgs::FrameDecoder(chunk).evaluate(0,true);
+        const auto after=vgs::FrameDecoder(editNativeChunk(chunk,{0,0,6},p,nullptr,{})).evaluate(0,true);
+        for (size_t i=0;i<before.colorDc.size();++i) QCOMPARE(after.colorDc[i],before.colorDc[i]);
+        QVERIFY(after.shRest==before.shRest);
+    }
+    void despillRoundTripAllShDegrees_data() {
+        QTest::addColumn<int>("degree");QTest::addColumn<bool>("sampled");
+        for (int degree=0;degree<=3;++degree) for (bool sampled:{false,true})
+            QTest::newRow(qPrintable(QString("SH%1-%2").arg(degree).arg(sampled ? "sampled" : "native")))<<degree<<sampled;
+    }
+    void despillRoundTripAllShDegrees() {
+        QFETCH(int,degree);QFETCH(bool,sampled);
+        auto chunk=temporalFixture(false);
+        // Signed, time-varying SH in both dictionaries: a DC-only test cannot
+        // detect angular leaks, especially when a basis term changes sign.
+        for (auto &page:chunk.pages) if (page.descriptor.attribute==vgs::ShStaticBook || page.descriptor.attribute==vgs::ShTemporalBook)
+            for (size_t i=0;i<page.bytes.size()/2;++i) {
+                const qfloat16 value(float(std::sin(double(i)*.71+page.descriptor.attribute)*.7));
+                uint16_t bits;std::memcpy(&bits,&value,2);page.bytes[2*i]=uint8_t(bits);page.bytes[2*i+1]=uint8_t(bits>>8);
+            }
+        QTemporaryDir directory;const QString source=directory.filePath("source.vgs"),output=directory.filePath("output.vgs");
+        vgs::Header header;header.frameCount=header.durationTicks=6;header.timeDenominator=30;header.chunks.resize(1);header.chunks[0].intervals=6;
+        vgs::EncodeOptions options;options.signer=vgs::authoringSigner();options.shDegree=3;
+        QFile file(source);QVERIFY(file.open(QIODevice::WriteOnly));
+        vgs::encodeSequence(header,[&](size_t) {return chunk;},[&](uint64_t offset,const uint8_t *bytes,size_t count) {
+            if (!file.seek(qint64(offset)) || file.write(reinterpret_cast<const char *>(bytes),qint64(count))!=qint64(count)) throw std::runtime_error("Cannot write fixture.");
+        },options);file.close();
+        Project project;project.asset=source;project.in=0;project.out=5./30;project.modifiers.clear();project.captureSettings.shDegree=degree;
+        if (sampled) project.transform.scale={1,.8f,1};
+        Modifier spill;spill.id=Project::newId();spill.type=ModifierType::Colour;spill.colourDespill=Modifier::DespillOnExport;
+        project.modifiers={spill};exportCaptureFile(project,output);
+        auto capture=vgsdec::Capture::openFile(output.toStdString());QCOMPARE(capture.shDegree(),degree);
+        double worst=0;
+        for (double sample:{0.,.25,1.5,2.75,4.,5.}) {
+            const auto &frame=capture.setTime(sample/30,true);
+            for (int x=-1;x<=1;++x) for (int y=-1;y<=1;++y) for (int z=-1;z<=1;++z) if (x || y || z) {
+                const auto b=basis(Eigen::Vector3d(x,y,z).normalized());
+                for (size_t row=0;row<frame.splatCount;++row) if (frame.active[row] && frame.opacities[row]>.01f) {
+                    double rgb[3]={frame.colors[row*3],frame.colors[row*3+1],frame.colors[row*3+2]};
+                    for (int k=0;k<frame.shCoefficients;++k) for (int c=0;c<3;++c) rgb[c]+=b[k+1]*frame.sphericalHarmonics[(row*frame.shCoefficients+k)*3+c];
+                    worst=std::max(worst,rgb[1]-.5*(rgb[0]+rgb[2]));
+                }
+            }
+        }
+        QVERIFY2(worst<.001,qPrintable(QString("Angular green residual: %1").arg(worst,0,'g',9)));
+    }
+    void despillReportedCaptureDiagnostics() {
+        const QString path=qEnvironmentVariable("EDITOR_DESPILL_TASK");
+        if (path.isEmpty()) QSKIP("Set EDITOR_DESPILL_TASK to audit a reported export.");
+        ExportTask task;QString error;QVERIFY2(readExportTask(path,&task,&error),qPrintable(error));
+        QTemporaryDir temporary;
+        const QString output=qEnvironmentVariable("EDITOR_DESPILL_OUTPUT",temporary.filePath("corrected.vgs"));
+        QVERIFY(QFileInfo(output).absoluteFilePath()!=QFileInfo(task.output).absoluteFilePath());
+        exportCaptureFile(task.project,output);
+        std::vector<Eigen::Matrix<double,16,1>> directions;
+        for (int x=-1;x<=1;++x) for (int y=-1;y<=1;++y) for (int z=-1;z<=1;++z)
+            if (x || y || z) directions.push_back(basis(Eigen::Vector3d(x,y,z).normalized()));
+        for (const auto &file:{task.output,output}) {
+            auto capture=vgsdec::Capture::openFile(file.toStdString());
+            size_t tested=0,dcGreen=0,angularGreen=0,angularDominant=0;double worst=0,dcWorst=0;
+            for (double fraction:{0.,.17,.34,.51,.68,.85}) {
+                const auto &f=capture.setTime(capture.duration()*fraction,true);
+                for (size_t row=0;row<f.splatCount;++row) {
+                    if (!f.active[row] || f.opacities[row]<.01f) continue;
+                    ++tested;const float *dc=f.colors+row*3;
+                    const double excess=dc[1]-.5*(dc[0]+dc[2]);dcWorst=std::max(dcWorst,excess);dcGreen+=excess>.001;
+                    double peak=-1e10,dominant=-1e10;
+                    for (const auto &b:directions) {
+                        double rgb[3]={dc[0],dc[1],dc[2]};
+                        for (int k=0;k<f.shCoefficients;++k) for (int c=0;c<3;++c)
+                            rgb[c]+=b[k+1]*f.sphericalHarmonics[(row*f.shCoefficients+k)*3+c];
+                        peak=std::max(peak,rgb[1]-.5*(rgb[0]+rgb[2]));
+                        for (double &value:rgb) value=std::clamp(value,0.,1.);
+                        dominant=std::max(dominant,rgb[1]-std::max(rgb[0],rgb[2]));
+                    }
+                    worst=std::max(worst,peak);angularGreen+=peak>.001;angularDominant+=dominant>.001;
+                }
+            }
+            qInfo("%s tested=%llu DC green=%llu angular green=%llu dominant green=%llu DC worst=%.7f angular worst=%.7f",
+                  qPrintable(file),qulonglong(tested),qulonglong(dcGreen),qulonglong(angularGreen),qulonglong(angularDominant),dcWorst,worst);
+            const CompiledModifiers modifiers(task.project);
+            if (file==output && modifiers.despill && modifiers.despillStrength>=1 && modifiers.colour==std::array<float,9>{1,0,0,0,1,0,0,0,1})
+                QVERIFY2(worst<.001,"Full despill leaked green after serialization and angular evaluation.");
         }
     }
     void despillActuallyChangesExportColours() {
