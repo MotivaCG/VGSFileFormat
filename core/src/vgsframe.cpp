@@ -747,6 +747,18 @@ void FrameDecoder::evaluateInto(double normalized, bool includeSh, Frame *out,
                       frame * int64_t(shPlanes) * 3 * nt * 3 * 2;
   }
 
+  // The same dictionary entries are used by many splats. Convert the current
+  // sample once per evaluation so the inner loop only gathers float values.
+  std::vector<float> shStaticValues, shTemporalValues;
+  if (evaluateSh) {
+    shStaticValues.resize(size_t(shPlanes * 3 * ns * 3));
+    shTemporalValues.resize(size_t(shPlanes * 3 * nt * 3));
+    for (size_t i = 0; i < shStaticValues.size(); ++i)
+      shStaticValues[i] = readHalf(shStaticBytes + i * 2);
+    for (size_t i = 0; i < shTemporalValues.size(); ++i)
+      shTemporalValues[i] = readHalf(shTemporalFrame + i * 2);
+  }
+
   struct GroupPlan {
     const Block *block = nullptr;
     uint64_t first = 0; // where its splats start in the frame
@@ -989,17 +1001,17 @@ void FrameDecoder::evaluateInto(double normalized, bool includeSh, Frame *out,
           for (int k = 0; k < 3; ++k) {
             const uint32_t si = (sWord >> kShift[k]) & 0x3FFu;
             const uint32_t ti = (tWord >> kShift[k]) & 0x3FFu;
-            const char *sEntry =
-                shStaticBytes + (((g * 3 + uint64_t(k)) * ns) + si) * 3 * 2;
-            const char *tEntry =
-                shTemporalFrame + (((g * 3 + uint64_t(k)) * nt) + ti) * 3 * 2;
+            const float *sEntry =
+                shStaticValues.data() + (((g * 3 + uint64_t(k)) * ns) + si) * 3;
+            const float *tEntry =
+                shTemporalValues.data() + (((g * 3 + uint64_t(k)) * nt) + ti) * 3;
             const uint64_t coefficient = g * 3 + uint64_t(k);
             if (coefficient >= shCoefficients)
               break;
             for (int c = 0; c < 3; ++c) {
               out->shRest[size_t((written + i) * shCoefficients * 3 +
                                  coefficient * 3 + uint64_t(c))] =
-                  readHalf(sEntry + c * 2) + readHalf(tEntry + c * 2);
+                  sEntry[c] + tEntry[c];
             }
           }
         }

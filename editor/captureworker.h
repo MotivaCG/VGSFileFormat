@@ -50,6 +50,7 @@ struct CaptureInfo {
     QString path, title, format;
     double duration = 0, fps = 30;
     int frames = 0;
+    int shDegree = -1;
     // Trained with anti-aliasing: Gracia .mint captures always, a .vgs when its header says
     // so. Splats are then drawn with the matching opacity compensation.
     bool antialiased = false;

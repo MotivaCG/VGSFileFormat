@@ -7,9 +7,12 @@
 
 #include "vgsdecoder/vgsdecoder.h"
 #include "vgsencoder/vgsencoder.h"
+#include "vgscodec.h"
 
 #include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -34,12 +37,58 @@ template <typename T> void equals(const T &got, const T &want, const char *what)
   }
 }
 
+bool canonicalSh2(const char *path) {
+  try {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) return false;
+    const vgs::Bytes file((std::istreambuf_iterator<char>(input)), {});
+    const auto header = vgs::readHeader(file.data(), file.size());
+    if (header.shDegree != 2) return false;
+    for (size_t ci = 0; ci < header.chunks.size(); ++ci) {
+      const auto &chunk = header.chunks[ci];
+      const auto directory = vgs::readChunkDirectory(header, ci,
+                              file.data() + chunk.offset, size_t(chunk.size));
+      for (const auto &p : directory.pages) {
+        if (p.attribute != vgs::ShStaticIndices && p.attribute != vgs::ShTemporalIndices &&
+            p.attribute != vgs::ShStaticBook && p.attribute != vgs::ShTemporalBook)
+          continue;
+        const auto raw = vgs::decodePage(header, p, file.data() + chunk.offset + p.offset,
+                                          size_t(p.size));
+        if (p.attribute == vgs::ShStaticIndices || p.attribute == vgs::ShTemporalIndices) {
+          const size_t n = size_t(p.spec.rows);
+          if (p.spec.width != 3 || raw.size() != n * 12) return false;
+          for (size_t i = 0; i < n; ++i) {
+            const size_t at = (2 * n + i) * 4;
+            if (raw[at] || (raw[at + 1] & 3)) return false;
+          }
+        } else {
+          const uint64_t entries = directory.groups.front().counts[
+              p.attribute == vgs::ShStaticBook ? 0 : 1];
+          const uint64_t period = entries * 9;
+          if (!entries || !period || raw.size() != p.spec.rows * 6) return false;
+          for (uint64_t row = 0; row < p.spec.rows; ++row)
+            if ((p.firstRow + row) % period >= entries * 8)
+              for (size_t byte = 0; byte < 6; ++byte)
+                if (raw[size_t(row * 6 + byte)]) return false;
+        }
+      }
+    }
+    return true;
+  } catch (const std::exception &) {
+    return false;
+  }
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
-  if (argc != 3 && (argc != 4 || (std::string(argv[3]) != "--entropy-search" &&
-                                 std::string(argv[3]) != "--split-temporal-sh"))) {
-    std::fprintf(stderr, "usage: roundtrip <input.mint> <output.vgs> [--entropy-search|--split-temporal-sh]\n");
+  uint32_t degree = 2;
+  if (argc == 4 && std::strncmp(argv[3], "--sh=", 5) == 0 &&
+      std::strlen(argv[3]) == 6 && argv[3][5] >= '0' && argv[3][5] <= '3')
+    degree = uint32_t(argv[3][5] - '0');
+  else if (argc != 3 && (argc != 4 || (std::string(argv[3]) != "--entropy-search" &&
+                                       std::string(argv[3]) != "--split-temporal-sh"))) {
+    std::fprintf(stderr, "usage: roundtrip <input.mint> <output.vgs> [--sh=0..3|--entropy-search|--split-temporal-sh]\n");
     return 2;
   }
 
@@ -52,7 +101,7 @@ int main(int argc, char **argv) {
   encoder.setCoding(vgsenc::Coding::Compressed);
   encoder.setEntropySearch(argc == 4 && std::string(argv[3]) == "--entropy-search");
   encoder.setTemporalShPageSplit(argc == 4 && std::string(argv[3]) == "--split-temporal-sh");
-  encoder.setSphericalHarmonicDegree(2);
+  encoder.setSphericalHarmonicDegree(degree);
   encoder.setId(id);
   encoder.setTitle(title);
   encoder.setAuthor(author);
@@ -74,9 +123,12 @@ int main(int argc, char **argv) {
   const std::string uuid = encoder.uuidText();
   std::printf("wrote %llu bytes, identifier %s\n\n",
               static_cast<unsigned long long>(encoder.outputSize()), uuid.c_str());
+  if (degree == 2)
+    check(canonicalSh2(argv[2]), "SH2 spare indices and codebook entries are zero");
 
   try {
     vgsdec::Capture capture = vgsdec::Capture::openFile(argv[2]);
+    equals(capture.shDegree(), degree, "the header records the selected SH degree");
 
     equals(capture.metadata().id, id, "the identifier survives");
     equals(capture.metadata().title, title, "the title survives");
@@ -126,8 +178,10 @@ int main(int argc, char **argv) {
     check(frame.positions && frame.rotations && frame.scales && frame.opacities &&
               frame.colors,
           "every base attribute comes back");
-    equals(frame.shCoefficients, 8, "spherical harmonic degree 2 means eight coefficients");
-    check(frame.sphericalHarmonics != nullptr, "the harmonics come back too");
+    equals(frame.shCoefficients, int(degree == 0 ? 0 : degree == 1 ? 3 : degree == 2 ? 8 : 15),
+           "the frame has the selected SH coefficient count");
+    check((frame.sphericalHarmonics != nullptr) == (degree != 0),
+          "the harmonics are present only when selected");
 
     // Positions must sit inside the box the header declares, or a renderer culling
     // against it would drop splats that are really there.

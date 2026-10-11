@@ -329,6 +329,12 @@ ChunkDirectory readChunkDirectory(const Header &h, size_t index,
     p.spec = readSpec(r);
     const auto &pol = policy(h, p.attribute);
     const bool known = std::string(attributeName(p.attribute)) != "unknown";
+    const bool shIndices = p.attribute == ShStaticIndices ||
+                           p.attribute == ShTemporalIndices;
+    const bool shBook = p.attribute == ShStaticBook ||
+                        p.attribute == ShTemporalBook;
+    const uint32_t shPlanes = h.shDegree == 3 ? 5 :
+                              h.shDegree == 2 ? 3 : h.shDegree;
     if (p.group >= ng || (known && p.layer != layer(p.attribute)) ||
         !declaresLayer(h, p.layer) || p.layer < lastLayer || !p.size ||
         p.size > Limit ||
@@ -338,6 +344,8 @@ ChunkDirectory readChunkDirectory(const Header &h, size_t index,
         p.spec.rows > p.totalRows - p.firstRow ||
         (pol.codec == Raw && p.size != p.decodedSize) ||
         ((p.attribute < 32) != (p.group == 0)) ||
+        (shIndices && p.spec.width != shPlanes) ||
+        (h.shDegree == 0 && (shIndices || shBook)) ||
         (p.attribute == MotionSamples &&
          !isMotionSamplesSpec(p.spec, p.totalRows, c.intervals + 1)))
       throw Error("invalid VGS page");
@@ -354,6 +362,16 @@ ChunkDirectory readChunkDirectory(const Header &h, size_t index,
   for (auto kv : coverage)
     if (kv.second.first != kv.second.second)
       throw Error("incomplete VGS attribute");
+  if (h.shDegree) {
+    if (!coverage.count({0u, uint32_t(ShStaticBook)}) ||
+        !coverage.count({0u, uint32_t(ShTemporalBook)}))
+      throw Error("VGS chunk without SH dictionaries");
+    for (uint32_t group = 1; group < ng; ++group)
+      if (d.groups[group].splats &&
+          (!coverage.count({group, uint32_t(ShStaticIndices)}) ||
+           !coverage.count({group, uint32_t(ShTemporalIndices)})))
+        throw Error("VGS splat group without SH indices");
+  }
   // A capture that moves moves in every chunk: a chunk without its samples would play
   // in place, which is exactly the silent failure this attribute is mandatory to prevent.
   if (declaresMotion(h) && !coverage.count({0u, uint32_t(MotionSamples)}))
@@ -375,7 +393,7 @@ Bytes decodePage(const Header &h, const Page &p, const uint8_t *data,
       throw Error("invalid raw VGS page");
     return Bytes(data, data + size);
   }
-  return mgs::decodeAttribute(p.spec, int(pol.model), data, size);
+  return mgs::decodeVgsAttribute(p.spec, int(pol.model), data, size);
 }
 DecodedChunk decodeChunk(const Header &h, size_t index, const uint8_t *data,
                          size_t size, uint32_t mask,

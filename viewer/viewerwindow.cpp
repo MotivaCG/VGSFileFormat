@@ -21,6 +21,7 @@
 #include <QMessageBox>
 #include <QMimeData>
 #include <QSettings>
+#include <QSignalBlocker>
 #include <QShortcut>
 #include <QStyle>
 #include <QPainter>
@@ -49,16 +50,16 @@ ViewerWindow::ViewerWindow() : worker_(new CaptureWorker) {
     auto *center=new QWidget;auto *layout=new QVBoxLayout(center);layout->setContentsMargins(0,0,0,0);layout->setSpacing(0);
     viewport_=new Viewport;viewport_->setViewerMode(true);viewport_->setSplatRendering(true);viewport_->setSplatShDegree(-1);
     layout->addWidget(viewport_,1);
-    // The editor's transport and timeline, without trimming: the range is the whole file.
+    // The editor's transport and timeline; the range selects the playback section.
     auto *timeline=new QWidget;timeline->setObjectName("timeline");auto *tl=new QVBoxLayout(timeline);tl->setContentsMargins(18,8,18,12);tl->setSpacing(6);
     auto *row=new QHBoxLayout;
     auto button=[&](QStyle::StandardPixmap icon,const QString &tip,auto action) {
         auto *b=new QPushButton;b->setIcon(transportIcon(style(),icon));b->setToolTip(tip);b->setFixedSize(34,30);connect(b,&QPushButton::clicked,this,action);row->addWidget(b);return b;};
-    button(QStyle::SP_MediaSkipBackward,tr("First frame (Home)"),[this] {play(false);setTime(0);});
+    button(QStyle::SP_MediaSkipBackward,tr("Playback range start (Home)"),[this] {play(false);setTime(slider_->startValue()/info_.fps);});
     button(QStyle::SP_MediaSeekBackward,tr("Previous frame (Left)"),[this] {play(false);setTime(time_s_-1/info_.fps);});
     playButton_=button(QStyle::SP_MediaPlay,tr("Play / pause (Space)"),[this] {play(!playback_.isActive());});
     button(QStyle::SP_MediaSeekForward,tr("Next frame (Right)"),[this] {play(false);setTime(time_s_+1/info_.fps);});
-    button(QStyle::SP_MediaSkipForward,tr("Last frame (End)"),[this] {play(false);setTime(last());});
+    button(QStyle::SP_MediaSkipForward,tr("Playback range end (End)"),[this] {play(false);setTime(slider_->endValue()/info_.fps);});
     time_=new QLabel;row->addSpacing(12);row->addWidget(time_);row->addStretch();
     loop_=new QCheckBox(tr("Loop"));loop_->setChecked(true);row->addWidget(loop_);row->addWidget(new QLabel(tr("Speed")));
     speed_=new QDoubleSpinBox;speed_->setRange(0.1,4);speed_->setSingleStep(0.25);speed_->setValue(1);speed_->setSuffix(" ×");row->addWidget(speed_);
@@ -66,12 +67,21 @@ ViewerWindow::ViewerWindow() : worker_(new CaptureWorker) {
     slider_=new RangeSlider;slider_->setObjectName("captureRangeSlider");slider_->setLabelsInSeconds(true);tl->addWidget(slider_);
     layout->addWidget(timeline);setCentralWidget(center);
     connect(slider_,&RangeSlider::playheadChanged,this,[this](int frame) {play(false);setTime(frame/info_.fps);});
-    connect(slider_,&RangeSlider::rangeChanged,this,[this](int,int,int) {slider_->setRangeValues(0,std::max(0,info_.frames-1));});
-    connect(speed_,&QDoubleSpinBox::valueChanged,this,[this](double) {if (playback_.isActive()) {playStart_=time_s_;clock_.restart();}});
+    connect(slider_,&RangeSlider::rangeChanged,this,[this](int,int,int preview) {
+        if (!loaded_) return;
+        play(false);setTime(preview/info_.fps);
+    });
+    connect(speed_,&QDoubleSpinBox::valueChanged,this,[this](double) {
+        if (playback_.isActive()) {playStart_=time_s_;clock_.restart();}
+        viewport_->setPlaybackRate(playback_.isActive(),info_.fps*speed_->value());
+    });
     // Menus: open and recent files; the floor aids; the capture's information.
     auto *file=menuBar()->addMenu(tr("File"));
     file->addAction(tr("Open…"),QKeySequence::Open,this,[this] {
-        QSettings settings;const QString path=QFileDialog::getOpenFileName(this,tr("Open capture"),settings.value("Viewer/Directory").toString(),tr("VGS captures (*.vgs *.pgs)"));
+        QSettings settings;
+        const QString last=settings.value("Viewer/LastFile").toString();
+        const QString initial=QFileInfo::exists(last) ? last : settings.value("Viewer/Directory").toString();
+        const QString path=QFileDialog::getOpenFileName(this,tr("Open capture"),initial,tr("VGS captures (*.vgs *.pgs)"));
         if (!path.isEmpty()) openFile(path);});
     recent_=file->addMenu(tr("Open recent"));updateRecent();
     file->addAction(tr("Capture information…"),QKeySequence("Ctrl+I"),this,&ViewerWindow::showInfo);
@@ -90,8 +100,8 @@ ViewerWindow::ViewerWindow() : worker_(new CaptureWorker) {
     key(Qt::Key_Space,[this] {play(!playback_.isActive());});
     key(Qt::Key_Left,[this] {play(false);setTime(time_s_-1/info_.fps);});
     key(Qt::Key_Right,[this] {play(false);setTime(time_s_+1/info_.fps);});
-    key(Qt::Key_Home,[this] {play(false);setTime(0);});
-    key(Qt::Key_End,[this] {play(false);setTime(last());});
+    key(Qt::Key_Home,[this] {play(false);setTime(slider_->startValue()/info_.fps);});
+    key(Qt::Key_End,[this] {play(false);setTime(slider_->endValue()/info_.fps);});
     audio_=new AudioPreview(this);
     // Under the background button, when the capture has sound: on/off.
     displayControls_=new QWidget;auto *controls=new QVBoxLayout(displayControls_);controls->setContentsMargins(0,0,0,0);
@@ -100,9 +110,16 @@ ViewerWindow::ViewerWindow() : worker_(new CaptureWorker) {
     viewport_->setDisplayControls(displayControls_);syncSound();
     // Playback follows the clock; a frame is decoded whenever the worker is free.
     playback_.setInterval(8);
+    playback_.setTimerType(Qt::PreciseTimer);
     connect(&playback_,&QTimer::timeout,this,[this] {
         double t=playStart_+clock_.elapsed()/1000.0*speed_->value();
-        if (t>last()) {if (loop_->isChecked()) {t=0;playStart_=0;clock_.restart();} else {setTime(last());play(false);return;}}
+        const double rangeStart=slider_->startValue()/info_.fps;
+        const double rangeEnd=slider_->endValue()/info_.fps;
+        if (t>rangeEnd) {
+            if (loop_->isChecked() && rangeEnd>rangeStart)
+                t=rangeStart+std::fmod(t-rangeStart,rangeEnd-rangeStart+1.0/info_.fps);
+            else {setTime(rangeEnd);play(false);return;}
+        }
         setTime(t);});
     worker_->moveToThread(&thread_);connect(&thread_,&QThread::finished,worker_,&QObject::deleteLater);
     connect(this,&ViewerWindow::openRequested,worker_,&CaptureWorker::open);
@@ -110,12 +127,17 @@ ViewerWindow::ViewerWindow() : worker_(new CaptureWorker) {
     connect(worker_,&CaptureWorker::opened,this,[this](CaptureInfo info,FramePtr frame,quint64 gen) {
         if (gen!=generation_) return;
         info_=info;loaded_=true;decoding_=pending_=false;time_s_=0;
+        QSettings().setValue("Viewer/LastFile",info.path);
         viewport_->setSplatAntialiasing(info.antialiased);viewport_->fit(info.minimum,info.maximum);viewport_->setFrame(frame);
-        slider_->setFrameRate(info.fps);slider_->setFrameRange(0,std::max(0,info.frames-1));slider_->setRangeValues(0,std::max(0,info.frames-1));slider_->resetView();
+        {
+            QSignalBlocker blocker(slider_);
+            slider_->setFrameRate(info.fps);slider_->setFrameRange(0,std::max(0,info.frames-1));
+            slider_->setRangeValues(0,std::max(0,info.frames-1));slider_->resetView();
+        }
         if (!info.audio.isEmpty()) audio_->setBytes(info.audio,info.audioSuffix);else audio_->clear();
         syncSound();
         setWindowTitle(tr("%1 — VGS Viewer %2").arg(info.title.isEmpty() ? QFileInfo(info.path).fileName() : info.title,VIEWER_VERSION_NAME));
-        syncTime();play(true);});
+        syncTime();play(false);});
     connect(worker_,&CaptureWorker::decoded,this,[this](FramePtr frame,quint64 gen) {
         if (gen!=generation_) return;
         decoding_=false;viewport_->setFrame(frame);if (pending_) {pending_=false;requestFrame();}});
@@ -142,15 +164,23 @@ void ViewerWindow::updateRecent() {
 }
 void ViewerWindow::play(bool playing) {
     if (playing && !loaded_) return;
-    if (playing) {if (time_s_>=last()) time_s_=0;playStart_=time_s_;clock_.restart();playback_.start();} else playback_.stop();
+    if (playing) {
+        const double rangeStart=slider_->startValue()/info_.fps;
+        const double rangeEnd=slider_->endValue()/info_.fps;
+        if (time_s_<rangeStart || time_s_>=rangeEnd) setTime(rangeStart);
+        playStart_=time_s_;clock_.restart();playback_.start();
+    } else playback_.stop();
+    viewport_->setPlaybackRate(playing,info_.fps*speed_->value());
     playButton_->setIcon(transportIcon(style(),playing ? QStyle::SP_MediaPause : QStyle::SP_MediaPlay));
     syncTime();
 }
 void ViewerWindow::setTime(double seconds) {
     if (!loaded_) return;
-    const double t=std::clamp(seconds,0.0,last());
+    const double t=std::clamp(seconds,slider_->startValue()/info_.fps,slider_->endValue()/info_.fps);
     const bool frameChanged=std::lround(t*info_.fps)!=std::lround(time_s_*info_.fps);
-    time_s_=t;syncTime();if (frameChanged) requestFrame();
+    time_s_=t;
+    if (frameChanged) {syncTime();requestFrame();}
+    else if (!playback_.isActive()) syncTime();
 }
 void ViewerWindow::requestFrame() {
     if (!loaded_) return;
@@ -186,6 +216,7 @@ void ViewerWindow::showInfo() {
     } catch (const std::exception &) {}
     if (!lines.isEmpty()) lines << QString();
     add(tr("File"),QFileInfo(info_.path).fileName());
+    if (info_.shDegree>=0) add(tr("SH degree"),tr("SH%1").arg(info_.shDegree));
     add(tr("Duration"),tr("%1 s \u00b7 %2 frames at %3 fps").arg(info_.duration,0,'f',3).arg(info_.frames).arg(info_.fps,0,'f',2));
     add(tr("Size"),tr("%1 MB").arg(QFileInfo(info_.path).size()/1e6,0,'f',1));
     if (!info_.audio.isEmpty()) add(tr("Audio"),info_.audioSuffix.toUpper());

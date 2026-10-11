@@ -85,7 +85,7 @@ descompresión de chunks; no usar esa tabla para comparar la velocidad de sus co
 
 ## Artefactos y reproducción
 
-- `build_plugin_decode/plugins/blender/Release/vgs-1.0.0.zip`.
+- `build_plugin_decode/plugins/blender/Release/vgs-blender-1.0.0.zip`.
 - `build_plugin_decode/plugins/houdini/Release/vgs-houdini-1.0.0-h22.0.zip`.
 - `build_plugin_decode/reference/vgsblender_before.dll`: referencia previa.
 - `build_plugin_decode/results/`: JSON de DLLs/hosts, CSV del packing y resumen.

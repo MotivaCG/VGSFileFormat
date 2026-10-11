@@ -15,6 +15,8 @@
 #include <QMouseEvent>
 #include <QKeyEvent>
 #include <QGuiApplication>
+#include <QScreen>
+#include <QWindow>
 #include <QPainter>
 #include <QPainterPathStroker>
 #include <QLabel>
@@ -371,10 +373,47 @@ Viewport::Viewport(QWidget *parent) : QOpenGLWidget(parent) {
         if (t >= 1) focusTimer_.stop();
         update(); emit cameraChanged();
     });
+    orbitInertiaTimer_.setInterval(16);
+    orbitInertiaTimer_.setTimerType(Qt::PreciseTimer);
+    connect(&orbitInertiaTimer_,&QTimer::timeout,this,[this] {
+        const float seconds=std::min(0.05f,float(orbitInertiaClock_.restart()/1000.0));
+        if (seconds<=0) return;
+        orbit(orbitVelocity_.x()*seconds,orbitVelocity_.y()*seconds);
+        orbitVelocity_*=std::exp(-seconds/0.1f);
+        if (orbitVelocity_.length()<2.f) orbitInertiaTimer_.stop();
+        emit cameraChanged();
+    });
     setMouseTracking(true);
     viewCube_ = new ViewCube(this); viewCube_->move(width()-viewCube_->width()-12,12);
     statistics_=new QLabel(this);statistics_->setObjectName("viewportStatistics");statistics_->move(18,12);
     statistics_->setAttribute(Qt::WA_TransparentForMouseEvents);statistics_->setStyleSheet(QString("color: %1; font-family: 'Segoe UI'; font-size: 9pt; background: transparent;").arg(overlayText().name()));
+    connect(this,&QOpenGLWidget::frameSwapped,this,[this] {
+        ++presentedFrames_;
+        if (playbackPlaying_ && frame_ && presentedFrameSerial_ != frameSerial_) ++playbackFrames_;
+        presentedFrameSerial_=frameSerial_;
+    });
+    performanceTimer_.setInterval(500);
+    connect(&performanceTimer_,&QTimer::timeout,this,[this] {
+        const double seconds=performanceClock_.restart()/1000.0;
+        if (seconds > 0) {
+            // A few paints from the overlay or window manager are not continuous rendering.
+            viewportIdle_=!playbackPlaying_ && presentedFrames_<5;
+            presentedSamples_[performanceSampleIndex_]=presentedFrames_;
+            playbackSamples_[performanceSampleIndex_]=playbackFrames_;
+            elapsedSamples_[performanceSampleIndex_]=seconds;
+            performanceSampleIndex_=(performanceSampleIndex_+1)%int(elapsedSamples_.size());
+            performanceSampleCount_=std::min(performanceSampleCount_+1,int(elapsedSamples_.size()));
+            int presented=0,played=0;double elapsed=0;
+            for (int i=0;i<performanceSampleCount_;++i) {
+                presented+=presentedSamples_[i];played+=playbackSamples_[i];elapsed+=elapsedSamples_[i];
+            }
+            viewportFps_=presented/elapsed;
+            playbackFps_=playbackPlaying_ ? played/elapsed : 0;
+        }
+        presentedFrames_=playbackFrames_=0;
+        updateStatistics();
+    });
+    performanceClock_.start();performanceTimer_.start();
     connect(viewCube_,&ViewCube::viewSelected,this,[this](ViewPreset preset) { setViewPreset(preset); setFocus(); });
     connect(viewCube_,&ViewCube::lightBackgroundSelected,this,[this](bool light) { setLightBackground(light); setFocus(); });
 }
@@ -695,7 +734,6 @@ void Viewport::paintGL() {
             auto upload = [&] {
                 glBindBuffer(GL_ARRAY_BUFFER, orderBuffer_);
                 glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(splatOrder_.size()*sizeof(uint32_t)), splatOrder_.data(), GL_STREAM_DRAW); };
-            const size_t count = frame_->points.size();
             if (cpuFiltering) {
                 // That order leaves the filtered splats out, so it is made here, for this paint.
                 sortBackToFront(frame_->points, modelView, &cpuKeep, splatDepths_, splatOrder_); upload();
@@ -706,9 +744,9 @@ void Viewport::paintGL() {
                     splatOrder_ = std::move(result.order); upload();
                     sortedSerial_ = frameSerial_; sortedView_ = result.modelView; orderComplete_ = true;
                 }
-                // A new frame can borrow the last order while its own is sorted, but only one that
-                // names every splat of a frame this size, so every index is valid.
-                if (sortedSerial_!=frameSerial_ && !(orderComplete_ && splatOrder_.size()==count)) {
+                // Even when two frames have the same number of splats, their active points and
+                // depths can differ. Never draw a new frame with the previous frame's order.
+                if (sortedSerial_!=frameSerial_) {
                     sortBackToFront(frame_->points, modelView, nullptr, splatDepths_, splatOrder_); upload();
                     sortedSerial_ = frameSerial_; sortedView_ = modelView; orderComplete_ = true;
                 }
@@ -764,17 +802,12 @@ void Viewport::paintGL() {
         ? tr("Drag: orbit   ·   Right drag: pan   ·   Wheel: zoom   ·   G/R/S: transform")
         : tr("Drag a gizmo handle to transform   ·   Repeat G/R/S: Global/Local   ·   Esc: exit mode"));
     }
-    statistics_->setVisible(!viewerMode_);
-    if (frame_) {
-        QString text=tr("%1 source points\nDecode %2 ms   ·   upload %3 ms   ·   %4")
-            .arg(qulonglong(frame_->points.size())).arg(frame_->decodeMs,0,'f',1).arg(uploadMs_,0,'f',1).arg(shCoefficients_ ? "SH" : "base color");
-        if (!playbackTimeText_.isEmpty()) text+='\n'+playbackTimeText_;
-        statistics_->setText(text);
-        statistics_->adjustSize();
-    } else {
-        statistics_->clear();
+    updateStatistics();
+    if (!frame_) {
         painter.setPen(lightBackground_ ? QColor("#333") : QColor("#ddd")); painter.setFont(QFont("Segoe UI", 18));
-        painter.drawText(rect().adjusted(30,30,-30,-30), Qt::AlignCenter, tr("Open a .vgs or .mint capture\n\nCtrl+O"));
+        painter.drawText(rect().adjusted(30,30,-30,-30), Qt::AlignCenter,
+                         viewerMode_ ? tr("Open or drop a .vgs or .pgs capture\n\nCtrl+O")
+                                     : tr("Open a .vgs or .mint capture\n\nCtrl+O"));
     }
 }
 void Viewport::setFrame(FramePtr frame) {
@@ -782,12 +815,41 @@ void Viewport::setFrame(FramePtr frame) {
     if (!frame) setTransformMode(TransformMode::None);
     frame_ = std::move(frame); ++frameSerial_; frameDirty_ = true; splatsDirty_ = true; update();
 }
+void Viewport::setPlaybackRate(bool playing,double targetFps) {
+    if (playbackPlaying_ != playing || (playing && std::abs(targetPlaybackFps_-targetFps)>1e-6)) {
+        presentedFrames_=playbackFrames_=0;playbackFps_=0;
+        presentedFrameSerial_=frameSerial_;
+        performanceSampleIndex_=performanceSampleCount_=0;
+        viewportIdle_=!playing;
+        performanceClock_.restart();performanceTimer_.start();
+    }
+    playbackPlaying_=playing;targetPlaybackFps_=targetFps;
+    updateStatistics();
+}
+void Viewport::updateStatistics() {
+    if (viewerMode_) {statistics_->hide();return;}
+    statistics_->setVisible(bool(frame_));
+    if (!frame_) {statistics_->clear();return;}
+    QString text=tr("%1 source points\nDecode %2 ms   ·   upload %3 ms   ·   %4")
+        .arg(qulonglong(frame_->points.size())).arg(frame_->decodeMs,0,'f',1).arg(uploadMs_,0,'f',1).arg(shCoefficients_ ? "SH" : "base color");
+    if (!playbackTimeText_.isEmpty()) text+='\n'+playbackTimeText_;
+    const QScreen *screen=window()->windowHandle() ? window()->windowHandle()->screen() : QGuiApplication::primaryScreen();
+    const QString viewport=viewportIdle_ ? tr("Viewport idle")
+        : performanceSampleCount_==0 ? tr("Viewport measuring…")
+        : screen ? tr("Viewport %1 FPS / display %2 Hz (VSync)").arg(viewportFps_,0,'f',1).arg(screen->refreshRate(),0,'f',1)
+                 : tr("Viewport %1 FPS (VSync)").arg(viewportFps_,0,'f',1);
+    const QString playback=playbackPlaying_ && performanceSampleCount_==0 ? tr("measuring…")
+        : tr("%1 FPS").arg(playbackFps_,0,'f',1);
+    text+=tr("\nPlayback %1 / target %2 FPS\n%3")
+        .arg(playback).arg(targetPlaybackFps_,0,'f',1).arg(viewport);
+    if (statistics_->text()!=text) {statistics_->setText(text);statistics_->adjustSize();}
+}
 void Viewport::setPlaybackTime(double seconds,double duration) {
     playbackTimeText_=tr("%1 s / %2 s").arg(seconds,0,'f',3).arg(duration,0,'f',3);update();
 }
 void Viewport::setTransform(const Transform &transform) { transform_ = transform; update(); }
 void Viewport::setCamera(const Camera &camera) {
-    focusTimer_.stop(); camera_ = camera;
+    focusTimer_.stop();orbitInertiaTimer_.stop();orbitDragging_=false;camera_ = camera;
     if (camera_.preset==ViewPreset::Free) { camera_.orthographic = false; camera_.pitch = std::clamp(camera_.pitch,-89.0f,89.0f); }
     viewCube_->setCamera(camera_); update();
 }
@@ -809,7 +871,7 @@ void Viewport::setLightBackground(bool light) {
     update();
 }
 void Viewport::fit(const QVector3D &minimum, const QVector3D &maximum) {
-    focusTimer_.stop(); const auto m = transform_.matrix();
+    focusTimer_.stop();orbitInertiaTimer_.stop();const auto m = transform_.matrix();
     camera_.target = m.map((minimum+maximum)*0.5f);
     float radius = 0;
     for (int i = 0; i < 8; ++i) {
@@ -869,7 +931,10 @@ void Viewport::drawGhost(const QMatrix4x4 &viewProjection,const QSize &pixels,fl
     ghostCompositeShader_->bind();ghostCompositeShader_->setUniformValue("ghostMask",0);ghostCompositeShader_->setUniformValue("outlineWidth",dpr);ghostCompositeShader_->setUniformValue("ghostOpacity",ghostOpacity_);glBindVertexArray(ghostCompositeVao_);glDrawArrays(GL_TRIANGLES,0,3);ghostCompositeShader_->release();glDisable(GL_BLEND);glDepthMask(GL_TRUE);
 }
 void Viewport::mousePressEvent(QMouseEvent *event) {
-    focusTimer_.stop(); lastMouse_ = event->position().toPoint(); setFocus();
+    focusTimer_.stop();orbitInertiaTimer_.stop();orbitVelocity_={};
+    orbitDragging_=viewerMode_ && event->button()==Qt::LeftButton && !(event->modifiers() & Qt::ShiftModifier);
+    if (orbitDragging_) orbitSampleClock_.start();
+    lastMouse_ = event->position().toPoint(); setFocus();
     if (selectTool_ != SelectTool::None && event->button()==Qt::LeftButton) {
         selecting_ = true; stroke_ = QPainterPath(event->position()); hover_ = event->position();
         strokeMode_ = (event->modifiers() & Qt::AltModifier) ? SelectMode::Subtract : (event->modifiers() & Qt::ControlModifier) ? SelectMode::Replace : SelectMode::Add;
@@ -900,7 +965,14 @@ void Viewport::mouseMoveEvent(QMouseEvent *event) {
     } else if (event->buttons() & Qt::LeftButton) {
         if (ignoreLeftUntilRelease_) return;
         if (dragging_) { updateManipulation(event->position()); event->accept(); return; }
-        orbit(-delta.x()*0.3f,delta.y()*0.3f);
+        const float yaw=-delta.x()*0.3f,pitch=delta.y()*0.3f;
+        orbit(yaw,pitch);
+        if (orbitDragging_ && !delta.isNull()) {
+            const float seconds=std::max(0.008f,float(orbitSampleClock_.restart()/1000.0));
+            QVector2D sample(yaw/seconds,pitch/seconds);
+            if (sample.length()>180.f) sample*=180.f/sample.length();
+            orbitVelocity_=orbitVelocity_*0.5f+sample*0.5f;
+        }
     } else {
         const int handle = pickHandle(event->position());
         if (hoverHandle_ != handle) { hoverHandle_ = handle; update(); }
@@ -910,6 +982,12 @@ void Viewport::mouseMoveEvent(QMouseEvent *event) {
     viewCube_->setCamera(camera_); update(); emit cameraChanged();
 }
 void Viewport::mouseReleaseEvent(QMouseEvent *event) {
+    if (viewerMode_ && event->button()==Qt::LeftButton && orbitDragging_) {
+        orbitDragging_=false;
+        if (!ignoreLeftUntilRelease_ && orbitSampleClock_.isValid() && orbitSampleClock_.elapsed()<80 && orbitVelocity_.length()>5.f) {
+            orbitInertiaClock_.start();orbitInertiaTimer_.start();
+        }
+    }
     if (selecting_ && event->button()==Qt::LeftButton) {
         selecting_ = false; stroke_.lineTo(event->position());
         QPainterPath region = selectTool_==SelectTool::Lasso ? stroke_ : brushRegion(stroke_,brushRadius_);
@@ -924,6 +1002,7 @@ void Viewport::mouseReleaseEvent(QMouseEvent *event) {
     QOpenGLWidget::mouseReleaseEvent(event);
 }
 void Viewport::mouseDoubleClickEvent(QMouseEvent *event) {
+    orbitInertiaTimer_.stop();orbitDragging_=false;
     // On a gizmo handle a double-click is a press like any other; elsewhere it focuses.
     if (event->button()==Qt::LeftButton && !(event->modifiers() & Qt::ShiftModifier) && pickHandle(event->position())<0) {
         lastMouse_ = event->position().toPoint(); ignoreLeftUntilRelease_ = true; // the second press does not orbit
@@ -1028,7 +1107,7 @@ void Viewport::keyPressEvent(QKeyEvent *event) {
     QOpenGLWidget::keyPressEvent(event);
 }
 void Viewport::wheelEvent(QWheelEvent *event) {
-    focusTimer_.stop();
+    focusTimer_.stop();orbitInertiaTimer_.stop();orbitDragging_=false;
     if (dragging_) { dragging_ = false; ignoreLeftUntilRelease_ = true; }
     if (selectTool_==SelectTool::Brush && (event->modifiers() & Qt::ControlModifier)) {
         if (!selecting_ && event->angleDelta().y()) emit brushRadiusRequested(brushRadius_ * std::pow(1.15f, event->angleDelta().y()/120.0f));
@@ -1342,7 +1421,7 @@ void Viewport::orbit(float yawDelta,float pitchDelta) {
     viewCube_->setCamera(camera_); update();
 }
 void Viewport::setViewPreset(ViewPreset preset,bool orthographic) {
-    focusTimer_.stop(); cancelManipulation(); camera_.preset = preset; camera_.orthographic = preset!=ViewPreset::Free && orthographic; camera_.roll = 0;
+    focusTimer_.stop();orbitInertiaTimer_.stop();cancelManipulation(); camera_.preset = preset; camera_.orthographic = preset!=ViewPreset::Free && orthographic; camera_.roll = 0;
     camera_.pitch = 0;
     switch (preset) {
     case ViewPreset::Front: camera_.yaw = 0; break;

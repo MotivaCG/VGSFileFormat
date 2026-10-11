@@ -12,7 +12,7 @@ warranty and liability limitations, subject to applicable law.
 
 Blender 5.3 or later, Windows x64.
 
-- **Install:** drag `vgs-<version>.zip` onto Blender, or *Edit > Preferences > Get
+- **Install:** drag `vgs-blender-<version>.zip` onto Blender, or *Edit > Preferences > Get
   Extensions > ▾ > Install from Disk*. After reinstalling, **restart Blender**: a running
   Blender keeps the old `vgsbridge.dll` loaded, and the new Python can end up talking to
   the old library. Add-ons from before the library was renamed carry `bin/vgsblender.dll`
@@ -146,12 +146,12 @@ Test capture: `D:\Trabajos\ScanMeNow\SMNWebviewer\Playcanvas\dist\data\boxing_de
   scene's range: past `frame_end` the look-ahead wraps to the start of the range and
   mispredicts, which looks like stalls at every chunk boundary and is not a bug.
 - **As installed:** with `BLENDER_USER_RESOURCES` pointing at an empty folder,
-  `blender --command extension install-file -r user_default --enable vgs-<version>.zip`,
+  `blender --command extension install-file -r user_default --enable vgs-blender-<version>.zip`,
   then a script that imports through the real package (`bl_ext.user_default.vgs`).
 - **Renders draw every splat:** at viewport density 0.25, a still render and a two-frame
   animation render from the command line (`bpy.ops.render.render` in the background) both
   drew all of them, and the viewport went back to 0.25 afterwards.
-- **The package itself:** `blender --command extension validate vgs-<version>.zip`.
+- **The package itself:** `blender --command extension validate vgs-blender-<version>.zip`.
 - **With the interface:** a script that queues steps with `bpy.app.timers` (import, play,
   stop) and saves `bpy.ops.screen.screenshot_area` images. It is the only way to see what
   EEVEE draws.

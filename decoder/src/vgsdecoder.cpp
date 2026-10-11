@@ -790,7 +790,12 @@ bool Capture::prepare(size_t chunkIndex, double budgetMilliseconds, Detail detai
       const ChunkInfo &info = s.chunks[chunkIndex];
       std::vector<uint8_t> scratch;
       const uint8_t *bytes = s.bytesAt(info.offset, info.size, scratch);
-      s.pending.bytes.assign(bytes, bytes + info.size);
+      // File-backed sources have already filled scratch: move that allocation into
+      // the pending decode instead of copying the entire chunk a second time.
+      if (!scratch.empty())
+        s.pending.bytes = std::move(scratch);
+      else
+        s.pending.bytes.assign(bytes, bytes + info.size);
       // readChunkDirectory checks the directory against the digest in the signed table,
       // so an altered chunk is refused here, before any of it has been decoded.
       s.pending.directory = vgs::readChunkDirectory(s.header, chunkIndex,

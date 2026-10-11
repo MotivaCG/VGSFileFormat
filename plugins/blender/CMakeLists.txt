@@ -2,7 +2,7 @@
 # Extensions > Install from Disk.
 #
 #   <build>/plugins/blender/<config>/vgs/                  the add-on, unpacked
-#   <build>/plugins/blender/<config>/vgs-<version>.zip     the same, to install
+#   <build>/plugins/blender/<config>/vgs-blender-<version>.zip  the same, to install
 #
 # The unpacked folder is there for development: point Blender at it (a junction into the
 # user extensions directory does it) and a rebuild is picked up on restart.
@@ -34,7 +34,7 @@ foreach(file ${addon_files})
 endforeach()
 
 set(stage ${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/${addon})
-set(zip ${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/${addon}-${addon_version}.zip)
+set(zip ${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/vgs-blender-${addon_version}.zip)
 set(decoder_license ${CMAKE_SOURCE_DIR}/decoder/LICENSE.md)
 
 # The manifest sits at the root of the zip, not in a folder, which is what Blender expects

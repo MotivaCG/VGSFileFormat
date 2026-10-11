@@ -21,6 +21,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <thread>
 
 class CaptureWorker::FileSource : public vgsdec::Source {
 public:
@@ -117,13 +118,16 @@ void CaptureWorker::open(const QString &path, quint64 generation, bool sh) {
             candidate.mint_ = std::make_unique<MintFile>(); QString error;
             if (!candidate.mint_->open(path, &error)) throw std::runtime_error(error.toStdString());
             candidate.info_.duration = candidate.mint_->duration(); candidate.info_.fps = candidate.mint_->frameRate();
+            candidate.info_.shDegree = 3;
             bounds = candidate.mint_->boundingBox();
             candidate.info_.antialiased = true;
         } else if (ext == "vgs" || ext == "pgs") {
             candidate.source_ = std::make_unique<FileSource>(path);
             candidate.vgs_ = std::make_unique<vgsdec::Capture>(vgsdec::Capture::openStream(*candidate.source_));
             candidate.vgs_->setCachePolicy({1, 1, 512ull * 1024 * 1024});
+            candidate.vgs_->setThreadCount(std::clamp(std::thread::hardware_concurrency(), 1u, 4u));
             candidate.info_.duration = candidate.vgs_->duration(); candidate.info_.fps = candidate.vgs_->frameRate();
+            candidate.info_.shDegree = int(candidate.vgs_->shDegree());
             if (!candidate.vgs_->metadata().title.empty()) candidate.info_.title = QString::fromStdString(candidate.vgs_->metadata().title);
             bounds = candidate.vgs_->bounds();
             candidate.info_.antialiased = candidate.vgs_->antialiased();
@@ -190,6 +194,13 @@ void CaptureWorker::decode(double time, quint64 generation, bool sh,Project proj
         } else if (!pruned.empty() || erasing || greensHere) for (size_t i=0;i<out->points.size();++i) out->points[i].modifierVisibility=unpruned(out->points[i]) && !greenGone(i) ? 1.f : 0.f;
         if (erasing && modifiers.showErased) for (auto &p:out->points) if (p.modifierVisibility>=.5f && erasedHere(p)) p.modifierVisibility=.75f;
         out->decodeMs=processingTimer.nsecsElapsed()/1e6;emit decoded(out,generation);
+        // Decode the next VGS chunk in small pieces while this one is on screen.
+        // Both the viewer and editor use this worker; doing it here keeps a chunk
+        // boundary from forcing the next frame to decompress the entire chunk.
+        if (vgs_ && out->chunkIndex + 1 < vgs_->chunkCount()) {
+            try { vgs_->prepare(out->chunkIndex + 1, 3.0, vgsdec::Detail::Full); }
+            catch (const std::exception &) { /* The normal frame request reports bad data. */ }
+        }
     }
     catch (const std::exception &e) { emit failed(QString::fromUtf8(e.what()), generation, false); }
 }

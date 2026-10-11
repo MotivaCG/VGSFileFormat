@@ -184,7 +184,7 @@ machine it runs on.
         bin/        vgsencode
         include/    vgsencoder/vgsencoder.h, vgsencoder_c.h
         lib/        vgsencoder.lib, cmake/VGSEncoder
-      blender/    vgs-<version>.zip, the Blender add-on (plugins/README.md)
+      blender/    vgs-blender-<version>.zip, the Blender add-on (plugins/README.md)
       houdini/    vgs-houdini-<version>-h<houdini>.zip, the Houdini plugin, when built
                   against a Houdini (plugins/houdini/README.md)
 
@@ -291,16 +291,18 @@ including the JavaScript one, on purpose.
 | `vgsexport capture.vgs out/` | the whole capture as a numbered `.ply` sequence |
 | `vgspagecost capture.vgs` | where the bytes and decoding time go, per attribute and per detail level, and what a CPU-sorting player spends |
 
-The recommended export uses the defaults: Standard entropy coding, 65536 target rows
-per page, and temporal SH splitting disabled. The source's SH degree is preserved
-by default (`--sh 3`). The temporal decoder loop optimization is always active in
-the updated decoder and also applies to existing captures; it needs no encoder flag.
+The recommended export uses the defaults: VGS 4 rANS16 entropy coding, 65536 target
+rows per page, and temporal SH splitting disabled. The `.mint` import defaults to
+SH3; `--sh 0..3` selects a lower degree and records it in the signed header. VGS 4
+readers reject VGS 3 files, and VGS 3 readers reject VGS 4 files. The decoder's rANS
+loop optimization needs no encoder flag. The [implementation review](docs/VGS4_IMPLEMENTATION_20261011.md)
+records the measured size and CPU tradeoffs and the chunk preparation change.
 
 The encoder stores each group's splats in spatial (Morton) order inside their rank runs,
 which makes captures about 2% smaller at no measurable decode cost; `--no-spatial-order`,
 `setSpatialOrder(false)` or `vgs_encoder_set_spatial_order(e, 0)` keeps the source order.
 
-Two experimental opt-in encoder settings preserve decoded attributes and the existing stream syntax:
+Two experimental opt-in encoder settings preserve decoded attributes within VGS 4:
 `--entropy-search` compares more rANS precisions, bit splits and table representations;
 `--split-temporal-sh` divides the temporal SH dictionary into complete sample blocks
 near `--page-rows`. The first trades encoding time for size, the second trades a little

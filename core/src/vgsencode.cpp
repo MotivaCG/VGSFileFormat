@@ -580,8 +580,48 @@ struct InputPage {
   Page page;
   Bytes data;
 };
+// Degree 2 evaluates eight SH coefficients while its three physical planes still
+// have room for nine. Canonicalize the spare index and book entries before either
+// model selection or page writing. This is a property of VGS output, not .mint input:
+// imported captures and native editor exports take the same route.
+void canonicalSh2(InputPage &p, const SourceChunk &c, uint32_t degree) {
+  if (degree != 2)
+    return;
+  const uint32_t id = p.page.attribute;
+  if (id == ShStaticIndices || id == ShTemporalIndices) {
+    const size_t rows = size_t(p.page.spec.rows);
+    if (p.page.spec.width != 3 || p.data.size() != rows * 12)
+      throw Error("invalid SH2 index page");
+    for (size_t i = 0; i < rows; ++i) {
+      uint8_t *word = p.data.data() + (2 * rows + i) * 4;
+      word[0] = 0;
+      word[1] &= 0xFC;
+    }
+    return;
+  }
+  if (id != ShStaticBook && id != ShTemporalBook)
+    return;
+  if (p.page.group || c.groups.empty())
+    throw Error("invalid SH2 book group");
+  const uint64_t entries = c.groups.front().counts[id == ShStaticBook ? 0 : 1];
+  const uint64_t period = entries * 9;
+  if (!entries || !period || p.page.totalRows % period ||
+      p.data.size() != p.page.spec.rows * 6)
+    throw Error("invalid SH2 book page");
+  const uint64_t first = p.page.firstRow, last = first + p.page.spec.rows;
+  for (uint64_t sample = first / period; sample <= (last - 1) / period; ++sample) {
+    const uint64_t unusedFirst = sample * period + entries * 8;
+    const uint64_t unusedLast = unusedFirst + entries;
+    const uint64_t begin = std::max(first, unusedFirst);
+    const uint64_t end = std::min(last, unusedLast);
+    if (begin < end)
+      std::fill(p.data.begin() + size_t((begin - first) * 6),
+                p.data.begin() + size_t((end - first) * 6), uint8_t(0));
+  }
+}
 std::vector<InputPage> pages(const SourceChunk &c, const uint8_t *mint,
-                             uint32_t pageRows, bool splitTemporalSh = false) {
+                             uint32_t pageRows, uint32_t shDegree,
+                             bool splitTemporalSh = false) {
   std::vector<InputPage> out;
   for (const auto &a : c.arrays) {
     const auto &s = a.spec;
@@ -601,6 +641,7 @@ std::vector<InputPage> pages(const SourceChunk &c, const uint8_t *mint,
       const uint8_t *base = a.data.empty() ? mint + a.offset : a.data.data();
       p.data.assign(base, base + a.size);
       p.page.decodedSize = a.size;
+      canonicalSh2(p, c, shDegree);
       out.push_back(std::move(p));
       continue;
     }
@@ -639,6 +680,7 @@ std::vector<InputPage> pages(const SourceChunk &c, const uint8_t *mint,
         auto rowBytes = a.size / s.rows;
         std::memcpy(p.data.data(), base + row * rowBytes, p.data.size());
       }
+      canonicalSh2(p, c, shDegree);
       out.push_back(std::move(p));
       row += n;
     }
@@ -914,7 +956,8 @@ static Bytes encodeSource(Source src, const uint8_t *mint, const EncodeOptions &
       h.maxChunkSplatRecords = std::max(h.maxChunkSplatRecords, sourceChunk.entry.splats);
       h.maxSplatsPerFrame = std::max(h.maxSplatsPerFrame, sourceChunk.entry.splats);
     }
-    for (const auto &p : pages(sourceChunk, mint, options.pageRows, options.splitTemporalShPages)) {
+    for (const auto &p : pages(sourceChunk, mint, options.pageRows, h.shDegree,
+                               options.splitTemporalShPages)) {
       auto &t = costs[p.page.attribute];
       int count = mgs::attributeModelCount(p.page.spec);
       if (t.models.empty()) {
@@ -931,7 +974,7 @@ static Bytes encodeSource(Source src, const uint8_t *mint, const EncodeOptions &
           try {
             t.models[model] =
                 add(t.models[model],
-                    mgs::encodeAttribute(p.page.spec, model, p.data.data(),
+                    mgs::encodeVgsAttribute(p.page.spec, model, p.data.data(),
                                          p.data.size(), options.entropySearch)
                         .size());
           } catch (const Error &) {
@@ -1014,7 +1057,8 @@ static Bytes encodeSource(Source src, const uint8_t *mint, const EncodeOptions &
   if (sink) { sink(0,out.b.data(),out.b.size()); outputBase = out.b.size(); out.b.clear(); }
   for (size_t ci = 0; ci < src.chunks.size(); ++ci) {
     const auto &sourceChunk = getChunk(ci);
-    auto inputs = pages(sourceChunk, mint, options.pageRows, options.splitTemporalShPages);
+    auto inputs = pages(sourceChunk, mint, options.pageRows, h.shDegree,
+                        options.splitTemporalShPages);
     std::stable_sort(inputs.begin(), inputs.end(),
                      [](const InputPage &a, const InputPage &b) {
                        return a.page.layer < b.page.layer;
@@ -1028,7 +1072,7 @@ static Bytes encodeSource(Source src, const uint8_t *mint, const EncodeOptions &
       Bytes payload =
           pol.codec == Raw
               ? input.data
-              : mgs::encodeAttribute(p.spec, int(pol.model), input.data.data(),
+              : mgs::encodeVgsAttribute(p.spec, int(pol.model), input.data.data(),
                                      input.data.size(), options.entropySearch);
       p.size = payload.size();
       p.crc = crc32(payload.data(), payload.size());
@@ -1183,7 +1227,8 @@ DecodedChunk MintLogicalSource::chunk(size_t index) const {
 void encodeSequence(const Header &header, const ChunkProvider &provider,
                     const WriteSink &sink, const EncodeOptions &options,
                     const Progress &progress) {
-  if (header.encoding != 0 || header.chunks.empty() || !provider || !sink)
+  if (header.encoding != 0 || header.shDegree != options.shDegree ||
+      header.chunks.empty() || !provider || !sink)
     throw Error("invalid edited sequence header");
   Source src; src.header = header;
   src.header.policies.clear(); src.header.layers.clear(); src.header.extras.clear();
@@ -1274,7 +1319,7 @@ void verifyMint(const uint8_t *coded, size_t size, const uint8_t *mint,
       logical.push_back(decodePage(h, p, coded + e.offset + p.offset, size_t(p.size)));
     }
     auto matches = [&](const SourceChunk &source) {
-      auto expected = pages(source, mint, h.pageRows, splitTemporalSh);
+      auto expected = pages(source, mint, h.pageRows, h.shDegree, splitTemporalSh);
       if (d.pages.size() != expected.size())
         throw Error("VGS page count mismatch");
       for (size_t pi = 0; pi < decoded.size(); ++pi) {

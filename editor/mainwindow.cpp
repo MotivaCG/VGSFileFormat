@@ -380,6 +380,7 @@ MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory,const QStr
         pendingProject_.reset(); refreshPresets(); syncUi(); title();
         // What was opened is where the history starts: opening is not undone.
         resetUndo();
+        viewport_->setPlaybackRate(false,info_.fps*project_.speed);
         viewport_->setFrame(frame);
         if (project_.time > 0) requestFrame();
         else receiveFrame(frame);
@@ -420,7 +421,7 @@ MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory,const QStr
         const bool enabled=project_.crop().enabled;project_.crop() = crop;project_.crop().enabled=enabled;keyCrop();syncUi();dirty();
     });
     connect(viewport_,&Viewport::frameRequested,this,&MainWindow::fitCurrentTarget);
-    playback_.setInterval(16); playback_.setTimerType(Qt::PreciseTimer);
+    playback_.setInterval(8); playback_.setTimerType(Qt::PreciseTimer);
     connect(&playback_, &QTimer::timeout, this, [this] {
         double t = playStart_ + double(clock_.elapsed())/1000.0 * project_.speed;
         if (t > project_.out) {
@@ -1476,6 +1477,7 @@ void MainWindow::play(bool playing) {
         if (project_.time >= project_.out) setTime(project_.in,false);
         playStart_ = project_.time; clock_.restart(); playback_.start();
     } else playback_.stop();
+    viewport_->setPlaybackRate(playing,info_.fps*project_.speed);
     syncAudio();
     playButton_->setIcon(transportIcon(style(),playing ? QStyle::SP_MediaPause : QStyle::SP_MediaPlay));
 }

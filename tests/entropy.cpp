@@ -20,6 +20,23 @@ void test(const mgs::AttributeSpec& spec, const mgs::Bytes& raw) {
     require(mgs::encodeAttribute(spec, model, raw.data(), raw.size()) == standard, "search setting leaked");
   }
 }
+void testVgs(const mgs::AttributeSpec& spec, const mgs::Bytes& raw) {
+  for (int model = 0; model < mgs::attributeModelCount(spec); ++model) {
+    const auto standard = mgs::encodeVgsAttribute(spec, model, raw.data(), raw.size());
+    const auto searched = mgs::encodeVgsAttribute(spec, model, raw.data(), raw.size(),
+                                                   mgs::EntropySearch::Thorough);
+    require(searched.size() <= standard.size(), "VGS entropy search grew payload");
+    require(mgs::decodeVgsAttribute(spec, model, standard.data(), standard.size()) == raw,
+            "VGS rANS16 values changed");
+    mgs::DecodeStats stats;
+    require(mgs::decodeVgsAttribute(spec, model, searched.data(), searched.size(), &stats) == raw,
+            "VGS rANS16 search values changed");
+    require(stats.streams > 0 && stats.symbols > 0, "VGS stream diagnostics missing");
+    const auto mgsStream = mgs::encodeAttribute(spec, model, raw.data(), raw.size());
+    require(mgs::decodeAttribute(spec, model, mgsStream.data(), mgsStream.size()) == raw,
+            "MGS stream changed after VGS coding");
+  }
+}
 }
 
 int main() {
@@ -43,6 +60,7 @@ int main() {
       std::memcpy(words.data() + i * 4, &value, 4);
     }
     test(packed, words);
+    testVgs(packed, words);
     mgs::AttributeSpec channels;
     channels.kind = 1; channels.family = 3; channels.fields = {0, 0, 0}; channels.rows = 4097;
     mgs::Bytes colors(size_t(channels.rows) * 3);
@@ -53,6 +71,7 @@ int main() {
     }
     // Many empty contexts and sparse/dense frequency representations.
     test(channels, colors);
+    testVgs(channels, colors);
     half.rows = 33 * 40; half.family = 1; half.samples = 33;
     raw.resize(size_t(half.rows) * 2);
     for (size_t i = 0; i < size_t(half.rows); ++i) {
@@ -60,6 +79,7 @@ int main() {
       raw[i * 2] = uint8_t(value); raw[i * 2 + 1] = uint8_t(value >> 8);
     }
     test(half, raw);
+    testVgs(half, raw);
     half.family = 2; half.entries = 40;
     test(half, raw);
     for (uint64_t samples : {uint64_t(1), uint64_t(33), uint64_t(65536)}) {
@@ -76,6 +96,7 @@ int main() {
     mgs::Bytes deltas(size_t(runs.rows) * 2);
     for (size_t i = 0; i < deltas.size(); ++i) deltas[i] = uint8_t((i / 5) % 7);
     test(runs, deltas);
+    testVgs(runs, deltas);
     mgs::AttributeSpec rotations;
     rotations.kind = 2; rotations.family = 7; rotations.width = 4;
     rotations.fields = {1, 9, 10, 10, 2}; rotations.samples = 33; rotations.rows = 33 * 150;
@@ -87,9 +108,11 @@ int main() {
     }
     // Run starts, changing dropped components and sign flips across rANS states.
     test(rotations, quats);
+    testVgs(rotations, quats);
     for (uint64_t n : {uint64_t(1), uint64_t(4095), uint64_t(4096)}) {
       mgs::AttributeSpec scalar; scalar.rows = n;
       test(scalar, mgs::Bytes(size_t(n), 255));
+      testVgs(scalar, mgs::Bytes(size_t(n), 255));
     }
     // Calls with different effort on independent threads, plus exception restoration.
     auto worker = std::async(std::launch::async, [&] { test(packed, words); });
@@ -101,6 +124,12 @@ int main() {
     catch (const mgs::Error&) { rejected = true; }
     require(rejected, "invalid input accepted");
     require(mgs::encodeAttribute(channels, 0, colors.data(), colors.size()) == before, "exception leaked search setting");
+    rejected = false;
+    try { mgs::encodeVgsAttribute(channels, 0, colors.data(), 0); }
+    catch (const mgs::Error&) { rejected = true; }
+    require(rejected, "invalid VGS input accepted");
+    require(mgs::encodeAttribute(channels, 0, colors.data(), colors.size()) == before,
+            "VGS exception leaked into MGS stream");
     std::puts("entropy search: exact values, non-growing payloads, profiling and isolation passed");
     return 0;
   } catch (const std::exception& error) {

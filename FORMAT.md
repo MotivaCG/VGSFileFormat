@@ -1,4 +1,4 @@
-# VFGS version 3: the `.vgs` and `.pgs` container
+# VFGS version 4: the `.vgs` and `.pgs` container
 
 A capture is a 4D Gaussian splat recording: a timeline of frames, each a few hundred
 thousand splats, laid out so a player fetches and decodes one chunk of time at a time
@@ -8,16 +8,20 @@ This document describes the bytes: what is in a capture and where. What to call 
 one is in the decoder's own README, and how the projects here are built is in the
 repository's.
 
-Two extensions share one container. `.vgs` codes its attribute pages with static rANS;
+Two extensions share one container. `.vgs` codes its attribute pages with VGS's
+16-bit-renormalized static rANS stream;
 `.pgs` stores them as they are. Nothing else differs, and a reader does not need to know
 which it has: the header declares the codec per attribute, so both are read by the same
 code. `.pgs` exists for cases where CPU time matters more than bytes.
 
-The container holds logical attributes, not the source's bytes. It preserves the exact
-packed attribute arrays and scalar reconstruction parameters of a format-6 `.mint`,
-including every f16 bit pattern, and drops that container's metadata, padding and opaque
-residue. It is therefore **not** a `.mint` and must not be handed to the Gracia runtime.
-Recreating a `.mint` byte for byte is what MGS does, which is a different format.
+The container holds named, independently paged attributes, not the source's bytes.
+The format-6 `.mint` importer preserves every value needed to render its source,
+including f16 bit patterns used by the frame evaluator, while canonicalizing the
+unused ninth SH2 coefficient slot to zero. It drops the source container's metadata,
+padding and opaque residue. VGS has its own signed header, chunk directory, playback
+metadata, layers and entropy bitstream; it is **not** a `.mint` and must not be handed
+to the Gracia runtime. MGS reconstructs `.mint` byte for byte and retains its older
+8-bit entropy stream. The two formats are not wire-compatible.
 
 ## What a reader gets
 
@@ -47,17 +51,21 @@ The header's `shDegree` says how much of the higher-order SH the file kept, and 
 takes it as an option rather than always writing what the source had. The index arrays are
 planes of three coefficients, one 32-bit word per splat each, so a degree keeps whole
 planes: five at degree 3, three at degree 2, one at degree 1, none at degree 0, where both
-SH layers are absent. Degree 2 needs eight coefficients and therefore leaves the ninth slot
-of its third plane unused; readers evaluate whole bands only, so that slot is never read.
+SH layers are absent. Degree 2 has its DC coefficient plus eight higher-order
+coefficients. Its three higher-order storage planes have room for nine, so the ninth
+position is only padding and is never evaluated. VGS v4 writes that position's index
+and codebook entries as zero,
+including across page boundaries. Readers evaluate whole bands only, so canonicalizing
+that slot does not change any evaluated coefficient.
 
-The plane count also appears in each SH index page's `width`, which is what sizes the page;
-a file written before the degree could be chosen leaves it at zero and means five. On
+The plane count also appears in each SH index page's `width`, which is what sizes the page.
+The signed header is authoritative: a v4 reader rejects an inconsistent plane count. On
 `boxing.mint` the degrees measure 44.85, 38.40, 31.99 and 28.78 MB — degree 2 costs 14.4%
 less than degree 3, and it is a third of the shader's work in the viewer as well.
 
 ## Import profile and current limits
 
-Version 1 accepts the observed SH degree 3 format-6 profile, at whatever frame rate the
+The current importer accepts the observed SH degree 3 format-6 profile, at whatever frame rate the
 source was captured: the timebase is taken from the source, each chunk's duration over
 its interval count, and written as the exact fraction that gives it back (1/30, 1/25,
 1001/30000). Every chunk must agree on it. Chunks have 1..255 intervals, one dictionary
@@ -75,10 +83,11 @@ motion samples moves as a whole on top of that, and its bounds are where it is a
 motion; see Motion samples.
 
 Spatial page bounds/culling, local dictionary dependencies, temporal
-rotation checkpoints, lower SH degrees and GPU motion evaluation remain roadmap work.
+rotation checkpoints and GPU motion evaluation remain roadmap work.
 Pages are numerical work units, not spatial tiles. Each splat group depends on the
 chunk's shared dictionaries; no chunk depends on another chunk. The temporal SH entry
-array stays in one page to retain its sample-major predictor in v1.
+array normally stays in one page to retain its sample-major predictor; the encoder
+can opt into splitting it on complete sample boundaries.
 
 ### The encoding field
 
@@ -94,7 +103,7 @@ wrong. Readers validate it as zero today.
 
 `Compression::Auto` measures raw storage and every supported model over **all pages**
 of each attribute type in the file. The smallest aggregate payload wins, once per type.
-Policies never change between groups or chunks. rANS is the only entropy codec in v1;
+Policies never change between groups or chunks. rANS16 is the only entropy codec in v4;
 raw is a genuine no-entropy-code path. No TurboPFor, Rust, pcodec or new dependency is used.
 `Compression::None` assigns raw to every type and skips all entropy trials.
 
@@ -112,7 +121,7 @@ padding. Alignment costs about 1.4 KB in a 45 MB capture.
 
 Pages target 65,536 rows by default (configurable from 1,024 to 1,048,576). Temporal
 pages start/end on complete trajectory boundaries. Term pages end on complete splats.
-SH index pages gather the corresponding row range from each of five planes. There is
+SH index pages gather the corresponding row range from the planes selected by degree. There is
 no entropy state shared between pages. File payloads are not implicitly padded/aligned.
 
 ## Wire conventions
@@ -211,7 +220,7 @@ that these fields do not describe.
 | Offset | Type | Field |
 |---:|---|---|
 | 0 | u32 | magic `VFGS` = `0x53474656` |
-| 4 | u32 | version = 3 |
+| 4 | u32 | version = 4 |
 | 8 | u64 | headerSize: the fixed header and the four tables |
 | 16 | u64 | signedSize: headerSize plus the metadata block; where the signature starts |
 | 24 | u64 | fileSize |
@@ -243,11 +252,11 @@ that these fields do not describe.
 and `signedSize = headerSize + metadataSize`. The header block holds the policies, then
 the layer table, then the extras table, then the chunk index, then the metadata.
 
-Older versions are not readable by this one and are not meant to be: the format had not
-shipped, so the layout changed where it needed to rather than growing a compatibility path
-nobody would exercise. Version 3 added `renderHints` and grew the fixed header from 192 to
-256 bytes, so the next fields have somewhere to go; the 64 reserved bytes are written as
-zero and a reader refuses anything else.
+The version is exact. Version 4 keeps the 256-byte signed header layout of version 3,
+but changes codec 1's entropy stream and canonicalizes degree-2 spare SH entries.
+Version-3 files are rejected; rewriting the header version alone cannot convert their
+page payloads. Version 3 had added `renderHints` and grew the fixed header from 192 to
+256 bytes. The 64 reserved bytes are written as zero and a reader refuses anything else.
 
 **When it was written.** `createdMillis` is inside the signed region, so it is the
 capture's own statement rather than a filesystem timestamp that copying, uploading or
@@ -308,7 +317,7 @@ separately. Header degree describes the complete capture, not the currently load
 `maxChunkSplatRecords` counts all splat records in the largest chunk, including those not
 simultaneously alive. Consumers must not use the frame maximum to size chunk storage.
 
-Each **policy** is six u32: attribute ID, codec (0 raw / 1 rANS), model, model family,
+Each **policy** is six u32: attribute ID, codec (0 raw / 1 VGS rANS16), model, model family,
 flags and a zero. Flag bit 0 marks the attribute **optional**: a reader that cannot name
 the attribute may skip its pages and still reconstruct a frame. An attribute ID a reader
 does not know is accepted when it is optional, whichever range it is in, and refused when
@@ -359,7 +368,7 @@ stays in sync - the editor writes the range's first source frame into `startTick
 purpose — block 1 belongs to whoever produced the capture, block 2 to whoever uses it, and
 neither has to parse or preserve the other's.
 
-Types 5..0x7FFF are reserved for future revisions of this specification; a version 1 reader
+Types 5..0x7FFF are reserved for future revisions of this specification; a version 4 reader
 rejects them rather than guessing. Vendor payloads must be ignorable: a reader that does not
 know a vendor type skips it and still plays the capture. Metadata keys `creator`, `source`,
 `take`, `capturedAt`, `license` and `units` are reserved by this specification; anything
@@ -405,14 +414,30 @@ higher-order SH, 2 all temporal higher-order SH. Layers 1/2 require base for ren
 - u32 rankRunCount; per run: u32 rank, u32 count. Ranks strictly increase; reconstruct
   one rank per splat for term models. Non-term arrays have no rank runs.
 
-Kinds: 0 f16 interleaved columns; 1 u8 interleaved columns; 2 packed words; 3 five SH
+Kinds: 0 f16 interleaved columns; 1 u8 interleaved columns; 2 packed words; 3 SH
 planes; 4 u16 rotation terms; 5 u32 position terms (u16 dictionary index + f16 weight).
 Families 0..9: plain, time, entry, channels, runs, lifetimes, quaternion base, quaternion
-time, rotation terms, position terms. Models, field extraction, f16 rank mapping and
-rANS streams follow [sections 6 and 7 of the numerical coding document](docs/NUMERICAL_CODING.md#6-columns). A VGS payload
+time, rotation terms, position terms. Models, field extraction and f16 rank mapping
+follow [sections 6 and 7 of the numerical coding document](docs/NUMERICAL_CODING.md#6-columns),
+but the entropy stream is VGS-specific as described below. A VGS payload
 has **no model prefix**: that value is fixed in the global policy. This reuses numerical
 coding only; no MGS header, chunk table, original offsets or .mint metadata is embedded.
 Raw pages contain exactly the logical array bytes, without the numerical transform.
+
+**Codec 1: VGS rANS16.** Symbols retain the policy's numerical model and context
+tables. Frequency precision is stored per stream in 12..16 bits; streams with at least
+4,096 symbols use four interleaved states (`i mod 4`), shorter ones use one. The
+encoder starts each state at `L = 2^16`, processes symbols backwards and, while
+`x >= ((L >> bits) << 16) * frequency`, appends the low and then high bytes of
+the low 16 bits to that state's reverse stream before shifting `x` by 16. It then
+updates `x = floor(x/frequency)*M + (x mod frequency) + cumulative`, with
+`M = 2^bits`. Each reverse stream receives its final 32-bit state and is reversed
+for storage. The decoder reads that state in big-endian order, recovers symbols
+using the stored slot/frequency/cumulative tables, and replenishes with **two
+bytes at a time in big-endian order** while `x < 2^16`. Streams must consume
+their encoded bytes exactly. All bounds and malformed-table checks apply before
+using untrusted bytes. This is a different wire format from MGS's 8-bit rANS
+(`L = 2^23`); neither decoder may silently use the other.
 
 The temporal SH entry dictionary may occupy one page or several contiguous blocks
 of complete samples. Each block begins on an `entries`-row boundary and resets its

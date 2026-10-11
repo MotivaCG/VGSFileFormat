@@ -33,6 +33,7 @@ build*/
 # this repository stays private.
 dist/
 experiments/
+docs/
 
 # Editors and tools
 .vs/

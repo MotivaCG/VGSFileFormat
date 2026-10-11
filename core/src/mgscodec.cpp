@@ -13,13 +13,15 @@ namespace {
 
 const uint32_t kMagic = 0x3153474D;  // "MGS1"
 const uint32_t kVersion = 5;
-const uint32_t kRansL = 1u << 23;
+const uint32_t kMgsRansL = 1u << 23;
+const uint32_t kVgsRansL = 1u << 16;
 const uint64_t kMaxTableEntries = 1u << 24;
 
 // Scoped per attribute, so concurrent encoders/profilers do not affect one another
 // and exceptions restore the previous setting. MGS whole-file coding stays Standard.
 thread_local EntropySearch entropySearch = EntropySearch::Standard;
 thread_local DecodeStats* decodeStats = nullptr;
+thread_local bool vgsRans16 = false;
 template <class T> struct ScopedValue {
     T& target;
     T previous;
@@ -335,16 +337,22 @@ void encodeSymbols(Writer& w, const int32_t* sym, size_t N, const Ctx* ctx)
         const int states = N >= 4096 ? 4 : 1;
         output.u8(uint8_t(states));
         std::vector<std::vector<uint8_t>> rev(states);
-        std::vector<uint32_t> x(states, kRansL);
-        const uint32_t xmaxBase = (kRansL >> bits) << 8;
+        const uint32_t lowerBound = vgsRans16 ? kVgsRansL : kMgsRansL;
+        std::vector<uint32_t> x(states, lowerBound);
+        const uint32_t xmaxBase = (lowerBound >> bits) << (vgsRans16 ? 16 : 8);
         for (size_t i = N; i-- > 0;) {
             const int s = int(i % states);
             const size_t k = (ctx ? size_t(ctx[i]) * A : 0) + size_t(sym[i]);
             const uint32_t fr = freq[k];
             const uint64_t xmax = uint64_t(xmaxBase) * fr;
             while (x[s] >= xmax) {
-                rev[s].push_back(uint8_t(x[s] & 255));
-                x[s] >>= 8;
+                rev[s].push_back(uint8_t(x[s]));
+                if (vgsRans16) {
+                    rev[s].push_back(uint8_t(x[s] >> 8));
+                    x[s] >>= 16;
+                } else {
+                    x[s] >>= 8;
+                }
             }
             x[s] = (x[s] / fr) * M + (x[s] % fr) + cum[k];
         }
@@ -448,8 +456,8 @@ struct Tables
 };
 
 // Symbol decoding. Out is the output element type; ctxOf(i, out) gives the context.
-template <class Out, class CtxOf>
-void decodeLoop(Reader& r, Out* out, size_t N, const Tables& t, CtxOf ctxOf)
+template <int RenormBytes, class Out, class CtxOf>
+void decodeLoopImpl(Reader& r, Out* out, size_t N, const Tables& t, CtxOf ctxOf)
 {
     const auto start = decodeStats ? ProfileClock::now() : ProfileClock::time_point{};
     const int states = r.u8();
@@ -477,27 +485,50 @@ void decodeLoop(Reader& r, Out* out, size_t N, const Tables& t, CtxOf ctxOf)
     const uint16_t* slots = t.slots.data();
     // Symbol i is decoded by state i % states, in order, so a context may still be the
     // symbol before it.
-    for (size_t i = 0; i < N;) {
-        for (int s = 0; s < states && i < N; ++s, ++i) {
-            const uint32_t c = ctxOf(i, out);
-            const uint32_t slot = x[s] & mask;
-            const uint32_t sym = slots[size_t(c) * M + slot];
-            const size_t k = size_t(c) * A + sym;
-            x[s] = freq[k] * (x[s] >> bits) + slot - cum[k];
-            // a valid stream is consumed exactly, so running out means corrupt data
-            while (x[s] < kRansL) {
-                if (p[s] == end[s])
-                    throw Error("corrupt symbol stream");
-                x[s] = (x[s] << 8) | *p[s]++;
-            }
-            out[i] = Out(sym);
+    const auto one = [&](size_t i, int s) {
+        const uint32_t c = ctxOf(i, out);
+        const uint32_t slot = x[s] & mask;
+        const uint32_t sym = slots[size_t(c) * M + slot];
+        const size_t k = size_t(c) * A + sym;
+        x[s] = freq[k] * (x[s] >> bits) + slot - cum[k];
+        constexpr uint32_t lowerBound = RenormBytes == 2 ? kVgsRansL : kMgsRansL;
+        while (x[s] < lowerBound) {
+            if (end[s] - p[s] < RenormBytes)
+                throw Error("corrupt symbol stream");
+            if constexpr (RenormBytes == 2)
+                x[s] = (x[s] << 16) | (uint32_t(p[s][0]) << 8) | p[s][1];
+            else
+                x[s] = (x[s] << 8) | p[s][0];
+            p[s] += RenormBytes;
         }
+        out[i] = Out(sym);
+    };
+    if (states == 4) {
+        size_t i = 0;
+        for (; i + 4 <= N; i += 4) {
+            one(i, 0); one(i + 1, 1); one(i + 2, 2); one(i + 3, 3);
+        }
+        for (; i < N; ++i) one(i, int(i & 3));
+    } else {
+        for (size_t i = 0; i < N; ++i) one(i, int(i % size_t(states)));
     }
+    for (int s = 0; s < states; ++s)
+        if (p[s] != end[s])
+            throw Error("trailing symbol stream bytes");
     if (decodeStats) {
         decodeStats->symbolMilliseconds += elapsedMs(start);
         ++decodeStats->streams;
         decodeStats->symbols += N;
     }
+}
+
+template <class Out, class CtxOf>
+void decodeLoop(Reader& r, Out* out, size_t N, const Tables& t, CtxOf ctxOf)
+{
+    if (vgsRans16)
+        decodeLoopImpl<2>(r, out, N, t, ctxOf);
+    else
+        decodeLoopImpl<1>(r, out, N, t, ctxOf);
 }
 
 template <class Out>
@@ -2109,6 +2140,11 @@ Bytes encodeAttribute(const AttributeSpec& spec, int model, const uint8_t* data,
     if (size != it.bytes || model < 0 || model >= kModelCount[it.family]) throw Error("invalid attribute input");
     Writer w; encodeModel(w, it, model, readColumns(data, it)); return std::move(w.buf);
 }
+Bytes encodeVgsAttribute(const AttributeSpec& spec, int model, const uint8_t* data, size_t size,
+                         EntropySearch search) {
+    ScopedValue<bool> stream(vgsRans16, true);
+    return encodeAttribute(spec, model, data, size, search);
+}
 Bytes decodeAttribute(const AttributeSpec& spec, int model, const uint8_t* data, size_t size) {
     return decodeAttribute(spec, model, data, size, nullptr);
 }
@@ -2121,6 +2157,11 @@ Bytes decodeAttribute(const AttributeSpec& spec, int model, const uint8_t* data,
     decodeModel(r, it, model, Sink{out.data(), it});
     if (r.remaining()) throw Error("trailing attribute payload");
     return out;
+}
+Bytes decodeVgsAttribute(const AttributeSpec& spec, int model, const uint8_t* data, size_t size,
+                         DecodeStats* stats) {
+    ScopedValue<bool> stream(vgsRans16, true);
+    return decodeAttribute(spec, model, data, size, stats);
 }
 std::vector<SourceAttribute> sourceAttributes(const uint8_t* data, size_t size, size_t index) {
     const Meta meta = parseMint(data, size);

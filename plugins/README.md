@@ -23,7 +23,7 @@ cmake -S . -B build_win64 -G "Visual Studio 17 2022" -A x64
 cmake --build build_win64 --config Release
 ```
 
-The result is `build_win64/plugins/blender/Release/vgs-<version>.zip`, which is what a
+The result is `build_win64/plugins/blender/Release/vgs-blender-<version>.zip`, which is what a
 user installs: Blender 5.3 or later, *Edit > Preferences > Get Extensions > ▾ > Install
 from Disk*, or drag it onto Blender's window. `cmake --install` copies it to
 `INSTALL/blender`, beside `INSTALL/decoder` and `INSTALL/encoder`; `--component blender`

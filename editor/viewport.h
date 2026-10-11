@@ -11,13 +11,14 @@
 #pragma once
 #include "captureworker.h"
 #include "project.h"
-#include <array>
 #include <QElapsedTimer>
 #include <QTimer>
+#include <array>
 #include <QPainterPath>
 #include <QOpenGLFunctions_3_3_Core>
 #include <QOpenGLShaderProgram>
 #include <QOpenGLWidget>
+#include <QVector2D>
 class ViewCube;
 class QLabel;
 class QOpenGLFramebufferObject;
@@ -65,11 +66,12 @@ public:
     int splatShDegree() const { return splatShDegree_; }
     void setDisplayControls(QWidget *controls);
     void setPlaybackTime(double seconds,double duration);
+    void setPlaybackRate(bool playing, double targetFps);
     // Display aids, each on its own: the floor grid, the coloured X/Y/Z axes and a grey
     // chevron on the floor just past a metre along +Z, pointing that way (where the capture faces).
     void setGrid(bool enabled);
-    // The viewer's: no statistics, no transform keys, only the navigation hint.
-    void setViewerMode(bool viewer) { viewerMode_ = viewer; update(); }
+    // The viewer's: no transform keys, only the navigation hint.
+    void setViewerMode(bool viewer) { viewerMode_ = viewer; if (!viewer) {orbitInertiaTimer_.stop();orbitDragging_=false;} update(); }
     void setAxes(bool enabled);
     void setFrontMarker(bool enabled);
     // Preview of a walking capture: it stays where it is and the floor slides under it,
@@ -167,6 +169,10 @@ private:
     QPointF hover_{-1000,-1000};
     QTimer focusTimer_;
     QElapsedTimer focusClock_;
+    QTimer orbitInertiaTimer_;
+    QElapsedTimer orbitInertiaClock_, orbitSampleClock_;
+    QVector2D orbitVelocity_;
+    bool orbitDragging_ = false;
     QVector3D focusFrom_, focusTo_;
     FramePtr frame_;
     Transform transform_;
@@ -174,6 +180,15 @@ private:
     ViewCube *viewCube_;
     QLabel *statistics_;
     QString playbackTimeText_;
+    QTimer performanceTimer_;
+    QElapsedTimer performanceClock_;
+    quint64 presentedFrameSerial_ = 0;
+    int presentedFrames_ = 0, playbackFrames_ = 0;
+    std::array<int,10> presentedSamples_{}, playbackSamples_{};
+    std::array<double,10> elapsedSamples_{};
+    int performanceSampleIndex_ = 0, performanceSampleCount_ = 0;
+    double viewportFps_ = 0, playbackFps_ = 0, targetPlaybackFps_ = 0;
+    bool playbackPlaying_ = false, viewportIdle_ = true;
     QWidget *displayControls_ = nullptr;
     CropVolume crop_;
     QVector<Modifier> modifiers_;
@@ -188,6 +203,7 @@ private:
     int markerVertices_ = 0;
     bool grid_ = true, frameDirty_ = true, initialized_ = false, lightBackground_ = false;
     QColor overlayText() const;
+    void updateStatistics();
     GLuint vao_ = 0, buffer_ = 0, shBuffer_ = 0, shTexture_ = 0;
     GLuint gridVao_ = 0, gridBuffer_ = 0, fineVao_ = 0, fineBuffer_ = 0;
     int fineVertices_ = 0;

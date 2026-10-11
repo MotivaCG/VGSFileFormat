@@ -75,6 +75,7 @@ endif()
 set(fixture ${CMAKE_CURRENT_BINARY_DIR}/roundtrip.vgs)
 
 add_executable(vgs_roundtrip roundtrip.cpp)
+target_include_directories(vgs_roundtrip PRIVATE ${VGS_CORE_INCLUDE_DIRS})
 target_link_libraries(vgs_roundtrip PRIVATE ${VGS_ENCODER_LINK} ${VGS_DECODER_LINK})
 vgs_apply_settings(vgs_roundtrip)
 
@@ -85,6 +86,15 @@ vgs_apply_settings(vgs_tamper)
 # roundtrip writes the capture the others read, so it goes first and they wait for it.
 add_test(NAME roundtrip COMMAND vgs_roundtrip ${VGS_TEST_MINT} ${fixture})
 set_tests_properties(roundtrip PROPERTIES FIXTURES_SETUP capture)
+
+# Every supported SH degree is written into the VGS header and reconstructed by
+# the decoder. SH2's unused slot is checked by the default roundtrip above.
+foreach(sh_degree 0 1 3)
+  add_test(NAME roundtrip_sh${sh_degree}
+           COMMAND vgs_roundtrip ${VGS_TEST_MINT}
+                   ${CMAKE_CURRENT_BINARY_DIR}/roundtrip_sh${sh_degree}.vgs
+                   --sh=${sh_degree})
+endforeach()
 
 set(search_fixture ${CMAKE_CURRENT_BINARY_DIR}/roundtrip_search.vgs)
 add_test(NAME roundtrip_entropy_search
