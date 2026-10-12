@@ -14,6 +14,7 @@
 # include vgskeys.h - the header refuses to compile anywhere else.
 
 vgs_core_quiet_vendor_sources()
+find_package(Threads REQUIRED)
 
 add_library(vgsencoder ${VGS_LIBRARY_TYPE}
     ${VGS_CORE_SHARED_SOURCES}
@@ -23,6 +24,7 @@ add_library(vgsencoder ${VGS_LIBRARY_TYPE}
     include/vgsencoder/vgsencoder.h
     include/vgsencoder/vgsencoder_c.h)
 add_library(VGS::Encoder ALIAS vgsencoder)
+target_link_libraries(vgsencoder PRIVATE Threads::Threads)
 
 target_compile_definitions(vgsencoder PRIVATE VGS_AUTHORING=1)
 if(VGS_BUILD_SHARED)
@@ -51,6 +53,7 @@ if(VGS_BUILD_SHARED)
       ${VGS_CORE_SHARED_SOURCES} ${VGS_CORE_AUTHORING_SOURCES}
       src/vgsencoder.cpp src/vgsencoder_c.cpp)
   target_compile_definitions(vgsencoder_internal PRIVATE VGS_AUTHORING=1)
+  target_link_libraries(vgsencoder_internal PRIVATE Threads::Threads)
   target_include_directories(vgsencoder_internal
       PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
       PRIVATE ${VGS_CORE_INCLUDE_DIRS})

@@ -217,7 +217,7 @@ callers that will not link a C++ runtime: a plugin ABI, a language binding, a ho
 application built with a different compiler.
 
 `-DVGS_BUILD_SHARED=ON` builds DLLs instead of static libraries. A DLL exports that C
-interface and nothing else - 44 functions, all named `vgs_*`, with none of the C++ API,
+interface and nothing else - functions named `vgs_*`, with none of the C++ API,
 the codec or the crypto reachable from outside. That is deliberate: the C++ API passes
 `std::string` and `std::vector` across the boundary, which is fine for a static library
 both sides compiled the same way, and a source of silent corruption across a DLL.
@@ -229,6 +229,19 @@ library when the consumer builds with your compiler and runtime; take the DLL wh
 not, and have them use the C interface.
 
 ## Using it
+
+Encoding automatically processes up to eight chunks concurrently (limited by hardware
+threads and an 8 GiB estimated chunk working-set budget). This covers both compression
+passes, spatial ordering, verification and bounds calculation. Output remains ordered;
+the format, quality and compressed payloads are unchanged. Source preparation, callbacks
+and file writes remain on the calling thread, so the editor's modifiers and decoder do
+not need concurrent access. A large chunk can reduce effective concurrency; one oversized
+chunk runs alone. This budget is not a hard limit on total application RAM.
+
+Use `vgsencode --threads 1` for serial encoding, `--threads 8` for an explicit limit,
+and `--chunk-memory-mib 8192` to change the estimated budget. The library exposes
+`setChunkThreads()` / `setChunkMemoryBudget()` and equivalent C setters. The editor
+uses the automatic defaults. MINT/PLY export has a separate writer and is unchanged.
 
 Writing a capture is a handful of setters and a call:
 

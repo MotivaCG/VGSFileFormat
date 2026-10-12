@@ -10,9 +10,10 @@
 
 ; VGS Editor installer (Inno Setup 6).
 ;
-; It packages the folder deploy.ps1 makes (build\...-Release\deploy): the editor, its Qt
-; libraries, the MSVC runtime, the built-in presets and ffmpeg. Run the deploy first, then
-; compile this script (Inno Setup IDE, or ISCC.exe VGSEditor_InnoSetup.iss).
+; It packages the folder deploy.ps1 makes (editor\deploy, beside the sources): the editor,
+; its Qt libraries, the MSVC runtime, the built-in presets and ffmpeg. Run the deploy first,
+; then compile this script (Inno Setup IDE, or ISCC.exe VGSEditor_InnoSetup.iss). A build
+; that deploys elsewhere passes its folder in: ISCC /DMyAppPathToInclude=<folder>.
 ;
 ; The version is not set here: it is read from ..\licensemanagement.h, where the editor
 ; takes it from too, so the installer and the program always agree.
@@ -45,7 +46,9 @@
 ; ---- What and where ----
 #define MyAppName "VGS Editor"
 #define MyAppExeName "VGSEditor.exe"
-#define MyAppPathToInclude AddBackslash(SourcePath) + "..\build\Desktop_Qt_6_8_0_MSVC2022_64bit-Release\deploy"
+#ifndef MyAppPathToInclude
+  #define MyAppPathToInclude AddBackslash(SourcePath) + "..\deploy"
+#endif
 #define MyAppOutputPath AddBackslash(SourcePath) + "Output"
 #define MyAppInstallerFile "VGSEditorInstaller_" + MyAppVersion
 

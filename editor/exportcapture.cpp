@@ -9,6 +9,12 @@
 // Other uses require prior written authorisation, subject to mandatory law.
 
 #include "exportcapture.h"
+#include <atomic>
+#include <chrono>
+#include <map>
+#include <mutex>
+#include <thread>
+#include <QFile>
 #include "nativeexport.h"
 #include "mintwriter.h"
 #include "isolation.h"
@@ -547,6 +553,9 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
     uint64_t outputTick=0;
     for (size_t i=0;i<header.chunks.size();++i) {header.chunks[i].startTick=outputTick;header.chunks[i].intervals=native ? nativePlan[i].intervals : 1;outputTick+=header.chunks[i].intervals;}
 
+    // Native chunks are prepared on the chunk workers; the sampled path decodes frames
+    // through one reader and one baker, which are not shared.
+    options.threadSafeProvider=native;
     options.shDegree=degree;options.signer=vgs::authoringSigner();options.compression=project.captureSettings.plain ? vgs::Compression::None : vgs::Compression::Auto;
     options.playbackMode=project.captureSettings.playbackMode<0 ? (capture ? vgs::PlaybackMode(capture->playbackMode()) : vgs::PlaybackMode::Loop) : vgs::PlaybackMode(project.captureSettings.playbackMode);
     options.motionType=header.motionType;options.movingSpeed=header.movingSpeed;
@@ -575,8 +584,25 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
     options.extras.erase(std::remove_if(options.extras.begin(),options.extras.end(),[](const auto &e) {return e.type==vgs::MetadataExtra2;}),options.extras.end());
     const auto json=QJsonDocument(provenance).toJson(QJsonDocument::Compact);options.extras.push_back({vgs::MetadataExtra2,vgs::JsonUtf8,vgs::Bytes(json.begin(),json.end())});
     QTemporaryFile temporary(QFileInfo(destination).absolutePath()+"/.vgs-export-XXXXXX");if (!temporary.open()) throw std::runtime_error(temporary.errorString().toStdString());
-    const Baker baker(project,degree);int currentPercent=0;bool writing=false;const bool animatedCrops=project.hasAnimatedCrop();
-    auto innerProgress=[&](int,const QString &message) {report(progress,currentPercent,message);return true;};
+    const Baker baker(project,degree);std::atomic<int> currentPercent{0};std::atomic<bool> writing{false};const bool animatedCrops=project.hasAnimatedCrop();
+    // Native chunks are prepared on the encoder's chunk workers (EncodeOptions::
+    // threadSafeProvider): answering costs seconds of decoding, despilling and refitting,
+    // and doing it one chunk at a time starved those workers. What the provider shares is
+    // taken under a lock or kept per chunk, and the caller's progress callback is only
+    // ever called from this thread - a worker asks it nothing and only reads whether the
+    // export was cancelled, since a callback that paints cannot be called from one.
+    const auto callerThread=std::this_thread::get_id();
+    std::atomic<bool> cancelled{false};
+    std::mutex readerMutex,stateMutex;
+    std::map<size_t,ExportResult> chunkStatistics;   // merged in chunk order, as a serial run counted them
+    auto reportHere=[&](const QString &message) {
+        if (std::this_thread::get_id()!=callerThread) {
+            if (cancelled.load()) throw std::runtime_error("Export canceled.");
+            return;
+        }
+        if (progress && !progress(currentPercent.load(),message)) {cancelled=true;throw std::runtime_error("Export canceled.");}
+    };
+    auto innerProgress=[&](int,const QString &message){reportHere(message);return true;};
     // Sampled export: each source chunk is scored once, as the preview scores it.
     const auto pruneFilters=CompiledModifiers(project).prunes;std::map<size_t,std::vector<uint8_t>> pruneCache;
     const CompiledModifiers handErased(project); // Erase: the splats picked by hand, per source chunk
@@ -591,13 +617,16 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
         countPruning(result,stats,keep);return keep;
     };
     auto provider=[&](size_t index) {
-        report(progress,currentPercent,QStringLiteral("%1 %2 %3 / %4").arg(writing ? "Writing" : "Preparing",native ? "native block" : "frame").arg(index+1).arg(native ? header.chunks.size() : size_t(result.frames)));
+        reportHere(QStringLiteral("%1 %2 %3 / %4").arg(writing ? "Writing" : "Preparing",native ? "native block" : "frame").arg(index+1).arg(native ? header.chunks.size() : size_t(result.frames)));
         if (native) {
             const auto &plan=nativePlan[index];vgs::DecodedChunk chunk;
-            if (nativeMint) {report(progress,currentPercent,QStringLiteral("Loading native attributes"));chunk=nativeMint->chunk(plan.sourceIndex);}
+            // The source is read under a lock and nothing else is: reading a chunk is
+            // milliseconds against the seconds of work that follow it.
+            if (nativeMint) {reportHere(QStringLiteral("Loading native attributes"));std::lock_guard<std::mutex> guard(readerMutex);chunk=nativeMint->chunk(plan.sourceIndex);}
             else {
                 const auto &entry=sourceHeader.chunks[plan.sourceIndex];vgs::Bytes bytes(size_t(entry.size));
-                if (!source->read(entry.offset,bytes.size(),bytes.data())) throw std::runtime_error("Cannot read native source chunk.");
+                {std::lock_guard<std::mutex> guard(readerMutex);
+                 if (!source->read(entry.offset,bytes.size(),bytes.data())) throw std::runtime_error("Cannot read native source chunk.");}
                 chunk=assembleNativeChunk(vgs::decodeChunk(sourceHeader,plan.sourceIndex,bytes.data(),bytes.size()));
                 setNativeShDegree(chunk,sourceDegree,degree);
             }
@@ -617,11 +646,14 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
             // with the splats an Erase modifier picked in that chunk.
             std::vector<uint8_t> keepMask;const std::vector<uint8_t> *pruned=nullptr;
             if (!pruneFilters.isEmpty()) {
+                // Held for the whole scoring: two workers on the same source chunk would
+                // otherwise score it twice and count its splats twice.
+                std::lock_guard<std::mutex> guard(stateMutex);
                 auto found=pruneCache.find(plan.sourceIndex);
                 if (found==pruneCache.end()) {
                     const vgs::FrameDecoder scorer(chunk);std::vector<PruneStats> stats;
                     auto keep=pruneChunk(0,1,[&](double t) {return scorer.evaluate(std::min(t,1.-1e-9),false);},sourceAntialiased,pruneFilters,
-                                         [&] {report(progress,currentPercent,QStringLiteral("Prune low contribution: scoring splats"));return false;},&stats);
+                                         [&] {reportHere(QStringLiteral("Prune low contribution: scoring splats"));return false;},&stats);
                     countPruning(result,stats,keep);found=pruneCache.emplace(plan.sourceIndex,std::move(keep)).first;
                 }
                 keepMask=found->second;
@@ -637,11 +669,16 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
             if (s.despill) {
                 MintDespillOptions processing;processing.strength=s.despillStrength;processing.greenGain=s.greenGain;
                 processing.viewChromaScale=s.viewChromaScale;processing.recoverSkinColour=s.recoverSkin;
-                report(progress,currentPercent,QStringLiteral("Processing native color dictionaries"));
-                if (!MintFile::despillLogical(&chunk,1/rate,processing,innerProgress,&error)) throw std::runtime_error(error.toStdString());
+                reportHere(QStringLiteral("Processing native color dictionaries"));
+                QString despillError;
+                if (!MintFile::despillLogical(&chunk,1/rate,processing,innerProgress,&despillError)) throw std::runtime_error(despillError.toStdString());
             }
-            auto edited=editNativeChunk(std::move(chunk),plan,project,writing ? nullptr : &result,innerProgress,classification ? &*classification : nullptr,moving ? &models : nullptr,
+            // What it counts goes to this chunk own result and is merged in chunk order
+            // below, so the report does not depend on which worker finished first.
+            ExportResult chunkResult;
+            auto edited=editNativeChunk(std::move(chunk),plan,project,writing ? nullptr : &chunkResult,innerProgress,classification ? &*classification : nullptr,moving ? &models : nullptr,
                                         int(sourceHeader.chunks[plan.sourceIndex].startTick)+plan.first,pruned);
+            if (!writing) {std::lock_guard<std::mutex> guard(stateMutex);chunkStatistics[index]=std::move(chunkResult);}
             if (moving) edited.pages.push_back(motionPage(samples));
             return edited;
         }
@@ -672,6 +709,9 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
     auto encodingProgress=[&](int done,int total) {writing=done>=int(header.chunks.size());currentPercent=total ? 85*done/total : 0;report(progress,currentPercent,QStringLiteral("Encoding capture"));return true;};
     if (mintOutput) writeMintSequence(header,provider,sink,encodingProgress);
     else vgs::encodeSequence(header,provider,sink,options,encodingProgress);
+    for (const auto &entry : chunkStatistics) {
+        result.kept+=entry.second.kept;result.removed+=entry.second.removed;result.notes << entry.second.notes;
+    }
     if (!result.kept) throw std::runtime_error("The selected range contains no Gaussian records after applying active modifiers.");
     if (!temporary.flush()) throw std::runtime_error(temporary.errorString().toStdString());
     if (mintOutput) {

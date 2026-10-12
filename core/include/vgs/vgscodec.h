@@ -289,6 +289,26 @@ struct EncodeOptions {
   // plain model then codes as small steps (about 2% smaller). Readers see the same
   // splats in another order.
   bool spatialOrder = true;
+  // Chunk workers: 0 selects up to eight hardware threads, 1 is serial.
+  // Progress callbacks and sinks remain on the calling thread; so does the provider,
+  // unless threadSafeProvider says otherwise.
+  uint32_t chunkThreads = 0;
+  // Estimated concurrent chunk working set. An oversized chunk runs alone;
+  // retained input/output and allocator overhead are outside this budget.
+  uint64_t chunkMemoryBudget = uint64_t(8) << 30;
+  // Encoding reads every chunk twice: once to measure model cost, once to write. A
+  // provider that decodes a chunk to answer - the editor's does, and despills and refits
+  // spherical harmonics besides - is the costly half of an export, so what the first pass
+  // prepares is kept for the second while it fits here. Chunks that do not fit are
+  // prepared again; 0 keeps none, which is what every encode did before.
+  uint64_t preparedCacheBudget = uint64_t(4) << 30;
+  // Set when the provider may be called from several chunk workers at once. Answering
+  // can cost far more than coding the chunk afterwards - the editor's provider decodes,
+  // despills and refits spherical harmonics - and while it answers one chunk at a time
+  // the workers are starved whatever chunkThreads says. Chunks are still taken in index
+  // order, so model selection, file layout and callback order do not change. The queue
+  // of chunks prepared ahead holds up to chunkThreads of them, outside chunkMemoryBudget.
+  bool threadSafeProvider = false;
 };
 using Progress = std::function<bool(int done, int total)>;
 

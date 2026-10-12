@@ -121,7 +121,16 @@ private slots:
         QCOMPARE(viewport.ghostOpacity(),.15f);
         auto ghostBrightness=[&] {const auto rendered=viewport.grabFramebuffer();int peak=0;for (int y=int(rendered.height()*.2);y<int(rendered.height()*.8);++y) for (int x=int(rendered.width()*.1);x<rendered.width()/2;++x) peak=std::max(peak,rendered.pixelColor(x,y).red());return peak;};
         viewport.setGhostOpacity(.6f);QVERIFY(ghostBrightness()>brightest+40);QCOMPARE(viewport.ghostTime(),.25);QCOMPARE(viewport.ghostPointCount(),size_t(3));
-        viewport.setGhostOpacity(0);QVERIFY(ghostBrightness()<30);QVERIFY(viewport.ghostEnabled());viewport.setGhostOpacity(.15f);
+        // Not brightness: the scene behind the ghost already peaks at 30 here (the axes,
+        // antialiased differently at every device pixel ratio), so only its ink answers
+        // whether the ghost is gone - the same grey the disabled case counts below.
+        auto ghostInk=[&] {const auto rendered=viewport.grabFramebuffer();int found=0;
+            for (int y=int(rendered.height()*.2);y<int(rendered.height()*.8);++y) for (int x=int(rendered.width()*.1);x<rendered.width()/2;++x) {
+                const auto c=rendered.pixelColor(x,y);
+                if (c.red()>35 && std::abs(c.red()-c.green())<6 && std::abs(c.red()-c.blue())<6) ++found;}
+            return found;};
+        QVERIFY(ghostInk()>10);
+        viewport.setGhostOpacity(0);QCOMPARE(ghostInk(),0);QVERIFY(viewport.ghostEnabled());viewport.setGhostOpacity(.15f);
         QVERIFY(viewport.focusVisible());QVERIFY(std::abs(viewport.camera().target.x()-.05f)<1e-5f);
         QVERIFY(!viewport.setGhost(false));QCOMPARE(viewport.ghostPointCount(),size_t(0));QVERIFY(viewport.focusVisible());QVERIFY(std::abs(viewport.camera().target.x()-.8f)<1e-5f);
         const auto disabled=viewport.grabFramebuffer();int grey=0;for (int y=int(disabled.height()*.2);y<int(disabled.height()*.8);++y) for (int x=int(disabled.width()*.1);x<int(disabled.width()*.48);++x) {const auto c=disabled.pixelColor(x,y);if (c.red()>35 && std::abs(c.red()-c.green())<6 && std::abs(c.red()-c.blue())<6) ++grey;}QCOMPARE(grey,0);

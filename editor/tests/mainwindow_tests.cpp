@@ -363,7 +363,9 @@ private slots:
         enter(frameField,.09);QCOMPARE(frameField->value(),.033);QCOMPARE(sliderControl->playheadValue(),1);
         secondsButton->click();QVERIFY(!secondsButton->isChecked());QCOMPARE(frameField->value(),1.);QCOMPARE(inField->value(),1.);QCOMPARE(outField->value(),1.);
         inField->setValue(0);outField->setValue(4);frameField->setValue(0);QCOMPARE(sliderControl->startValue(),0);QCOMPARE(sliderControl->endValue(),4);
-        viewport->grabFramebuffer();auto *stats=viewport->findChild<QLabel *>("viewportStatistics");QVERIFY(stats);QVERIFY(stats->text().endsWith("0.000 s / 0.167 s"));
+        viewport->grabFramebuffer();auto *stats=viewport->findChild<QLabel *>("viewportStatistics");QVERIFY(stats);// Its own line, not the last one: the overlay grew a playback and a viewport line
+        // under the time after this was written.
+        QVERIFY(stats->text().contains("\n0.000 s / 0.167 s\n"));
         viewport->setFocus();
         QTest::keyClick(viewport,Qt::Key_Tab);QTRY_VERIFY(button->isChecked());QVERIFY(viewport->cropEditing());
         auto crop=viewport->crop();auto captureTransform=viewport->transform();

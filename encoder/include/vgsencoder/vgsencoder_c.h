@@ -84,6 +84,10 @@ VGS_ENCODER_API void vgs_encoder_set_input_memory(vgs_encoder *, const uint8_t *
 
 VGS_ENCODER_API void vgs_encoder_set_coding(vgs_encoder *, int coding);
 VGS_ENCODER_API void vgs_encoder_set_sh_degree(vgs_encoder *, uint32_t degree);
+/** 0: auto, up to eight hardware threads; 1: serial; 2..64: explicit limit. */
+VGS_ENCODER_API void vgs_encoder_set_chunk_threads(vgs_encoder *, uint32_t threads);
+/** Estimated concurrent chunk working set, default 8 GiB. An oversized chunk runs alone. */
+VGS_ENCODER_API void vgs_encoder_set_chunk_memory_budget(vgs_encoder *, uint64_t bytes);
 VGS_ENCODER_API void vgs_encoder_set_start_tick(vgs_encoder *, uint64_t tick);
 /* How players should run the capture by default: once (holding the last frame), in a
  * loop, or there and back. Loop unless set; other values are ignored. */

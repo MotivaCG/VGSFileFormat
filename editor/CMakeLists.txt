@@ -15,6 +15,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 find_package(Qt6 6.5 REQUIRED COMPONENTS Widgets OpenGL OpenGLWidgets Multimedia)
+find_package(Threads REQUIRED)
 set(VGS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." CACHE PATH "VGSFileFormat sources")
 add_library(editor_decoder STATIC
     ${VGS_ROOT}/decoder/src/vgsdecoder.cpp
@@ -28,7 +29,7 @@ target_include_directories(editor_decoder PUBLIC ${VGS_ROOT}/decoder/include PRI
 add_library(editor_authoring STATIC ${VGS_ROOT}/core/src/vgsencode.cpp ${VGS_ROOT}/core/crypto/vgssign.cpp)
 target_compile_definitions(editor_authoring PRIVATE VGS_AUTHORING)
 target_include_directories(editor_authoring PUBLIC ${VGS_ROOT}/core/include/vgs ${VGS_ROOT}/core/crypto PRIVATE ${VGS_ROOT}/core/src)
-target_link_libraries(editor_authoring PUBLIC editor_decoder)
+target_link_libraries(editor_authoring PUBLIC editor_decoder PRIVATE Threads::Threads)
 add_library(editor_support STATIC editortheme.cpp displayscaling.cpp isolation.cpp pruning.cpp audiomix.cpp mintwriter.cpp modifiers.cpp nativeexport.cpp exportcapture.cpp exporttask.cpp dependencies/mint/mintskinrecovery.cpp project.cpp capturesettings.cpp captureworker.cpp filehistory.cpp presetstore.cpp dependencies/mint/mintfile.cpp)
 target_include_directories(editor_support PUBLIC . dependencies/mint dependencies/eigen)
 target_link_libraries(editor_support PUBLIC Qt6::Widgets editor_decoder editor_authoring)

@@ -27,6 +27,8 @@
 #include <QtTest>
 #include <cstring>
 #include <qfloat16.h>
+#include <mutex>
+#include <thread>
 
 namespace {
 void word32(uint8_t *p,uint32_t v) {for (int i=0;i<4;++i) p[i]=uint8_t(v>>(i*8));}
@@ -795,6 +797,98 @@ private slots:
         for (int i=0;i<40;++i) {
             QVector3D world=QVector3D(std::sin(i*.7f),std::cos(i*.3f),std::sin(i*1.3f)).normalized();auto local=inverse.mapVector(world).normalized();
             for (int c=0;c<3;++c) QVERIFY(std::abs(colour(baked,{world.x(),world.y(),world.z()},c)-colour(f,{local.x(),local.y(),local.z()},c))<2e-6);
+        }
+    }
+    void parallelSourceMemoryDiagnostics() {
+        const QString source=qEnvironmentVariable("EDITOR_PARALLEL_SOURCE");
+        if (source.isEmpty()) QSKIP("Set EDITOR_PARALLEL_SOURCE to inspect chunk memory estimates.");
+        MintFile input;QString error;QVERIFY2(input.open(source,&error),qPrintable(error));
+        uint64_t smallest=UINT64_MAX,largest=0;
+        for (const auto &chunk:input.chunks()) {
+            uint64_t bytes=0,splats=0;
+            for (const auto &block:chunk.blocks) {
+                if (block.type==1) splats+=block.splats;
+                for (const auto &array:block.arrays) bytes+=array.size;
+            }
+            const uint64_t estimate=6*bytes+128*splats+(1ull<<20);
+            smallest=std::min(smallest,estimate);largest=std::max(largest,estimate);
+        }
+        qInfo("chunks=%lld estimated MiB min=%.1f max=%.1f; 1-GiB jobs=%llu 8-GiB jobs=%llu",
+              qlonglong(input.chunks().size()),smallest/1048576.,largest/1048576.,
+              qulonglong((1ull<<30)/largest),qulonglong((8ull<<30)/largest));
+    }
+    void parallelEncodingPreservesBytesAndCallbackThread() {
+        constexpr size_t count=12;
+        vgs::Header header;header.frameCount=header.durationTicks=count;header.timeDenominator=30;header.createdMillis=1234;
+        header.chunks.resize(count);for (size_t i=0;i<count;++i) {header.chunks[i].startTick=i;header.chunks[i].intervals=1;}
+        const auto caller=std::this_thread::get_id();
+        for (int degree:{0,1,2,3}) for (bool raw:{false,true}) {
+            header.shDegree=uint32_t(degree);
+            // `reuse` keeps what the measuring pass prepared for the writing pass, and
+            // `onWorkers` lets the provider answer from the chunk workers. Both change how
+            // often and from where it is asked; neither may change a byte of the result,
+            // which is what every case below is compared against.
+            auto encode=[&](uint32_t threads,uint64_t budget,uint64_t reuse,bool onWorkers) {
+                vgs::EncodeOptions options;options.signer=vgs::authoringSigner();options.shDegree=degree;options.chunkThreads=threads;options.chunkMemoryBudget=budget;
+                options.compression=raw ? vgs::Compression::None : vgs::Compression::Auto;
+                options.preparedCacheBudget=reuse;options.threadSafeProvider=onWorkers;
+                vgs::Bytes bytes;int doneBefore=0;
+                std::mutex askedMutex;std::vector<size_t> asked;
+                auto onCaller=[&] {if (std::this_thread::get_id()!=caller) throw std::runtime_error("Callback moved to worker thread.");};
+                vgs::encodeSequence(header,[&](size_t index) {
+                    // The sink and the progress callback never leave the caller's thread;
+                    // the provider only does when it has said it may.
+                    if (!onWorkers) onCaller();
+                    {std::lock_guard<std::mutex> guard(askedMutex);asked.push_back(index);}
+                    auto frame=sample();frame.colorDc[0]=float(index)*.035f;return packExportFrame(frame,degree);
+                },[&](uint64_t offset,const uint8_t *data,size_t size) {
+                    onCaller();bytes.resize(std::max(bytes.size(),size_t(offset)+size));std::copy_n(data,size,bytes.data()+offset);
+                },options,[&](int done,int total) {
+                    onCaller();if (done<doneBefore || total!=2*count) throw std::runtime_error("Progress moved backwards.");doneBefore=done;return true;
+                });
+                // Every chunk is asked for once per pass that needs it: twice when nothing
+                // is kept, once when the writing pass reuses what the measuring pass has.
+                const size_t passes=reuse ? 1 : 2;
+                if (asked.size()!=passes*count || doneBefore!=2*count) throw std::runtime_error([&]{std::string order;for (size_t i:asked) order+=std::to_string(i)+" ";return "Incomplete callbacks: asked "+order+"("+std::to_string(asked.size())+" of "+std::to_string(passes*count)+"), progress "+std::to_string(doneBefore);}());
+                // Chunks are taken in index order even when several are being prepared at
+                // once, because that is what decides model selection and file layout.
+                if (!onWorkers) for (size_t i=0;i<asked.size();++i)
+                    if (asked[i]!=i%count) throw std::runtime_error("Provider order changed.");
+                std::vector<size_t> seen=asked;std::sort(seen.begin(),seen.end());
+                for (size_t i=0;i<seen.size();++i)
+                    if (seen[i]!=i/passes) throw std::runtime_error("A chunk was prepared the wrong number of times.");
+                return bytes;
+            };
+            // What the callbacks throw says which contract broke; let it be read.
+            try {
+                const auto serial=encode(1,uint64_t(1)<<30,0,false);
+                QVERIFY(serial==encode(8,uint64_t(1)<<30,0,false));
+                QVERIFY(serial==encode(8,1,0,false)); // a single oversized job still makes progress
+                QVERIFY(serial==encode(8,uint64_t(1)<<30,uint64_t(1)<<30,false)); // the writing pass reuses chunks
+                QVERIFY(serial==encode(8,uint64_t(1)<<30,uint64_t(1)<<30,true));  // prepared on the workers
+                QVERIFY(serial==encode(8,uint64_t(1)<<30,0,true));                // on the workers, nothing kept
+            } catch (const std::exception &failure) {QFAIL(failure.what());}
+        }
+    }
+    void parallelEncodingCancelsAndPropagatesFailures() {
+        constexpr size_t count=12;vgs::Header header;header.frameCount=header.durationTicks=count;header.chunks.resize(count);
+        for (size_t i=0;i<count;++i) {header.chunks[i].startTick=i;header.chunks[i].intervals=1;}
+        vgs::EncodeOptions options;options.signer=vgs::authoringSigner();options.chunkThreads=8;
+        for (int failure=0;failure<5;++failure) {
+            bool signedOutput=false;int writes=0;options.signer.sign=[&](const uint8_t *,size_t) {signedOutput=true;return vgs::Signature{};};
+            auto provider=[&](size_t i) {
+                if (failure==1 && i==3) throw std::runtime_error("provider failed");
+                auto chunk=packExportFrame(sample(),3);
+                if (failure==3 && i==2) { // schema accepted by provider; worker rejects coding
+                    for (auto &p:chunk.pages) if (p.descriptor.attribute==vgs::Sh0Lut) p.descriptor.attribute=vgs::MotionSamples;
+                }
+                return chunk;
+            };
+            auto sink=[&](uint64_t,const uint8_t *,size_t) {if (++writes>1 && failure==2) throw std::runtime_error("sink failed");};
+            QVERIFY_EXCEPTION_THROWN(vgs::encodeSequence(header,provider,sink,options,[&](int done,int) {
+                return (failure!=0 || done<2) && (failure!=4 || done<int(count)+2);
+            }),std::runtime_error);
+            QVERIFY(!signedOutput);
         }
     }
     void neutralColourModifierPreservesDespill() {

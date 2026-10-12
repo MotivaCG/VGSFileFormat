@@ -126,6 +126,12 @@ public:
   /** Store each group's splats in spatial (Morton) order, which makes the file about
    *  2% smaller. On by default; readers get the same splats in another order. */
   void setSpatialOrder(bool enabled);
+  /** Chunk workers: 0 selects up to eight hardware threads (default), 1 is
+   *  serial, 2..64 sets a limit. Callbacks still run on the calling thread. */
+  void setChunkThreads(uint32_t threads);
+  /** Estimated concurrent chunk working set, default 8 GiB. One oversized chunk
+   *  runs alone. Does not include retained source/output or all allocator overhead. */
+  void setChunkMemoryBudget(uint64_t bytes);
 
   // ---- metadata ---------------------------------------------------------------
   //

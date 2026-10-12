@@ -31,6 +31,8 @@ int usage() {
                "  --plain                store pages without entropy coding (.pgs)\n"
                "  --sh <0..3>            highest spherical harmonic degree to keep (default 3)\n"
                "  --page-rows <n>        target rows per page (1024..1048576, default 65536)\n"
+               "  --threads <0..64>      chunk workers; 0: auto up to 8 (default), 1: serial\n"
+               "  --chunk-memory-mib <n> estimated concurrent chunk working set (default 8192 MiB)\n"
                "  --start-tick <n>       where the capture starts on an external timeline\n"
                "  --playback <mode>      how players run it: once, loop or pingpong (default loop)\n"
                "  --no-spatial-order     keep the source's splat order (about 2%% larger)\n"
@@ -137,6 +139,11 @@ int main(int argc, char **argv) {
     } else if (flag == "--page-rows") {
       value(&v);
       encoder.setPageRows(uint32_t(std::atoi(v)));
+    } else if (flag == "--threads" || flag == "--chunk-memory-mib") {
+      value(&v);char *end=nullptr;const unsigned long n=std::strtoul(v,&end,10);
+      if (!*v || *end || *v=='-' || n>(flag=="--threads" ? 64ul : 1048576ul)) return usage();
+      if (flag=="--threads") encoder.setChunkThreads(uint32_t(n));
+      else encoder.setChunkMemoryBudget(uint64_t(n)<<20);
     } else if (flag == "--start-tick") {
       value(&v);
       encoder.setStartTick(uint64_t(std::atoll(v)));

@@ -87,6 +87,12 @@ VGS_ENCODER_API void vgs_encoder_set_coding(vgs_encoder *handle, int coding) {
 VGS_ENCODER_API void vgs_encoder_set_sh_degree(vgs_encoder *handle, uint32_t degree) {
   self(handle)->encoder.setSphericalHarmonicDegree(degree);
 }
+VGS_ENCODER_API void vgs_encoder_set_chunk_threads(vgs_encoder *handle, uint32_t threads) {
+  self(handle)->encoder.setChunkThreads(threads);
+}
+VGS_ENCODER_API void vgs_encoder_set_chunk_memory_budget(vgs_encoder *handle, uint64_t bytes) {
+  self(handle)->encoder.setChunkMemoryBudget(bytes);
+}
 
 VGS_ENCODER_API void vgs_encoder_set_start_tick(vgs_encoder *handle, uint64_t tick) {
   self(handle)->encoder.setStartTick(tick);

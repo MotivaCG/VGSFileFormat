@@ -5,13 +5,18 @@
 #include "vgsinternal.h"
 #include "vgsframe.h"
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <deque>
+#include <future>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <set>
+#include <thread>
 
 namespace vgs {
 using namespace detail;
@@ -274,6 +279,64 @@ struct Source {
   std::vector<SourceChunk> chunks;
   std::function<SourceChunk(size_t)> provider;
 };
+// A bounded pipeline: providers (including the editor's Qt reader and modifier
+// caches) and consumers stay serial. Futures are collected in source order, so
+// scheduling cannot change model selection, file layout or callback ordering.
+template<class Prepare, class Work, class Consume, class Report>
+void parallelChunks(size_t count, const EncodeOptions &options, Prepare prepare,
+                    Work work, Consume consume, Report report) {
+  const size_t threads = std::min(count, size_t(options.chunkThreads ? options.chunkThreads :
+      std::min(8u, std::max(1u, std::thread::hardware_concurrency()))));
+  std::atomic<bool> stopped{false};
+  using Result = decltype(work(SourceChunk{}, stopped));
+  if (threads <= 1) {
+    for (size_t i=0;i<count;++i) {consume(i,work(prepare(i),stopped));report(i+1);}
+    return;
+  }
+  struct Pending {size_t index;uint64_t memory;std::future<Result> result;};
+  std::deque<Pending> pending;
+  uint64_t reserved=0;size_t completed=0;
+  // A provider that may be called from several threads prepares ahead on the workers;
+  // the futures are taken in index order, so the chunks reach `work` exactly as they
+  // would have one at a time. Without it, preparation stays on this thread, which is
+  // what every encode did before.
+  std::deque<std::future<SourceChunk>> preparing;size_t asked=0;
+  auto take=[&](size_t index) {
+    if (!options.threadSafeProvider) return prepare(index);
+    while (asked<count && preparing.size()<threads)
+      preparing.push_back(std::async(std::launch::async,[&,next=asked++]{return prepare(next);}));
+    auto ahead=std::move(preparing.front());preparing.pop_front();
+    return ahead.get();
+  };
+  auto drain = [&] {
+    auto &p=pending.front();
+    while (p.result.wait_for(std::chrono::milliseconds(100))!=std::future_status::ready)
+      report(completed);
+    consume(p.index,p.result.get());reserved-=p.memory;pending.pop_front();
+    report(++completed);
+  };
+  try {
+    for (size_t i=0;i<count;++i) {
+      if (pending.size()>=threads) drain();
+      auto source=take(i);
+      uint64_t bytes=0;for (const auto &a:source.arrays) bytes=add(bytes,a.size);
+      // Source/order/page/payload/codec scratch, plus decoded verification frames.
+      const uint64_t memory=add(mul(bytes,6),add(mul(source.entry.splats,128),uint64_t(1)<<20));
+      while (!pending.empty() && (reserved>=options.chunkMemoryBudget ||
+             memory>options.chunkMemoryBudget-reserved)) drain();
+      reserved=add(reserved,memory);
+      pending.push_back({i,memory,std::async(std::launch::async,
+          [&,source=std::move(source)]() mutable {return work(std::move(source),stopped);})});
+    }
+    while (!pending.empty()) drain();
+  } catch (...) {
+    stopped=true;
+    // std::async futures join here, before work/source/header references can die.
+    pending.clear();
+    preparing.clear();
+    throw;
+  }
+}
 const uint32_t SharedSlots[] = {8,   112, 128, 168, 184, 208,
                                 232, 248, 264, 304, 320};
 const uint32_t GroupSlots[] = {56,  136, 200, 216, 232, 248, 264, 280,
@@ -922,6 +985,8 @@ static Bytes encodeSource(Source src, const uint8_t *mint, const EncodeOptions &
                           const Progress &progress, const WriteSink &sink = {}) {
   if (options.pageRows < 1024 || options.pageRows > 1048576)
     throw Error("VGS pageRows outside 1024..1048576");
+  if (options.chunkThreads > 64)
+    throw Error("VGS chunkThreads outside 0..64");
   Header h = src.header;
   h.pageRows = options.pageRows;
   auto report = [&](int done) {
@@ -929,13 +994,34 @@ static Bytes encodeSource(Source src, const uint8_t *mint, const EncodeOptions &
       throw Error("cancelled");
   };
   report(0);
-  SourceChunk provided, ordered;
-  auto getChunk = [&](size_t index) -> const SourceChunk & {
-    const SourceChunk &c = src.provider ? (provided = src.provider(index)) : src.chunks[index];
-    if (!options.spatialOrder)
-      return c;
-    ordered = spatialOrder(c, mint);
-    return ordered;
+  // Chunks a provider answers with are kept between the two passes (preparedCacheBudget):
+  // the chunk handed to the second pass is the one the first pass was given, so the file
+  // written is the same. The chunks are taken in index order whoever prepares them, but
+  // with a thread-safe provider several arrive at once, so the store has a lock of its
+  // own - held around the store, never around the provider, which is the slow part.
+  std::map<size_t,SourceChunk> prepared;
+  std::mutex preparedMutex;
+  uint64_t preparedHeld=0;bool keepPrepared=bool(src.provider);
+  auto heldBytes=[](const SourceChunk &c) {
+    uint64_t bytes=0;for (const auto &a:c.arrays) bytes=add(bytes,uint64_t(a.data.size()));return bytes;
+  };
+  auto getChunk = [&](size_t index) {
+    {
+      std::lock_guard<std::mutex> guard(preparedMutex);
+      if (auto found=prepared.find(index);found!=prepared.end()) {
+        SourceChunk chunk=std::move(found->second);prepared.erase(found);
+        preparedHeld-=std::min(preparedHeld,heldBytes(chunk));
+        return chunk;
+      }
+    }
+    if (!src.provider) return src.chunks[index];
+    SourceChunk chunk=src.provider(index);
+    if (keepPrepared) {
+      const uint64_t bytes=heldBytes(chunk);
+      std::lock_guard<std::mutex> guard(preparedMutex);
+      if (add(preparedHeld,bytes)<=options.preparedCacheBudget) {prepared.emplace(index,chunk);preparedHeld+=bytes;}
+    }
+    return chunk;
   };
   // First pass measures complete candidate cost over every page in the file.
   struct Costs {
@@ -945,20 +1031,19 @@ static Bytes encodeSource(Source src, const uint8_t *mint, const EncodeOptions &
   };
   std::map<uint32_t, Costs> costs;
   size_t movingChunks = 0;
-  for (size_t ci = 0; ci < src.chunks.size(); ++ci) {
-    const auto &sourceChunk = getChunk(ci);
+  struct Measurement {std::map<uint32_t,Costs> costs;uint64_t splats;bool moving;};
+  parallelChunks(src.chunks.size(),options,getChunk,[&](SourceChunk sourceChunk,const std::atomic<bool> &stopped) {
+    if (stopped) throw Error("cancelled");
+    if (options.spatialOrder) sourceChunk=spatialOrder(sourceChunk,mint);
+    Measurement result;result.splats=sourceChunk.entry.splats;
     // Motion is checked here, before anything is written, rather than discovered by a
     // reader: a sample that does not validate, or a chunk without samples in a capture
     // that has them, would make every reader refuse the file.
-    if (!motionOf(sourceChunk, mint).empty())
-      ++movingChunks;
-    if (src.provider) {
-      h.maxChunkSplatRecords = std::max(h.maxChunkSplatRecords, sourceChunk.entry.splats);
-      h.maxSplatsPerFrame = std::max(h.maxSplatsPerFrame, sourceChunk.entry.splats);
-    }
+    result.moving=!motionOf(sourceChunk,mint).empty();
     for (const auto &p : pages(sourceChunk, mint, options.pageRows, h.shDegree,
                                options.splitTemporalShPages)) {
-      auto &t = costs[p.page.attribute];
+      if (stopped) throw Error("cancelled");
+      auto &t = result.costs[p.page.attribute];
       int count = mgs::attributeModelCount(p.page.spec);
       if (t.models.empty()) {
         t.family = p.page.spec.family;
@@ -971,6 +1056,7 @@ static Bytes encodeSource(Source src, const uint8_t *mint, const EncodeOptions &
         std::fill(t.models.begin(), t.models.end(), UINT64_MAX);
       for (int model = 0; model < count; ++model)
         if (t.models[model] != UINT64_MAX) {
+          if (stopped) throw Error("cancelled");
           try {
             t.models[model] =
                 add(t.models[model],
@@ -984,8 +1070,23 @@ static Bytes encodeSource(Source src, const uint8_t *mint, const EncodeOptions &
           }
         }
     }
-    report(int(ci + 1));
-  }
+    return result;
+  },[&](size_t,Measurement result) {
+    movingChunks+=result.moving;
+    if (src.provider) {
+      h.maxChunkSplatRecords=std::max(h.maxChunkSplatRecords,result.splats);
+      h.maxSplatsPerFrame=std::max(h.maxSplatsPerFrame,result.splats);
+    }
+    for (auto &kv:result.costs) {
+      auto it=costs.find(kv.first);
+      if (it==costs.end()) {costs.emplace(kv.first,std::move(kv.second));continue;}
+      auto &total=it->second;const auto &part=kv.second;
+      if (total.family!=part.family || total.models.size()!=part.models.size()) throw Error("mixed attribute schema");
+      total.raw=add(total.raw,part.raw);
+      for (size_t m=0;m<total.models.size();++m)
+        total.models[m]=(total.models[m]==UINT64_MAX || part.models[m]==UINT64_MAX) ? UINT64_MAX : add(total.models[m],part.models[m]);
+    }
+  },[&](size_t done) {report(int(done));});
   if (movingChunks && movingChunks != src.chunks.size())
     throw Error("motion samples must be in every chunk or in none");
   for (const auto &kv : costs) {
@@ -1055,9 +1156,16 @@ static Bytes encodeSource(Source src, const uint8_t *mint, const EncodeOptions &
   }
   uint64_t outputBase = 0;
   if (sink) { sink(0,out.b.data(),out.b.size()); outputBase = out.b.size(); out.b.clear(); }
-  for (size_t ci = 0; ci < src.chunks.size(); ++ci) {
-    const auto &sourceChunk = getChunk(ci);
-    auto inputs = pages(sourceChunk, mint, options.pageRows, h.shDegree,
+  // Workers see an immutable header. The writer alone fills final offsets and
+  // bounds in h while other chunks are still being compressed and verified.
+  const Header encodingHeader=h;
+  // The last pass: what it prepares is used once, so nothing is kept back from it.
+  keepPrepared=false;
+  struct EncodedChunk {ChunkEntry entry;Bytes bytes;};
+  parallelChunks(src.chunks.size(),options,getChunk,[&](SourceChunk sourceChunk,const std::atomic<bool> &stopped) {
+    if (stopped) throw Error("cancelled");
+    if (options.spatialOrder) sourceChunk=spatialOrder(sourceChunk,mint);
+    auto inputs = pages(sourceChunk, mint, options.pageRows, encodingHeader.shDegree,
                         options.splitTemporalShPages);
     std::stable_sort(inputs.begin(), inputs.end(),
                      [](const InputPage &a, const InputPage &b) {
@@ -1067,8 +1175,9 @@ static Bytes encodeSource(Source src, const uint8_t *mint, const EncodeOptions &
     d.groups = sourceChunk.groups;
     std::vector<Bytes> payloads;
     for (auto &input : inputs) {
+      if (stopped) throw Error("cancelled");
       auto p = input.page;
-      const auto &pol = policy(h, p.attribute);
+      const auto &pol = policy(encodingHeader, p.attribute);
       Bytes payload =
           pol.codec == Raw
               ? input.data
@@ -1077,7 +1186,7 @@ static Bytes encodeSource(Source src, const uint8_t *mint, const EncodeOptions &
       p.size = payload.size();
       p.crc = crc32(payload.data(), payload.size());
       if (options.verify &&
-          decodePage(h, p, payload.data(), payload.size()) != input.data)
+          decodePage(encodingHeader, p, payload.data(), payload.size()) != input.data)
         throw Error("VGS page verification failed");
       d.pages.push_back(std::move(p));
       payloads.push_back(std::move(payload));
@@ -1122,17 +1231,17 @@ static Bytes encodeSource(Source src, const uint8_t *mint, const EncodeOptions &
         c.bounds[k + 3] = float(b);
       }
     }
-    while ((outputBase + out.b.size()) % 16) out.b.push_back(0);
-    c.offset = outputBase + out.b.size();
+    W chunkBytes;
+    c.offset = 0;
     c.directoryDigest = digest(dir.b.data(), dir.b.size());
-    out.bytes(dir.b);
+    chunkBytes.bytes(dir.b);
     for (size_t pi = 0; pi < payloads.size(); ++pi) {
-      while (outputBase + out.b.size() - c.offset < d.pages[pi].offset)
-        out.b.push_back(0);
-      out.bytes(payloads[pi]);
+      while (chunkBytes.b.size() < d.pages[pi].offset)
+        chunkBytes.b.push_back(0);
+      chunkBytes.bytes(payloads[pi]);
     }
-    c.size = outputBase + out.b.size() - c.offset;
-    h.chunks[ci] = c;
+    c.size = chunkBytes.b.size();
+    Header localHeader=encodingHeader;localHeader.chunks={c};
     // What a player does with this box is fit things to it: culling, and the shadow
     // map of a directional light. The quantisation cube is several times the size of
     // the capture, which spreads that shadow map over mostly empty space until the
@@ -1140,10 +1249,15 @@ static Bytes encodeSource(Source src, const uint8_t *mint, const EncodeOptions &
     // sample grid measured: positions move linearly between samples, so the extremes
     // are all at sample points and this is exact, not an estimate. Only live splats
     // count - a dead one's stored position is not on screen.
-    tighten(h, ci, out.b.data() + size_t(c.offset - outputBase), size_t(c.size));
+    if (stopped) throw Error("cancelled");
+    tighten(localHeader, 0, chunkBytes.b.data(),chunkBytes.b.size());
+    return EncodedChunk{localHeader.chunks[0],std::move(chunkBytes.b)};
+  },[&](size_t ci,EncodedChunk chunk) {
+    while ((outputBase + out.b.size()) % 16) out.b.push_back(0);
+    chunk.entry.offset=outputBase+out.b.size();h.chunks[ci]=chunk.entry;
+    out.bytes(chunk.bytes);
     if (sink) { sink(outputBase,out.b.data(),out.b.size()); outputBase += out.b.size(); out.b.clear(); }
-    report(int(src.chunks.size() + ci + 1));
-  }
+  },[&](size_t done) {report(int(src.chunks.size()+done));});
   // The capture's own box, and the only one a player has before it fetches a chunk:
   // the union of the boxes just measured, so it is the exact extent over every frame
   // rather than whatever the source declared. A capture with no live splat anywhere

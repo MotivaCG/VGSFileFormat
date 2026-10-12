@@ -8,6 +8,9 @@
 # See LICENSE.md for the limited use grant and applicable terms.
 # Other uses require prior written authorisation, subject to mandatory law.
 
+!versionAtLeast(QT_VERSION, 6.8.0) {
+    error("VGS Editor requires Qt 6.8 or newer. Select the Desktop Qt 6.8.0 MSVC2022 64-bit kit; Qt 5 cannot build this project.")
+}
 QT += core gui widgets opengl openglwidgets multimedia
 CONFIG += c++17
 DEFINES += VGS_AUTHORING
