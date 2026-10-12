@@ -579,7 +579,7 @@ void MainWindow::buildUi() {
     auto *savedPresetRow = new QHBoxLayout;
     presetCombo_ = new QComboBox; presetCombo_->setObjectName("savedPresetCombo"); presetCombo_->setMinimumContentsLength(18);
     presetCombo_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
-    presetCombo_->setToolTip(tr("Choose a saved preset to restore capture transforms, modifiers and playback settings."));
+    presetCombo_->setToolTip(tr("Choose a saved preset to restore capture transforms, modifiers and playback settings, and frame the capture."));
     savedPresetRow->addWidget(presetCombo_,1);
     presetFolderButton_ = new QToolButton; presetFolderButton_->setIcon(transportIcon(style(),QStyle::SP_DirOpenIcon,Qt::white));
     presetFolderButton_->setFixedSize(34,34); presetFolderButton_->setAccessibleName(tr("Open presets folder"));
@@ -1905,6 +1905,11 @@ void MainWindow::loadSelectedPreset() {
     EditorPreset preset; QString error;
     if (!presetStore_.read(path,PresetScope::Editor,&preset,&error)) { showError(error); return; }
     applyPresetSettings(preset.settings);
+    // A preset carries the capture's transform, so what it restores can land off screen -
+    // or arrive while the camera is still framing whatever was there before. Framing it is
+    // the same action the Focus button runs; the view angle is left alone, only where the
+    // camera looks and how far away it sits.
+    fitCurrentTarget();
     statusBar()->showMessage(tr("Preset loaded: %1").arg(preset.name),5000);
 }
 void MainWindow::openPresetFolder() {

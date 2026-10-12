@@ -8,3 +8,6 @@ moc_*.cpp
 qrc_*.cpp
 *_resource.rc
 *.res
+
+build/
+release/

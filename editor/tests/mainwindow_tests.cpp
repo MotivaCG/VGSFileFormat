@@ -459,8 +459,13 @@ private slots:
         pointSize->setValue(7);grid->setChecked(false);ghost->click();QVERIFY(ghost->isChecked());opacity->setValue(62);const auto ghostCount=viewport->ghostPointCount();const double ghostTime=viewport->ghostTime();
         editorCombo->setCurrentIndex(editorCombo->findData(editorPath));
         QVERIFY(QMetaObject::invokeMethod(editorCombo,"activated",Qt::DirectConnection,Q_ARG(int,editorCombo->currentIndex())));
-        QCOMPARE(viewport->transform().position,setup.transform.position);QCOMPARE(viewport->camera().target,camera.target);
-        QCOMPARE(viewport->camera().yaw,camera.yaw);QCOMPARE(viewport->camera().pitch,camera.pitch);QCOMPARE(viewport->camera().distance,camera.distance);
+        QCOMPARE(viewport->transform().position,setup.transform.position);
+        // Loading a preset frames what it restored: the camera looks at the capture where the
+        // preset put it, from the angle the user was already using.
+        QCOMPARE(viewport->camera().yaw,camera.yaw);QCOMPARE(viewport->camera().pitch,camera.pitch);
+        QVERIFY(viewport->camera().target!=camera.target);QVERIFY(viewport->camera().distance!=camera.distance);
+        {Camera framed=viewport->camera();viewport->focusVisible();
+         QCOMPARE(viewport->camera().target,framed.target);QCOMPARE(viewport->camera().distance,framed.distance);}
         QCOMPARE(pointSize->value(),7.);QVERIFY(!grid->isChecked());QVERIFY(ghost->isChecked());QVERIFY(opacity->isEnabled());QCOMPARE(opacity->value(),62);QVERIFY(std::abs(viewport->ghostOpacity()-.62f)<1e-6);
         QCOMPARE(viewport->ghostPointCount(),ghostCount);QCOMPARE(viewport->ghostTime(),ghostTime);ghost->click();QVERIFY(!opacity->isEnabled());
         newType->setCurrentIndex(newType->findData(2));add->click();QCOMPARE(modifiers->topLevelItemCount(),2);
