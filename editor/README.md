@@ -36,6 +36,9 @@ scale transforms the entire capture without changing point size.
   pointing the way the capture faces; each on its own (grid and marker on, axes off at first).
 
 The timeline uses Gracia Converter's range control: drag the upper Start marker, lower End marker, or white playhead. Above it, the clock toggle comes first, followed by Start/Frame/End on the left; transport buttons are centred and Loop/Speed sit on the right. The frame field reads **Frame X of Y**, with a zero-based index and the full capture frame count. The clock switches all three fields to seconds; typed values snap to the nearest valid frame. Start and End are inclusive and define the export range. Current time / full duration appears below decode statistics in the viewport. The unit preference is remembered without changing the project range.
+Small yellow ticks mark internal chunk changes on the editor's timeline, also when zoomed
+or panned. They help locate where Eraser picks switch to another chunk; the viewer does not
+show these marks.
 The single **Transform** group provides Position, Rotation (XYZ Euler degrees)
 and Scale on three compact rows, plus reset. X/Y/Z labels use the red, green and
 blue modifier colours. Numeric values remain fully editable without stepper

@@ -349,6 +349,10 @@ MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory,const QStr
         loadingOverlay_->stop();
         loading_ = false; loaded_ = true; decoding_ = pendingDecode_ = false;
         generation_ = gen; info_ = info;
+        QVector<double> chunkFrames;
+        chunkFrames.reserve(info.chunkBoundaries.size());
+        for (double seconds : info.chunkBoundaries) chunkFrames.append(seconds * info.fps);
+        slider_->setChunkBoundaries(chunkFrames);
         viewport_->setGhost(false); slider_->resetView(); // a newly opened capture is seen whole
         viewport_->setSplatAntialiasing(info.antialiased);
         processingState_={};

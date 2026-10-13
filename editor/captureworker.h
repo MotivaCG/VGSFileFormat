@@ -60,6 +60,8 @@ struct CaptureInfo {
     QByteArray audio;
     QString audioSuffix;
     double startSeconds = 0;
+    // Internal chunk changes, in seconds on the capture timeline; editor display only.
+    QVector<double> chunkBoundaries;
     QVector3D minimum, maximum;
 };
 Q_DECLARE_METATYPE(CaptureInfo)

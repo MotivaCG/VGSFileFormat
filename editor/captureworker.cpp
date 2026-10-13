@@ -145,6 +145,16 @@ void CaptureWorker::open(const QString &path, quint64 generation, bool sh) {
             candidate.info_.duration * candidate.info_.fps > std::numeric_limits<int>::max() - 1)
             throw std::runtime_error("The capture has an invalid timeline.");
         candidate.info_.frames = std::max(1, int(std::ceil(candidate.info_.duration * candidate.info_.fps - 1e-6)));
+#ifndef VGS_VIEWER
+        if (candidate.mint_) {
+            const auto &chunks = candidate.mint_->chunks();
+            for (qsizetype i = 1; i < chunks.size(); ++i)
+                candidate.info_.chunkBoundaries.append(chunks[i].start);
+        } else {
+            for (size_t i = 1; i < candidate.vgs_->chunkCount(); ++i)
+                candidate.info_.chunkBoundaries.append(candidate.vgs_->chunk(i).startSeconds);
+        }
+#endif
         for (int j = 0; j < 3; ++j) {
             if (!std::isfinite(bounds[j]) || !std::isfinite(bounds[j+3]) || bounds[j] > bounds[j+3])
                 throw std::runtime_error("The capture has invalid spatial bounds.");

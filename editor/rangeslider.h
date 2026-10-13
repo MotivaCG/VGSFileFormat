@@ -24,6 +24,9 @@ public:
     void setFrameRate(double fps);
     // Whether the second labels under the track read as times or as frame numbers.
     void setLabelsInSeconds(bool seconds);
+    // Small yellow ticks at internal chunk changes. Empty by default (the viewer).
+    // Positions are in frames and may be fractional, just like the second ticks.
+    void setChunkBoundaries(const QVector<double> &frames);
     // The seconds labelled under the track: a regular step (1, 2, 5, 10, 15, 30 s, minutes...)
     // wide enough apart to read, none cut off at the track's ends; empty when the second
     // ticks themselves are too dense to draw.
@@ -84,6 +87,7 @@ private:
     QString m_label;
     double m_viewFirst = 0, m_viewLast = 0;
     double m_frameRate = 0;
+    QVector<double> m_chunkBoundaries;
     bool m_labelsInSeconds = false;
     bool m_panning = false;
     double m_panX = 0;

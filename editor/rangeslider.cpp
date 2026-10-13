@@ -51,6 +51,14 @@ void RangeSlider::setLabelsInSeconds(bool seconds)
     update();
 }
 
+void RangeSlider::setChunkBoundaries(const QVector<double> &frames)
+{
+    if (m_chunkBoundaries == frames)
+        return;
+    m_chunkBoundaries = frames;
+    update();
+}
+
 QString RangeSlider::secondLabel(int second) const
 {
     if (!m_labelsInSeconds)
@@ -302,6 +310,26 @@ void RangeSlider::paintEvent(QPaintEvent*)
             }
             painter.restore();
         }
+    }
+
+    // Chunk changes stay small and distinct from the frame/second ticks. Packed changes
+    // share a pixel rather than accumulating brightness when the timeline is zoomed out.
+    if (span > 0 && !m_chunkBoundaries.isEmpty()) {
+        painter.save();
+        painter.setRenderHint(QPainter::Antialiasing, false);
+        painter.setClipRect(track.adjusted(0, -2, 0, 2));
+        painter.setPen(QPen(QColor(244, 197, 66), 2));
+        int previousX = -1;
+        for (double frame : m_chunkBoundaries) {
+            if (!std::isfinite(frame) || frame < m_viewFirst || frame > m_viewLast)
+                continue;
+            const int x = qRound(frameX(frame));
+            if (x == previousX)
+                continue;
+            painter.drawLine(x, track.top() - 2, x, track.bottom() + 2);
+            previousX = x;
+        }
+        painter.restore();
     }
 
     // Only what lies in the view is drawn; the markers still reach just past the track ends.
