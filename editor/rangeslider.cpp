@@ -237,10 +237,15 @@ QRect RangeSlider::triangleHandleRect(int value, bool top) const
     return QRect(x - halfWidth, y, halfWidth * 2, heightPx);
 }
 
-QRect RangeSlider::playheadHandleRect() const
+// Where a press takes a triangle: its whole band above (Start) or below (End) the track,
+// a little wider than the triangle, so it is caught without aiming at its few pixels.
+QRect RangeSlider::triangleHitRect(int value, bool top) const
 {
-    const int x = valueToX(m_playhead);
-    return QRect(x - 5, 0, 10, height());
+    constexpr int halfWidth = 12;
+    const int x = valueToX(value);
+    const QRect track = trackRect();
+    return top ? QRect(x - halfWidth, 0, halfWidth * 2, track.top())
+               : QRect(x - halfWidth, track.bottom() + 1, halfWidth * 2, std::max(1, height() - track.bottom() - 1));
 }
 
 void RangeSlider::paintEvent(QPaintEvent*)
@@ -373,22 +378,14 @@ void RangeSlider::mousePressEvent(QMouseEvent* event)
     const int clickValue = xToValue(event->position().x());
     const QPoint pos = event->position().toPoint();
 
-    if (triangleHandleRect(m_start, true).contains(pos)) {
+    if (triangleHitRect(m_start, true).contains(pos)) {
         m_dragHandle = DragHandle::Start;
-    } else if (triangleHandleRect(m_end, false).contains(pos)) {
+    } else if (triangleHitRect(m_end, false).contains(pos)) {
         m_dragHandle = DragHandle::End;
-    } else if (playheadHandleRect().contains(pos)) {
-        m_dragHandle = DragHandle::Playhead;
     } else {
-        const int startDistance = std::abs(clickValue - m_start);
-        const int endDistance = std::abs(clickValue - m_end);
-        const int playheadDistance = std::abs(clickValue - m_playhead);
-        if (playheadDistance <= startDistance && playheadDistance <= endDistance)
-            m_dragHandle = DragHandle::Playhead;
-        else if (m_start == m_end)
-            m_dragHandle = (clickValue >= m_end) ? DragHandle::End : DragHandle::Start;
-        else
-            m_dragHandle = (startDistance <= endDistance) ? DragHandle::Start : DragHandle::End;
+        // Anywhere else on the track sets the time: Start and End move only by their triangles,
+        // never because a click happened to land nearer one of them than the playhead.
+        m_dragHandle = DragHandle::Playhead;
     }
 
     setDraggedValue(clickValue);

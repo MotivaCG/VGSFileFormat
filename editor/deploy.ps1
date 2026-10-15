@@ -106,6 +106,12 @@ $sitePackages = Join-Path $runtime "Lib\site-packages"
     --target $sitePackages --platform win_amd64 --python-version "$($parts[0]).$($parts[1])" --implementation cp `
     --only-binary=:all: -r (Join-Path $source "mcp/requirements.txt")
 if ($LASTEXITCODE -ne 0) { throw "Could not install the MCP requirements into the embedded Python." }
+# pip's command launchers (bin\*.exe) carry this machine's Python path and are never used: the
+# server runs as python.exe server.py. RECORD only serves pip's own uninstall.
+Remove-Item -LiteralPath (Join-Path $sitePackages "bin") -Recurse -Force -ErrorAction SilentlyContinue
+Get-ChildItem -LiteralPath $sitePackages -Directory -Filter "*.dist-info" | ForEach-Object {
+    Remove-Item -LiteralPath (Join-Path $_.FullName "RECORD") -Force -ErrorAction SilentlyContinue
+}
 # The deployed runtime must import the adapter exactly as an assistant will start it.
 & (Join-Path $runtime "python.exe") (Join-Path $mcpOut "server.py") --help | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "The embedded Python cannot start the MCP server." }

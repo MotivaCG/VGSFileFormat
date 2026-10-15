@@ -73,7 +73,7 @@ private:
     int valueToX(int value) const;
     int xToValue(int x) const;
     QRect triangleHandleRect(int value, bool top) const;
-    QRect playheadHandleRect() const;
+    QRect triangleHitRect(int value, bool top) const;
     void setDraggedValue(int value);
     void setView(double first, double span);
     double frameX(double value) const;

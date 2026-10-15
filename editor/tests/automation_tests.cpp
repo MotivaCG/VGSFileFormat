@@ -7,6 +7,7 @@
 #include "editortheme.h"
 #include "viewport.h"
 #include "taskqueuedialog.h"
+#include "modifierpanel.h"
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QMessageBox>
@@ -23,6 +24,8 @@
 #include <QSurfaceFormat>
 #include <QTcpSocket>
 #include <QTemporaryDir>
+#include <QToolTip>
+#include <QTreeWidget>
 #include <QtTest>
 
 class AutomationTests : public QObject {
@@ -280,6 +283,35 @@ private slots:
         QTest::qWait(200);
         for (auto *dialog:window.findChildren<QDialog *>()) QVERIFY2(!dialog->isVisible(),qPrintable(dialog->windowTitle()));
         QVERIFY2(boxes.isEmpty(),qPrintable(boxes.join("; ")));
+    }
+    void erasePicksShowAsChunkSpansThatSeekToTheirChunk() {
+        QTemporaryDir dir;QVERIFY(dir.isValid());settings(dir.path());const auto path=capture(dir.path(),8); // one chunk per frame
+        MainWindow window(nullptr,dir.path()+"/presets");window.resize(1200,800);window.show();EditorAutomation bridge(&window,dir.path()+"/sessions");
+        bridge.execute("open",{{"path",path}});QTRY_VERIFY_WITH_TIMEOUT(bridge.state()["ready"].toBool(),5000);
+        bridge.execute("add_modifier",{{"type","erase"}});QTRY_VERIFY_WITH_TIMEOUT(bridge.state()["ready"].toBool(),5000);
+        bridge.execute("view",{{"preset","front"},{"focus",true}});
+        bridge.execute("erase_editing",{{"enabled",true}});QTRY_VERIFY_WITH_TIMEOUT(bridge.state()["ready"].toBool(),5000);
+        bridge.execute("seek",{{"frame",5}});QTRY_VERIFY_WITH_TIMEOUT(bridge.state()["ready"].toBool(),5000);
+        const QJsonArray polygon{QJsonArray{0,0},QJsonArray{1,0},QJsonArray{1,1},QJsonArray{0,1}};
+        QVERIFY(bridge.execute("stroke",{{"view_id",bridge.state()["view_id"]},{"tool","lasso"},{"mode","add"},{"points",polygon}})["picked_records"].toInt()>0);
+        QTRY_VERIFY_WITH_TIMEOUT(bridge.state()["ready"].toBool(),5000);
+        bridge.execute("seek",{{"frame",1}});QTRY_VERIFY_WITH_TIMEOUT(bridge.state()["ready"].toBool(),5000);
+        auto *panel=window.findChild<ModifierPanel *>();QVERIFY(panel);auto *tree=panel->findChild<QTreeWidget *>();QVERIFY(tree);
+        QTreeWidgetItem *erase=nullptr;for (int i=0;i<tree->topLevelItemCount();++i) if (tree->topLevelItem(i)->data(2,Qt::UserRole+3).toInt()==int(ModifierType::Erase)) erase=tree->topLevelItem(i);
+        QVERIFY(erase);QCOMPARE(erase->data(2,Qt::UserRole+7).toList().size(),1);
+        // Middle of frame 5 on the Erase bar: its chunk's span.
+        const auto [left,width]=panel->trackSpan();const auto [first,last]=panel->view();
+        const int x=tree->viewport()->mapFromGlobal(QPoint(int(left+width*(5.5-first)/(last-first)),0)).x();
+        const QPoint at(x,tree->visualItemRect(erase).center().y());
+        QHelpEvent help(QEvent::ToolTip,at,tree->viewport()->mapToGlobal(at));QApplication::sendEvent(tree->viewport(),&help);
+        QTRY_VERIFY(QToolTip::isVisible());QVERIFY2(QToolTip::text().contains("Chunk 5"),qPrintable(QToolTip::text()));QToolTip::hideText();
+        QTest::mouseClick(tree->viewport(),Qt::LeftButton,{},at);
+        QTRY_COMPARE_WITH_TIMEOUT(bridge.state()["frame"].toInt(),5,5000);
+        // Already in that chunk: a click selects the row and leaves the time where it is.
+        QTest::mouseClick(tree->viewport(),Qt::LeftButton,{},at);QTest::qWait(100);QCOMPARE(bridge.state()["frame"].toInt(),5);
+        // Elsewhere on the bar, with no picks, the time does not move either.
+        const QPoint empty(tree->viewport()->mapFromGlobal(QPoint(int(left+width*(2.5-first)/(last-first)),0)).x(),at.y());
+        QTest::mouseClick(tree->viewport(),Qt::LeftButton,{},empty);QTest::qWait(100);QCOMPARE(bridge.state()["frame"].toInt(),5);
     }
     void recentFilesAreListedWithoutALoadedCapture() {
         QTemporaryDir dir;QVERIFY(dir.isValid());settings(dir.path());const auto path=capture(dir.path());

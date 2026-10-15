@@ -1116,6 +1116,10 @@ private slots:
         QCOMPARE(slider.endValue(),80);slider.setPlayheadValue(50);
         QTest::mousePress(&slider,Qt::LeftButton,Qt::NoModifier,{330,19});QTest::mouseMove(&slider,{394,19});QTest::mouseRelease(&slider,Qt::LeftButton,Qt::NoModifier,{394,19});
         QCOMPARE(slider.playheadValue(),60);QCOMPARE(slider.startValue(),20);QCOMPARE(slider.endValue(),80);QVERIFY(seek.count()>0);
+        // A click on the track nearer End than the playhead, off the triangles, only sets the time.
+        slider.setPlayheadValue(20);const int ranges=range.count();
+        QTest::mousePress(&slider,Qt::LeftButton,Qt::NoModifier,{480,19});QTest::mouseRelease(&slider,Qt::LeftButton,Qt::NoModifier,{480,19});
+        QCOMPARE(slider.startValue(),20);QCOMPARE(slider.endValue(),80);QCOMPARE(range.count(),ranges);QVERIFY(slider.playheadValue()>60);
     }
 private:
     static vgs::Frame copy(const vgsdec::Frame &f) {

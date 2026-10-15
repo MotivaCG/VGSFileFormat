@@ -20,6 +20,8 @@ public:
     explicit ModifierPanel(QWidget *parent=nullptr);
     void setProject(const Project &project);
     void setTimeline(int frame,int maximum);
+    // The capture's chunk boundaries, in frames: an Erase bar marks the chunks it has picks in.
+    void setChunks(const QVector<double> &boundaries);
     const Project &project() const {return project_;}
     // The modifier bars' horizontal extent in global coordinates: left edge and width.
     QPair<int,int> trackSpan() const;
@@ -49,7 +51,11 @@ private:
     int minimumNameWidth_=0;
     void resizeEvent(QResizeEvent *event) override;
     bool eventFilter(QObject *watched,QEvent *event) override;
-    bool panning_=false;
+    bool panning_=false,scrubbing_=false;
+    QPair<double,double> barSpan() const;
+    int frameAt(double x) const;
+    bool onPlayhead(const QPointF &at) const;
+    QPair<int,qulonglong> erasedChunkAt(const QPointF &at) const;
     double panX_=0;
     void addModifier();
     void removeSelection();

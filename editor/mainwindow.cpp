@@ -354,7 +354,7 @@ MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory,const QStr
         QVector<double> chunkFrames;
         chunkFrames.reserve(info.chunkBoundaries.size());
         for (double seconds : info.chunkBoundaries) chunkFrames.append(seconds * info.fps);
-        slider_->setChunkBoundaries(chunkFrames);
+        slider_->setChunkBoundaries(chunkFrames); modifierPanel_->setChunks(chunkFrames);
         viewport_->setGhost(false); slider_->resetView(); // a newly opened capture is seen whole
         viewport_->setSplatAntialiasing(info.antialiased);
         processingState_={};
@@ -1453,7 +1453,7 @@ void MainWindow::newProject() {
     play(false); loaded_ = decoding_ = pendingDecode_ = false; generation_ = ++serial_;
     viewport_->setTransformMode(TransformMode::None);
     viewport_->setCropEditing(false); viewport_->setCrop({});
-    project_ = defaultProject(); info_ = {}; projectPath_.clear(); slider_->setChunkBoundaries({}); viewport_->setFrame({}); viewport_->setTransform({});
+    project_ = defaultProject(); info_ = {}; projectPath_.clear(); slider_->setChunkBoundaries({}); modifierPanel_->setChunks({}); viewport_->setFrame({}); viewport_->setTransform({});
     for (int g=0; g<3; ++g) viewport_->setCoordinateSpace(TransformMode(g+1),project_.spaces[g]);
     viewport_->setCamera(project_.camera); setWindowModified(false); refreshPresets(); syncUi(); title(); resetUndo(); discardAutosave();
     // Release the source and its caches in their owning thread.

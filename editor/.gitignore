@@ -71,6 +71,9 @@ __pycache__/
 /mcp/.http-token
 /mcp/connections/
 
+# Output of deploy.ps1, regenerated on every deploy (and the installer's input)
+/deploy/
+
 # Binaries
 # --------
 *.dll

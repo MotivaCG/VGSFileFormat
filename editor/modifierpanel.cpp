@@ -28,6 +28,8 @@
 #include <QWheelEvent>
 #include <QKeyEvent>
 #include <QPersistentModelIndex>
+#include <QToolTip>
+#include <QHelpEvent>
 #include <functional>
 #include <QIcon>
 #include <algorithm>
@@ -41,8 +43,15 @@ QVariantList keyFrames(const Modifier &m) {
     else for (const auto &key:m.animation.keys) frames.append(key.frame);
     return frames;
 }
+// An Erase modifier's hand picks, per source chunk: [chunk, picked records] for each chunk
+// that has some. They hold for every frame of their chunk, so the bar shows chunks, not keys.
+QVariantList erasedChunks(const Modifier &m) {
+    QVariantList chunks;
+    if (m.type==ModifierType::Erase) for (const auto &[chunk,records]:m.erased) if (!records.empty()) chunks.append(QVariant(QVariantList{chunk,qulonglong(records.size())}));
+    return chunks;
+}
 QJsonArray visualState(const Project &project) {
-    QJsonArray items;for (const auto &m:project.modifiers) items.append(QJsonObject{{"id",m.id},{"name",m.name},{"active",m.active()},{"type",int(m.type)},{"shape",int(m.crop.shape)},{"keys",QJsonArray::fromVariantList(keyFrames(m))}});return items;
+    QJsonArray items;for (const auto &m:project.modifiers) items.append(QJsonObject{{"id",m.id},{"name",m.name},{"active",m.active()},{"type",int(m.type)},{"shape",int(m.crop.shape)},{"keys",QJsonArray::fromVariantList(keyFrames(m))},{"erased",QJsonArray::fromVariantList(erasedChunks(m))}});return items;
 }
 QString typeName(const Modifier &modifier) {
     switch (modifier.type) {
@@ -125,6 +134,14 @@ public:
     std::function<void(int)> seek;
     std::function<void()> textMoved;
     double viewFirst=0,viewLast=0; // the frames the bars show
+    QVector<int> chunkStarts; // the first frame of each source chunk after the first
+    // A chunk's frames, inclusive; the last chunk runs to `maximum`.
+    QPair<int,int> chunkFrames(int chunk,int maximum) const {
+        const int first=chunk<=0 ? 0 : chunk-1<chunkStarts.size() ? chunkStarts[chunk-1] : maximum;
+        const int last=chunk<chunkStarts.size() ? chunkStarts[chunk]-1 : maximum;
+        return {first,std::max(first,last)};
+    }
+    int chunkOf(int frame) const {return int(std::upper_bound(chunkStarts.begin(),chunkStarts.end(),frame)-chunkStarts.begin());}
     double frameX(const QRect &bar,double frame) const {return bar.left()+bar.width()*(frame-viewFirst)/std::max(1e-9,viewLast-viewFirst);}
     bool inView(double frame) const {return frame>=viewFirst-1e-6 && frame<=viewLast+1e-6;}
     mutable int textOffset=-1; // unknown until a row has been painted
@@ -186,8 +203,19 @@ public:
         painter->save();const auto rect=barRect(option.rect);painter->setPen(Qt::NoPen);
         painter->setBrush(!active ? QColor(75,80,86) : modifierColour(type));painter->drawRoundedRect(rect,3,3);
         const int current=index.data(Qt::UserRole+6).toInt();
+        // An Erase's picked chunks: spans over their frames in the bar's own colour, a shade
+        // darker; not diamonds, since a pick holds for its whole chunk rather than at one time.
+        const int maximum=index.data(Qt::UserRole+5).toInt();
+        for (const auto &entry:index.data(Qt::UserRole+7).toList()) {
+            const auto [first,last]=chunkFrames(entry.toList().value(0).toInt(),maximum);
+            const double left=std::max<double>(rect.left(),frameX(rect,first)),right=std::min<double>(rect.right()+1,frameX(rect,last+1));
+            if (right<=left) continue;
+            painter->setBrush((!active ? QColor(75,80,86) : modifierColour(type)).darker(135));
+            painter->drawRect(QRectF(left,rect.top()+2,right-left,rect.height()-4));
+        }
         painter->setRenderHint(QPainter::Antialiasing,true);
-        // The current time, read only: the timeline's playhead carried down through every bar.
+        // The current time: the timeline's playhead carried down through every bar; dragging it
+        // in any row moves the time (see the panel's event filter).
         if (inView(current)) {const double x=frameX(rect,current);
             painter->setPen(QPen(QColor(0,0,0,90),3));painter->drawLine(QPointF(x,rect.top()-3),QPointF(x,rect.bottom()+4));
             painter->setPen(QPen(Qt::white,2));painter->drawLine(QPointF(x,rect.top()-3),QPointF(x,rect.bottom()+4));}
@@ -267,12 +295,12 @@ ModifierPanel::ModifierPanel(QWidget *parent):QWidget(parent) {
     tree_->setStyleSheet("QTreeWidget {border-radius: 4px;} QTreeWidget::item {padding: 2px 5px; border-bottom: 1px solid #23262a;}"
         "QTreeWidget::item:selected {background: #333a40; color: #e7eaeb;} QTreeWidget::item:hover:!selected {background: #1b1e21;}");
     tree_->header()->setSectionResizeMode(0,QHeaderView::Fixed);tree_->header()->setSectionResizeMode(1,QHeaderView::ResizeToContents);tree_->header()->setSectionResizeMode(2,QHeaderView::Stretch);
-    tree_->viewport()->installEventFilter(this);
+    tree_->viewport()->installEventFilter(this);tree_->viewport()->setMouseTracking(true); // the playhead's hover cursor
     connect(tree_->header(),&QHeaderView::sectionResized,this,&ModifierPanel::trackMoved);
     connect(tree_->header(),&QHeaderView::geometriesChanged,this,&ModifierPanel::trackMoved);
     auto *delegate=new CoverageDelegate(tree_);delegate->seek=[this](int frame) {emit seekFrame(frame);};
     // Measured while painting: refit and realign afterwards, not in the middle of a paint.
-    delegate->textMoved=[this] {QMetaObject::invokeMethod(this,[this] {fitNames();emit trackMoved();},Qt::QueuedConnection);};tree_->setItemDelegate(delegate);tree_->setToolTip(tr("Click the eye to enable or disable a modifier.\nSelect a modifier to edit its properties in Tools.\nClick a keyframe diamond to seek.\nCtrl+wheel zooms the timeline, Shift+wheel or a middle drag pans it."));layout->addWidget(tree_);
+    delegate->textMoved=[this] {QMetaObject::invokeMethod(this,[this] {fitNames();emit trackMoved();},Qt::QueuedConnection);};tree_->setItemDelegate(delegate);tree_->setToolTip(tr("Click the eye to enable or disable a modifier.\nSelect a modifier to edit its properties in Tools.\nClick a keyframe diamond to seek, or drag the white time line.\nCtrl+wheel zooms the timeline, Shift+wheel or a middle drag pans it."));layout->addWidget(tree_);
     connect(tree_,&QTreeWidget::currentItemChanged,this,[this](QTreeWidgetItem *item) {
         if (updating_ || !item) return;project_.selectedModifier=item->data(0,ModifierRole).toString();emit selectionChanged();
     });
@@ -319,7 +347,7 @@ void ModifierPanel::setProject(const Project &project) {
                 auto *item=tree_->topLevelItem(i);const auto &m=project_.modifiers[i];
                 item->setText(0,m.name);item->setText(1,typeName(m));item->setToolTip(0,typeName(m)+"\n"+typeDescription(m.type));item->setToolTip(2,item->toolTip(0));
                 item->setCheckState(0,m.active() ? Qt::Checked : Qt::Unchecked);item->setData(2,Qt::UserRole+2,m.active());item->setData(2,Qt::UserRole+3,int(m.type));
-                item->setData(2,Qt::UserRole+4,keyFrames(m));
+                item->setData(2,Qt::UserRole+4,keyFrames(m));item->setData(2,Qt::UserRole+7,erasedChunks(m));
             }
             renderedModifiers_=visualState(project_);updating_=false;fitNames();tree_->viewport()->update();
         }
@@ -334,7 +362,7 @@ void ModifierPanel::rebuild() {
         const QString type=typeName(m);
         auto *item=new QTreeWidgetItem(tree_,{m.name,type,QString()});item->setFlags(item->flags()|Qt::ItemIsEditable|Qt::ItemIsUserCheckable);item->setCheckState(0,m.active() ? Qt::Checked : Qt::Unchecked);
         item->setToolTip(0,type+"\n"+typeDescription(m.type));
-        item->setData(2,Qt::UserRole+4,keyFrames(m));item->setData(2,Qt::UserRole+5,maximum_);item->setData(2,Qt::UserRole+6,frame_);
+        item->setData(2,Qt::UserRole+4,keyFrames(m));item->setData(2,Qt::UserRole+5,maximum_);item->setData(2,Qt::UserRole+6,frame_);item->setData(2,Qt::UserRole+7,erasedChunks(m));
         item->setData(0,ModifierRole,m.id);item->setData(2,Qt::UserRole+2,m.active());item->setData(2,Qt::UserRole+3,int(m.type));item->setToolTip(2,item->toolTip(0));
         if (project_.selectedModifier==m.id) selected=item;
     }
@@ -368,10 +396,74 @@ void ModifierPanel::setView(double first,double last) {
     if (delegate->viewFirst==first && delegate->viewLast==last) return;
     delegate->viewFirst=first;delegate->viewLast=last;tree_->viewport()->update();
 }
+// The bars' extent in the tree viewport, and the frame under an x there.
+QPair<double,double> ModifierPanel::barSpan() const {
+    const auto *header=tree_->header();
+    const QRect bar=CoverageDelegate::barRect(QRect(header->sectionViewportPosition(2),0,header->sectionSize(2),30));
+    return {double(bar.left()),double(bar.width())};
+}
+int ModifierPanel::frameAt(double x) const {
+    const auto [left,width]=barSpan();const auto [first,last]=view();
+    return std::clamp(int(std::lround(first+(x-left)/std::max(1.0,width)*(last-first))),0,std::max(0,maximum_));
+}
+void ModifierPanel::setChunks(const QVector<double> &boundaries) {
+    QVector<int> starts;for (double frame:boundaries) starts.append(int(std::lround(frame)));
+    auto *delegate=static_cast<CoverageDelegate *>(tree_->itemDelegate());
+    if (delegate->chunkStarts!=starts) {delegate->chunkStarts=starts;tree_->viewport()->update();}
+}
+// An Erase row's picked chunk under a point over the bars: its chunk index and picked records,
+// or {-1,0}.
+QPair<int,qulonglong> ModifierPanel::erasedChunkAt(const QPointF &at) const {
+    const auto *item=tree_->itemAt(at.toPoint());const auto [left,width]=barSpan();
+    if (!item || at.x()<left || at.x()>left+width) return {-1,0};
+    const auto *delegate=static_cast<CoverageDelegate *>(tree_->itemDelegate());const int chunk=delegate->chunkOf(frameAt(at.x()));
+    for (const auto &entry:item->data(2,Qt::UserRole+7).toList()) if (entry.toList().value(0).toInt()==chunk) return {chunk,entry.toList().value(1).toULongLong()};
+    return {-1,0};
+}
+// Over the playhead line, in any modifier's row.
+bool ModifierPanel::onPlayhead(const QPointF &at) const {
+    const auto [left,width]=barSpan();const auto [first,last]=view();
+    if (!tree_->itemAt(at.toPoint()) || frame_<first-1e-6 || frame_>last+1e-6) return false;
+    return std::abs(at.x()-(left+width*(frame_-first)/std::max(1e-9,last-first)))<=6;
+}
 // Over the bars, Ctrl+wheel zooms the timeline and Shift+wheel, a horizontal wheel or a
-// middle drag pans it; the plain wheel still scrolls the list.
+// middle drag pans it; the plain wheel still scrolls the list. The playhead line drags to
+// another time, for every modifier and the timeline at once.
 bool ModifierPanel::eventFilter(QObject *watched,QEvent *event) {
     if (watched!=tree_->viewport()) return QWidget::eventFilter(watched,event);
+    switch (event->type()) {
+    case QEvent::MouseButtonPress: case QEvent::MouseMove: case QEvent::MouseButtonRelease: {
+        auto *mouse=static_cast<QMouseEvent *>(event);
+        if (event->type()==QEvent::MouseButtonPress && mouse->button()==Qt::LeftButton && onPlayhead(mouse->position())) {
+            scrubbing_=true;tree_->viewport()->setCursor(Qt::SizeHorCursor);return true;
+        }
+        if (scrubbing_) {
+            if (event->type()==QEvent::MouseMove) {const int frame=frameAt(mouse->position().x());if (frame!=frame_) emit seekFrame(frame);}
+            else if (event->type()==QEvent::MouseButtonRelease && mouse->button()==Qt::LeftButton) {scrubbing_=false;if (!onPlayhead(mouse->position())) tree_->viewport()->unsetCursor();}
+            return true;
+        }
+        // A click on an Erase's picked chunk goes to its first frame, unless the time is already
+        // in it; the row is selected as usual.
+        if (event->type()==QEvent::MouseButtonPress && mouse->button()==Qt::LeftButton) {
+            const auto *delegate=static_cast<CoverageDelegate *>(tree_->itemDelegate());
+            const int chunk=erasedChunkAt(mouse->position()).first;
+            if (chunk>=0 && delegate->chunkOf(frame_)!=chunk) emit seekFrame(delegate->chunkFrames(chunk,maximum_).first);
+        }
+        if (event->type()==QEvent::MouseMove && !panning_ && mouse->buttons()==Qt::NoButton) {
+            if (onPlayhead(mouse->position())) tree_->viewport()->setCursor(Qt::SizeHorCursor);
+            else tree_->viewport()->unsetCursor();
+        }
+        break;
+    }
+    case QEvent::ToolTip: {
+        auto *help=static_cast<QHelpEvent *>(event);const auto [chunk,records]=erasedChunkAt(help->pos());
+        if (chunk<0) break;
+        const auto [first,last]=static_cast<CoverageDelegate *>(tree_->itemDelegate())->chunkFrames(chunk,maximum_);
+        QToolTip::showText(help->globalPos(),tr("Chunk %1 (frames %2\u2013%3): %4 splats erased by hand.\nPicks hold for the whole chunk; click to go to its first frame.").arg(chunk).arg(first).arg(last).arg(records),tree_->viewport());
+        return true;
+    }
+    default: break;
+    }
     switch (event->type()) {
     case QEvent::Wheel: {
         auto *wheel=static_cast<QWheelEvent *>(event);const auto delta=wheel->angleDelta();
