@@ -14,11 +14,17 @@
 #include "filehistory.h"
 #include "presetstore.h"
 #include <QElapsedTimer>
+#include <QImage>
+#include <QJsonArray>
+#include <QJsonObject>
 #include <QMainWindow>
 #include <QThread>
 #include <QTimer>
 #include <map>
 #include <optional>
+#include <memory>
+#include <functional>
+#include "exporttask.h"
 
 class Viewport;
 class ModifierPanel;
@@ -41,6 +47,8 @@ class QGroupBox;
 class QFormLayout;
 class LoadingOverlay;
 class AudioPreview;
+class EditorAutomation;
+enum class EditorCloseResult { Ready, Waiting, Cancelled };
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -48,6 +56,31 @@ public:
     explicit MainWindow(QWidget *parent = nullptr,const QString &presetDirectory = {},const QString &systemPresetDirectory = {});
     ~MainWindow() override;
     void openPath(const QString &path);
+    enum class Interaction { Gui, Automation };
+    bool openPath(const QString &path, Interaction interaction, bool discardUnsaved, QString *error);
+    bool saveTo(const QString &path, QString *error);
+    // Application operations used by automation; the transport never accesses UI internals.
+    QJsonObject automationState(const QString &connectionId) const;
+    QJsonObject automationCommand(const QString &method, const QJsonObject &arguments, const QString &connectionId);
+    ExportTask prepareAutomationExport(const QString &path, bool overwrite);
+    // Inspection images of the capture on screen: the view as shown, a survey of nine views of
+    // this frame and, optionally, top and front views across Start/End (motion), which visits
+    // frames and so finishes later, returning to the frame shown. `render` -1 keeps the
+    // viewport's mode, 0 points, 1 splats. `done` gets the images and their description, or
+    // an error. Only one runs at a time.
+    struct InspectionOptions { bool motion = false, showRemoved = false; int render = -1, motionFrames = 6; std::optional<QVector3D> target; double distance = 0; };
+    struct Inspection { QImage current, survey, motion; QJsonObject meta; };
+    void inspect(const InspectionOptions &options, std::function<void(const Inspection &, const QString &)> done, int waited = 0);
+    // Validates an MCP request and starts the inspection; `reply` gets the answer, PNGs in base64.
+    void automationInspect(const QJsonObject &arguments, std::function<void(const QJsonObject &)> reply);
+    QImage composeInspection(const Inspection &inspection);
+    // Export > Inspection image after its file dialog: renders, composes and saves to `path`.
+    void exportInspectionTo(const QString &path);
+    // Unavailable when this installation has no MCP adapter; `reason` then says why.
+    void setMcpAvailable(bool available, const QString &reason = {});
+    void setMcpConnectionState(bool enabled);
+    void rememberMcpEnabled(bool enabled);
+    void setMcpCloseHandler(std::function<EditorCloseResult()> handler) { mcpCloseHandler_=std::move(handler); }
     void smokeTest(const QString &path, const QString &output);
     // Autosave: every two minutes while there are unsaved changes, a copy of the project in a
     // file of this session's own, removed once the project is saved, replaced or closed
@@ -59,15 +92,40 @@ public:
     // to the project it came from.
     void offerRecovery();
     bool recover(const QString &autosave);
+    bool mcpPreferredEnabled() const { return settings_.value("MCP/Enabled",false).toBool(); }
 signals:
-    void openRequested(QString path, quint64 generation, bool sh);
-    void decodeRequested(double time, quint64 generation, bool sh,Project project);
+    void closeAborted();
+    void mcpEnabledRequested(bool enabled);
+    void openRequested(QString path, quint64 generation, bool sh, quint64 request);
+    void decodeRequested(double time, quint64 generation, bool sh,Project project, quint64 request);
 protected:
     void closeEvent(QCloseEvent *event) override;
     void dragEnterEvent(QDragEnterEvent *event) override;
     void dropEvent(QDropEvent *event) override;
     void changeEvent(QEvent *event) override;
 private:
+    bool remoteCommand_ = false;
+    struct InspectionFraming { QVector3D centre; double orthographic = 0, perspective = 0; };
+    struct InspectionRun {
+        InspectionOptions options; Inspection result; std::function<void(const Inspection &, const QString &)> done;
+        QList<int> frames; int index = 0; bool measuring = true, measured = false, splats = false, remote = false;
+        double original = 0; quint64 generation = 0; QVector3D minimum, maximum; InspectionFraming framing;
+        QList<QImage> tops, fronts; QJsonArray columns; QElapsedTimer waited;
+    };
+    std::unique_ptr<InspectionRun> inspection_;
+    static InspectionFraming inspectionFraming(const QVector3D &minimum, const QVector3D &maximum);
+    QImage renderSurvey(const InspectionFraming &framing, bool splats, bool showRemoved, QJsonArray *cells);
+    void advanceInspection();
+    QString automationError_;
+    QString automationViewId(const QString &connectionId) const;
+    void requireAutomationReady() const;
+    void automationChanged();
+    void validateAutomationProject(const QJsonObject &root, Project *result) const;
+    void reportOperationError(const QString &message, bool remote);
+    std::function<EditorCloseResult()> mcpCloseHandler_;
+    bool closePending_ = false;
+    QByteArray approvedCloseEdits_;
+    QString approvedCloseProject_;
     void buildUi();
     void syncUi();
     void dirty();
@@ -81,6 +139,7 @@ private:
     void play(bool playing);
     void receiveFrame(FramePtr frame);
     void exportImage();
+    void exportInspection();
     void exportCapture();
     QByteArray thumbnailJpeg();
     void estimateExport();
@@ -122,6 +181,8 @@ private:
     QString pendingProjectPath_;
     bool loaded_ = false, loading_ = false, decoding_ = false, pendingDecode_ = false, syncing_ = false;
     quint64 serial_ = 0, generation_ = 0, openingGeneration_ = 0;
+    quint64 requestSerial_ = 0, openingRequest_ = 0, decodeRequest_ = 0;
+    bool openingRemote_ = false, decodeRemote_ = false, pendingDecodeRemote_ = false;
     QThread thread_;
     CaptureWorker *worker_;
     QTimer playback_, autosave_;
@@ -209,6 +270,7 @@ private:
     QWidget *undoFocus_ = nullptr;
     QElapsedTimer undoClock_;
     QAction *undoAction_ = nullptr, *redoAction_ = nullptr;
+    QAction *mcpAction_ = nullptr;
     static QByteArray undoKey(const Project &project);
     void recordUndo();
     void resetUndo();
@@ -239,7 +301,7 @@ private:
     QPushButton *t4dsPresetButton_, *smnPresetButton_;
     QPushButton *cropFitButton_, *cropClearButton_;
     QAction *estimateAction_ = nullptr;
-    QAction *saveAction_, *saveAsAction_, *imageAction_, *exportAction_, *gridAction_, *axesAction_, *markerAction_, *plyAction_ = nullptr, *taskAction_ = nullptr;
+    QAction *saveAction_, *saveAsAction_, *imageAction_, *exportAction_, *gridAction_, *axesAction_, *markerAction_, *plyAction_ = nullptr, *taskAction_ = nullptr, *inspectionAction_ = nullptr;
     QMenu *recentMenu_;
     QString smokeOutput_;
     int smokeStage_ = 0;

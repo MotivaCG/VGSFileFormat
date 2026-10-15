@@ -396,11 +396,11 @@ static Project withModifierDespill(Project project) {
     if (compiled.despill) {s.despillStrength=compiled.despillStrength;s.greenGain=compiled.greenGain;s.viewChromaScale=compiled.viewChroma;s.recoverSkin=compiled.recoverSkin;}
     return project;
 }
-// One scored chunk in the totals: with several prune modifiers, what all of them removed,
-// the largest share asked, and limited when any of them was.
+// One scored chunk in the totals: with several prune modifiers, which apply in turn, what
+// all of them removed, the sum of what each asked of what it saw, and limited when any was.
 void countPruning(ExportResult &result,const std::vector<PruneStats> &stats,const std::vector<uint8_t> &keep) {
     if (stats.empty()) return;
-    quint64 asked=0;bool limited=false;for (const auto &s:stats) {asked=std::max<quint64>(asked,s.asked);limited|=s.limited();}
+    quint64 asked=0;bool limited=false;for (const auto &s:stats) {asked+=s.asked;limited|=s.limited();}
     result.pruneRecords+=keep.size();result.pruneAsked+=asked;result.pruneRemoved+=quint64(std::count(keep.begin(),keep.end(),uint8_t(0)));
     ++result.pruneChunks;if (limited) ++result.pruneLimited;
 }

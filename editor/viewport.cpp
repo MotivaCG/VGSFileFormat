@@ -9,6 +9,7 @@
 // Other uses require prior written authorisation, subject to mandatory law.
 
 #include "viewport.h"
+#include "pointvisibility.h"
 #include "viewcube.h"
 #include "editortheme.h"
 #include <QElapsedTimer>
@@ -25,6 +26,7 @@
 #include <QWheelEvent>
 #include <QtMath>
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <numeric>
 #include <condition_variable>
@@ -76,10 +78,11 @@ vec3 shadedColor() {
 uniform float pointSize;
 uniform samplerBuffer modifierData;
 uniform int cropCount, greenCount;
-uniform bool editingCrop, editShowsRed;
-// 0 drawn, 1 removed, 2 removed by a crop but shown in red while one is edited.
+uniform bool editingCrop, editShowsRed, showRemoved;
+// 0 drawn, 1 removed, 2 removed but shown in red: by a crop while one is edited, or by any
+// modifier in an inspection sheet that asks to see what is removed.
 int removedByModifiers() {
-    if(usePurgeMask && modifierVisibility<0.5) return 1;
+    if(usePurgeMask && modifierVisibility<0.5) return showRemoved ? 2 : 1;
     vec3 world=(model*vec4(position,1)).xyz;
     if(cropCount>0) {
         // Inside some Keep crop (or there is none) and inside no Remove crop.
@@ -95,7 +98,7 @@ int removedByModifiers() {
             if(dimensions.w>0.5) insideRemove=insideRemove||inside;
             else {anyKeep=true;insideKeep=insideKeep||inside;}
         }
-        if(insideRemove || (anyKeep && !insideKeep)) return editingCrop && editShowsRed ? 2 : 1;
+        if(insideRemove || (anyKeep && !insideKeep)) return (editingCrop && editShowsRed) || showRemoved ? 2 : 1;
     }
     vec3 baseRgb=clamp(color,0.0,1.0);
     for(int i=0;i<greenCount;++i) {
@@ -106,7 +109,7 @@ int removedByModifiers() {
         if(chroma<=0.0 || maximum<=0.0) continue;
         float hue=maximum==rgb.r ? (rgb.g-rgb.b)/chroma : maximum==rgb.g ? 2.0+(rgb.b-rgb.r)/chroma : 4.0+(rgb.r-rgb.g)/chroma;
         hue*=60.0;if(hue<0.0) hue+=360.0;float distance=abs(hue-120.0);distance=min(distance,360.0-distance);
-        if(chroma/maximum>=greenFilter.x && distance<=greenFilter.y) return 1;
+        if(chroma/maximum>=greenFilter.x && distance<=greenFilter.y) return showRemoved ? 2 : 1;
     }
     return 0;
 }
@@ -690,7 +693,7 @@ void Viewport::paintGL() {
         auto activeModifiers=modifiers_;
         if (!modifierStack_) {Modifier modifier;modifier.crop=crop_;activeModifiers={modifier};}
         CompiledModifiers modifiers(activeModifiers);std::vector<QVector4D> values;
-        shader->setUniformValue("usePurgeMask",!modifiers.isolations.isEmpty() || !modifiers.prunes.isEmpty() || !modifiers.erased.empty());
+        shader->setUniformValue("usePurgeMask",frame_->greensApplied || !modifiers.isolations.isEmpty() || !modifiers.prunes.isEmpty() || !modifiers.erased.empty());
         shader->setUniformValue("colourMatrix",QMatrix3x3(modifiers.colour.data()));
         if (splats) shader->setUniformValue("opacityScale",modifiers.opacity);
         for (const auto &crop:modifiers.crops) {
@@ -708,18 +711,19 @@ void Viewport::paintGL() {
             // Splats filter while sorting: the records stay, the draw order leaves them out.
             cpuKeep.resize(frame_->points.size());
             for (size_t i=0; i<cpuKeep.size(); ++i) {const auto &p=frame_->points[i];
-                cpuKeep[i] = ((cropEditing_ && crop_.showRemovedInRed) || modifiers.keepsPosition(model.map({p.position[0],p.position[1],p.position[2]}))) && !modifiers.removesColour({p.color[0],p.color[1],p.color[2]});}
+                cpuKeep[i] = keepsPreviewPoint(p,model,modifiers,frame_->greensApplied,cropEditing_ && crop_.showRemovedInRed);}
             values.clear();
         } else if (cpuFiltering) {
             std::vector<PointVertex> points;points.reserve(frame_->points.size());
-            for (const auto &p:frame_->points) if (((cropEditing_ && crop_.showRemovedInRed) || modifiers.keepsPosition(model.map({p.position[0],p.position[1],p.position[2]}))) && !modifiers.removesColour({p.color[0],p.color[1],p.color[2]})) points.push_back(p);
+            for (const auto &p:frame_->points) if (keepsPreviewPoint(p,model,modifiers,frame_->greensApplied,cropEditing_ && crop_.showRemovedInRed)) points.push_back(p);
             glBindBuffer(GL_ARRAY_BUFFER,buffer_);glBufferData(GL_ARRAY_BUFFER,GLsizeiptr(points.size()*sizeof(PointVertex)),points.data(),GL_STREAM_DRAW);drawCount=points.size();values.clear();
         }
         cpuFiltered_=cpuFiltering;
         if (values.empty()) values.push_back({0,0,0,0});
         glBindBuffer(GL_TEXTURE_BUFFER,modifierBuffer_);glBufferData(GL_TEXTURE_BUFFER,GLsizeiptr(values.size()*sizeof(QVector4D)),values.data(),GL_STREAM_DRAW);
         glActiveTexture(GL_TEXTURE1);glBindTexture(GL_TEXTURE_BUFFER,modifierTexture_);glTexBuffer(GL_TEXTURE_BUFFER,GL_RGBA32F,modifierBuffer_);
-        shader->setUniformValue("modifierData",1);shader->setUniformValue("cropCount",cpuFiltering ? 0 : int(modifiers.crops.size()));shader->setUniformValue("greenCount",cpuFiltering ? 0 : int(modifiers.greens.size()));shader->setUniformValue("editingCrop",cropEditing_ && !cleanCapture_);shader->setUniformValue("editShowsRed",crop_.showRemovedInRed);
+        shader->setUniformValue("modifierData",1);shader->setUniformValue("cropCount",cpuFiltering ? 0 : int(modifiers.crops.size()));shader->setUniformValue("greenCount",cpuFiltering ? 0 : int(modifiers.greens.size()));shader->setUniformValue("editingCrop",cropEditing_ && !cleanCapture_ && !sheetCapture_);shader->setUniformValue("editShowsRed",crop_.showRemovedInRed);
+        shader->setUniformValue("showRemoved",sheetCapture_ && sheetShowRemoved_);
         const auto eye = view.inverted().map(QVector3D(0,0,0));
         shader->setUniformValue("eyeLocal", model.inverted().map(eye));
         shader->setUniformValue("shCoefficients", shCoefficients_);
@@ -734,9 +738,10 @@ void Viewport::paintGL() {
             auto upload = [&] {
                 glBindBuffer(GL_ARRAY_BUFFER, orderBuffer_);
                 glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(splatOrder_.size()*sizeof(uint32_t)), splatOrder_.data(), GL_STREAM_DRAW); };
-            if (cpuFiltering) {
-                // That order leaves the filtered splats out, so it is made here, for this paint.
-                sortBackToFront(frame_->points, modelView, &cpuKeep, splatDepths_, splatOrder_); upload();
+            if (cpuFiltering || sheetCapture_) {
+                // That order leaves the filtered splats out, so it is made here, for this paint;
+                // an inspection view's camera is used once, so it is sorted here too.
+                sortBackToFront(frame_->points, modelView, cpuFiltering ? &cpuKeep : nullptr, splatDepths_, splatOrder_); upload();
                 sortedSerial_ = frameSerial_; sortedView_ = modelView; orderComplete_ = false;
             } else {
                 SplatSorter::Result result;
@@ -775,14 +780,15 @@ void Viewport::paintGL() {
         }
         shader->release(); glDisable(GL_BLEND); glDepthMask(GL_TRUE);
     }
-    if (!cleanCapture_) {
+    if (!cleanCapture_ && !sheetCapture_) {
         drawGhost(projection*view,QSize(int(size.x()),int(size.y())),dpr);
         drawCrop(projection*view); drawGizmo(projection*view);
     }
+    if (sheetCapture_ && sheetCrop_) drawCrop(projection*view,true);
     glBindVertexArray(0);
     glDisable(GL_DEPTH_TEST); glDisable(GL_PROGRAM_POINT_SIZE);
     painter.endNativePainting();
-    if (cleanCapture_) return;
+    if (cleanCapture_ || sheetCapture_) return;
     if (selectTool_ != SelectTool::None) {
         painter.setRenderHint(QPainter::Antialiasing);
         // Pink picks; its inverse, green, while Alt is held or the stroke subtracts.
@@ -811,6 +817,7 @@ void Viewport::paintGL() {
     }
 }
 void Viewport::setFrame(FramePtr frame) {
+    ++frameRevision_;
     if (!frame) setGhost(false);
     if (!frame) setTransformMode(TransformMode::None);
     frame_ = std::move(frame); ++frameSerial_; frameDirty_ = true; splatsDirty_ = true; update();
@@ -885,10 +892,9 @@ std::vector<QVector3D> Viewport::visibleWorldPoints() const {
     std::vector<QVector3D> points;if (!frame_) return points;points.reserve(frame_->points.size());const auto model=transform_.matrix();
     auto stack=modifiers_;if (!modifierStack_) {Modifier m;m.crop=crop_;stack={m};}CompiledModifiers modifiers(stack);
     for (const auto &point:frame_->points) {
-        if ((!modifiers.isolations.isEmpty() || !modifiers.prunes.isEmpty() || !modifiers.erased.empty()) && point.modifierVisibility<.5f) continue;
         const auto world=model.map({point.position[0],point.position[1],point.position[2]});
         if (!std::isfinite(world.x()) || !std::isfinite(world.y()) || !std::isfinite(world.z())) continue;
-        if ((cropEditing_ || modifiers.keepsPosition(world)) && !modifiers.removesColour({point.color[0],point.color[1],point.color[2]})) points.push_back(world);
+        if (keepsPreviewPoint(point,model,modifiers,frame_->greensApplied,cropEditing_ && crop_.showRemovedInRed)) points.push_back(world);
     }return points;
 }
 bool Viewport::focusVisible() {
@@ -1033,12 +1039,10 @@ std::vector<uint32_t> Viewport::recordsInside(const QPainterPath &region) const 
     const auto model = transform_.matrix(), viewProjection = projectionMatrix()*viewMatrix();
     auto stack = modifiers_; if (!modifierStack_) { Modifier m; m.crop = crop_; stack = {m}; }
     const CompiledModifiers modifiers(stack);
-    const bool masked = !modifiers.isolations.isEmpty() || !modifiers.prunes.isEmpty() || !modifiers.erased.empty();
     const QRectF bounds = region.boundingRect();
     for (const auto &point : frame_->points) {
-        if (masked && point.modifierVisibility<.5f) continue;
         const QVector3D p = model.map({point.position[0],point.position[1],point.position[2]});
-        if (!(cropEditing_ || modifiers.keepsPosition(p)) || modifiers.removesColour({point.color[0],point.color[1],point.color[2]})) continue;
+        if (!keepsPreviewPoint(point,model,modifiers,frame_->greensApplied,cropEditing_ && crop_.showRemovedInRed)) continue;
         const QVector4D clip = viewProjection*QVector4D(p,1); if (clip.w()<=1e-5f || clip.z()<-clip.w() || clip.z()>clip.w()) continue;
         const QPointF screen((clip.x()/clip.w()+1)*width()*0.5,(1-clip.y()/clip.w())*height()*0.5);
         if (bounds.contains(screen) && region.contains(screen)) records.push_back(uint32_t(point.id));
@@ -1055,17 +1059,15 @@ bool Viewport::pickPoint(const QPointF &screen, QVector3D *world) const {
     const auto model = transform_.matrix(), view = viewMatrix(), viewProjection = projectionMatrix()*view;
     auto stack = modifiers_; if (!modifierStack_) { Modifier m; m.crop = crop_; stack = {m}; }
     const CompiledModifiers modifiers(stack);
-    const bool masked = !modifiers.isolations.isEmpty() || !modifiers.prunes.isEmpty() || !modifiers.erased.empty();
     const float modelScale = std::cbrt(std::abs(model.determinant()));
     const bool orthographic = camera_.orthographic && camera_.preset!=ViewPreset::Free;
     const float tangent = std::tan(qDegreesToRadians(22.5f)), pixelsAtUnitDepth = height()*0.5f/tangent;
     const float orthographicPixels = height()*0.5f/std::max(1e-6f,camera_.distance*tangent);
     struct Hit { float depth, alpha; }; std::vector<Hit> hits;
     for (const auto &point : frame_->points) {
-        if (masked && point.modifierVisibility<.5f) continue;
         const QVector3D p = model.map({point.position[0],point.position[1],point.position[2]});
         if (!std::isfinite(p.x()) || !std::isfinite(p.y()) || !std::isfinite(p.z())) continue;
-        if (!(cropEditing_ || modifiers.keepsPosition(p)) || modifiers.removesColour({point.color[0],point.color[1],point.color[2]})) continue;
+        if (!keepsPreviewPoint(point,model,modifiers,frame_->greensApplied,cropEditing_ && crop_.showRemovedInRed)) continue;
         const QVector4D clip = viewProjection*QVector4D(p,1); if (clip.w()<=1e-5f) continue;
         const float depth = -view.map(p).z(); if (depth<=0) continue;
         const float dx = (clip.x()/clip.w()+1)*width()*0.5f-float(screen.x()), dy = (1-clip.y()/clip.w())*height()*0.5f-float(screen.y()), d2 = dx*dx+dy*dy;
@@ -1492,8 +1494,8 @@ bool Viewport::handleViewKey(int key,Qt::KeyboardModifiers modifiers) {
     if (key==Qt::Key_0) { setViewPreset(ViewPreset::Free); return true; }
     return false;
 }
-void Viewport::drawCrop(const QMatrix4x4 &viewProjection) {
-    if (!cropEditing_) return;
+void Viewport::drawCrop(const QMatrix4x4 &viewProjection, bool always) {
+    if (!cropEditing_ && !(always && crop_.enabled)) return;
     struct Vertex { float p[3],c[3]; }; std::vector<Vertex> lines;
     const auto m = crop_.transform.matrix();
     auto line = [&](QVector3D a,QVector3D b) {
@@ -1515,4 +1517,58 @@ void Viewport::drawCrop(const QMatrix4x4 &viewProjection) {
     glBindVertexArray(gizmoVao_); glBindBuffer(GL_ARRAY_BUFFER,gizmoBuffer_);
     glBufferData(GL_ARRAY_BUFFER,GLsizeiptr(lines.size()*sizeof(Vertex)),lines.data(),GL_STREAM_DRAW);
     glDrawArrays(GL_LINES,0,GLsizei(lines.size())); gridShader_->release();
+}
+
+QJsonObject Viewport::samplePoints(int limit, bool includeRemoved) const {
+    if (!frame_) throw std::runtime_error("No decoded frame available.");
+    if (limit<1 || limit>2000) throw std::runtime_error("limit must be between 1 and 2000.");
+    const auto model=transform_.matrix();
+    auto stack=modifiers_;if (!modifierStack_) {Modifier m;m.crop=crop_;stack={m};}
+    const CompiledModifiers modifiers(stack);
+    size_t visible=0;std::vector<const PointVertex *> kept;kept.reserve(frame_->points.size());
+    for (const auto &p:frame_->points) {
+        const bool keep=keepsPreviewPoint(p,model,modifiers,frame_->greensApplied,cropEditing_ && crop_.showRemovedInRed);
+        if (keep) ++visible;
+        if (keep || includeRemoved) kept.push_back(&p);
+    }
+    const size_t count=std::min(size_t(limit),kept.size());QJsonArray points;
+    for (size_t i=0;i<count;++i) {
+        const auto &p=*kept[i*kept.size()/count];const auto world=model.map({p.position[0],p.position[1],p.position[2]});
+        points.append(QJsonObject{{"record",double(p.id)},{"position",QJsonArray{world.x(),world.y(),world.z()}},
+            {"colour",QJsonArray{p.color[0],p.color[1],p.color[2]}},{"modifier_visible",p.modifierVisibility>=.5f}});
+    }
+    return {{"chunk",int(frame_->chunkIndex)},{"visible_points",double(visible)},
+        {"active_points",double(frame_->points.size())},{"points",points}};
+}
+
+QImage Viewport::sheetImage(const Camera &camera, bool splats, bool showRemoved, bool cropOutline) {
+    const Camera shown=camera_;const bool shownSplats=splats_;
+    camera_=camera;if (splats_!=splats) {splats_=splats;splatsDirty_=true;}
+    sheetCapture_=true;sheetShowRemoved_=showRemoved;sheetCrop_=cropOutline;
+    const QImage image=grabFramebuffer();
+    sheetCapture_=sheetShowRemoved_=sheetCrop_=false;
+    camera_=shown;if (splats_!=shownSplats) {splats_=shownSplats;splatsDirty_=true;}
+    sortedSerial_=0; // the next paint sorts for the user's own camera again
+    update();return image;
+}
+bool Viewport::visibleExtent(QVector3D *minimum, QVector3D *maximum, float trim) const {
+    if (!frame_) return false;
+    const auto model=transform_.matrix();
+    auto stack=modifiers_;if (!modifierStack_) {Modifier m;m.crop=crop_;stack={m};}
+    const CompiledModifiers modifiers(stack);
+    std::array<std::vector<float>,3> axes;
+    for (const auto &p:frame_->points) {
+        if (!keepsPreviewPoint(p,model,modifiers,frame_->greensApplied)) continue;
+        const auto world=model.map(QVector3D(p.position[0],p.position[1],p.position[2]));
+        if (!std::isfinite(world.x()) || !std::isfinite(world.y()) || !std::isfinite(world.z())) continue;
+        for (int a=0;a<3;++a) axes[a].push_back(world[a]);
+    }
+    if (axes[0].empty()) return false;
+    const size_t cut=size_t(float(axes[0].size())*std::clamp(trim,0.f,0.4f));
+    for (int a=0;a<3;++a) {
+        auto &v=axes[a];
+        std::nth_element(v.begin(),v.begin()+cut,v.end());(*minimum)[a]=v[cut];
+        std::nth_element(v.begin(),v.end()-1-cut,v.end());(*maximum)[a]=v[v.size()-1-cut];
+    }
+    return true;
 }

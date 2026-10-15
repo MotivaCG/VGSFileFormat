@@ -17,6 +17,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QElapsedTimer>
+#include <QScopedValueRollback>
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -105,6 +106,12 @@ FramePtr CaptureWorker::frame(double time, bool includeSh) {
     out->decodeMs = timer.nsecsElapsed()/1e6;
     return out;
 }
+void CaptureWorker::openRequest(const QString &path, quint64 generation, bool sh, quint64 request) {
+    const QScopedValueRollback<quint64> scope(request_,request);open(path,generation,sh);
+}
+void CaptureWorker::decodeRequest(double time, quint64 generation, bool sh, Project project, quint64 request) {
+    const QScopedValueRollback<quint64> scope(request_,request);decode(time,generation,sh,std::move(project));
+}
 void CaptureWorker::open(const QString &path, quint64 generation, bool sh) {
     // Build a candidate first: a failed open leaves the existing capture usable.
     CaptureWorker candidate;
@@ -165,10 +172,14 @@ void CaptureWorker::open(const QString &path, quint64 generation, bool sh) {
         source_ = std::move(candidate.source_); vgs_ = std::move(candidate.vgs_); mint_ = std::move(candidate.mint_);
         info_ = candidate.info_; generation_ = generation; pruneScores_.clear();
         emit opened(info_, first, generation);
-    } catch (const std::exception &e) { emit failed(QString::fromUtf8(e.what()), generation, true); }
+        emit openedRequest(info_, first, generation, request_);
+    } catch (const std::exception &e) {
+        emit failed(QString::fromUtf8(e.what()), generation, true);
+        emit failedRequest(QString::fromUtf8(e.what()), generation, true, request_);
+    }
 }
 void CaptureWorker::decode(double time, quint64 generation, bool sh,Project project) {
-    if (generation != generation_) { emit failed("Capture replaced.", generation, false); return; }
+    if (generation != generation_) { emit failed("Capture replaced.", generation, false);emit failedRequest("Capture replaced.",generation,false,request_);return; }
     try {
         QElapsedTimer processingTimer;processingTimer.start();auto out=frame(time,sh);CompiledModifiers modifiers(project.modifiersAtFrame(std::round(time*info_.fps)));
         // A Colour modifier that despills always: the export's despill on what is shown. The
@@ -203,7 +214,7 @@ void CaptureWorker::decode(double time, quint64 generation, bool sh,Project proj
             applyIsolation(positions,keep,modifiers.isolations);for (size_t i=0;i<keep.size();++i) out->points[i].modifierVisibility=keep[i] ? 1.f : 0.f;
         } else if (!pruned.empty() || erasing || greensHere) for (size_t i=0;i<out->points.size();++i) out->points[i].modifierVisibility=unpruned(out->points[i]) && !greenGone(i) ? 1.f : 0.f;
         if (erasing && modifiers.showErased) for (auto &p:out->points) if (p.modifierVisibility>=.5f && erasedHere(p)) p.modifierVisibility=.75f;
-        out->decodeMs=processingTimer.nsecsElapsed()/1e6;emit decoded(out,generation);
+        out->decodeMs=processingTimer.nsecsElapsed()/1e6;emit decoded(out,generation);emit decodedRequest(out,generation,request_);
         // Decode the next VGS chunk in small pieces while this one is on screen.
         // Both the viewer and editor use this worker; doing it here keeps a chunk
         // boundary from forcing the next frame to decompress the entire chunk.
@@ -212,5 +223,5 @@ void CaptureWorker::decode(double time, quint64 generation, bool sh,Project proj
             catch (const std::exception &) { /* The normal frame request reports bad data. */ }
         }
     }
-    catch (const std::exception &e) { emit failed(QString::fromUtf8(e.what()), generation, false); }
+    catch (const std::exception &e) { emit failed(QString::fromUtf8(e.what()), generation, false);emit failedRequest(QString::fromUtf8(e.what()),generation,false,request_); }
 }

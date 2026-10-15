@@ -39,9 +39,9 @@ struct PruneStats {
     bool limited() const { return removed < asked; }
 };
 
-// What stays: for each filter, up to its percent of the chunk's records, lowest scores first,
-// among those scoring below its protection threshold. `stats`, when given, gets one entry
-// per filter.
+// What stays: for each filter in turn, up to its percent of the records the previous filters
+// kept, lowest scores first, among those scoring below its protection threshold. `stats`,
+// when given, gets one entry per filter, counted on the records that filter saw.
 std::vector<uint8_t> pruneKeep(const std::vector<float> &scores, const QVector<PruneFilter> &filters,
                                std::vector<PruneStats> *stats = nullptr);
 

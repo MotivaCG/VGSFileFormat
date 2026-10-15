@@ -93,10 +93,13 @@ private slots:
         QCOMPARE(removed({{90,1000}}),(QList<int>{0,1,2,4,5,6,7,8,9}));   // -1 is never removed
         QCOMPARE(removed({{50,0}}),QList<int>{});                         // a capture where everything counts
         QCOMPARE(removed({{10,1},{0,1}}),(QList<int>{0}));
-        // What each filter did: asked for five, the protection let four go.
+        // Filters apply in turn: the second takes its share of the eight left, the next lowest.
+        QCOMPARE(removed({{20,1},{20,1}}),(QList<int>{0,2,5}));
+        // What each filter did: asked for five, the protection let four go; the second sees the
+        // six left, asks for one and finds none below its protection.
         std::vector<PruneStats> stats;pruneKeep(scores,{{50,0.25},{20,0.25}},&stats);QCOMPARE(stats.size(),size_t(2));
         QCOMPARE(stats[0].records,size_t(10));QCOMPARE(stats[0].asked,size_t(5));QCOMPARE(stats[0].removed,size_t(4));QVERIFY(stats[0].limited());
-        QCOMPARE(stats[1].asked,size_t(2));QCOMPARE(stats[1].removed,size_t(2));QVERIFY(!stats[1].limited());
+        QCOMPARE(stats[1].records,size_t(6));QCOMPARE(stats[1].asked,size_t(1));QCOMPARE(stats[1].removed,size_t(0));QVERIFY(stats[1].limited());
         QCOMPARE(pruneSampleTimes(1,2).size(),size_t(4));for (double t:pruneSampleTimes(1,2)) QVERIFY(t>1 && t<2);
         // Faint and tiny splats score below the ones that make the picture.
         vgs::Frame f;f.count=0;

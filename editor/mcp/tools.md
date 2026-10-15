@@ -1,0 +1,115 @@
+# VGS Editor modifiers and cleanup examples
+
+Tool discovery (`tools/list`) is the source of truth for each tool's purpose, parameters,
+limits, defaults and annotations, taken from the server's docstrings and typed signatures.
+This resource explains modifier behavior and worked examples; it does not repeat the tool
+catalog. Use `vgs-editor://workflow` for the capture context and cleanup procedure.
+
+## Modifier types: what each one does
+
+All types below can be added with `add_modifier` and configured by `edit_modifier` using
+the **existing** native fields. Modifiers operate over the source timeline; seek through
+several poses to evaluate them. Animation varies a modifier over time where supported.
+
+| `type` | Intended use | Native settings and cautions |
+|---|---|---|
+| `crop` | The main tool for removing large unwanted regions: keep the subject inside a cylinder/box, or remove floor/rig fragments. | See "Crop volumes" below for shapes, fields and how several crops combine. Check the entire motion; tight single-pose crops can cut limbs or object parts. |
+| `purge-isolated` | Remove sparse, detached reconstruction noise automatically. | `isolation.neighbour` and `medianPercent`. Removes points whose Nth-neighbor distance exceeds median distance times medianPercent/100. Default neighbour=4, medianPercent=700; use 900 for a conservative first comparison. **Higher medianPercent removes less.** Density does not prove semantic relevance; protect thin detail. |
+| `erase` | Manually remove residual floaters or fragments missed by filters. | Use brush/lasso/clear tools, not a patch to `erase`. Picks are chunk-local source-record identities. Pink editing preview differs from the final removed result; always check both. |
+| `remove-green` | Remove splats classified as green by their base colour, e.g. green-screen fragments. | `green.minimumSaturation`, `hueTolerance`, `colourSpace`; target hue is green (120 degrees). Can delete intentional green clothes/props. Deleting green points and correcting green spill are different operations. |
+| `colour` | Adjust exposure, white balance, saturation, opacity and green spill while retaining capture colour representation. | `colour`: exposure, temperature, tint, saturation, opacity, despillMode/strength and related fields. Exposure is stops, opacity a multiplier. Despill modes `none`/`export`/`always` determine whether the viewport shows it. This corrects appearance; it does not identify floating geometry. |
+| `prune-low-contribution` | Reduce splats contributing little to rendered images, including faint, tiny or hidden data. | `prune.percent` is an upper reduction share, `protectAbove` protects higher average 1080p pixel coverage. Evaluated per chunk from surrounding views. It is a visual-contribution optimization; it may preserve highly visible unwanted junk and remove valid weak detail. Validate separately from spatial cleanup. |
+| `bake-antialiasing` | Prepare an antialias-trained capture, such as Gracia MINT, for renderers without the matching compensation. | `bake.distance`, `screenHeight` at 45-degree vertical FOV. Widens thin splats and compensates opacity for the target viewing conditions. Changes rendering preparation, not semantic noise selection. |
+| `animate-transform` | Apply keyed position/rotation/scale offsets to the whole subject over time. | `animation.keys` in reference-offset space, using the returned native schema. Key arrays are replaced in full when patched. VGS/PGS can carry motion samples; MINT cannot preserve this motion representation. |
+| `walk` | Mark the capture as walking along +Z with a speed. | `walk.speed` in metres/second, optional display units. Preview moves the floor; VGS export records walking metadata and leaves point positions in place. Does not create limb animation or clean geometry. |
+| `audio` | Attach the capture's own soundtrack or an external file, with offset, volume and optional looping. | `audio.source`, `file`, `offset` in seconds, `volume` 0..1 and `loop`. Paths belong to the editor's computer. Multiple tracks mix; VGS/PGS carry synchronized audio, MINT cannot. |
+
+## Crop volumes: removing the bulk first
+
+Crops are the most effective way to remove large unwanted data (floor, rig parts,
+background clouds): one crop acts on every frame and chunk at once, unlike Erase picks.
+Use them before Purge Isolated and Erase.
+
+**Shapes.** All sizes are in metres; Y is vertical. A crop's pivot is at its **base**:
+local Y runs from 0 (bottom) to `height` (top), so `crop.position[1]` is the bottom,
+not the centre. With the subject placed on the floor (feet or base at Y=0, centred on
+X=0, Z=0, by eye), put the crop's base at [0,0,0]: everything below Y=0 is then cut as noise.
+Never place the base from the lowest point or `bounds` minimum; stray noise sits there.
+
+- `cylinder`: elliptic, `radius` along local X, `radiusZ` along local Z, plus `height`.
+  Usually the best `keep` volume around a person, since it matches a standing or
+  turning figure and the rig's inward-facing layout.
+- `box`: `width` (X), `depth` (Z), `height` (Y). Best for flat or rectangular regions:
+  a thin `remove` box for a floor slab, or a box around a rig fragment or prop table.
+
+`crop.position`, `rotation` (degrees), `scale` and `shear` place the volume in world
+space. Crops do not follow `set_capture_transform`; move them separately if the capture
+is transformed.
+
+**Combining crops (`mode`).** Stack order between crops does not matter. A point is kept
+when it is inside at least one `keep` crop (or there are no `keep` crops) and inside no
+`remove` crop:
+
+- several `keep` crops add together (union), e.g. a cylinder for the body plus a box
+  for a prop held at arm's length;
+- `remove` crops subtract, and win wherever they overlap a `keep` crop, e.g. a keep
+  cylinder around the subject plus a thin remove box for the floor under the feet;
+- with only `remove` crops, everything outside them is kept.
+
+**Order with other modifiers.** Processing order is fixed, not the stack order:
+Prune Low Contribution and Erase picks, then crops and Remove green, then Purge Isolated
+on what remains. Purge Isolated therefore computes its median distance only on points
+that crops keep, so cropping the bulk away first makes its threshold more meaningful.
+Stack order only matters between Remove green and Colour (a Remove green below a Colour
+modifier tests the corrected colour).
+
+**Typical setup.** First place the subject with `set_capture_transform`: centred on
+X=0, Z=0 by eye (top and front views) and with its feet or base on the floor grid at Y=0
+by eye in the front view; noise below the subject makes the lowest point unreliable. Then add one
+`keep` cylinder with its base at [0,0,0] covering the full motion with a margin of
+0.1-0.2 m. Its base cuts everything below Y=0. A new crop initially fits the capture;
+read its values with `get_project`, then patch only what changes, e.g.:
+
+```json
+{"modifier_id":"ID","patch":{"crop":{"shape":"cylinder","mode":"keep","position":[0,0,0],"radius":0.6,"radiusZ":0.6,"height":2.0}}}
+```
+
+Crop animation keys can be patched when they already exist; this MCP has no dedicated
+tool to create crop keys, so prefer a static crop large enough for the whole motion.
+
+## Example: inspect, clean and validate
+
+1. Call `list_editor_sessions`; explicitly select the intended window if needed.
+2. Call `pause_playback`, `get_editor_state` and `get_project`. Record the user's range,
+   existing modifiers and selected modifier; do not overwrite their work with a preset.
+3. Use `set_render_mode(mode="points", point_size=2)`, `set_view` and
+   `get_viewport_image(max_width=1024)`. Follow the survey baseline in the workflow:
+   front, side, top and perspective at first/middle/last frames and both sides of chunk boundaries.
+   Place the subject with `set_capture_transform`: centred on X=0, Z=0 and feet/base on the
+   floor grid at Y=0, judged by eye in the top and front views, not from the lowest point.
+   Then add a `keep` cylinder with its base at [0,0,0]; it also cuts everything below Y=0.
+   Add `remove` boxes for remaining rig fragments, checked across the full motion.
+4. If noise is isolated and sparse, add a `purge-isolated` modifier and use its returned ID:
+
+   ```json
+   {"modifier_id":"ID_FROM_ADD_MODIFIER","patch":{"isolation":{"neighbour":4,"medianPercent":900}}}
+   ```
+
+   This raises the threshold from the default 700 to 900 for a conservative comparison.
+   Compare enabled/disabled images. Tune from the observed result; this filter is not
+   mandatory when the unwanted data is dense or touches the subject.
+5. For a remaining detached fragment, add/select an enabled `erase`, call `set_erase_editing(true)`,
+   then get an image. Use `erase_brush` or `erase_lasso` on the observed fragment, avoiding
+   the subject in depth. Use the image's `view_id`; get a new image after each stroke.
+6. Turn Erase editing off and inspect in splats. Check fine details and full motion;
+   undo or soften an edit when it damages the subject. Repeat separately in other chunks.
+7. Save a `.vgsproj` if requested. For delivery, start an export to a new requested path,
+   poll its job until terminal, and report success only for `done`, including relevant notes.
+
+## MCP resources and prompt
+
+- `vgs-editor://workflow`: app purpose, rig context, cleanup sequence and operating rules.
+- `vgs-editor://tools`: modifier behavior and cleanup examples; no editor changes.
+- `clean_noise` prompt: the workflow plus the caller's `detail` objective, defaulting to
+  preserving the subject and fine details. Requesting the prompt performs no cleanup;
+  the assistant still needs to inspect images and execute tools.

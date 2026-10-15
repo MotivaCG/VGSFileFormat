@@ -34,7 +34,7 @@ public:
     ~TaskQueueDialog() override;
     void addTasks(const QStringList &paths);
     void start();
-    bool running() const { return job_ != nullptr; }
+    bool running() const { return exportLease_ != nullptr; }
     QTreeWidget *list() const { return list_; }
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -56,6 +56,8 @@ private:
     QList<Entry> entries_;
     int current_ = -1;
     QThread *job_ = nullptr;
+    std::unique_ptr<ExportLease> exportLease_;
+    bool closing_ = false;
     std::atomic_bool stopTask_{false}, stopAll_{false};
     QVector<int> run_;          // the entries this run processes
     ExportResult jobResult_;    // written by the job before its thread finishes

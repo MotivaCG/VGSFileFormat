@@ -30,6 +30,9 @@ public:
     explicit Viewport(QWidget *parent = nullptr);
     ~Viewport() override;
     void setFrame(FramePtr frame);
+    FramePtr frame() const { return frame_; }
+    quint64 frameRevision() const { return frameRevision_; }
+    QJsonObject samplePoints(int limit, bool includeRemoved) const;
     void setTransform(const Transform &transform);
     Transform transform() const { return transform_; }
     void setTransformMode(TransformMode mode);
@@ -105,6 +108,13 @@ public:
     // The scene as it is drawn now, without the grid, gizmo, crop wires, ghost or help text:
     // the centre square of the view, `side` pixels across. An export's thumbnail.
     QImage cleanImage(int side = 256);
+    // The current frame from `camera`, for inspection sheets: floor grid but no gizmo, ghost
+    // or hints, splats or points as asked; optionally what the modifiers remove drawn in red
+    // instead of hidden, and the selected crop's wire volume. The user's view is untouched.
+    QImage sheetImage(const Camera &camera, bool splats, bool showRemoved, bool cropOutline);
+    // The box of the points on screen, each axis without `trim` of them at either end so a
+    // few floaters do not stretch it. False when nothing is visible.
+    bool visibleExtent(QVector3D *minimum, QVector3D *maximum, float trim = 0.01f) const;
     bool setGhost(bool enabled);
     void setGhostOpacity(float opacity);
     float ghostOpacity() const {return ghostOpacity_;}
@@ -138,6 +148,7 @@ protected:
     void wheelEvent(QWheelEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
 private:
+    quint64 frameRevision_ = 0;
     void cleanup();
     QMatrix4x4 viewMatrix() const;
     QMatrix4x4 projectionMatrix() const;
@@ -156,11 +167,11 @@ private:
     QVector3D editablePivot() const;
     void applyEditableTransform(const Transform &transform);
     void orbit(float yawDelta, float pitchDelta);
-    void drawCrop(const QMatrix4x4 &viewProjection);
+    void drawCrop(const QMatrix4x4 &viewProjection, bool always = false);
     std::vector<QVector3D> visibleWorldPoints() const;
     void drawGhost(const QMatrix4x4 &viewProjection,const QSize &pixels,float dpr);
     Transform worldTransformed(const Transform &start,const QMatrix4x4 &delta) const;
-    bool cleanCapture_ = false;
+    bool cleanCapture_ = false, sheetCapture_ = false, sheetShowRemoved_ = false, sheetCrop_ = false;
     SelectTool selectTool_ = SelectTool::None;
     float brushRadius_ = 20;
     bool selecting_ = false;

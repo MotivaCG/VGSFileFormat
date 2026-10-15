@@ -74,6 +74,7 @@
 #include <QScrollArea>
 #include <QShortcut>
 #include <QSignalBlocker>
+#include <QScopedValueRollback>
 #include "rangeslider.h"
 #include <QSpinBox>
 #include <functional>
@@ -342,10 +343,11 @@ MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory,const QStr
     buildUi();
     worker_->moveToThread(&thread_);
     connect(&thread_, &QThread::finished, worker_, &QObject::deleteLater);
-    connect(this, &MainWindow::openRequested, worker_, &CaptureWorker::open);
-    connect(this, &MainWindow::decodeRequested, worker_, &CaptureWorker::decode);
-    connect(worker_, &CaptureWorker::opened, this, [this](CaptureInfo info, FramePtr frame, quint64 gen) {
-        if (gen != openingGeneration_) return;
+    connect(this, &MainWindow::openRequested, worker_, &CaptureWorker::openRequest);
+    connect(this, &MainWindow::decodeRequested, worker_, &CaptureWorker::decodeRequest);
+    connect(worker_, &CaptureWorker::openedRequest, this, [this](CaptureInfo info, FramePtr frame, quint64 gen, quint64 request) {
+        if (gen != openingGeneration_ || request!=openingRequest_) return;
+        const QScopedValueRollback<bool> origin(remoteCommand_,openingRemote_);
         loadingOverlay_->stop();
         loading_ = false; loaded_ = true; decoding_ = pendingDecode_ = false;
         generation_ = gen; info_ = info;
@@ -390,21 +392,24 @@ MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory,const QStr
         else receiveFrame(frame);
         statusBar()->showMessage(tr("Capture ready: %1").arg(info.title), 5000);
     });
-    connect(worker_, &CaptureWorker::decoded, this, [this](FramePtr frame, quint64 gen) {
-        if (gen != generation_) return;
+    connect(worker_, &CaptureWorker::decodedRequest, this, [this](FramePtr frame, quint64 gen, quint64 request) {
+        if (gen != generation_ || request!=decodeRequest_) return;
         decoding_ = false; receiveFrame(frame);
-        if (pendingDecode_ && !loading_) { pendingDecode_ = false; requestFrame(); }
+        if (pendingDecode_ && !loading_) {
+            pendingDecode_ = false;const QScopedValueRollback<bool> origin(remoteCommand_,pendingDecodeRemote_);requestFrame();
+        }
     });
-    connect(worker_, &CaptureWorker::failed, this, [this](QString message, quint64 gen, bool opening) {
+    connect(worker_, &CaptureWorker::failedRequest, this, [this](QString message, quint64 gen, bool opening, quint64 request) {
+        const bool remote=opening ? openingRemote_ : decodeRemote_;
         if (opening) {
-            if (gen != openingGeneration_) return;
+            if (gen != openingGeneration_ || request!=openingRequest_) return;
             loadingOverlay_->stop();recovering_=false;
             loading_ = false; pendingProject_.reset(); pendingProjectPath_.clear();
         } else {
-            if (gen != generation_) return;
+            if (gen != generation_ || request!=decodeRequest_) return;
             decoding_ = pendingDecode_ = false;
         }
-        play(false); syncUi(); showError(message);
+        play(false); syncUi(); reportOperationError(message,remote);
     });
     connect(viewport_, &Viewport::renderFailed, this, [this](const QString &error) {
         statusBar()->showMessage(error);
@@ -446,6 +451,16 @@ MainWindow::~MainWindow() {
     playback_.stop(); thread_.quit(); thread_.wait();
 }
 
+void MainWindow::setMcpAvailable(bool available, const QString &reason) {
+    mcpAction_->setEnabled(available);
+    mcpAction_->setText(available || reason.isEmpty() ? tr("Enable MCP") : tr("Enable MCP (not installed)"));
+    mcpAction_->setToolTip(reason.isEmpty() ? tr("Allow connected AI assistants to inspect and control this editor.") : reason);
+    mcpAction_->setStatusTip(reason);
+}
+void MainWindow::setMcpConnectionState(bool enabled) {
+    const QSignalBlocker blocker(mcpAction_);mcpAction_->setChecked(enabled);
+}
+void MainWindow::rememberMcpEnabled(bool enabled) {settings_.setValue("MCP/Enabled",enabled);settings_.sync();}
 void MainWindow::buildUi() {
     resize(1400, 900); setAcceptDrops(true);
     auto *file = menuBar()->addMenu(tr("File"));
@@ -473,6 +488,11 @@ void MainWindow::buildUi() {
     redoAction_->setShortcuts({QKeySequence("Ctrl+Y"),QKeySequence("Ctrl+Shift+Z")});
     redoAction_->setIcon(themeIcon(QIcon::ThemeIcon::EditRedo,style()->standardIcon(QStyle::SP_ArrowForward)));
     redoAction_->setToolTip(tr("Redo the edit just undone (Ctrl+Y or Ctrl+Shift+Z)."));
+    edit->addSeparator();
+    mcpAction_ = edit->addAction(tr("Enable MCP"));mcpAction_->setObjectName("editMcp");
+    mcpAction_->setCheckable(true);mcpAction_->setEnabled(false);
+    mcpAction_->setToolTip(tr("Allow connected AI assistants to inspect and control this editor."));
+    connect(mcpAction_,&QAction::toggled,this,&MainWindow::mcpEnabledRequested);
     qApp->installEventFilter(new UndoInput(this));
     // Everything that writes something other than the project.
     auto *exportMenu = menuBar()->addMenu(tr("Export")); exportMenu->setToolTipsVisible(true);
@@ -480,10 +500,16 @@ void MainWindow::buildUi() {
     exportAction_->setToolTip(tr("Export the selected Start/End range to VGS, PGS or MINT, baking capture transforms and active modifiers (Ctrl+E). MINT omits capture metadata."));
     plyAction_ = exportMenu->addAction(tr("Export current frame as PLY\u2026"), QKeySequence("Ctrl+Alt+E"), this, &MainWindow::exportFrame);
     plyAction_->setToolTip(tr("Write the frame on screen as a 3D Gaussian Splatting .ply, edited as Export capture would write it: transform, modifiers, color processing and SH degree (Ctrl+Alt+E)."));
-    imageAction_ = exportMenu->addAction(tr("Export viewport image\u2026"), QKeySequence("Ctrl+Shift+E"), this, &MainWindow::exportImage);
     estimateAction_ = exportMenu->addAction(tr("Estimate export size\u2026"), QKeySequence("Ctrl+Alt+S"), this, &MainWindow::estimateExport);
     estimateAction_->setToolTip(tr("How much a .vgs export of the Start/End range would weigh, and the bitrate it needs to stream, with every modifier and setting as it is now (Ctrl+Alt+S).\nA few seconds are exported for real and extrapolated; short ranges are measured exactly."));
     estimateAction_->setIcon(themeIcon(QIcon::ThemeIcon::DocumentProperties,style()->standardIcon(QStyle::SP_FileDialogInfoView)));
+    // Pictures of the capture, apart from the exports of it.
+    exportMenu->addSeparator();
+    imageAction_ = exportMenu->addAction(tr("Export viewport image\u2026"), QKeySequence("Ctrl+I"), this, &MainWindow::exportImage);
+    inspectionAction_ = exportMenu->addAction(tr("Export inspection image\u2026"), QKeySequence("Ctrl+Alt+I"), this, &MainWindow::exportInspection);
+    inspectionAction_->setObjectName("exportInspection");
+    inspectionAction_->setToolTip(tr("Save one image to check a cleanup: the view on screen, nine views of this frame from every side and from above and below, and top and front views across Start/End with the crop drawn (Ctrl+Alt+I)."));
+    inspectionAction_->setIcon(themeIcon(QIcon::ThemeIcon::EditFind,style()->standardIcon(QStyle::SP_FileDialogContentsView)));
     exportMenu->addSeparator();
     taskAction_ = exportMenu->addAction(tr("Export task\u2026"), QKeySequence("Ctrl+T"), this, &MainWindow::exportTask);
     taskAction_->setToolTip(tr("Choose an output as for Export capture, and write a .vgstask beside it instead of exporting.\nThe task keeps a copy of the project as it is now. Run it later with Process tasks (Ctrl+T)."));
@@ -491,7 +517,7 @@ void MainWindow::buildUi() {
     processAction->setToolTip(tr("Open one or more .vgstask files and export them one after another (Ctrl+Shift+T)."));
     taskAction_->setIcon(themeIcon(QIcon::ThemeIcon::ListAdd,style()->standardIcon(QStyle::SP_FileDialogNewFolder)));
     processAction->setIcon(themeIcon(QIcon::ThemeIcon::MediaPlaybackStart,style()->standardIcon(QStyle::SP_MediaPlay)));
-    imageAction_->setToolTip(tr("Save the viewport as it looks now as a PNG (Ctrl+Shift+E)."));
+    imageAction_->setToolTip(tr("Save the viewport as it looks now as a PNG (Ctrl+I)."));
     newAction->setIcon(themeIcon(QIcon::ThemeIcon::DocumentNew,style()->standardIcon(QStyle::SP_FileIcon)));
     openAction->setIcon(themeIcon(QIcon::ThemeIcon::DocumentOpen,style()->standardIcon(QStyle::SP_DirOpenIcon)));
     saveAction_->setIcon(themeIcon(QIcon::ThemeIcon::DocumentSave,style()->standardIcon(QStyle::SP_DialogSaveButton)));
@@ -1240,7 +1266,7 @@ void MainWindow::syncUi() {
     captureSettingsButton_->setEnabled(loaded_ && !loading_);
     savePresetButton_->setEnabled(loaded_ && !loading_); presetCombo_->setEnabled(loaded_ && !loading_ && presetCombo_->count()>1);
     presetFolderButton_->setEnabled(loaded_ && !loading_);
-    saveAction_->setEnabled(loaded_ && !loading_); saveAsAction_->setEnabled(loaded_ && !loading_); imageAction_->setEnabled(loaded_ && !loading_); exportAction_->setEnabled(loaded_ && !loading_); plyAction_->setEnabled(loaded_ && !loading_); taskAction_->setEnabled(loaded_ && !loading_); estimateAction_->setEnabled(loaded_ && !loading_);
+    saveAction_->setEnabled(loaded_ && !loading_); saveAsAction_->setEnabled(loaded_ && !loading_); imageAction_->setEnabled(loaded_ && !loading_); inspectionAction_->setEnabled(loaded_ && !loading_); exportAction_->setEnabled(loaded_ && !loading_); plyAction_->setEnabled(loaded_ && !loading_); taskAction_->setEnabled(loaded_ && !loading_); estimateAction_->setEnabled(loaded_ && !loading_);
     assetLabel_->setText(loaded_ ? info_.title : tr("No capture"));
     assetLabel_->setToolTip(project_.asset);
     metadata_->setText(loaded_ ? tr("%1 · %2 fps\n%3 s · %4 frames").arg(info_.format).arg(info_.fps,0,'f',2).arg(info_.duration,0,'f',3).arg(info_.frames) : QString());
@@ -1411,34 +1437,55 @@ bool MainWindow::save(bool saveAs) {
     }
     if (path.isEmpty()) return false;
     if (!path.endsWith(".vgsproj", Qt::CaseInsensitive)) path += ".vgsproj";
-    project_.camera = viewport_->camera(); QString error;
-    if (!project_.write(path, &error)) { showError(error); return false; }
-    projectPath_ = QFileInfo(path).absoluteFilePath(); history_.remember(projectPath_); updateRecentMenu();
-    setWindowModified(false); title(); discardAutosave(); statusBar()->showMessage(tr("Project saved."),3000); return true;
+    QString error;
+    if (!saveTo(path,&error)) { showError(error);return false; }
+    return true;
+}
+bool MainWindow::saveTo(const QString &path, QString *error) {
+    if (!loaded_ || loading_) {if (error) *error=tr("Open a capture first and wait for loading.");return false;}
+    project_.camera=viewport_->camera();QString failure;
+    if (!project_.write(path,&failure)) {if (error) *error=failure;return false;}
+    projectPath_=QFileInfo(path).absoluteFilePath();history_.remember(projectPath_);updateRecentMenu();
+    setWindowModified(false);title();discardAutosave();statusBar()->showMessage(tr("Project saved."),3000);return true;
 }
 void MainWindow::newProject() {
     if (loading_ || !canDiscard()) return;
     play(false); loaded_ = decoding_ = pendingDecode_ = false; generation_ = ++serial_;
     viewport_->setTransformMode(TransformMode::None);
     viewport_->setCropEditing(false); viewport_->setCrop({});
-    project_ = defaultProject(); info_ = {}; projectPath_.clear(); viewport_->setFrame({}); viewport_->setTransform({});
+    project_ = defaultProject(); info_ = {}; projectPath_.clear(); slider_->setChunkBoundaries({}); viewport_->setFrame({}); viewport_->setTransform({});
     for (int g=0; g<3; ++g) viewport_->setCoordinateSpace(TransformMode(g+1),project_.spaces[g]);
     viewport_->setCamera(project_.camera); setWindowModified(false); refreshPresets(); syncUi(); title(); resetUndo(); discardAutosave();
     // Release the source and its caches in their owning thread.
     QMetaObject::invokeMethod(worker_, &CaptureWorker::clear, Qt::QueuedConnection);
 }
 void MainWindow::openPath(const QString &path) {
-    if (loading_ || !canDiscard()) return;
-    pendingProject_.reset(); pendingProjectPath_.clear(); QString asset = path;
-    if (QFileInfo(path).suffix().compare("vgsproj", Qt::CaseInsensitive) == 0) {
-        Project p; QString error;
-        if (!Project::read(path, &p, &error)) { showError(error); return; }
-        pendingProject_ = p; pendingProjectPath_ = QFileInfo(path).absoluteFilePath(); asset = p.asset;
-    }
+    QString error;
+    if (!openPath(path,Interaction::Gui,false,&error) && !error.isEmpty()) showError(error);
+}
+bool MainWindow::openPath(const QString &path, Interaction interaction, bool discardUnsaved, QString *error) {
+    auto failed=[error](const QString &message) {if (error) *error=message;return false;};
+    if (error) error->clear();
+    if (loading_ || (interaction==Interaction::Automation && decoding_)) return failed(tr("Editor is busy."));
+    if (interaction==Interaction::Gui) {if (!canDiscard()) return false;}
+    else if (isWindowModified() && !discardUnsaved) return failed(tr("Unsaved project. Save it or explicitly set discard_unsaved=true."));
+    const QString absolute=QFileInfo(path).absoluteFilePath();
+    if (!QFileInfo(absolute).isFile()) return failed(tr("Capture or project does not exist."));
+    QString asset=absolute;std::optional<Project> candidate;
+    const QString suffix=QFileInfo(absolute).suffix().toLower();
+    if (suffix=="vgsproj") {
+        Project p;QString failure;
+        if (!Project::read(absolute,&p,&failure)) return failed(failure);
+        if (!QFileInfo(p.asset).isFile()) return failed(tr("The project's source capture is missing."));
+        candidate=p;asset=p.asset;
+    } else if (suffix!="vgs" && suffix!="pgs" && suffix!="mint") return failed(tr("Open a VGS, PGS, MINT or VGSPROJ file."));
+    pendingProject_=candidate;pendingProjectPath_=candidate ? absolute : QString();
+    openingRemote_=interaction==Interaction::Automation;openingRequest_=++requestSerial_;
+    automationError_.clear();
     play(false); viewport_->setTransformMode(TransformMode::None); viewport_->setCropEditing(false); loading_ = true; openingGeneration_ = ++serial_; syncUi();
     loadingOverlay_->start(QFileInfo(asset).fileName());
     statusBar()->showMessage(tr("Loading %1…").arg(QFileInfo(asset).fileName()));
-    emit openRequested(asset, openingGeneration_, true);
+    emit openRequested(asset, openingGeneration_, true, openingRequest_);return true;
 }
 int MainWindow::timelineFrame(double displayedValue) const {
     return int(std::clamp(std::round(displayedValue*(timelineSecondsButton_->isChecked() ? info_.fps : 1.0)),0.0,double(std::max(0,info_.frames-1))));
@@ -1470,10 +1517,11 @@ void MainWindow::syncAudio() {
 }
 void MainWindow::requestFrame() {
     if (!loaded_ || loading_) return;
-    if (decoding_) { pendingDecode_ = true; return; }
+    if (decoding_) { pendingDecode_ = true;pendingDecodeRemote_=remoteCommand_;return; }
     Project snapshot=project_;if (viewport_->cropEditing()) for (auto &m:snapshot.modifiers) if (m.type==ModifierType::Crop) m.enabled=false;
     for (auto &m:snapshot.modifiers) if (m.type==ModifierType::Erase) m.showErased=m.id==project_.selectedModifier && eraseEditing_;
-    decoding_ = true; emit decodeRequested(project_.time, generation_, true,snapshot);
+    decoding_ = true;decodeRemote_=remoteCommand_;decodeRequest_=++requestSerial_;
+    emit decodeRequested(project_.time, generation_, true,snapshot,decodeRequest_);
 }
 void MainWindow::play(bool playing) {
     if (playing && (!loaded_ || loading_)) return;
@@ -1674,6 +1722,8 @@ void MainWindow::exportCapture() {
     if (outputExtension!="vgs" && outputExtension!="pgs" && outputExtension!="mint" && outputExtension!="ply") {
         showError(tr("Select a .vgs, .pgs, .mint or .ply destination."));return;
     }
+    auto lease=ExportLease::tryAcquire();
+    if (!lease) {showError(tr("An export is already running in the editor or task queue."));return;}
     Project snapshot=project_;snapshot.captureSettings.plain=outputExtension=="pgs";
     const qint64 originalBytes=QFileInfo(snapshot.asset).size();const QByteArray thumbnail=outputExtension=="mint" || outputExtension=="ply" ? QByteArray() : thumbnailJpeg();
     QProgressDialog progress(tr("Preparing export"),tr("Cancel"),0,100,this);
@@ -1736,6 +1786,8 @@ void MainWindow::exportFrame() {
     QString destination=QFileDialog::getSaveFileName(this,tr("Export current frame as PLY"),suggested,tr("Gaussian splat (*.ply)"));
     if (destination.isEmpty()) return;
     if (QFileInfo(destination).suffix().compare("ply",Qt::CaseInsensitive)!=0) destination+=".ply";
+    auto lease=ExportLease::tryAcquire();
+    if (!lease) {showError(tr("An export is already running in the editor or task queue."));return;}
     const Project snapshot=project_;const double seconds=project_.time;
     QProgressDialog progress(tr("Preparing export"),tr("Cancel"),0,100,this);
     progress.setWindowTitle(tr("Export current frame"));progress.setWindowModality(Qt::ApplicationModal);
@@ -1763,6 +1815,8 @@ QByteArray MainWindow::thumbnailJpeg() {
 }
 void MainWindow::estimateExport() {
     if (!loaded_ || loading_) return;
+    auto lease=ExportLease::tryAcquire();
+    if (!lease) {showError(tr("An export is already running in the editor or task queue."));return;}
     play(false);const Project snapshot=project_;const QByteArray thumbnail=thumbnailJpeg();
     QProgressDialog progress(tr("Estimating export size"),tr("Cancel"),0,100,this);
     progress.setWindowTitle(tr("Estimate export size"));progress.setWindowModality(Qt::ApplicationModal);progress.setAutoClose(false);progress.setAutoReset(false);progress.setMinimumDuration(0);
@@ -1793,6 +1847,10 @@ void MainWindow::exportImage() {
     history_.rememberImage(path); statusBar()->showMessage(tr("Image saved."),3000);
 }
 void MainWindow::showError(const QString &message) {
+    reportOperationError(message,remoteCommand_);
+}
+void MainWindow::reportOperationError(const QString &message, bool remote) {
+    if (remote) {automationError_=message;statusBar()->showMessage(message,10000);return;}
     if (!smokeOutput_.isEmpty()) { qCritical("%s",qPrintable(message)); setWindowModified(false); qApp->exit(2); }
     else QMessageBox::critical(this,tr("VGS Editor"),message);
 }
@@ -1801,7 +1859,22 @@ void MainWindow::smokeTest(const QString &path, const QString &output) {
     QTimer::singleShot(60000,this,[] { qCritical("Smoke test timed out"); qApp->exit(3); });
 }
 void MainWindow::closeEvent(QCloseEvent *event) {
-    if (!canDiscard()) { event->ignore(); return; }
+    const auto pendingEdits=QJsonDocument(project_.json(projectPath_)).toJson(QJsonDocument::Compact);
+    if (!closePending_ || approvedCloseEdits_!=pendingEdits || approvedCloseProject_!=projectPath_) {
+        if (!canDiscard()) {closePending_=false;emit closeAborted();event->ignore();return;}
+        approvedCloseEdits_=QJsonDocument(project_.json(projectPath_)).toJson(QJsonDocument::Compact);approvedCloseProject_=projectPath_;
+    }
+    bool stoppingQueue=false;
+    for (auto *queue:findChildren<TaskQueueDialog *>()) if (queue->running()) {queue->close();stoppingQueue=true;}
+    if (stoppingQueue) {closePending_=true;event->ignore();QTimer::singleShot(100,this,[this] {close();});return;}
+    if (mcpCloseHandler_) {
+        const auto result=mcpCloseHandler_();
+        if (result!=EditorCloseResult::Ready) {
+            closePending_=result==EditorCloseResult::Waiting;
+            if (!closePending_) emit closeAborted();
+            event->ignore();return;
+        }
+    }
     settings_.setValue("geometry",saveGeometry()); settings_.setValue("windowState",saveState()); settings_.sync();
     discardAutosave(); event->accept();
 }

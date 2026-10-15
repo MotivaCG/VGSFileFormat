@@ -140,14 +140,19 @@ std::vector<float> contributionScores(const std::vector<vgs::Frame> &samples, bo
 std::vector<uint8_t> pruneKeep(const std::vector<float> &scores, const QVector<PruneFilter> &filters, std::vector<PruneStats> *stats) {
     std::vector<uint8_t> keep(scores.size(), 1);
     if (stats) stats->clear();
+    // Each filter works on what the previous ones left: its share and candidates count survivors only.
     for (const auto &filter : filters) {
-        std::vector<uint32_t> candidates;
-        for (size_t i = 0; i < scores.size(); ++i) if (scores[i] >= 0 && double(scores[i]) < filter.protectAbove) candidates.push_back(uint32_t(i));
+        std::vector<uint32_t> candidates; size_t survivors = 0;
+        for (size_t i = 0; i < scores.size(); ++i) {
+            if (!keep[i]) continue;
+            ++survivors;
+            if (scores[i] >= 0 && double(scores[i]) < filter.protectAbove) candidates.push_back(uint32_t(i));
+        }
         std::sort(candidates.begin(), candidates.end(), [&](uint32_t a, uint32_t b) { return scores[a] < scores[b] || (scores[a] == scores[b] && a < b); });
-        const size_t asked = size_t(std::floor(std::clamp(filter.percent, 0.0, 100.0) / 100 * double(scores.size())));
+        const size_t asked = size_t(std::floor(std::clamp(filter.percent, 0.0, 100.0) / 100 * double(survivors)));
         const size_t limit = std::min(candidates.size(), asked);
         for (size_t k = 0; k < limit; ++k) keep[candidates[k]] = 0;
-        if (stats) stats->push_back({scores.size(), asked, limit});
+        if (stats) stats->push_back({survivors, asked, limit});
     }
     return keep;
 }

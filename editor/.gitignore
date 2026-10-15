@@ -66,6 +66,10 @@ CMakeLists.txt.user*
 
 # Python byte code
 *.pyc
+.venv/
+__pycache__/
+/mcp/.http-token
+/mcp/connections/
 
 # Binaries
 # --------

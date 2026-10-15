@@ -46,6 +46,48 @@ class ViewportTests : public QObject {
         return point;
     }
 private slots:
+    void cropEditingPicksAndFocusFollowShowRemovedPreview() {
+        Viewport viewport;viewport.resize(600,400);auto frame=std::make_shared<RenderFrame>();
+        frame->points={{{0,1,0},{1,0,0},0},{{2,1,0},{0,1,0},1}};viewport.setFrame(frame);
+        Modifier crop;crop.crop.enabled=true;crop.crop.shape=CropShape::Box;crop.crop.width=crop.crop.depth=2;crop.crop.height=2;
+        crop.crop.showRemovedInRed=false;viewport.setModifiers({crop});viewport.setCrop(crop.crop);viewport.setCropEditing(true);
+        Camera camera;camera.target={0,1,0};camera.yaw=camera.pitch=0;camera.distance=8;viewport.setCamera(camera);
+        QPainterPath region;region.addRect(0,0,600,400);
+        QCOMPARE(viewport.recordsInside(region),(std::vector<uint32_t>{0}));
+        QCOMPARE(viewport.samplePoints(200,false)["visible_points"].toInt(),1);
+        QVERIFY(viewport.focusVisible());QCOMPARE(viewport.camera().target,QVector3D(0,1,0));
+        crop.crop.showRemovedInRed=true;viewport.setCrop(crop.crop);viewport.setCamera(camera);
+        QCOMPARE(viewport.recordsInside(region),(std::vector<uint32_t>{0,1}));
+        QCOMPARE(viewport.samplePoints(200,false)["visible_points"].toInt(),2);
+        QVERIFY(viewport.focusVisible());QCOMPARE(viewport.camera().target,QVector3D(1,1,0));
+        viewport.setCropEditing(false);viewport.setCamera(camera);
+        QCOMPARE(viewport.recordsInside(region),(std::vector<uint32_t>{0}));
+    }
+    void pointSamplingAndPickingShareVisibilityIncludingDecodedGreenMasks() {
+        Viewport viewport;viewport.resize(400,300);auto frame=std::make_shared<RenderFrame>();
+        for (int i=0;i<5;++i) {
+            PointVertex p{};p.position[0]=(i-2)*.5f;p.position[1]=.5f;p.id=float(i);
+            p.color[0]=.5f;p.color[1]=.5f;p.color[2]=.5f;if (i==1) p.modifierVisibility=0;
+            if (i==3) {p.color[0]=0;p.color[1]=1;p.color[2]=0;}
+            frame->points.push_back(p);
+        }
+        Camera camera;camera.target={0,.5f,0};camera.yaw=camera.pitch=0;camera.distance=4;viewport.setCamera(camera);
+        Modifier crop;crop.type=ModifierType::Crop;crop.crop.enabled=true;crop.crop.shape=CropShape::Box;crop.crop.width=1.5f;
+        Modifier isolation;isolation.type=ModifierType::PurgeIsolated;
+        Modifier green;green.type=ModifierType::RemoveGreen;
+        viewport.setModifiers({crop,isolation,green});viewport.setFrame(frame);
+        QPainterPath region;region.addRect(0,0,400,300);
+        QCOMPARE(viewport.recordsInside(region),(std::vector<uint32_t>{2}));
+        QCOMPARE(viewport.samplePoints(200,false)["visible_points"].toInt(),1);
+        QCOMPARE(viewport.samplePoints(200,true)["points"].toArray().size(),5);
+        // The worker already tested green before despill; displayed green alone must not
+        // cause a second, different rejection in picking or point sampling.
+        frame->greensApplied=true;viewport.setFrame(frame);
+        QCOMPARE(viewport.recordsInside(region),(std::vector<uint32_t>{2,3}));
+        const auto sample=viewport.samplePoints(200,false);QCOMPARE(sample["visible_points"].toInt(),2);
+        QCOMPARE(sample["points"].toArray()[0].toObject()["record"].toInt(),2);
+        QCOMPARE(sample["points"].toArray()[1].toObject()["record"].toInt(),3);
+    }
     void brushAndLassoPickWhatTheyCover() {
         // A row of five points across the view; the camera looks at the middle one.
         Viewport viewport;viewport.resize(400,300);auto frame=std::make_shared<RenderFrame>();

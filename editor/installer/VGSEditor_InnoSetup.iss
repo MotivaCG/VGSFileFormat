@@ -64,6 +64,9 @@
 #if !FileExists(MyAppPathToInclude + "\" + MyAppExeName)
   #error The deploy folder has no VGSEditor.exe: build Release and run deploy.ps1 first.
 #endif
+#if !FileExists(MyAppPathToInclude + "\mcp\python\python.exe")
+  #error The deploy folder has no MCP runtime: run the current deploy.ps1 again.
+#endif
 
 [Setup]
 ; AppId identifies VGS Editor for upgrades and uninstall; never reuse it for another program.
@@ -107,15 +110,21 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Name: "assocvgs"; Description: "VGS captures (.vgs)"; GroupDescription: "Open these files with VGS Editor by default:"
 Name: "assocpgs"; Description: "PGS captures (.pgs)"; GroupDescription: "Open these files with VGS Editor by default:"
 Name: "assocmint"; Description: "MINT captures (.mint)"; GroupDescription: "Open these files with VGS Editor by default:"
+; MCP: the adapter AI assistants launch to control the editor, with its own Python (~71 MB).
+Name: "mcp"; Description: "MCP server for AI assistants (includes its own Python, about 71 MB)"; GroupDescription: "Optional components:"
 
 [InstallDelete]
 ; An update replaces the built-in presets whole, so one removed from the editor goes too.
 ; The user's own presets live in their AppData and are never touched.
 Type: filesandordirs; Name: "{app}\presets"
+; The MCP adapter and its runtime are replaced whole too, and removed when not chosen,
+; so the editor's MCP menu item reflects what this installation really has.
+Type: filesandordirs; Name: "{app}\mcp"
 
 [Files]
 Source: "{#MyAppPathToInclude}\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#MyAppPathToInclude}\*"; DestDir: "{app}"; Excludes: "{#MyAppExeName}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#MyAppPathToInclude}\*"; DestDir: "{app}"; Excludes: "{#MyAppExeName},\mcp"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#MyAppPathToInclude}\mcp\*"; DestDir: "{app}\mcp"; Flags: ignoreversion recursesubdirs createallsubdirs; Tasks: mcp
 ; NOTE: Don't use "Flags: ignoreversion" on any shared system files
 
 [Registry]
@@ -150,5 +159,11 @@ Root: HKA; Subkey: "Software\Classes\.mint"; ValueType: string; ValueName: ""; V
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
+[UninstallDelete]
+Type: filesandordirs; Name: "{app}\mcp"
+
 [Run]
+; Connection profiles for the assistants belong to the user, so they are written with the
+; credentials of whoever started Setup, in their own AppData, not as administrator.
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\mcp\install.ps1"""; StatusMsg: "Generating MCP connection profiles..."; Flags: runasoriginaluser runhidden waituntilterminated; Tasks: mcp
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent

@@ -11,6 +11,18 @@
 #pragma once
 #include "exportcapture.h"
 #include <QString>
+#include <memory>
+
+// Shared reservation for GUI exports, task queues and MCP jobs in this process.
+class ExportLease {
+public:
+    static std::unique_ptr<ExportLease> tryAcquire();
+    ~ExportLease();
+    ExportLease(const ExportLease &) = delete;
+    ExportLease &operator=(const ExportLease &) = delete;
+private:
+    ExportLease() = default;
+};
 
 // A queued export, written as a .vgstask: a copy of the project as it was when the task was
 // made - later edits to the project do not change it - and where its export goes.

@@ -9,6 +9,15 @@
 // Other uses require prior written authorisation, subject to mandatory law.
 
 #include "exporttask.h"
+#include <atomic>
+
+namespace {std::atomic<bool> exportReserved{false};}
+std::unique_ptr<ExportLease> ExportLease::tryAcquire() {
+    bool expected=false;
+    if (!exportReserved.compare_exchange_strong(expected,true)) return {};
+    return std::unique_ptr<ExportLease>(new ExportLease);
+}
+ExportLease::~ExportLease() {exportReserved=false;}
 #include <QDateTime>
 #include <QDir>
 #include <QFile>

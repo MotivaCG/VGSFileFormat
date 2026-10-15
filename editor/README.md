@@ -16,6 +16,13 @@ scale transforms the entire capture without changing point size.
 
 ## Controls
 
+The editor includes a vendor-independent MCP server (stdio and authenticated Streamable HTTP)
+for compatible assistants: live viewport images, point/splat
+inspection, chunk-aware brush/lasso, modifiers, presets, undo/redo and asynchronous exports.
+MCP is **off by default**. Toggle **Edit > Enable MCP**; the editor remembers your choice
+between launches. See [MCP setup and usage](mcp/README.md). Use `--no-mcp` to start with it off
+without changing the saved preference.
+
 - `Ctrl+O`: open a capture. Drag and drop or a command-line path also work.
 - `Ctrl+Shift+O`: open a `.vgsproj` project.
 - `Ctrl+S` / `Ctrl+Shift+S`: save project / save as. Project commands are in File; there is no Project toolbar.
@@ -28,7 +35,7 @@ scale transforms the entire capture without changing point size.
 - Drag: orbit; right/middle drag or Shift+drag: pan; wheel: zoom. Double-click: the pivot glides to
   the point under the cursor (what is seen there: through faint splats to the first that covers
   it), keeping the angle and distance, as the web viewer does; any navigation cancels the glide.
-- `Numpad decimal` / `Numpad Del` / `F`: Focus visible. `Ctrl+E`: export the edited capture. `Ctrl+Shift+E`: export the viewport as PNG.
+- `Numpad decimal` / `Numpad Del` / `F`: Focus visible. `Ctrl+E`: export the edited capture. `Ctrl+I`: export the viewport as PNG. `Ctrl+Alt+I`: export an inspection image, one PNG to check a cleanup: the view on screen, nine views of the frame (five sides, high and low diagonals) and top and front views across Start/End with the crop drawn.
 - `G` / `R` / `S`: activate Move / Rotate / Scale. Repeat the active mode's key to switch Global/Local. `Esc`: leave all transform modes, and what `Tab` entered (crop or Eraser editing).
 - `Shift+G` or **View > Grid**: toggle the floor grid. **View > Axes** toggles the coloured
   X/Y/Z axes and **View > Origin and front marker** a faint square round the origin and a grey chevron on

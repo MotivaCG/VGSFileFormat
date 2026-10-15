@@ -9,6 +9,7 @@
 // Other uses require prior written authorisation, subject to mandatory law.
 
 #include "mainwindow.h"
+#include "editorautomation.h"
 #include "licensemanagement.h"
 #include "exportcapture.h"
 #include "exporttask.h"
@@ -49,7 +50,10 @@ int main(int argc, char *argv[])
     QCommandLineOption smokeScreen("smoke-screen", "Maximize an automated preview on the specified screen index.", "index");
     QCommandLineOption exportOption("export-capture", "Export a .vgsproj to VGS/PGS/MINT without opening the editor window.", "output");
     QCommandLineOption tasksOption("process-tasks", "Export the .vgstask files given, one after another, without opening the editor window.");
-    parser.addOption(smoke);parser.addOption(smokeScreen); parser.addOption(exportOption); parser.addOption(tasksOption); parser.process(a);
+    QCommandLineOption noMcp("no-mcp", "Start with MCP disabled, overriding the saved preference.");
+    QCommandLineOption mcpDirectory("mcp-session-dir", "Directory for local MCP session discovery.", "directory");
+    parser.addOption(smoke);parser.addOption(smokeScreen); parser.addOption(exportOption); parser.addOption(tasksOption);
+    parser.addOption(noMcp);parser.addOption(mcpDirectory);parser.process(a);
     if (parser.isSet(tasksOption)) {
         const auto paths=parser.positionalArguments();
         if (paths.isEmpty()) {std::fprintf(stderr,"Give one or more .vgstask files.\n");return 2;}
@@ -97,6 +101,11 @@ int main(int argc, char *argv[])
     });
     // Built-in presets ship in `presets` beside the program; the smoke run keeps to its own.
     MainWindow w(nullptr,smokeSettings ? smokeSettings->path()+"/presets" : QString(),smokeSettings ? QString() : QCoreApplication::applicationDirPath()+"/presets");
+    std::unique_ptr<EditorAutomation> automation;
+    if (!parser.isSet(smoke)) {
+        automation=std::make_unique<EditorAutomation>(&w,parser.value(mcpDirectory));QString error;
+        if (!parser.isSet(noMcp) && w.mcpPreferredEnabled() && automation->adapterInstalled() && !automation->start(&error)) qWarning("MCP connection: %s",qPrintable(error));
+    }
     w.show();
     if (parser.isSet(smoke) && parser.isSet(smokeScreen)) {
         bool valid=false;const int index=parser.value(smokeScreen).toInt(&valid);const auto screens=QGuiApplication::screens();

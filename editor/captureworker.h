@@ -75,10 +75,15 @@ public slots:
     void clear();
     void open(const QString &path, quint64 generation, bool sh);
     void decode(double time, quint64 generation, bool sh,Project project = {});
+    void openRequest(const QString &path, quint64 generation, bool sh, quint64 request);
+    void decodeRequest(double time, quint64 generation, bool sh, Project project, quint64 request);
 signals:
     void opened(CaptureInfo info, FramePtr frame, quint64 generation);
     void decoded(FramePtr frame, quint64 generation);
     void failed(QString message, quint64 generation, bool opening);
+    void openedRequest(CaptureInfo info, FramePtr frame, quint64 generation, quint64 request);
+    void decodedRequest(FramePtr frame, quint64 generation, quint64 request);
+    void failedRequest(QString message, quint64 generation, bool opening, quint64 request);
 private:
     class FileSource;
     std::unique_ptr<FileSource> source_;
@@ -86,6 +91,7 @@ private:
     std::unique_ptr<MintFile> mint_;
     CaptureInfo info_;
     quint64 generation_ = 0;
+    quint64 request_ = 0;
     // Prune low contribution's scores, per source chunk: they depend on the capture alone.
     std::map<size_t, std::vector<float>> pruneScores_;
     FramePtr frame(double time, bool sh);

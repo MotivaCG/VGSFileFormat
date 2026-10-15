@@ -120,6 +120,8 @@ void TaskQueueDialog::refreshButtons() {
 
 void TaskQueueDialog::start() {
     if (running()) return;
+    exportLease_=ExportLease::tryAcquire();
+    if (!exportLease_) {taskLabel_->setText(tr("An export is already running in the editor or another task queue. Wait and try again."));return;}
     stopTask_=false;stopAll_=false;run_.clear();
     // Checked before anything runs, so a task that never could is known at once.
     for (int i=0;i<entries_.size();++i) {
@@ -128,7 +130,7 @@ void TaskQueueDialog::start() {
         if (!problem.isEmpty()) {e.state=State::Skipped;e.message=problem;refreshRow(i);continue;}
         run_.append(i);
     }
-    if (run_.isEmpty()) {refreshButtons();return;}
+    if (run_.isEmpty()) {exportLease_.reset();refreshButtons();return;}
     awake_=std::make_unique<StayAwake>();runStarted_=QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss");
     totalBar_->setValue(0);runClock_.start();tick_->start();runNext();
 }
@@ -143,7 +145,9 @@ void TaskQueueDialog::runNext() {
         taskLabel_->setText(tr("Current task"));taskBar_->setValue(0);tick_->stop();
         totalLabel_->setText(tr("Finished in %4: %1 done, %2 failed, %3 canceled or skipped.").arg(done).arg(failed).arg(other).arg(duration(runClock_.elapsed()/1000.0)));
         if (!stopAll_) totalBar_->setValue(totalBar_->maximum());
-        refreshButtons();return;
+        exportLease_.reset();refreshButtons();
+        if (closing_) QTimer::singleShot(0,this,&QDialog::close);
+        return;
     }
     auto &e=entries_[current_];e.state=State::Running;e.message.clear();refreshRow(current_);
     stopTask_=false;jobFailure_.clear();jobResult_={};taskBar_->setValue(0);showProgress(0,tr("Starting"));
@@ -216,7 +220,11 @@ void TaskQueueDialog::writeLog() {
 
 void TaskQueueDialog::closeEvent(QCloseEvent *event) {
     // Closing stops the queue: the task being exported is cancelled and leaves no file.
-    if (job_) {stopAll_=true;stopTask_=true;job_->wait();delete job_;job_=nullptr;awake_.reset();}
+    if (job_) {
+        closing_=true;stopAll_=true;stopTask_=true;taskLabel_->setText(tr("Stopping export before closing..."));
+        if (windowModality()!=Qt::WindowModal) {hide();setWindowModality(Qt::WindowModal);show();}
+        event->ignore();return;
+    }
     QDialog::closeEvent(event);
 }
 

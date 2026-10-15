@@ -11,7 +11,10 @@
 !versionAtLeast(QT_VERSION, 6.8.0) {
     error("VGS Editor requires Qt 6.8 or newer. Select the Desktop Qt 6.8.0 MSVC2022 64-bit kit; Qt 5 cannot build this project.")
 }
-QT += core gui widgets opengl openglwidgets multimedia
+QT += core gui widgets opengl openglwidgets multimedia network
+SOURCES += $$PWD/editorautomation.cpp $$PWD/mainwindowautomation.cpp
+HEADERS += $$PWD/editorautomation.h
+HEADERS += $$PWD/pointvisibility.h
 CONFIG += c++17
 DEFINES += VGS_AUTHORING
 TARGET = VGSEditor
@@ -23,7 +26,7 @@ HEADERS += $$PWD/editortheme.h
 VGS_ROOT = $$clean_path($$PWD/..)
 INCLUDEPATH += $$PWD/dependencies/eigen $$PWD $$PWD/dependencies/mint $$VGS_ROOT/decoder/include \
     $$VGS_ROOT/core/include/vgs $$VGS_ROOT/core/crypto $$VGS_ROOT/core/src
-SOURCES += $$PWD/main.cpp $$PWD/mainwindow.cpp $$PWD/viewport.cpp $$PWD/viewcube.cpp $$PWD/captureworker.cpp $$PWD/project.cpp $$PWD/filehistory.cpp $$PWD/presetstore.cpp $$PWD/capturesettings.cpp $$PWD/capturesettingsdialog.cpp \
+SOURCES += $$PWD/main.cpp $$PWD/mainwindow.cpp $$PWD/inspection.cpp $$PWD/viewport.cpp $$PWD/viewcube.cpp $$PWD/captureworker.cpp $$PWD/project.cpp $$PWD/filehistory.cpp $$PWD/presetstore.cpp $$PWD/capturesettings.cpp $$PWD/capturesettingsdialog.cpp \
     $$PWD/dependencies/mint/mintfile.cpp \
     $$VGS_ROOT/decoder/src/vgsdecoder.cpp \
     $$VGS_ROOT/core/src/vgscontainer.cpp $$VGS_ROOT/core/src/vgsframe.cpp \
@@ -70,6 +73,9 @@ else: VGS_OUT = $$OUT_PWD/release
 builtinPresets.files = $$files($$PWD/presets/*.preset)
 builtinPresets.path = $$VGS_OUT/presets
 COPIES += builtinPresets
+mcpAdapter.files = $$PWD/mcp/server.py $$PWD/mcp/http_transport.py $$PWD/mcp/connections.py $$PWD/mcp/workflows.md $$PWD/mcp/tools.md $$PWD/mcp/requirements.txt $$PWD/mcp/install.ps1 $$PWD/mcp/README.md
+mcpAdapter.path = $$VGS_OUT/mcp
+COPIES += mcpAdapter
 exists($$VGS_FFMPEG) {
     ffmpegTool.files = $$VGS_FFMPEG
     ffmpegTool.path = $$VGS_OUT/tools

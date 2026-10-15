@@ -14,7 +14,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
-find_package(Qt6 6.5 REQUIRED COMPONENTS Widgets OpenGL OpenGLWidgets Multimedia)
+find_package(Qt6 6.5 REQUIRED COMPONENTS Widgets OpenGL OpenGLWidgets Multimedia Network)
 find_package(Threads REQUIRED)
 set(VGS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." CACHE PATH "VGSFileFormat sources")
 add_library(editor_decoder STATIC
@@ -36,7 +36,7 @@ target_link_libraries(editor_support PUBLIC Qt6::Widgets editor_decoder editor_a
 if(WIN32)
     target_link_libraries(editor_support PRIVATE user32)
 endif()
-qt_add_executable(VGSEditor main.cpp audiopreview.cpp audiopreview.h animationpanel.cpp animationpanel.h modifierpanel.cpp modifierpanel.h taskqueuedialog.cpp taskqueuedialog.h mainwindow.cpp viewport.cpp viewcube.cpp capturesettingsdialog.cpp mainwindow.h viewport.h viewcube.h capturesettingsdialog.h rangeslider.cpp rangeslider.h resources.qrc)
+qt_add_executable(VGSEditor main.cpp audiopreview.cpp audiopreview.h animationpanel.cpp animationpanel.h modifierpanel.cpp modifierpanel.h taskqueuedialog.cpp taskqueuedialog.h mainwindow.cpp inspection.cpp viewport.cpp viewcube.cpp capturesettingsdialog.cpp mainwindow.h viewport.h viewcube.h capturesettingsdialog.h rangeslider.cpp rangeslider.h resources.qrc)
 if(WIN32)
     # The version is set once, in licensemanagement.h ("v1.0.0").
     file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/licensemanagement.h VGS_EDITOR_VERSION_LINE REGEX "#define[ \t]+VERSION_NAME")
@@ -46,7 +46,8 @@ if(WIN32)
     configure_file(appicon.rc.in ${CMAKE_CURRENT_BINARY_DIR}/appicon.rc @ONLY)
     target_sources(VGSEditor PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/appicon.rc)
 endif()
-target_link_libraries(VGSEditor PRIVATE editor_support Qt6::OpenGLWidgets Qt6::OpenGL Qt6::Multimedia)
+target_sources(VGSEditor PRIVATE editorautomation.cpp editorautomation.h mainwindowautomation.cpp)
+target_link_libraries(VGSEditor PRIVATE editor_support Qt6::OpenGLWidgets Qt6::OpenGL Qt6::Multimedia Qt6::Network)
 if(MSVC)
     target_compile_options(editor_decoder PRIVATE /bigobj)
     target_compile_options(editor_support PRIVATE /utf-8)
@@ -57,7 +58,13 @@ endif()
 # one. Without it exports still work, keeping one audio track as delivered.
 set(VGS_FFMPEG "D:/Trabajos/THE4DSCANNER/GraciaConverter/Gracia4DGSConverter/build/Desktop_Qt_6_8_0_MSVC2022_64bit-Release/release/tools/ffmpeg.exe" CACHE FILEPATH "ffmpeg copied beside the editor")
 add_custom_command(TARGET VGSEditor POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/presets $<TARGET_FILE_DIR:VGSEditor>/presets)
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/presets $<TARGET_FILE_DIR:VGSEditor>/presets
+    COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:VGSEditor>/mcp
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_CURRENT_SOURCE_DIR}/mcp/server.py ${CMAKE_CURRENT_SOURCE_DIR}/mcp/http_transport.py
+        ${CMAKE_CURRENT_SOURCE_DIR}/mcp/connections.py ${CMAKE_CURRENT_SOURCE_DIR}/mcp/workflows.md ${CMAKE_CURRENT_SOURCE_DIR}/mcp/tools.md
+        ${CMAKE_CURRENT_SOURCE_DIR}/mcp/requirements.txt ${CMAKE_CURRENT_SOURCE_DIR}/mcp/install.ps1
+        ${CMAKE_CURRENT_SOURCE_DIR}/mcp/README.md $<TARGET_FILE_DIR:VGSEditor>/mcp/)
 if(EXISTS "${VGS_FFMPEG}")
     add_custom_command(TARGET VGSEditor POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:VGSEditor>/tools
@@ -70,12 +77,20 @@ option(EDITOR_BUILD_TESTS "Build project and decoder integration tests" ON)
 if(EDITOR_BUILD_TESTS)
     enable_testing()
     find_package(Qt6 REQUIRED COMPONENTS Test)
-    qt_add_executable(mainwindow_tests tests/mainwindow_tests.cpp audiopreview.cpp animationpanel.cpp animationpanel.h modifierpanel.cpp modifierpanel.h taskqueuedialog.cpp taskqueuedialog.h mainwindow.cpp viewport.cpp viewcube.cpp capturesettingsdialog.cpp rangeslider.cpp resources.qrc)
+    qt_add_executable(mainwindow_tests tests/mainwindow_tests.cpp audiopreview.cpp animationpanel.cpp animationpanel.h modifierpanel.cpp modifierpanel.h taskqueuedialog.cpp taskqueuedialog.h mainwindow.cpp inspection.cpp viewport.cpp viewcube.cpp capturesettingsdialog.cpp rangeslider.cpp resources.qrc)
     target_link_libraries(mainwindow_tests PRIVATE editor_support Qt6::Test Qt6::OpenGLWidgets Qt6::OpenGL Qt6::Multimedia)
     if(MSVC)
         target_compile_options(mainwindow_tests PRIVATE /utf-8)
     endif()
     add_test(NAME mainwindow_tests COMMAND mainwindow_tests)
+    qt_add_executable(automation_tests tests/automation_tests.cpp editorautomation.cpp mainwindowautomation.cpp audiopreview.cpp animationpanel.cpp modifierpanel.cpp taskqueuedialog.cpp mainwindow.cpp inspection.cpp viewport.cpp viewcube.cpp capturesettingsdialog.cpp rangeslider.cpp resources.qrc)
+    target_link_libraries(automation_tests PRIVATE editor_support Qt6::Test Qt6::OpenGLWidgets Qt6::OpenGL Qt6::Multimedia Qt6::Network)
+    if(MSVC)
+        target_compile_options(automation_tests PRIVATE /utf-8)
+    endif()
+    # The editor's build copies the MCP adapter beside both programs; the bridge needs it.
+    add_dependencies(automation_tests VGSEditor)
+    add_test(NAME automation_tests COMMAND automation_tests)
     qt_add_executable(export_tests tests/export_tests.cpp rangeslider.cpp rangeslider.h)
     target_link_libraries(export_tests PRIVATE editor_support Qt6::Test)
     add_test(NAME export_tests COMMAND export_tests)
