@@ -97,6 +97,14 @@ Cast Shadows in Karma:
 
     Let the splats cast shadows in Karma. Off by default, as Bake GSplats leaves it.
 
+Write Normals:
+    #id: normals
+
+    Write the capture's outward surface normals to `N`, when it carries them (exported
+    from the VGS Editor with Write normals). Off by default. Nothing in Houdini draws
+    Gaussian splats with them: Karma XPU does not light splats and neither does the
+    viewport. `N` is for your own conversion or shading in SOPs.
+
 Fit Scene:
     #id: fitscene
 

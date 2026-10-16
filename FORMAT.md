@@ -448,7 +448,7 @@ searches may also vary stored rANS precision and high/low bit splits within the
 already supported ranges. Neither option changes the encoding ID or model IDs.
 
 Attribute IDs and shapes are named in `core/include/vgs/vgscodec.h` and `attributeName()`. IDs 1..12
-are shared (dictionaries, LUTs and motion samples); IDs 32..46 are group attributes. Their interpretation,
+are shared (dictionaries, LUTs and motion samples); IDs 32..46 are group attributes, and 47 and 48 the optional ones below. Their interpretation,
 quantized field widths, quaternion ordering and reconstruction arithmetic are defined
 by the source format, whose semantics this import profile retains unchanged. The
 normative statement of them here is `core/src/vgsframe.cpp`, which is the code every
@@ -469,6 +469,33 @@ exactly, and its opacity falls by the growth of its two largest axes, which this
 carries. Such a capture no longer has the anti-aliasing render hint. A reader that does not
 know the attribute skips it and draws the capture as it was before baking: thin splats at
 full opacity.
+
+### Normals
+
+Attribute 48, `normals`, optional: every splat's outward surface normal, for renderers that
+light splats. A Gaussian has no normal of its own; renderers that light splats derive one
+from the shortest axis, which faces into the subject for about half of them and does not
+follow the surface at all on near-round ones. The editor computes normals at export from the
+capture's rig (see editor/README.md) and stores them here.
+
+Two bytes per splat in its group, constant over the chunk, descriptor kind 1 (u8), family 3
+(channels), two channels: the normal is in the splat's own frame, so it turns with the
+splat and one code serves every sample. The frame is the splat's axes ordered by their
+`scale_indices`, smallest first, ties to the lower axis: call them `s` (shortest), `m` and
+`l`. With the normal's components `x = n.m`, `y = n.l`, `z = n.s`:
+
+- `sum = |x| + |y| + |z|`, `u = (x + y) / sum`, `v = (x - y) / sum`, both in [-1, 1];
+- byte 0 is `round((u + 1) / 2 * 255)`;
+- byte 1 is `round((v + 1) / 2 * 127) << 1`, with bit 0 set when `z < 0`.
+
+A reader inverts it: `u` and `v` from the codes, `x = (u + v) / 2`, `y = (u - v) / 2`,
+`z = max(0, 1 - |x| - |y|)` negated when bit 0 is set, normalised, then rotated by the
+splat's rotation at the instant (after the chunk's motion, see below). The error is under a
+degree. Flat splats, most of a capture, have their normal on the shortest axis, which this
+frame puts at the pole: their codes are `128` and `128` or `129`, a few values the entropy
+coder takes for a handful of bits per splat. `vgs::encodeNormal` and `vgs::decodeNormal` in
+`core/include/vgs/vgscodec.h` are the reference. A reader that does not know the attribute
+skips it and lights the capture as before, by the shortest axis.
 
 ### Motion samples
 

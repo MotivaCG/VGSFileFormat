@@ -256,6 +256,12 @@ def write_frame(pointcloud, frame):
     while (stale := attributes.get("radiance:sh_{:d}".format(k))) is not None:
         attributes.remove(stale)
         k += 1
+    # Lights shade a splat by its normal when it has one, and by its shortest axis
+    # otherwise, which faces into the subject half the time.
+    if frame.normals is not None:
+        _ensure_attribute(attributes, "normal", 'FLOAT_VECTOR')
+    elif (stale := attributes.get("normal")) is not None:
+        attributes.remove(stale)
 
     if n:
         attributes["position"].data.foreach_set("vector", frame.positions)
@@ -264,6 +270,8 @@ def write_frame(pointcloud, frame):
         attributes["radiance:base"].data.foreach_set("vector", frame.radiance)
         for k, plane in enumerate(frame.sh):
             attributes["radiance:sh_{:d}".format(k)].data.foreach_set("vector", plane)
+        if frame.normals is not None:
+            attributes["normal"].data.foreach_set("vector", frame.normals)
 
     pointcloud.update_tag()
 

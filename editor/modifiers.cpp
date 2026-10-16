@@ -124,6 +124,40 @@ std::array<float,9> Modifier::colourMatrix() const {
     for (int r=0;r<3;++r) for (int c=0;c<3;++c) m[r*3+c]=float(gain*((r==c ? s : 0)+(1-s)*luma[c])*balance[c]);
     return m;
 }
+bool removesSplats(ModifierType type) {
+    return type==ModifierType::Crop || type==ModifierType::RemoveGreen || type==ModifierType::PurgeIsolated || type==ModifierType::Erase || type==ModifierType::PruneLowContribution;
+}
+const Modifier *Project::loopMorph() const {for (const auto &m:modifiers) if (m.active() && m.type==ModifierType::LoopMorph) return &m;return nullptr;}
+int Project::morphFrames(double fps) const {
+    const auto *m=loopMorph();if (!m || !(fps>0)) return 0;
+    return std::max(1,int(std::lround(m->morphSeconds*fps)));
+}
+double Project::playbackEnd(double fps) const {return fps>0 ? out+morphFrames(fps)/fps : out;}
+bool Project::inMorph(double seconds,double fps,double *fraction) const {
+    const int frames=morphFrames(fps);if (!frames) return false;
+    const int k=int(std::lround((seconds-out)*fps));if (k<1 || k>frames) return false;
+    if (fraction) *fraction=double(k)/double(frames+1);
+    return true;
+}
+// The Loop morph splits only what removes splats; the stack is otherwise the same both ways.
+static QVector<Modifier> splitAtMorph(const QVector<Modifier> &stack,bool above) {
+    int at=-1;for (int i=0;i<stack.size();++i) if (stack[i].active() && stack[i].type==ModifierType::LoopMorph) {at=i;break;}
+    QVector<Modifier> result;
+    for (int i=0;i<stack.size();++i) {
+        if (stack[i].type==ModifierType::LoopMorph) continue;
+        if (at>=0 && removesSplats(stack[i].type) && (above ? i>at : i<at)) continue;
+        result.append(stack[i]);
+    }
+    return result;
+}
+QVector<Modifier> Project::modifiersAboveMorph(double frame) const {return splitAtMorph(modifiersAtFrame(frame),true);}
+QVector<Modifier> Project::modifiersBelowMorph(double frame) const {return splitAtMorph(modifiersAtFrame(frame),false);}
+QVector<Project::MorphPair> Project::morphPairs(double fps) const {
+    QVector<MorphPair> pairs;const auto *m=loopMorph();if (!m) return pairs;
+    const int first=int(std::lround(in*fps)),last=int(std::lround(out*fps));
+    for (const auto &marker:m->morphMarkers) if (marker.hasEnd && marker.hasStart && marker.endFrame==last && marker.startFrame==first) pairs.append({marker.number,marker.end,marker.start});
+    return pairs;
+}
 QVector<const Modifier *> Project::audioModifiers() const {
     QVector<const Modifier *> found;for (const auto &m:modifiers) if (m.active() && m.type==ModifierType::Audio) found.append(&m);return found;
 }
@@ -226,6 +260,7 @@ QJsonArray Project::modifierJson() const {
             case ModifierType::Audio: type="audio";break;
             case ModifierType::Colour: type="colour";break;
             case ModifierType::Erase: type="erase";break;
+            case ModifierType::LoopMorph: type="loop-morph";break;
             }
             QJsonObject item{{"id",m.id},{"name",m.name},{"enabled",m.active()},{"type",type},{"timeline","full"}};
             if (m.type==ModifierType::Crop) {const auto c=m.staticCrop();item["crop"]=QJsonObject{{"space","world"},{"shape",c.shape==CropShape::Box ? "box" : "cylinder"},
@@ -247,6 +282,16 @@ QJsonArray Project::modifierJson() const {
                 {"despill",m.colourDespill!=Modifier::DespillNone},{"despillMode",m.colourDespill==Modifier::DespillAlways ? "always" : m.colourDespill==Modifier::DespillOnExport ? "export" : "none"},{"despillStrength",m.colourDespillStrength},{"greenGain",m.colourGreenGain},{"viewChroma",m.colourViewChroma},{"recoverSkin",m.colourRecoverSkin}};
             else if (m.type==ModifierType::Audio) item["audio"]=QJsonObject{{"source",m.audioFile.isEmpty() ? "capture" : "file"},{"file",m.audioFile},{"offset",m.audioOffset},{"volume",m.audioVolume},{"loop",m.audioLoop}};
             else if (m.type==ModifierType::PruneLowContribution) item["prune"]=QJsonObject{{"percent",m.prune.percent},{"protectAbove",m.prune.protectAbove},{"protectUnit","px-1080p-mean"}};
+            else if (m.type==ModifierType::LoopMorph) {
+                QJsonArray markers;
+                for (const auto &marker:m.morphMarkers) {
+                    QJsonObject entry{{"number",marker.number}};
+                    if (marker.hasEnd) {entry["end"]=vector(marker.end);entry["endFrame"]=marker.endFrame;}
+                    if (marker.hasStart) {entry["start"]=vector(marker.start);entry["startFrame"]=marker.startFrame;}
+                    markers.append(entry);
+                }
+                item["morph"]=QJsonObject{{"seconds",m.morphSeconds},{"space","capture-local"},{"markers",markers}};
+            }
             else if (m.type==ModifierType::PurgeIsolated) item["isolation"]=QJsonObject{{"neighbour",m.isolation.neighbour},{"medianPercent",m.isolation.medianPercent}};
             result.append(item);
     }

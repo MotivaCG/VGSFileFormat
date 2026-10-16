@@ -12,6 +12,7 @@ into the point cloud's attributes, which Blender draws natively.
     properties.py  per-capture settings and add-on preferences
     operators.py   import, reload, fit the scene to a capture
     scatter.py     a capture scattered over points, instanced with Geometry Nodes
+    shading.py     self-illuminated or shaded, through a shared material
     interface.py   the panel and the menu entry
 """
 

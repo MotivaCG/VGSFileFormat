@@ -11,9 +11,15 @@
 #pragma once
 #include <algorithm>
 #include "exportcapture.h"
+#include "gaussiannormals.h"
 
 struct NativeChunkPlan { size_t sourceIndex=0; int first=0,intervals=0; };
 bool supportsNativeTransform(const Project &);
+// Writes every splat's outward normal into the chunk's optional normals attribute
+// (FORMAT.md, Normals), seen from `views`, which must be in the chunk's own frame. Call it
+// before motion samples are added. Returns what the middle sample's cameras saw.
+gaussiannormals::Result addNormals(vgs::DecodedChunk &, const std::vector<gaussiannormals::View> &views,
+                                   const ExportProgress &);
 std::vector<NativeChunkPlan> nativeExportPlan(const vgs::Header &, int first, int frames);
 vgs::DecodedChunk assembleNativeChunk(vgs::DecodedChunk);
 void setNativeShDegree(vgs::DecodedChunk &, int sourceDegree, int targetDegree);

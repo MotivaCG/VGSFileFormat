@@ -12,6 +12,7 @@
 #include "mintfile.h"
 #include "project.h"
 #include "pruning.h"
+#include "loopmorph.h"
 #include "vgsdecoder/vgsdecoder.h"
 #include <QObject>
 #include <QVector3D>
@@ -37,6 +38,8 @@ struct RenderFrame {
     double seconds = 0;
     quint64 total = 0;
     size_t chunkIndex = 0;
+    // The chunkIndex of a Loop morph's frames: their splats belong to no source chunk.
+    static constexpr size_t MorphChunk = size_t(-1);
     double decodeMs = 0;
     // What each active Prune low contribution did to this frame's chunk, in stack order.
     std::vector<PruneStats> prune;
@@ -84,6 +87,8 @@ signals:
     void openedRequest(CaptureInfo info, FramePtr frame, quint64 generation, quint64 request);
     void decodedRequest(FramePtr frame, quint64 generation, quint64 request);
     void failedRequest(QString message, quint64 generation, bool opening, quint64 request);
+    // A Loop morph is being fitted (a second or so on a large capture), and when it is done.
+    void morphFitting(bool fitting);
 private:
     class FileSource;
     std::unique_ptr<FileSource> source_;
@@ -95,5 +100,10 @@ private:
     // Prune low contribution's scores, per source chunk: they depend on the capture alone.
     std::map<size_t, std::vector<float>> pruneScores_;
     FramePtr frame(double time, bool sh);
+    FramePtr processed(double time, bool sh, const Project &project, const QVector<Modifier> &stack);
+    FramePtr morphFrame(double time, double fraction, bool sh, const Project &project);
+    // The Loop morph fitted last, and what it was fitted for.
+    std::unique_ptr<loopmorph::Morph> morph_;
+    QByteArray morphKey_;
     const std::vector<float> &pruneScores(size_t chunk);
 };

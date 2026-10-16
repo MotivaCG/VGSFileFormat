@@ -178,7 +178,7 @@ QJsonObject MainWindow::automationCommand(const QString &method,const QJsonObjec
         const QString type=text(a,"type");
         const std::map<QString,ModifierType> types={{"crop",ModifierType::Crop},{"remove-green",ModifierType::RemoveGreen},{"purge-isolated",ModifierType::PurgeIsolated},
             {"erase",ModifierType::Erase},{"colour",ModifierType::Colour},{"animate-transform",ModifierType::AnimateTransform},{"walk",ModifierType::Walk},
-            {"audio",ModifierType::Audio},{"prune-low-contribution",ModifierType::PruneLowContribution},{"bake-antialiasing",ModifierType::BakeAntialiasing}};
+            {"audio",ModifierType::Audio},{"prune-low-contribution",ModifierType::PruneLowContribution},{"bake-antialiasing",ModifierType::BakeAntialiasing},{"loop-morph",ModifierType::LoopMorph}};
         const auto it=types.find(type);if (it==types.end()) fail("Unknown modifier type.");
         Modifier m;m.id=Project::newId();m.name=a.contains("name") ? text(a,"name") : type;
         if (m.name.size()>120) fail("Modifier name is too long.");

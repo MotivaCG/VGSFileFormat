@@ -12,14 +12,20 @@ The standalone viewer has no bridge and cannot be controlled by it.
 
 ## Choose a client
 
-| Client / integration | Connection | Generated profile |
+Any MCP client works: the server is the same for all of them, and the client picks the
+model. Use the profile that matches how your client writes its configuration.
+
+| Configuration format | Clients | Generated profile |
 |---|---|---|
-| Codex | stdio or Streamable HTTP | `codex.toml` / `codex-http.toml` |
-| Claude Desktop local MCP configuration | stdio | `claude-desktop.json` |
-| Claude Code | stdio or Streamable HTTP | `stdio.json` / `claude-code-http.json` |
-| OpenAI Agents SDK running on the editor's PC | stdio or Streamable HTTP | command/args from `stdio.json` |
-| OpenAI Responses API hosted tool | Reachable HTTPS MCP endpoint | `openai-responses-tool.json` |
-| Other MCP clients | Supported standard transport | same server command or authenticated URL |
+| `mcpServers` with `command`/`args` (stdio) | Claude Code, Claude Desktop, Cursor, Gemini CLI, Windsurf, most others | `stdio.json` |
+| `mcpServers` with `url`/`headers` (Streamable HTTP) | Claude Code, Cursor and other HTTP-capable hosts | `http.json` |
+| `servers` (VS Code / GitHub Copilot `mcp.json`) | VS Code | `vscode.json` / `vscode-http.json` |
+| TOML `[mcp_servers.*]` | Codex | `codex.toml` / `codex-http.toml` |
+| SDK objects | OpenAI Agents SDK, Claude Agent SDK, the MCP SDKs, running on the editor's PC | command/args from `stdio.json`, or URL and header from `http.json` |
+| Hosted MCP tool (runs in a provider's cloud) | OpenAI Responses API, Claude API MCP connector | a reachable HTTPS endpoint; `openai-responses-tool.json` |
+
+`claude-desktop.json` and `claude-code-http.json` are the earlier names of `stdio.json`
+and `http.json`, still written for existing setups.
 
 Compatibility is with MCP-enabled clients, not every model or chat interface. Visual
 cleanup also needs a model and host that accept MCP image content. The server remains
@@ -48,15 +54,20 @@ is remembered). Register the server in your chosen client, then
 reload that client. The server can be registered before the editor opens. Each user runs
 their own adapter against their own editor, with their own local credentials.
 
-`-RegisterCodex` remains an optional convenience switch. For a manual Codex setup, merge
-the generated `codex.toml` into its configuration, or register the generated command/args
-with `codex mcp add vgs-editor -- PYTHON_PATH SERVER_PATH`. Use `codex mcp list` to check it.
+`-Register claude-code,codex` (either or both) also registers the stdio server with those
+clients' own CLIs, for the current user; without it the installer changes no client's
+settings. `-RegisterCodex` still works and means `-Register codex`. By hand, with the paths
+the installer prints:
 
-For Claude Desktop, use Developer > Edit Config and merge the generated
-`claude-desktop.json` entry into the existing `mcpServers` object, preserving other servers.
-For Claude Code, use `claude mcp add --transport stdio vgs-editor -- PYTHON_PATH SERVER_PATH`,
-or merge the generated HTTP entry into its MCP configuration. Registration is performed
-by the user; the installer does not modify Claude settings.
+- Claude Code: `claude mcp add --scope user --transport stdio vgs-editor -- PYTHON_PATH SERVER_PATH`
+  (check with `claude mcp list`), or merge `http.json` into its MCP configuration for HTTP.
+- Codex: `codex mcp add vgs-editor -- PYTHON_PATH SERVER_PATH`, or merge `codex.toml` into
+  its configuration (check with `codex mcp list`).
+- Claude Desktop: Developer > Edit Config, then merge the `vgs-editor` entry of `stdio.json`
+  into the existing `mcpServers` object, preserving other servers.
+- VS Code: merge `vscode.json` into the workspace's `.vscode/mcp.json` or the user `mcp.json`.
+- Cursor, Gemini CLI, Windsurf and similar: merge the `vgs-editor` entry of `stdio.json`
+  into their `mcpServers` object.
 
 For another MCP host, configure a stdio server with:
 
@@ -74,6 +85,10 @@ For another MCP host, configure a stdio server with:
 The two paths must refer to the user's installation. Different hosts may wrap these
 command/args fields differently; use the generated profile for the selected client.
 No model API key is used by this adapter. Normal model usage belongs to the client.
+
+Long tool calls wait at most 120 seconds for the editor (exports return a job at once).
+A client whose default tool timeout is shorter needs it raised: the Codex profiles set
+`tool_timeout_sec = 180`.
 
 ## Streamable HTTP and cloud integrations
 
@@ -95,8 +110,8 @@ to pin it explicitly; otherwise the first successful selection is pinned. Use se
 processes/ports for different windows or users. stdio clients naturally have independent
 processes and selections.
 
-OpenAI Responses API's MCP tool executes in the cloud. It cannot reach a URL on the
-user's localhost. To use its hosted MCP tool, configure a reachable HTTPS reverse proxy
+Hosted MCP tools (the OpenAI Responses API's, the Claude API's MCP connector) run in the
+provider's cloud and cannot reach a URL on the user's localhost. To use one, configure a reachable HTTPS reverse proxy
 to this adapter and start it with `--public-url https://YOUR-DOMAIN/mcp`. This permits that
 host/origin while keeping DNS rebinding protection and token authentication enabled.
 The default loopback bind remains suitable behind a local reverse proxy. A non-loopback
@@ -139,7 +154,7 @@ Tool discovery is the source of truth for each tool's description and typed inpu
 including numeric ranges, stroke lengths, optional camera/transform fields and defaults.
 Titles and operation hints describe which calls are idempotent or replace existing work.
 See [modifier meanings and cleanup examples](tools.md), also exposed as
-`vgs-editor://tools`, for the ten modifier types and an example cleanup sequence.
+`vgs-editor://tools`, for the eleven modifier types and an example cleanup sequence.
 
 Version 1.2 uses `erase_brush`, `erase_lasso` and `set_erase_editing` consistently for Erase
 operations (previously `paint_brush`, `select_lasso`, `set_eraser_editing`). Reload tool

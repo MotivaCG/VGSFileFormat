@@ -34,12 +34,19 @@ def generate(root: Path, python: Path, output: Path, data_dir: Path | None = Non
     token = validate_token(token_path.read_text(encoding="utf-8"))
     command, server = str(python), str(root / "server.py")
     endpoint = "http://127.0.0.1:8765/mcp"
+    # The common "mcpServers" shape (Claude Desktop/Code, Cursor, Gemini CLI, Windsurf and
+    # most hosts); VS Code names its object "servers"; Codex uses TOML, written below.
     stdio = {"mcpServers": {"vgs-editor": {"command": command, "args": [server]}}}
+    headers = {"Authorization": "Bearer " + token}
+    http = {"mcpServers": {"vgs-editor": {"type": "http", "url": endpoint, "headers": headers}}}
     profiles = {
         "stdio.json": stdio,
+        "http.json": http,
+        "vscode.json": {"servers": {"vgs-editor": {"type": "stdio", "command": command, "args": [server]}}},
+        "vscode-http.json": {"servers": {"vgs-editor": {"type": "http", "url": endpoint, "headers": headers}}},
+        # Earlier names of the same profiles, kept for existing setups.
         "claude-desktop.json": stdio,
-        "claude-code-http.json": {"mcpServers": {"vgs-editor": {"type": "http", "url": endpoint,
-                                                              "headers": {"Authorization": "Bearer " + token}}}},
+        "claude-code-http.json": http,
         "openai-responses-tool.json": {"type": "mcp", "server_label": "vgs_editor",
                                         "server_url": "https://YOUR-HTTPS-ENDPOINT/mcp", "authorization": token},
     }

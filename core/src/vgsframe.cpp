@@ -689,6 +689,10 @@ void FrameDecoder::evaluateInto(double normalized, bool includeSh, Frame *out,
   out->opacity.resize(int(total));
   out->colorDc.resize(int(total * 3));
   out->active.resize(int(total));
+  bool anyNormals = false;
+  for (const Block *group : groups)
+    anyNormals = anyNormals || group->arrays.count("normals") != 0;
+  out->normal.assign(anyNormals ? size_t(total * 3) : 0, 0.0f);
 
   // A capture written at a lower SH degree carries fewer coefficients: three at
   // degree 1, eight at degree 2, fifteen at degree 3. The planes it stores hold
@@ -768,6 +772,7 @@ void FrameDecoder::evaluateInto(double normalized, bool includeSh, Frame *out,
     const uint8_t *scaleIndices = nullptr, *lifetimes = nullptr;
     const char *opacityWords = nullptr, *sh0Indices = nullptr, *sh0Words = nullptr;
     const uint8_t *opacityScales = nullptr; // optional: a per-splat factor, or none
+    const uint8_t *normals = nullptr;       // optional: two bytes per splat, or none
     const char *shStaticIndices = nullptr, *shTemporalIndices = nullptr;
   };
   std::vector<GroupPlan> plans;
@@ -797,6 +802,8 @@ void FrameDecoder::evaluateInto(double normalized, bool includeSh, Frame *out,
       plan.opacityWords = group->array("opacity_rq_indices");
       if (group->arrays.count("opacity_scales"))
         plan.opacityScales = reinterpret_cast<const uint8_t *>(group->array("opacity_scales"));
+      if (group->arrays.count("normals"))
+        plan.normals = reinterpret_cast<const uint8_t *>(group->array("normals"));
       plan.lifetimes = reinterpret_cast<const uint8_t *>(group->array("lifetimes"));
       plan.sh0Indices = group->array("sh0_base_indices");
       plan.sh0Words = group->array("sh0_rq_indices");
@@ -1065,6 +1072,23 @@ void FrameDecoder::evaluateInto(double normalized, bool includeSh, Frame *out,
         }
       }
     }
+
+    // --- normals: stored in the splat's own frame, turned as the splat is ---------
+    if (plan.normals) {
+      for (uint64_t i = begin; i < end; ++i) {
+        const size_t record = size_t(written + i);
+        float v[3];
+        decodeNormal(plan.normals + i * 2, plan.scaleIndices + i * 3, v);
+        const float *q = out->rotation.data() + record * 4;
+        // v + 2w (q x v) + 2 q x (q x v), with q in xyzw.
+        const float t[3] = {2 * (q[1] * v[2] - q[2] * v[1]), 2 * (q[2] * v[0] - q[0] * v[2]),
+                            2 * (q[0] * v[1] - q[1] * v[0])};
+        float *world = out->normal.data() + record * 3;
+        world[0] = v[0] + q[3] * t[0] + (q[1] * t[2] - q[2] * t[1]);
+        world[1] = v[1] + q[3] * t[1] + (q[2] * t[0] - q[0] * t[2]);
+        world[2] = v[2] + q[3] * t[2] + (q[0] * t[1] - q[1] * t[0]);
+      }
+    }
   };
 
   // A range of the whole frame, which may cross from one group into the next.
@@ -1242,6 +1266,8 @@ FrameDecoder::FrameDecoder(const DecodedChunk &chunk, double tick, Contents cont
     require(b, "opacity_rq_indices", n * 8);
     if (b.arrays.count("opacity_scales"))
       require(b, "opacity_scales", n);
+    if (b.arrays.count("normals"))
+      require(b, "normals", n * 2);
     if (!positionsOnly) {
       checkRq(b, "sh0_rq_indices", shared.sh0Entries / 5);
       checkRq(b, "opacity_rq_indices", shared.opacityEntries / 5);

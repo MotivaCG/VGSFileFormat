@@ -63,7 +63,11 @@ struct CropVolume {
     bool contains(const QVector3D &worldPosition) const;
 };
 Q_DECLARE_METATYPE(CropVolume)
-enum class ModifierType { Crop, RemoveGreen, AnimateTransform, PurgeIsolated, Walk, BakeAntialiasing, PruneLowContribution, Audio, Colour, Erase };
+enum class ModifierType { Crop, RemoveGreen, AnimateTransform, PurgeIsolated, Walk, BakeAntialiasing, PruneLowContribution, Audio, Colour, Erase, LoopMorph };
+// The kinds that remove splats. A Loop morph splits them: those above it shape the End and
+// Start frames it morphs, those below it apply to its frames. Every other kind applies to
+// every frame wherever it is in the stack.
+bool removesSplats(ModifierType type);
 struct GreenFilter {
     float minimumSaturation = 0.5f, hueTolerance = 45; // HSV: saturation 0..1, circular distance from 120 degrees.
     bool linearRgb = true; // Convert clamped sRGB base colour to linear RGB before HSV.
@@ -107,6 +111,16 @@ struct IsolationFilter {
 struct PruneFilter {
     double percent=15;
     double protectAbove=0.25;
+};
+// A Loop morph's marker: one point of the subject picked on the End frame and the same
+// point on the Start frame, numbered from 1. Each is in the capture's own coordinates at its
+// frame (before the transform), and remembers that frame: moving End or Start leaves it
+// where it was picked, and the morph no longer uses it until it is picked again.
+struct MorphMarker {
+    int number=1;
+    bool hasEnd=false,hasStart=false;
+    QVector3D end,start;
+    int endFrame=0,startFrame=0;
 };
 struct Modifier {
     QString id, name;
@@ -162,6 +176,10 @@ struct Modifier {
     // The world-space size every splat is widened by: the renderer's 0.3 px^2 low-pass,
     // as a distance at bakeDistance.
     double bakeSize() const;
+    // Loop morph: frames added after End, `morphSeconds` long, that carry the capture back
+    // to Start so a loop has no jump, guided by the markers.
+    double morphSeconds = 1;
+    QVector<MorphMarker> morphMarkers;
     bool active() const { return enabled && (type!=ModifierType::Crop || crop.enabled); }
 };
 struct Project {
@@ -195,6 +213,24 @@ struct Project {
     double antialiasingBake() const;
     // The active Audio modifiers, mixed into the soundtrack, in stack order.
     QVector<const Modifier *> audioModifiers() const;
+    // The Loop morph that applies - the first active one - or none.
+    const Modifier *loopMorph() const;
+    // How many frames it adds after End at a frame rate, and the last time playback reaches.
+    int morphFrames(double fps) const;
+    double playbackEnd(double fps) const;
+    // Whether a time is one of those frames, and how far through the morph it is: frame k of
+    // n is k/(n+1) of the way from End (0) to Start (1), so neither end shows twice.
+    bool inMorph(double seconds,double fps,double *fraction=nullptr) const;
+    // The stack at a frame split at the Loop morph: what shapes the End and Start frames it
+    // morphs (every kind but the removing ones below it), and what its own frames are drawn
+    // and exported with (every kind but the removing ones above it). The Loop morph itself is
+    // in neither; with none, both are the whole stack.
+    QVector<Modifier> modifiersAboveMorph(double frame) const;
+    QVector<Modifier> modifiersBelowMorph(double frame) const;
+    // The markers placed on both the current End and Start frames, each point in its frame's
+    // capture coordinates.
+    struct MorphPair {int number;QVector3D end,start;};
+    QVector<MorphPair> morphPairs(double fps) const;
     static QString newId();
     CaptureSettings captureSettings;
     double time = 0, in = 0, out = 0, speed = 1;

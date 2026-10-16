@@ -1,7 +1,10 @@
 # Prepare the adapter's Python and per-user connection profiles. No global packages are changed.
 # A deployed editor ships its own runtime in .\python and needs neither Python nor network;
 # a source checkout gets an isolated virtual environment instead.
-param([switch]$RegisterCodex, [string]$Python = "python", [string]$EnvironmentDir)
+# -Register claude-code,codex also registers the stdio server with those clients' own CLIs;
+# any other MCP client uses a generated profile. -RegisterCodex is kept as -Register codex.
+param([ValidateSet("claude-code", "codex")][string[]]$Register = @(), [switch]$RegisterCodex,
+      [string]$Python = "python", [string]$EnvironmentDir)
 $ErrorActionPreference = "Stop"
 $adapterRoot = $PSScriptRoot
 $clientDataPath = if ($env:VGS_EDITOR_MCP_DATA_DIR) { $env:VGS_EDITOR_MCP_DATA_DIR } else {
@@ -23,12 +26,16 @@ if (-not $EnvironmentDir -and (Test-Path -LiteralPath $bundledPython)) {
 $serverPath = Join-Path $adapterRoot "server.py"
 & $pythonPath (Join-Path $adapterRoot "connections.py") --data-dir $clientDataPath
 if ($LASTEXITCODE -ne 0) { throw "Could not generate MCP connection profiles." }
-if ($RegisterCodex) {
-    & codex mcp add vgs-editor -- $pythonPath $serverPath
-    if ($LASTEXITCODE -ne 0) { throw "Could not register the server in Codex." }
-} else {
-    Write-Output "Installed. Choose your MCP client using $clientDataPath/connections."
-    Write-Output "Standard stdio command: $pythonPath"
-    Write-Output "Arguments: $serverPath"
-    Write-Output "For HTTP: $pythonPath $serverPath --transport streamable-http"
+if ($RegisterCodex) { $Register = @($Register) + "codex" }
+foreach ($client in ($Register | Select-Object -Unique)) {
+    switch ($client) {
+        "claude-code" { & claude mcp add --scope user --transport stdio vgs-editor -- $pythonPath $serverPath }
+        "codex" { & codex mcp add vgs-editor -- $pythonPath $serverPath }
+    }
+    if ($LASTEXITCODE -ne 0) { throw "Could not register the server in $client." }
+    Write-Output "Registered vgs-editor in $client."
 }
+Write-Output "Installed. Connection profiles for any MCP client are in $clientDataPath/connections."
+Write-Output "Standard stdio command: $pythonPath"
+Write-Output "Arguments: $serverPath"
+Write-Output "For HTTP: $pythonPath $serverPath --transport streamable-http"

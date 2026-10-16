@@ -51,13 +51,13 @@ DISTFILES += $$PWD/README.md $$PWD/dependencies/mint/README.md
 SOURCES += $$PWD/rangeslider.cpp $$PWD/exportcapture.cpp $$PWD/dependencies/mint/mintskinrecovery.cpp $$VGS_ROOT/core/src/vgsencode.cpp $$VGS_ROOT/core/crypto/vgssign.cpp
 HEADERS += $$PWD/rangeslider.h $$PWD/exportcapture.h $$PWD/dependencies/mint/mintskinrecovery.h
 
-SOURCES += $$PWD/nativeexport.cpp
-HEADERS += $$PWD/nativeexport.h
+SOURCES += $$PWD/nativeexport.cpp $$PWD/gaussiannormals.cpp $$PWD/normalrigs.cpp
+HEADERS += $$PWD/nativeexport.h $$PWD/gaussiannormals.h
 
 SOURCES += $$PWD/modifiers.cpp $$PWD/audiomix.cpp
 HEADERS += $$PWD/audiomix.h
-SOURCES += $$PWD/audiopreview.cpp $$PWD/isolation.cpp $$PWD/pruning.cpp $$PWD/animationpanel.cpp
-HEADERS += $$PWD/audiopreview.h $$PWD/isolation.h $$PWD/pruning.h $$PWD/animationpanel.h
+SOURCES += $$PWD/audiopreview.cpp $$PWD/isolation.cpp $$PWD/loopmorph.cpp $$PWD/pruning.cpp $$PWD/animationpanel.cpp
+HEADERS += $$PWD/audiopreview.h $$PWD/isolation.h $$PWD/loopmorph.h $$PWD/pruning.h $$PWD/animationpanel.h
 SOURCES += $$PWD/mintwriter.cpp
 HEADERS += $$PWD/mintwriter.h
 

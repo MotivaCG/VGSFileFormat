@@ -9,6 +9,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 
 namespace vgs {
 using Bytes = mgs::Bytes;
@@ -149,9 +150,48 @@ enum Attribute : uint32_t {
   // anti-aliasing is baked for plain renderers: shared opacity tables cannot lower one
   // splat's opacity, so the factor travels per splat. A reader that predates it skips it
   // and draws the needle splats it was meant to fade. See FORMAT.md.
-  OpacityScales
+  OpacityScales,
+  // Optional: two bytes per splat, constant over the chunk: the splat's outward surface
+  // normal in its own frame, for renderers that light splats. It turns with the splat, so
+  // one code serves every sample. See encodeNormal and FORMAT.md.
+  Normals
 };
 inline float opacityScale(uint8_t code) { return std::exp2(-float(code) / 16.0f); }
+
+// A normal is stored in the splat's own axes ordered by scale index, shortest first (ties
+// to the lower axis): flat splats, most of a capture, then all have theirs at the pole, and
+// their codes are a handful of values the entropy coder takes for a few bits. Byte 0 is u,
+// byte 1 is v above the sign of the normal along the shortest axis, in a hemi-octahedral
+// map of that pole's hemisphere: under a degree from the true normal.
+inline void normalAxes(const uint8_t scaleIndices[3], int axes[3]) {
+  axes[0] = 0, axes[1] = 1, axes[2] = 2;
+  for (int i = 1; i < 3; ++i)
+    for (int j = i; j > 0 && scaleIndices[axes[j]] < scaleIndices[axes[j - 1]]; --j)
+      std::swap(axes[j], axes[j - 1]);
+}
+inline void encodeNormal(const float local[3], const uint8_t scaleIndices[3], uint8_t code[2]) {
+  int axes[3];
+  normalAxes(scaleIndices, axes);
+  const float x = local[axes[1]], y = local[axes[2]], z = local[axes[0]];
+  const float sum = std::abs(x) + std::abs(y) + std::abs(z);
+  if (!(sum > 0)) { code[0] = 128, code[1] = 64 << 1; return; }
+  const float px = x / sum, py = y / sum;
+  const auto quantize = [](float value, int top) {
+    return uint8_t(std::min(float(top), std::max(0.0f, std::round((value + 1) * 0.5f * float(top)))));
+  };
+  code[0] = quantize(px + py, 255);
+  code[1] = uint8_t(quantize(px - py, 127) << 1 | (z < 0 ? 1 : 0));
+}
+inline void decodeNormal(const uint8_t code[2], const uint8_t scaleIndices[3], float local[3]) {
+  int axes[3];
+  normalAxes(scaleIndices, axes);
+  const float u = float(code[0]) / 255.0f * 2 - 1, v = float(code[1] >> 1) / 127.0f * 2 - 1;
+  const float px = (u + v) * 0.5f, py = (u - v) * 0.5f;
+  float z = std::max(0.0f, 1 - std::abs(px) - std::abs(py));
+  if (code[1] & 1) z = -z;
+  const float norm = std::max(std::sqrt(px * px + py * py + z * z), 1e-20f);
+  local[axes[1]] = px / norm, local[axes[2]] = py / norm, local[axes[0]] = z / norm;
+}
 inline uint8_t opacityScaleCode(float factor) {
   if (!(factor > 0)) return 255;
   const float code = std::round(-16.0f * std::log2(std::min(factor, 1.0f)));

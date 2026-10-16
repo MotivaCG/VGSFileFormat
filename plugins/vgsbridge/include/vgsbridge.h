@@ -75,7 +75,7 @@ extern "C" {
 
 /* Bumped whenever a struct below or a signature changes, so a stale add-on refuses to load
  * a newer library rather than read its structs wrongly. */
-#define VGSB_API_VERSION 4
+#define VGSB_API_VERSION 5
 
 typedef struct vgsb_player vgsb_player;
 
@@ -107,6 +107,8 @@ typedef struct vgsb_frame {
   const float *scales;     /* 3 per splat, activated */
   const float *radiance;   /* 4 per splat: DC rgb, activated opacity */
   const float *sh;         /* sh_coefficients planes of 3 * count floats */
+  const float *normals;    /* 3 per splat, outward and unit length; NULL when the capture
+                            * carries none */
 } vgsb_frame;
 
 VGSB_API int vgsb_api_version(void);

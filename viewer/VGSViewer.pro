@@ -16,7 +16,7 @@ INCLUDEPATH += $$PWD $$EDITOR $$EDITOR/dependencies/mint $$EDITOR/dependencies/e
 
 SOURCES += $$PWD/viewermain.cpp $$PWD/viewerwindow.cpp \
     $$EDITOR/editortheme.cpp $$EDITOR/displayscaling.cpp $$EDITOR/viewport.cpp $$EDITOR/viewcube.cpp \
-    $$EDITOR/rangeslider.cpp $$EDITOR/audiopreview.cpp $$EDITOR/captureworker.cpp $$EDITOR/isolation.cpp \
+    $$EDITOR/rangeslider.cpp $$EDITOR/audiopreview.cpp $$EDITOR/captureworker.cpp $$EDITOR/isolation.cpp $$EDITOR/loopmorph.cpp \
     $$EDITOR/pruning.cpp $$EDITOR/project.cpp $$EDITOR/modifiers.cpp $$EDITOR/capturesettings.cpp \
     $$EDITOR/dependencies/mint/mintfile.cpp $$EDITOR/dependencies/mint/mintskinrecovery.cpp \
     $$VGS_ROOT/decoder/src/vgsdecoder.cpp $$VGS_ROOT/core/src/vgscontainer.cpp $$VGS_ROOT/core/src/vgsframe.cpp \

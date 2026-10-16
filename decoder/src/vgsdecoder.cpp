@@ -524,6 +524,7 @@ struct Capture::State {
     view.opacities = first(decoded.opacity);
     view.colors = first(decoded.colorDc);
     view.sphericalHarmonics = first(decoded.shRest);
+    view.normals = first(decoded.normal);
     view.shCoefficients = decoded.shCoefficients;
     view.active = decoded.active.empty() ? nullptr : decoded.active.data();
     view.activeCount = decoded.count;

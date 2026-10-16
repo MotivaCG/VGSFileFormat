@@ -65,6 +65,7 @@ QString typeName(const Modifier &modifier) {
     case ModifierType::Audio: return ModifierPanel::tr("Audio");
     case ModifierType::Colour: return ModifierPanel::tr("Color");
     case ModifierType::Erase: return ModifierPanel::tr("Eraser");
+    case ModifierType::LoopMorph: return ModifierPanel::tr("Loop morph");
     }
     return {};
 }
@@ -81,6 +82,7 @@ QString typeDescription(ModifierType type) {
     case ModifierType::Audio: return ModifierPanel::tr("The soundtrack: the capture's own or a file, with an offset.\nThe editor plays it with the timeline; VGS/PGS exports carry it in sync.\nMINT cannot hold audio.");
     case ModifierType::Colour: return ModifierPanel::tr("Exposure, white balance and saturation for the whole capture,\nview-dependent color included, and green spill removal.\nShown in the viewport; exports keep the capture's own color tables.");
     case ModifierType::Erase: return ModifierPanel::tr("Removes splats picked by hand with a brush or a lasso:\nfloaters, stray pieces, whatever the filters miss.\nA splat is itself only within one chunk, so each chunk keeps its own picks.");
+    case ModifierType::LoopMorph: return ModifierPanel::tr("Adds frames after End that morph the End frame back into the Start frame,\nso a loop plays without a jump. Numbered markers on both frames guide it.\nThe cleaning modifiers above it shape those two frames; the ones below apply to its frames.");
     }
     return {};
 }
@@ -93,8 +95,9 @@ QColor modifierColour(ModifierType type) {
     case ModifierType::PurgeIsolated: return QColor(QRgb(0xA3214Fu));
     case ModifierType::Erase: return QColor(QRgb(0x781638u));
     case ModifierType::Colour: return QColor(QRgb(0xA0A6ADu));
-    case ModifierType::AnimateTransform: return QColor(QRgb(0x3B82F6u));
-    case ModifierType::Walk: return QColor(QRgb(0x20C9D2u));
+    case ModifierType::AnimateTransform: return QColor(QRgb(0x20C9D2u));
+    case ModifierType::Walk: return QColor(QRgb(0x3B82F6u));
+    case ModifierType::LoopMorph: return QColor(QRgb(0x8B5CF6u));
     case ModifierType::Audio: return QColor(QRgb(0xF4C542u));
     case ModifierType::PruneLowContribution: return QColor(QRgb(0x70C45Au));
     case ModifierType::BakeAntialiasing: return QColor(QRgb(0x328D62u));
@@ -247,14 +250,14 @@ ModifierPanel::ModifierPanel(QWidget *parent):QWidget(parent) {
     };
     // The kinds in the order a capture is usually worked on - clean it, its look, its motion,
     // its sound, then what prepares it for delivery - with separators between the groups. F1 to
-    // F10 add them in that order.
+    // F11 add them in that order.
     type_=new QComboBox;type_->setObjectName("newModifierType");type_->setItemDelegate(new KindListDelegate(type_));
     {
         struct Kind {QString name;int data;ModifierType type;};
         const QVector<QVector<Kind>> groups{
             {{tr("Crop"),0,ModifierType::Crop},{tr("Remove green points"),2,ModifierType::RemoveGreen},{tr("Purge Isolated"),4,ModifierType::PurgeIsolated},{tr("Eraser"),10,ModifierType::Erase}},
             {{tr("Color"),9,ModifierType::Colour}},
-            {{tr("Animate transform"),3,ModifierType::AnimateTransform},{tr("Walk"),5,ModifierType::Walk}},
+            {{tr("Animate transform"),3,ModifierType::AnimateTransform},{tr("Walk"),5,ModifierType::Walk},{tr("Loop morph"),11,ModifierType::LoopMorph}},
             {{tr("Audio"),8,ModifierType::Audio}},
             {{tr("Prune low contribution"),7,ModifierType::PruneLowContribution},{tr("Bake anti-aliasing"),6,ModifierType::BakeAntialiasing}}};
         int key=1;
@@ -270,7 +273,7 @@ ModifierPanel::ModifierPanel(QWidget *parent):QWidget(parent) {
             }
         }
     }
-    // The swatches smaller here than in the menu, and the whole list open at once: ten kinds and
+    // The swatches smaller here than in the menu, and the whole list open at once: eleven kinds and
     // the separators between their groups, no scrolling.
     type_->setIconSize({12,12});type_->setMaxVisibleItems(type_->count());
     toolbar->addWidget(type_);
@@ -495,7 +498,7 @@ void ModifierPanel::setTimeline(int frame,int maximum) {
 void ModifierPanel::addModifier() {
     Modifier m;m.id=Project::newId();const int type=type_->currentData().toInt();
     m.type=type==2 ? ModifierType::RemoveGreen : type==3 ? ModifierType::AnimateTransform : type==4 ? ModifierType::PurgeIsolated : type==5 ? ModifierType::Walk
-          : type==6 ? ModifierType::BakeAntialiasing : type==7 ? ModifierType::PruneLowContribution : type==8 ? ModifierType::Audio : type==9 ? ModifierType::Colour : type==10 ? ModifierType::Erase : ModifierType::Crop;
+          : type==6 ? ModifierType::BakeAntialiasing : type==7 ? ModifierType::PruneLowContribution : type==8 ? ModifierType::Audio : type==9 ? ModifierType::Colour : type==10 ? ModifierType::Erase : type==11 ? ModifierType::LoopMorph : ModifierType::Crop;
     m.crop.enabled=true;m.crop.shape=CropShape::Cylinder; // Shape is chosen afterwards in the crop parameters.
     // The first of a kind keeps the bare name ("Crop"); later ones take the next free number ("Crop 2", "Crop 3"...).
     const QString base=m.type==ModifierType::Crop ? tr("Crop") : typeName(m);

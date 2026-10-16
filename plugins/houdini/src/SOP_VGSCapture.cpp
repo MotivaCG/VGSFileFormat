@@ -232,6 +232,7 @@ struct Shape {
   bool turned = false;
   bool linearize = true;
   bool castShadows = false;
+  bool normals = false; // write N when the capture carries normals
 };
 
 Shape shapeFor(UpAxis axis) {
@@ -288,11 +289,13 @@ struct Target {
   GA_RWHandleF alpha;
   GA_RWHandleV4 restOrient;
   GA_RWHandleM4 sphere[3];
+  GA_RWHandleV3 normal;
   bool harmonics = false;
+  bool normals = false;
   bool convert = false;
   PXL_OCIO::PHandle processor;
 
-  Target(GU_Detail &gdp, exint total, bool withHarmonics, const Shape &shape) {
+  Target(GU_Detail &gdp, exint total, bool withHarmonics, bool withNormals, const Shape &shape) {
     gdp.clearAndDestroy();
     if (total > 0)
       gdp.appendPointBlock(total);
@@ -308,6 +311,10 @@ struct Target {
       sphere[1] = GA_RWHandleM4(pointFloats(gdp, "GS_SPH_G", 16, GA_TYPE_VOID));
       sphere[2] = GA_RWHandleM4(pointFloats(gdp, "GS_SPH_B", 16, GA_TYPE_VOID));
     }
+    // N only when asked for and carried: nothing in Houdini draws splats with it.
+    normals = shape.normals && withNormals;
+    if (normals)
+      normal = GA_RWHandleV3(pointFloats(gdp, "N", 3, GA_TYPE_NORMAL));
     if (!shape.castShadows) {
       // What Bake GSplats sets to keep Karma from casting shadows from the splats.
       UT_StringHolder name = UT_VarEncode::encodeAttrib("karma:object:rendervisibility");
@@ -327,6 +334,8 @@ struct Target {
              {restOrient.getAttribute(), sphere[0].getAttribute(), sphere[1].getAttribute(),
               sphere[2].getAttribute()})
           attribute->hardenAllPages();
+      if (normals)
+        normal.getAttribute()->hardenAllPages();
     }
     processor = shape.linearize ? colourProcessor() : PXL_OCIO::PHandle();
     convert = shape.linearize && PXL_OCIO::isValidTransform(processor) &&
@@ -376,6 +385,14 @@ void writeSplats(Target &target, const vgsb_frame &frame, const Shape &shape,
     target.alpha.set(offset, frame.radiance[i * 4 + 3]);
     const float *rgb = &colours[size_t(i - begin) * 3];
     target.colour.set(offset, UT_Vector3F(rgb[0], rgb[1], rgb[2]));
+    if (target.normals && frame.normals) {
+      // A direction: turned with the splat, not scaled or moved.
+      const float *n = frame.normals + i * 3;
+      UT_Vector3F direction(n[0], n[1], n[2]);
+      if (turned)
+        direction = turn.rotate(direction);
+      target.normal.set(offset, direction);
+    }
 
     if (target.harmonics) {
       target.restOrient.set(offset, UT_Vector4F(rest.x(), rest.y(), rest.z(), rest.w()));
@@ -762,7 +779,7 @@ OP_ERROR SOP_VGSCapture::cookMySop(OP_Context &context) {
   // Checked for every group before anything is written: during playback a frame that is
   // not ready leaves the whole previous result showing, rather than some copies missing.
   const double wait = isPlaying ? envPlaybackWaitMs() : ExactWaitMs;
-  bool withHarmonics = false;
+  bool withHarmonics = false, withNormals = false;
   exint total = 0;
   for (Group &group : groups) {
     auto found = players.find(group.path);
@@ -781,6 +798,7 @@ OP_ERROR SOP_VGSCapture::cookMySop(OP_Context &context) {
     }
     group.splats = exint(frame.count);
     withHarmonics = withHarmonics || (frame.sh && frame.sh_coefficients > 0);
+    withNormals = withNormals || frame.normals != nullptr;
     total += group.splats * exint(group.copies.size());
     vgsb_release(found->second.player);
   }
@@ -789,6 +807,7 @@ OP_ERROR SOP_VGSCapture::cookMySop(OP_Context &context) {
   Shape shape = shapeFor(UpAxis(std::clamp(int(evalInt(parm::UpAxis, 0, now)), 0, 2)));
   shape.linearize = evalInt(parm::Linearize, 0, now) != 0;
   shape.castShadows = evalInt(parm::CastShadows, 0, now) != 0;
+  shape.normals = evalInt(parm::Normals, 0, now) != 0;
 
   // Auto: splats for the viewport, which misplaces Gaussian splats inside packed
   // primitives; instances for renders, which draw them right for a fraction of the memory.
@@ -811,7 +830,7 @@ OP_ERROR SOP_VGSCapture::cookMySop(OP_Context &context) {
       const exint count = std::min(exint(frame.count), group.splats);
       auto *variant = new GU_Detail;
       {
-        Target inner(*variant, count, withHarmonics, shape);
+        Target inner(*variant, count, withHarmonics, withNormals, shape);
         const exint blocks = (count + Block - 1) / Block;
         UTparallelFor(UT_BlockedRange<exint>(0, blocks), [&](const UT_BlockedRange<exint> &range) {
           for (exint block = range.begin(); block != range.end(); ++block)
@@ -853,7 +872,7 @@ OP_ERROR SOP_VGSCapture::cookMySop(OP_Context &context) {
     return error();
   }
 
-  Target target(*gdp, total, withHarmonics, shape);
+  Target target(*gdp, total, withHarmonics, withNormals, shape);
 
   GA_Offset base = GA_Offset(0);
   exint copies = 0;

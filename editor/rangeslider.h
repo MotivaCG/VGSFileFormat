@@ -33,6 +33,10 @@ public:
     QVector<int> labelledSeconds() const;
     QString secondLabel(int second) const;
     void setRangeValues(int start, int end);
+    // Frames added after End that play with the range (a Loop morph's), drawn after it; the
+    // frame range must reach them. 0 for none.
+    void setTailFrames(int frames);
+    int tailFrames() const { return m_tailFrames; }
     void setPlayheadValue(int value);
     int startValue() const { return m_start; }
     int endValue() const { return m_end; }
@@ -83,6 +87,7 @@ private:
     int m_start = 0;
     int m_end = 0;
     int m_playhead = 0;
+    int m_tailFrames = 0;
     int m_leftInset = 10, m_rightInset = 10;
     QString m_label;
     double m_viewFirst = 0, m_viewLast = 0;

@@ -276,6 +276,10 @@ VGS_DECODER_API int vgs_current_frame(const vgs_capture *h, vgs_frame *out) {
   return VGS_DEC_OK;
 }
 
+VGS_DECODER_API const float *vgs_frame_normals(const vgs_capture *h) {
+  return h ? self(h)->capture.frame().normals : nullptr;
+}
+
 VGS_DECODER_API void vgs_release_cache(vgs_capture *h) { self(h)->capture.releaseCache(); }
 
 } // extern "C"

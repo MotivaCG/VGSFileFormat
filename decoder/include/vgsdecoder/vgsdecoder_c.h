@@ -168,6 +168,12 @@ VGS_DECODER_API int vgs_set_time(vgs_capture *, double seconds, int include_sh, 
 VGS_DECODER_API double vgs_time(const vgs_capture *);
 /** The instant last decoded, without decoding anything. */
 VGS_DECODER_API int vgs_current_frame(const vgs_capture *, vgs_frame *out);
+/**
+ * The instant last decoded's outward surface normals, 3 per splat, or NULL when the
+ * capture carries none. A function rather than a vgs_frame field, so callers built
+ * against the older struct keep working. Valid as long as the frame's arrays.
+ */
+VGS_DECODER_API const float *vgs_frame_normals(const vgs_capture *);
 /** Drops the cached chunk. */
 VGS_DECODER_API void vgs_release_cache(vgs_capture *);
 

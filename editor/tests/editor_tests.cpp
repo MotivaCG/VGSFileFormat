@@ -15,6 +15,7 @@
 #include "isolation.h"
 #include "pruning.h"
 #include "displayscaling.h"
+#include "loopmorph.h"
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonArray>
@@ -22,10 +23,127 @@
 #include <QTemporaryDir>
 #include <QtTest>
 #include <cmath>
+#include <random>
+
+namespace {
+// A rod of splats along `axis` from `from`, `length` long and `radius` thick, as a body's
+// limb would be: points on its surface, small round splats, mid grey.
+void addRod(loopmorph::Cloud &cloud,QVector3D from,QVector3D axis,float length,float radius,int count,std::mt19937 &random) {
+    std::uniform_real_distribution<float> unit(0,1);axis.normalize();
+    QVector3D side=QVector3D::crossProduct(axis,{0,0,1});if (side.length()<.1f) side=QVector3D::crossProduct(axis,{0,1,0});side.normalize();
+    const QVector3D up=QVector3D::crossProduct(axis,side);
+    for (int i=0;i<count;++i) {
+        const float along=unit(random)*length,angle=unit(random)*6.2831853f;const QVector3D p=from+axis*along+(side*std::cos(angle)+up*std::sin(angle))*radius;
+        cloud.position.insert(cloud.position.end(),{p.x(),p.y(),p.z()});cloud.rotation.insert(cloud.rotation.end(),{0,0,0,1});
+        cloud.scale.insert(cloud.scale.end(),{.01f,.01f,.01f});cloud.colour.insert(cloud.colour.end(),{.5f,.5f,.5f});cloud.opacity.push_back(.9f);
+    }
+}
+QVector3D splatAt(const loopmorph::Cloud &c,size_t i) {return {c.position[3*i],c.position[3*i+1],c.position[3*i+2]};}
+size_t nearestSplat(const loopmorph::Cloud &c,size_t count,QVector3D to) {
+    size_t best=0;float distance=1e30f;for (size_t i=0;i<count;++i) if (const float d=(splatAt(c,i)-to).lengthSquared();d<distance) {distance=d;best=i;}return best;
+}
+}
 
 class EditorTests : public QObject {
     Q_OBJECT
 private slots:
+    void loopMorphSplitsTheStackAndPersists() {
+        Project project;project.modifiers.clear();project.in=0;project.out=2;
+        auto add=[&](ModifierType type,const QString &name) {Modifier m;m.id=Project::newId();m.name=name;m.type=type;m.crop.enabled=true;project.modifiers.append(m);return m.id;};
+        add(ModifierType::Crop,"Crop");add(ModifierType::Colour,"Colour");add(ModifierType::LoopMorph,"Morph");add(ModifierType::RemoveGreen,"Green");add(ModifierType::Walk,"Walk");
+        auto names=[](const QVector<Modifier> &stack) {QStringList n;for (const auto &m:stack) n << m.name;return n.join(',');};
+        // Removing kinds above it shape the frames it morphs, those below apply to its frames;
+        // every other kind applies both ways, and the morph itself to neither.
+        QCOMPARE(names(project.modifiersAboveMorph(0)),QString("Crop,Colour,Walk"));
+        QCOMPARE(names(project.modifiersBelowMorph(0)),QString("Colour,Green,Walk"));
+        auto &morph=project.modifiers[2];morph.morphSeconds=.4;
+        QCOMPARE(project.morphFrames(25),10);QVERIFY(std::abs(project.playbackEnd(25)-2.4)<1e-9);
+        double fraction=0;QVERIFY(project.inMorph(2.04,25,&fraction));QVERIFY(std::abs(fraction-1/11.)<1e-9);QVERIFY(!project.inMorph(2,25));QVERIFY(!project.inMorph(2.44,25));
+        // Markers pair up only on the current End and Start frames.
+        MorphMarker both;both.number=1;both.hasEnd=both.hasStart=true;both.end={1,2,3};both.start={4,5,6};both.endFrame=50;both.startFrame=0;
+        MorphMarker endOnly;endOnly.number=2;endOnly.hasEnd=true;endOnly.end={.5f,0,0};endOnly.endFrame=50;
+        MorphMarker moved=both;moved.number=3;moved.endFrame=40;
+        morph.morphMarkers={both,endOnly,moved};
+        QCOMPARE(project.morphPairs(25).size(),1);QCOMPARE(project.morphPairs(25)[0].end,QVector3D(1,2,3));QCOMPARE(project.morphPairs(25)[0].number,1);
+        // Saved and read back, with the playhead on one of its frames.
+        project.time=2.2;QTemporaryDir dir;project.asset=dir.filePath("source.vgs");const auto json=project.json(dir.filePath("scene.vgsproj"));
+        Project restored;QString error;QVERIFY2(Project::fromJson(json,dir.path(),&restored,&error),qPrintable(error));
+        QCOMPARE(restored.modifierJson(),project.modifierJson());QCOMPARE(restored.modifiers[2].morphMarkers.size(),3);QVERIFY(!restored.modifiers[2].morphMarkers[1].hasStart);
+        // Two markers with one number are refused.
+        auto invalid=json;auto mods=invalid["modifiers"].toArray();auto m=mods[2].toObject();auto data=m["morph"].toObject();auto markers=data["markers"].toArray();
+        markers.append(markers[0]);data["markers"]=markers;m["morph"]=data;mods[2]=m;invalid["modifiers"]=mods;QVERIFY(!Project::fromJson(invalid,dir.path(),&restored,&error));
+        // Disabled, it adds nothing and splits nothing.
+        project.modifiers[2].enabled=false;QCOMPARE(project.morphFrames(25),0);QCOMPARE(names(project.modifiersAboveMorph(0)),QString("Crop,Colour,Green,Walk"));
+    }
+    void loopMorphSuggestsPairsAndFlagsAMispairedOne() {
+        // Start turned 30 degrees about Y and moved: from four pairs, where a fifth point's pair
+        // is follows the turn, and nearby pairs' own misfit is carried along.
+        QMatrix4x4 motion;motion.translate(.3f,0,-.1f);motion.rotate(30,0,1,0);
+        std::vector<loopmorph::Pair> pairs;
+        for (QVector3D p:{QVector3D(0,0,0),QVector3D(0,1.6f,0),QVector3D(.4f,1.3f,0),QVector3D(-.4f,1.3f,.1f)}) pairs.push_back({motion.map(p),p});
+        QVector3D guess;QVERIFY(loopmorph::predict(pairs,{.2f,1,0},true,&guess));QVERIFY((guess-motion.map(QVector3D(.2f,1,0))).length()<1e-4f);
+        QVERIFY(loopmorph::predict(pairs,motion.map(QVector3D(.2f,1,0)),false,&guess));QVERIFY((guess-QVector3D(.2f,1,0)).length()<1e-4f);
+        // A hand raised 10 cm at End, beyond the rigid motion: a point beside it follows it.
+        pairs[2].end+=QVector3D(0,.1f,0);QVERIFY(loopmorph::predict(pairs,{.42f,1.3f,0},true,&guess));
+        QVERIFY((guess-motion.map(QVector3D(.42f,1.3f,0))-QVector3D(0,.1f,0)).length()<.02f);
+        pairs[2].end-=QVector3D(0,.1f,0);
+        // Fewer than three, or three in a line, say nothing.
+        QVERIFY(!loopmorph::predict({pairs[0],pairs[1]},{0,0,0},true,&guess));
+        QVERIFY(!loopmorph::predict({{{0,0,0},{0,0,0}},{{0,1,0},{0,1,0}},{{0,2,0},{0,2,0}}},{1,0,0},true,&guess));
+        // A fifth pair clicked on the wrong point stands out; the others agree to the millimetre.
+        pairs.push_back({motion.map(QVector3D(0,1,.1f))+QVector3D(.25f,0,0),{0,1,.1f}});
+        const auto off=loopmorph::deviations(pairs);QCOMPARE(off.size(),size_t(5));
+        QVERIFY2(off[4]>.15f,qPrintable(QString::number(off[4])));
+        for (int i=0;i<4;++i) QVERIFY2(off[size_t(i)]<off[4]/2,qPrintable(QString("%1: %2").arg(i).arg(off[size_t(i)])));
+        // With three pairs nothing is left over to judge one by.
+        QVERIFY(std::isnan(loopmorph::deviations({pairs[0],pairs[1],pairs[2]})[0]));
+    }
+    void loopMorphMovesARigidSubjectRigidly() {
+        // The start frame is the end frame turned 40 degrees about Y and moved half a metre,
+        // its own splats drawn afresh: no splat is the same one in both.
+        std::mt19937 random(7);loopmorph::Cloud end,start;
+        addRod(end,{0,0,0},{0,1,0},1.6f,.15f,6000,random);addRod(end,{-.4f,1.3f,0},{1,0,0},.8f,.05f,2000,random);
+        QMatrix4x4 motion;motion.translate(.5f,0,.2f);motion.rotate(40,0,1,0);
+        addRod(start,motion.map({0,0,0}),motion.mapVector({0,1,0}),1.6f,.15f,6000,random);addRod(start,motion.map({-.4f,1.3f,0}),motion.mapVector({1,0,0}),.8f,.05f,2000,random);
+        std::vector<loopmorph::Pair> pairs;for (QVector3D p:{QVector3D(0,0,.15f),QVector3D(0,1.6f,.15f),QVector3D(-.4f,1.3f,.05f),QVector3D(.4f,1.3f,.05f)}) pairs.push_back({p,motion.map(p)});
+        const loopmorph::Morph morph(end,start,pairs);
+        QVERIFY2(morph.markerError()<.02,qPrintable(QString::number(morph.markerError())));
+        // At the ends each frame is itself, the other faded out entirely.
+        const auto first=morph.evaluate(0),last=morph.evaluate(1);
+        QCOMPARE(first.size(),end.size());QCOMPARE(last.size(),start.size());
+        for (size_t i=0;i<end.size();i+=97) QVERIFY((splatAt(first,i)-splatAt(end,i)).length()<1e-4f);
+        for (size_t i=0;i<start.size();i+=97) QVERIFY((splatAt(last,i)-splatAt(start,i)).length()<1e-4f);
+        // Halfway the end frame's splats are the subject, rigid: the arm's tips as far apart.
+        const auto middle=morph.evaluate(.5);QCOMPARE(middle.size(),end.size()+start.size());
+        const size_t left=nearestSplat(end,end.size(),{-.4f,1.3f,.05f}),right=nearestSplat(end,end.size(),{.4f,1.3f,.05f});
+        const float span=(splatAt(end,left)-splatAt(end,right)).length(),now=(splatAt(middle,left)-splatAt(middle,right)).length();
+        QVERIFY2(std::abs(now-span)<.03f*span,qPrintable(QString("%1 vs %2").arg(now).arg(span)));
+        // Turned about halfway: the arm's direction 20 degrees from where it was.
+        const QVector3D was=(splatAt(end,right)-splatAt(end,left)).normalized(),is=(splatAt(middle,right)-splatAt(middle,left)).normalized();
+        const float turned=qRadiansToDegrees(std::acos(std::clamp(QVector3D::dotProduct(was,is),-1.f,1.f)));
+        QVERIFY2(std::abs(turned-20)<5,qPrintable(QString::number(turned)));
+        // Fading: the start frame in over the first half, the end frame out over the second.
+        QCOMPARE(loopmorph::endOpacity(0),1.f);QCOMPARE(loopmorph::startOpacity(0),0.f);QCOMPARE(loopmorph::endOpacity(1),0.f);QCOMPARE(loopmorph::startOpacity(1),1.f);
+        QVERIFY(loopmorph::endOpacity(.5)>.7f && loopmorph::startOpacity(.5)>.7f);
+    }
+    void loopMorphSwingsABendingArmRoundTheElbow() {
+        // An arm that bends 90 degrees at the elbow between the frames.
+        std::mt19937 random(3);loopmorph::Cloud end,start;
+        addRod(end,{0,0,0},{1,0,0},.5f,.05f,3000,random);addRod(end,{.5f,0,0},{1,0,0},.5f,.05f,3000,random);
+        addRod(start,{0,0,0},{1,0,0},.5f,.05f,3000,random);addRod(start,{.5f,0,0},{0,1,0},.5f,.05f,3000,random);
+        const std::vector<loopmorph::Pair> pairs{{{0,0,.05f},{0,0,.05f}},{{.5f,0,.05f},{.5f,0,.05f}},{{1,0,.05f},{.5f,.5f,.05f}},{{.75f,0,.05f},{.5f,.25f,.05f}}};
+        const loopmorph::Morph morph(end,start,pairs);
+        QVERIFY2(morph.markerError()<.03,qPrintable(QString::number(morph.markerError())));
+        // The hand keeps its distance from the elbow all the way: it swings round on an arc
+        // rather than cutting the corner, where it would come within 0.35 m.
+        const size_t hand=nearestSplat(end,end.size(),{1,0,.05f}),elbow=nearestSplat(end,end.size(),{.5f,0,.05f});
+        for (double s:{.25,.5,.75}) {
+            const auto frame=morph.evaluate(s);const float reach=(splatAt(frame,hand)-splatAt(frame,elbow)).length();
+            QVERIFY2(reach>.44f && reach<.56f,qPrintable(QString("s=%1: %2").arg(s).arg(reach)));
+        }
+        // And it ends where the start frame's hand is.
+        const auto nearlyThere=morph.evaluate(.98);QVERIFY2((splatAt(nearlyThere,hand)-QVector3D(.5f,.5f,0)).length()<.08f,qPrintable(QString::number((splatAt(nearlyThere,hand)-QVector3D(.5f,.5f,0)).length())));
+    }
     void compactDensityMatchesFullHdAndFourK() {
         QCOMPARE(compactDisplayScale({1920,1080}),.875);QCOMPARE(compactDisplayScale({3840,2160}),1.0);
         QCOMPARE(compactDisplayScale({1080,1920}),.875);QCOMPARE(compactDisplayScale({2560,1440}),1.0);

@@ -17,6 +17,7 @@
 #include <QFile>
 #include "nativeexport.h"
 #include "mintwriter.h"
+#include "loopmorph.h"
 #include "isolation.h"
 #include "pruning.h"
 #include "audiomix.h"
@@ -140,15 +141,23 @@ public:
         if (!a.allFinite() || std::abs(a.determinant())<1e-15) throw std::runtime_error("Cannot export a singular capture transform.");
         sh=angularBake(a);
     }
-    vgs::Frame bake(const vgs::Frame &source,const ExportProgress &progress,const std::vector<uint8_t> *pruned=nullptr) const {
+    // The records the stack keeps, and in `input` the frame with its colour processed.
+    std::vector<uint8_t> decide(const vgs::Frame &source,vgs::Frame &input,const ExportProgress &progress,const std::vector<uint8_t> *pruned) const {
         std::vector<QVector3D> worldPositions(size_t(source.count));std::vector<uint8_t> keep(size_t(source.count));
         if (pruned && pruned->size()!=source.count) throw std::runtime_error("The pruning does not match the frame's records.");
         // The colour processing first: a Remove green below a Color modifier tests its result.
-        vgs::Frame input=source; processColour(input,project.captureSettings,progress);
+        input=source; processColour(input,project.captureSettings,progress);
         auto sourceRgb=[&](size_t i) {return QVector3D(source.colorDc[3*i],source.colorDc[3*i+1],source.colorDc[3*i+2]);};
         auto processedRgb=[&](size_t i) {return QVector3D(input.colorDc[3*i],input.colorDc[3*i+1],input.colorDc[3*i+2]);};
         for (size_t i=0;i<source.count;++i) {worldPositions[i]=model.map({source.position[3*i],source.position[3*i+1],source.position[3*i+2]});keep[i]=source.active[i] && (!pruned || (*pruned)[i]) && modifiers.keeps(worldPositions[i],sourceRgb(i),processedRgb(i));}
         applyIsolation(worldPositions,keep,modifiers.isolations,[&] {report(progress,0,QStringLiteral("Purge Isolated: searching neighbors"));return false;});
+        return keep;
+    }
+    std::vector<uint8_t> keeps(const vgs::Frame &source,const ExportProgress &progress,const std::vector<uint8_t> *pruned) const {vgs::Frame input;return decide(source,input,progress,pruned);}
+    vgs::Frame bake(const vgs::Frame &source,const ExportProgress &progress,const std::vector<uint8_t> *pruned=nullptr) const {
+        vgs::Frame input;const auto keep=decide(source,input,progress,pruned);
+        auto sourceRgb=[&](size_t i) {return QVector3D(source.colorDc[3*i],source.colorDc[3*i+1],source.colorDc[3*i+2]);};
+        auto processedRgb=[&](size_t i) {return QVector3D(input.colorDc[3*i],input.colorDc[3*i+1],input.colorDc[3*i+2]);};
         vgs::Frame out;out.shCoefficients=coefficients;out.seconds=source.seconds;
         for (size_t i=0;i<input.count;++i) {
             if ((i%8192)==0) report(progress,0,QStringLiteral("Baking transforms and crop"));
@@ -412,10 +421,59 @@ QString pruningNote(const ExportResult &result) {
         .arg(removed,0,'f',1).arg(asked,0,'f',1).arg(result.pruneLimited).arg(result.pruneChunks);
 }
 void despillFrame(vgs::Frame &frame,const CaptureSettings &settings) {CaptureSettings s=settings;s.despill=true;processColour(frame,s,{});}
+// What the rig's cameras saw, in the export's notes. Cameras that see little of it describe
+// another frame: the sides are then guessed.
+static void normalsNote(const gaussiannormals::Result &seen,const CaptureSettings &s,ExportResult *result) {
+    if (!seen.opaque) return;
+    const double share=100.0*double(seen.opaqueSeen)/double(seen.opaque);
+    result->notes << (share>=50 ? QStringLiteral("Normals written: the %1 cameras see %2% of the opaque splats.")
+                                : QStringLiteral("Normals written, but the %1 cameras see only %2% of the opaque splats: is it the right rig, and the capture's own frame?"))
+                         .arg(s.normalRig==1 ? QStringLiteral("THE4DSCANNER") : QStringLiteral("SMNV1")).arg(share,0,'f',1);
+}
+// The rig's cameras for data baked with `model`: a rotation with uniform scale moves them.
+static std::vector<gaussiannormals::View> rigViewsFor(const CaptureSettings &s,const QMatrix4x4 &model) {
+    Eigen::Matrix3f linear;for (int i=0;i<3;++i) for (int j=0;j<3;++j) linear(i,j)=model(i,j);
+    return gaussiannormals::transformedViews(gaussiannormals::rigViews(s.normalRig==1 ? gaussiannormals::Rig::The4DScanner : gaussiannormals::Rig::SmnV1),
+                                             linear,Eigen::Vector3f(model(0,3),model(1,3),model(2,3)));
+}
+// Outward normals into a baked frame's `normal`, seen from the rig moved by its pose. Returns
+// what the cameras saw.
+static gaussiannormals::Result bakeFrameNormals(vgs::Frame &baked,const Project &project,double frameRate) {
+    const auto views=rigViewsFor(project.captureSettings,project.transformAtFrame(baked.seconds*frameRate).matrix());
+    gaussiannormals::Splats splats;splats.count=size_t(baked.count);splats.position=baked.position.data();splats.rotation=baked.rotation.data();
+    splats.scale=baked.scale.data();splats.opacity=baked.opacity.data();splats.use=baked.active.size()==baked.count ? baked.active.data() : nullptr;
+    baked.normal.assign(size_t(baked.count)*3,0.f);
+    return gaussiannormals::computeNormals(splats,views,baked.normal.data());
+}
 vgs::Frame bakeExportFrame(const vgs::Frame &frame,const Project &project,int degree,const ExportProgress &progress,double frameRate,const std::vector<uint8_t> *pruned) {
     if (degree<0 || degree>3) throw std::runtime_error("Invalid export SH degree.");
     Project pose=withModifierDespill(project);pose.transform=project.transformAtFrame(frame.seconds*frameRate);pose.modifiers=project.modifiersAtFrame(std::round(frame.seconds*frameRate));
     return Baker(pose,degree).bake(frame,progress,pruned);
+}
+
+// A Loop morph's End or Start frame as the modifiers above it leave it, carried by `into` into
+// the End frame's capture coordinates: the splats it keeps, with their own colours (the
+// morph's frames are colour processed with the rest of the export).
+static loopmorph::Cloud morphCloud(const vgs::Frame &source,const std::vector<uint8_t> &keep,const QMatrix4x4 &into) {
+    Matrix a;for (int r=0;r<3;++r) for (int c=0;c<3;++c) a(r,c)=into(r,c);
+    Eigen::JacobiSVD<Matrix> svd(a,Eigen::ComputeFullU|Eigen::ComputeFullV);Matrix rotation=svd.matrixU()*svd.matrixV().transpose();if (rotation.determinant()<0) rotation=-rotation;
+    const Eigen::Quaterniond turn(rotation);const float grow=float(std::cbrt(std::abs(a.determinant())));
+    loopmorph::Cloud c;c.shCoefficients=source.shCoefficients;c.reserve(size_t(source.count));const size_t terms=size_t(source.shCoefficients)*3;
+    for (size_t i=0;i<source.count;++i) {
+        if (!keep[i]) continue;
+        const QVector3D p=into.map({source.position[3*i],source.position[3*i+1],source.position[3*i+2]});
+        const Eigen::Quaterniond q=(turn*Eigen::Quaterniond(source.rotation[4*i+3],source.rotation[4*i],source.rotation[4*i+1],source.rotation[4*i+2]).normalized()).normalized();
+        c.position.insert(c.position.end(),{p.x(),p.y(),p.z()});c.rotation.insert(c.rotation.end(),{float(q.x()),float(q.y()),float(q.z()),float(q.w())});
+        c.scale.insert(c.scale.end(),{source.scale[3*i]*grow,source.scale[3*i+1]*grow,source.scale[3*i+2]*grow});
+        c.colour.insert(c.colour.end(),{source.colorDc[3*i],source.colorDc[3*i+1],source.colorDc[3*i+2]});c.opacity.push_back(source.opacity[i]);
+        if (terms) c.sh.insert(c.sh.end(),source.shRest.begin()+std::ptrdiff_t(terms*i),source.shRest.begin()+std::ptrdiff_t(terms*(i+1)));
+    }
+    return c;
+}
+static vgs::Frame morphFrameOf(const loopmorph::Cloud &c,double seconds) {
+    vgs::Frame f;f.seconds=seconds;f.count=c.size();f.shCoefficients=c.shCoefficients;
+    f.position=c.position;f.rotation=c.rotation;f.scale=c.scale;f.colorDc=c.colour;f.opacity=c.opacity;f.shRest=c.sh;f.active.assign(c.size(),1);
+    return f;
 }
 
 ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &destination,const ExportProgress &progress,const QByteArray &thumbnailJpeg) {
@@ -476,6 +534,9 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
     const int available=std::max(1,int(std::ceil(duration*rate-1e-6)));
     const int first=std::clamp(int(std::round(project.in*rate)),0,available-1),last=std::clamp(int(std::round(project.out*rate)),first,available-1);
     result.frames=last-first+1;
+    // A Loop morph's frames follow the range. MINT stores its source's own frames only.
+    const int morphFrames=mintOutput ? 0 : project.morphFrames(rate),totalFrames=result.frames+morphFrames;
+    if (mintOutput && project.morphFrames(rate)) result.notes << QStringLiteral("MINT exports leave out the Loop morph's frames.");
     const int degree=project.captureSettings.shDegree<0 ? sourceDegree : project.captureSettings.shDegree;
     // Where the range starts on the audio's timeline, for players: the source's own track runs
     // on the source's timeline; a file starts `offset` seconds into the capture's. Players
@@ -485,7 +546,7 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
     // range's length as AAC, so it starts with the range and nothing outside it is stored.
     QTemporaryDir audioDir;
     if (mixing && !mintOutput) {
-        const double rangeStart=first/rate,length=result.frames/rate,sourceStart=mint ? 0. : sourceHeader.startTick/rate;
+        const double rangeStart=first/rate,length=totalFrames/rate,sourceStart=mint ? 0. : sourceHeader.startTick/rate;
         QString ownTrack;
         auto own=[&]() -> QString {
             if (sourceAudio.empty()) return {};
@@ -549,9 +610,10 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
         sourceHeader=nativeMint->header();header.timeNumerator=sourceHeader.timeNumerator;header.timeDenominator=sourceHeader.timeDenominator;
     }
     const auto nativePlan=native ? nativeExportPlan(sourceHeader,first,result.frames) : std::vector<NativeChunkPlan>{};
-    header.shDegree=degree;header.frameCount=header.durationTicks=result.frames;header.chunks.resize(native ? nativePlan.size() : size_t(result.frames));
+    const size_t rangeChunks=native ? nativePlan.size() : size_t(result.frames);
+    header.shDegree=degree;header.frameCount=header.durationTicks=totalFrames;header.chunks.resize(rangeChunks+size_t(morphFrames));
     uint64_t outputTick=0;
-    for (size_t i=0;i<header.chunks.size();++i) {header.chunks[i].startTick=outputTick;header.chunks[i].intervals=native ? nativePlan[i].intervals : 1;outputTick+=header.chunks[i].intervals;}
+    for (size_t i=0;i<header.chunks.size();++i) {header.chunks[i].startTick=outputTick;header.chunks[i].intervals=i<rangeChunks && native ? nativePlan[i].intervals : 1;outputTick+=header.chunks[i].intervals;}
 
     // Native chunks are prepared on the chunk workers; the sampled path decodes frames
     // through one reader and one baker, which are not shared.
@@ -573,7 +635,7 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
     auto &m=options.metadata;m.id=utf(s.catalogueId);m.title=utf(s.title);m.author=utf(s.author);m.projectName=utf(s.projectName);m.takeName=utf(s.takeName);
     m.captureStudio=utf(s.studio);m.copyright=utf(s.copyright);m.softwareName=utf(s.softwareName);m.softwareVersion=utf(s.softwareVersion);
     for (const auto &tag : s.tags) m.tags.push_back(utf(tag));
-    QJsonObject provenance{{"editorExportVersion",2},{"colourProcessingVersion",2},{"sampling",native ? "native-temporal" : "native-frame-hold"},{"sourceInFrame",first},{"sourceOutFrame",last},
+    QJsonObject provenance{{"editorExportVersion",2},{"colourProcessingVersion",2},{"sampling",native ? "native-temporal" : "native-frame-hold"},{"sourceInFrame",first},{"sourceOutFrame",last},{"loopMorphFrames",morphFrames},
         {"transform",inputProject.json({})["transform"]},{"crop",project.json({})["crop"]},{"modifiers",project.modifierJson()},{"processing",s.json()},
         // The editor's view as the export was made: where players without a camera of their
         // own look from. The exported data is in these coordinates, transform baked.
@@ -616,8 +678,65 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
             return copyFrame(capture->setTime(t,false));},sourceAntialiased,pruneFilters,[&] {report(progress,currentPercent,QStringLiteral("Prune low contribution: scoring splats"));return false;},&stats);
         countPruning(result,stats,keep);return keep;
     };
+    // Normals are computed on what is written, so the rig's cameras are moved into its frame:
+    // the transform baked into the data, a rotation with uniform scale.
+    const bool normals=s.normals && !mintOutput;
+    if (s.normals && mintOutput) result.notes << QStringLiteral("MINT cannot hold normals: they are not written.");
+    std::vector<gaussiannormals::View> normalViews;std::atomic<size_t> normalOpaque{0},normalSeen{0};
+    if (normals) normalViews=rigViewsFor(s,project.transform.matrix());
+    auto withNormals=[&](vgs::DecodedChunk chunk) {
+        if (!normals) return chunk;
+        const auto seen=addNormals(chunk,normalViews,innerProgress);normalOpaque+=seen.opaque;normalSeen+=seen.opaqueSeen;
+        return chunk;
+    };
+    // The Loop morph: fitted once here for the End and Start frames as the modifiers above it
+    // leave them, then each of its frames is a sampled chunk after the range, drawn with the
+    // modifiers below it and moving, when the capture does, as it is at End.
+    std::unique_ptr<loopmorph::Morph> morph;
+    if (morphFrames) {
+        report(progress,0,QStringLiteral("Loop morph: reading End and Start"));
+        const QMatrix4x4 endModel=inputProject.transformAtFrame(last).matrix(),startModel=inputProject.transformAtFrame(first).matrix();
+        bool invertible=false;const QMatrix4x4 toEnd=endModel.inverted(&invertible)*startModel;
+        if (!invertible) throw std::runtime_error("The loop morph needs an invertible transform at End.");
+        auto read=[&](int frame) {
+            const double seconds=std::min(double(frame)/rate,duration-1e-7);vgs::Frame f;size_t chunk=0;
+            if (mint) {MintFrame decoded;if (!mint->decode(seconds,&decoded,true,&error)) throw std::runtime_error(error.toStdString());f=copyFrame(decoded);chunk=size_t(decoded.chunkIndex);}
+            else {f=copyFrame(capture->setTime(seconds,true));chunk=capture->chunkAt(seconds);}
+            Project above=project;above.transform=inputProject.transformAtFrame(frame);above.modifiers=inputProject.modifiersAboveMorph(frame);
+            for (auto &m:above.modifiers) m.showErased=false;
+            const CompiledModifiers stack(above.modifiers);std::vector<uint8_t> mask;
+            if (!stack.prunes.isEmpty()) {
+                double start,end;
+                if (mint) {const auto &c=mint->chunks().at(qsizetype(chunk));start=c.start;end=c.start+c.duration;}
+                else {const auto &c=capture->chunk(chunk);start=c.startSeconds;end=c.endSeconds;}
+                mask=pruneChunk(start,end,[&](double t) {
+                    if (mint) {MintFrame decoded;if (!mint->decode(t,&decoded,false,&error)) throw std::runtime_error(error.toStdString());return copyFrame(decoded);}
+                    return copyFrame(capture->setTime(t,false));},sourceAntialiased,stack.prunes,[&] {report(progress,0,QStringLiteral("Loop morph: scoring splats"));return false;},nullptr);
+            }
+            if (!stack.erased.empty()) {const auto erase=stack.eraseKeep(int(chunk),f.count);if (mask.empty()) mask=erase;else for (size_t i=0;i<mask.size() && i<erase.size();++i) mask[i]&=erase[i];}
+            return std::make_pair(f,Baker(above,degree).keeps(f,progress,mask.empty() ? nullptr : &mask));
+        };
+        const auto [endSource,endKeep]=read(last);const auto [startSource,startKeep]=read(first);
+        std::vector<loopmorph::Pair> pairs;for (const auto &pair:project.morphPairs(rate)) pairs.push_back({pair.end,toEnd.map(pair.start)});
+        report(progress,0,QStringLiteral("Loop morph: fitting"));
+        morph=std::make_unique<loopmorph::Morph>(morphCloud(endSource,endKeep,QMatrix4x4()),morphCloud(startSource,startKeep,toEnd),pairs,[&] {return progress && !progress(0,QStringLiteral("Loop morph: fitting"));});
+        result.notes << QStringLiteral("Loop morph: %1 frames after End (%2 marker pairs).").arg(morphFrames).arg(pairs.size());
+    }
+    Project morphPose=project;morphPose.modifiers=inputProject.modifiersBelowMorph(last);
+    const QMatrix4x4 morphWorld=inputProject.transformAtFrame(last).matrix();
     auto provider=[&](size_t index) {
-        reportHere(QStringLiteral("%1 %2 %3 / %4").arg(writing ? "Writing" : "Preparing",native ? "native block" : "frame").arg(index+1).arg(native ? header.chunks.size() : size_t(result.frames)));
+        reportHere(QStringLiteral("%1 %2 %3 / %4").arg(writing ? "Writing" : "Preparing",index>=rangeChunks ? "loop morph frame" : native ? "native block" : "frame").arg(index+1).arg(header.chunks.size()));
+        if (index>=rangeChunks) {
+            // Frame k of n is k/(n+1) of the way, so neither End nor Start shows twice. The
+            // morph is in End's capture coordinates: the baked transform takes it to the world,
+            // or, moving, to where the data is baked, and its motion samples the rest.
+            const int k=int(index-rangeChunks)+1;const auto cloud=morph->evaluate(double(k)/double(morphFrames+1));
+            auto baked=Baker(morphPose,degree).bake(morphFrameOf(cloud,double(result.frames+k-1)/rate),innerProgress);
+            if (!writing) {std::lock_guard<std::mutex> guard(stateMutex);result.kept+=baked.count;}
+            auto chunk=withNormals(packFrame(std::move(baked),degree));
+            if (moving) {const auto sample=similarityFrom(morphWorld*unbake,last);chunk.pages.push_back(motionPage({sample,sample}));}
+            return chunk;
+        }
         if (native) {
             const auto &plan=nativePlan[index];vgs::DecodedChunk chunk;
             // The source is read under a lock and nothing else is: reading a chunk is
@@ -679,6 +798,7 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
             auto edited=editNativeChunk(std::move(chunk),plan,project,writing ? nullptr : &chunkResult,innerProgress,classification ? &*classification : nullptr,moving ? &models : nullptr,
                                         int(sourceHeader.chunks[plan.sourceIndex].startTick)+plan.first,pruned);
             if (!writing) {std::lock_guard<std::mutex> guard(stateMutex);chunkStatistics[index]=std::move(chunkResult);}
+            edited=withNormals(std::move(edited));
             if (moving) edited.pages.push_back(motionPage(samples));
             return edited;
         }
@@ -701,7 +821,7 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
             Project pose=project;if (animated) pose.transform=inputProject.transformAtFrame(first+int(index));
             pose.modifiers=inputProject.modifiersAtFrame(first+int(index));return Baker(pose,degree).bake(frame,innerProgress,pruned);}();
         if (!writing) {result.kept+=baked.count;result.removed+=std::count(frame.active.begin(),frame.active.end(),uint8_t(1))-baked.count;}
-        return packFrame(std::move(baked),degree);
+        return withNormals(packFrame(std::move(baked),degree));
     };
     auto sink=[&](uint64_t offset,const uint8_t *data,size_t count) {
         if (!temporary.seek(qint64(offset)) || temporary.write(reinterpret_cast<const char *>(data),qint64(count))!=qint64(count)) throw std::runtime_error(temporary.errorString().toStdString());
@@ -712,6 +832,7 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
     for (const auto &entry : chunkStatistics) {
         result.kept+=entry.second.kept;result.removed+=entry.second.removed;result.notes << entry.second.notes;
     }
+    if (normals) {gaussiannormals::Result seen;seen.opaque=normalOpaque;seen.opaqueSeen=normalSeen;normalsNote(seen,s,&result);}
     if (!result.kept) throw std::runtime_error("The selected range contains no Gaussian records after applying active modifiers.");
     if (!temporary.flush()) throw std::runtime_error(temporary.errorString().toStdString());
     if (mintOutput) {
@@ -721,7 +842,7 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
         result.notes << QStringLiteral("MINT format 6: capture metadata, audio, thumbnail and playback hints are omitted. Lower SH degrees are zero-padded to the MINT degree-3 layout.");
     } else {
         FileSource verifySource(temporary.fileName());auto verified=vgsdec::Capture::openStream(verifySource);verified.setCachePolicy({0,0,64ull*1024*1024});
-        for (int i=0;i<result.frames;++i) {report(progress,85+10*i/result.frames,QStringLiteral("Verifying frame %1 / %2").arg(i+1).arg(result.frames));verified.setTime(i/rate,true);}
+        for (int i=0;i<totalFrames;++i) {report(progress,85+10*i/totalFrames,QStringLiteral("Verifying frame %1 / %2").arg(i+1).arg(totalFrames));verified.setTime(i/rate,true);}
     }
     QSaveFile output(destination);output.setDirectWriteFallback(false);if (!output.open(QIODevice::WriteOnly)) throw std::runtime_error(output.errorString().toStdString());
     temporary.seek(0);while (!temporary.atEnd()) {
@@ -787,7 +908,9 @@ void writePly(const vgs::Frame &frame,const QString &destination) {
     for (size_t i=0;i<n;++i) {
         row.clear();
         for (int c=0;c<3;++c) row.push_back(frame.position[3*i+c]);
-        row.insert(row.end(),{0,0,0}); // normals are unused
+        // Outward normals when the export computed them, zero as 3DGS training writes otherwise.
+        if (frame.normal.size()==n*3) row.insert(row.end(),{frame.normal[3*i],frame.normal[3*i+1],frame.normal[3*i+2]});
+        else row.insert(row.end(),{0,0,0});
         for (int c=0;c<3;++c) row.push_back(float((frame.colorDc[3*i+c]-.5)/C0));
         // f_rest is channel-major: every band's red, then green, then blue.
         for (int c=0;c<3;++c) for (size_t k=0;k<bands;++k) row.push_back(frame.shRest[(i*bands+k)*3+c]);
@@ -864,7 +987,9 @@ ExportResult exportFramePly(const Project &project,double seconds,const QString 
     const int degree=project.captureSettings.shDegree<0 ? source.sourceDegree : project.captureSettings.shDegree;
     const auto baked=bakeExportFrame(frame,project,degree,progress,source.rate,keep.empty() ? nullptr : &keep);
     if (!baked.count) throw std::runtime_error("No Gaussian records remain at this frame after applying active modifiers.");
-    report(progress,90,QStringLiteral("Writing the .ply"));writePly(baked,destination);
+    auto written=baked;
+    if (project.captureSettings.normals) {report(progress,80,QStringLiteral("Computing normals"));normalsNote(bakeFrameNormals(written,project,source.rate),project.captureSettings,&result);}
+    report(progress,90,QStringLiteral("Writing the .ply"));writePly(written,destination);
     result.frames=1;result.kept=baked.count;result.bytes=quint64(QFileInfo(destination).size());
     if (const auto note=pruningNote(result);!note.isEmpty()) result.notes << note;
     result.removed=quint64(std::count(frame.active.begin(),frame.active.end(),uint8_t(1)))-baked.count;
@@ -889,7 +1014,7 @@ ExportResult exportPlySequence(const Project &projectAsGiven,const QString &dest
     const int first=std::clamp(int(std::round(project.in*rate)),0,available-1),last=std::clamp(int(std::round(project.out*rate)),first,available-1);
     const int digits=std::max(4,int(QString::number(last).size()));
     const int degree=project.captureSettings.shDegree<0 ? source.sourceDegree : project.captureSettings.shDegree;
-    ExportResult result;std::vector<uint8_t> keep;int empty=0;
+    ExportResult result;std::vector<uint8_t> keep;int empty=0;size_t seenOpaque=0,seenBy=0;
     for (int f=first;f<=last;++f) {
         const int percent=int(100.0*(f-first)/std::max(1,last-first+1));
         report(progress,percent,QStringLiteral("Frame %1 of %2").arg(f-first+1).arg(last-first+1));
@@ -898,11 +1023,14 @@ ExportResult exportPlySequence(const Project &projectAsGiven,const QString &dest
         // the progress of baking it stays inside the frame's step.
         const auto baked=bakeExportFrame(frame,project,degree,[&](int,const QString &message) {return !progress || progress(percent,message);},rate,keep.empty() ? nullptr : &keep);
         if (!baked.count) ++empty;
-        const QString file=plySequenceFile(destination,f,digits);writePly(baked,file);
+        auto written=baked;
+        if (project.captureSettings.normals) {const auto seen=bakeFrameNormals(written,project,rate);seenOpaque+=seen.opaque;seenBy+=seen.opaqueSeen;}
+        const QString file=plySequenceFile(destination,f,digits);writePly(written,file);
         result.kept+=baked.count;result.removed+=quint64(std::count(frame.active.begin(),frame.active.end(),uint8_t(1)))-baked.count;
         result.bytes+=quint64(QFileInfo(file).size());++result.frames;
     }
     report(progress,100,QStringLiteral("Finishing export"));
+    if (project.captureSettings.normals) {gaussiannormals::Result seen;seen.opaque=seenOpaque;seen.opaqueSeen=seenBy;normalsNote(seen,project.captureSettings,&result);}
     result.notes << QStringLiteral("%1 .ply files, %2 to %3, numbered by the source's frame.").arg(result.frames)
         .arg(QFileInfo(plySequenceFile(destination,first,digits)).fileName(),QFileInfo(plySequenceFile(destination,last,digits)).fileName());
     if (empty) result.notes << QStringLiteral("%1 frame(s) kept no Gaussian records and are empty .ply files.").arg(empty);

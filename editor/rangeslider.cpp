@@ -104,15 +104,24 @@ QVector<int> RangeSlider::labelledSeconds() const
 void RangeSlider::setRangeValues(int start, int end)
 {
     const int clampedStart = std::clamp(start, m_minimum, m_maximum);
-    const int clampedEnd = std::clamp(end, clampedStart, m_maximum);
+    const int clampedEnd = std::clamp(end, clampedStart, std::max(clampedStart, m_maximum - m_tailFrames));
     if (m_start == clampedStart && m_end == clampedEnd)
         return;
 
     m_start = clampedStart;
     m_end = clampedEnd;
-    m_playhead = std::clamp(m_playhead, m_start, m_end);
+    m_playhead = std::clamp(m_playhead, m_start, m_end + m_tailFrames);
     update();
     emit rangeChanged(m_start, m_end, m_start);
+}
+
+void RangeSlider::setTailFrames(int frames)
+{
+    frames = std::max(0, frames);
+    if (m_tailFrames == frames)
+        return;
+    m_tailFrames = frames;
+    update();
 }
 
 void RangeSlider::setPlayheadValue(int value)
@@ -278,6 +287,15 @@ void RangeSlider::paintEvent(QPaintEvent*)
     painter.setBrush(QColor(65, 176, 24));
     if (selected.width() > 0)
         painter.drawRoundedRect(selected, 2, 2);
+    // A Loop morph's frames, after End: they play with the range, in the morph's violet.
+    if (m_tailFrames > 0) {
+        QRect tail = track;
+        tail.setLeft(std::max(track.left(), valueToX(m_end) + 1));
+        tail.setRight(std::min(track.right(), valueToX(m_end + m_tailFrames)));
+        painter.setBrush(QColor(139, 92, 246));
+        if (tail.width() > 0)
+            painter.drawRoundedRect(tail, 2, 2);
+    }
 
     // A tick every second, in a much lighter green, and one per frame halfway between that and
     // the track's green - each only while they stay apart; packed closer they would smear.
@@ -434,7 +452,7 @@ void RangeSlider::setDraggedValue(int value)
         m_playhead = m_start;
         previewFrame = m_start;
     } else if (m_dragHandle == DragHandle::End) {
-        m_end = std::clamp(value, m_start, m_maximum);
+        m_end = std::clamp(value, m_start, std::max(m_start, m_maximum - m_tailFrames));
         m_playhead = m_end;
         previewFrame = m_end;
     } else if (m_dragHandle == DragHandle::Playhead) {

@@ -19,6 +19,10 @@ struct CaptureSettings {
     // plain: uncompressed (.pgs). Exports set it from the output file's extension; it is
     // only read from older projects and presets, never chosen in the editor.
     bool plain = false,despill = false,recoverSkin = true;
+    // Outward normals in the exported .vgs, from the cameras of the rig that captured it:
+    // 0 SMNV1, 1 THE4DSCANNER. Off by default; MINT cannot hold them.
+    bool normals = false;
+    int normalRig = 0;
     int shDegree = -1,playbackMode = -1; // -1 preserves the source setting.
     double despillStrength = 1,greenGain = 0.97,viewChromaScale = 0.5;
     QJsonObject json() const;

@@ -377,7 +377,7 @@ async def sample_points(limit: SampleLimit = 200, include_removed: bool = False)
 
 
 @mcp.tool(title="Add modifier", annotations=EDIT)
-async def add_modifier(type: Literal["crop", "remove-green", "purge-isolated", "erase", "colour", "animate-transform", "walk", "audio", "prune-low-contribution", "bake-antialiasing"], name: ModifierName | None = None) -> dict[str, Any]:
+async def add_modifier(type: Literal["crop", "remove-green", "purge-isolated", "erase", "colour", "animate-transform", "walk", "audio", "prune-low-contribution", "bake-antialiasing", "loop-morph"], name: ModifierName | None = None) -> dict[str, Any]:
     """Append/select an enabled undoable modifier across the timeline; returns modifier_id. Crop initially fits the capture. Purge Isolated defaults to neighbour=4, medianPercent=700; raise medianPercent to 900 for a conservative first comparison (higher removes less). Modifier meanings/examples: vgs-editor://tools."""
     args: dict[str, Any] = {"type": type}
     if name is not None:
@@ -543,7 +543,7 @@ async def save_project(path: str, overwrite: bool = False) -> dict[str, Any]:
 
 @mcp.tool(title="Set metadata and export options", annotations=EDIT)
 async def set_export_settings(patch: dict[str, Any]) -> dict[str, Any]:
-    """Undoably patch exact get_project.captureSettings fields, e.g. title/author/tags, shDegree, playbackMode or despill. Unknown/invalid fields fail. Does not change range, select path or launch export. Some settings affect output only; extension selects format, plain is legacy."""
+    """Undoably patch exact get_project.captureSettings fields, e.g. title/author/tags, shDegree, playbackMode, despill, or normals (bool, off by default) with normalRig ("SMNV1" or "THE4DSCANNER", the studio that recorded it). Unknown/invalid fields fail. Does not change range, select path or launch export. Some settings affect output only; extension selects format, plain is legacy."""
     return await _edit("export_settings", patch)
 
 

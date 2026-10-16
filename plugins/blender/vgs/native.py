@@ -14,7 +14,7 @@ import sys
 
 import numpy as np
 
-API_VERSION = 4
+API_VERSION = 5
 
 _c_float_p = ctypes.POINTER(ctypes.c_float)
 
@@ -56,6 +56,7 @@ class _Frame(ctypes.Structure):
         ("scales", _c_float_p),
         ("radiance", _c_float_p),
         ("sh", _c_float_p),
+        ("normals", _c_float_p),
     ]
 
 
@@ -172,6 +173,8 @@ class Frame:
         self.radiance = _view(raw.radiance, n * 4)
         planes = _view(raw.sh, n * 3 * raw.sh_coefficients)
         self.sh = [planes[k * n * 3:(k + 1) * n * 3] for k in range(raw.sh_coefficients)]
+        # Outward surface normals, or None when the capture carries none.
+        self.normals = _view(raw.normals, n * 3) if raw.normals else None
 
 
 class Player:

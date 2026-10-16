@@ -10,6 +10,7 @@
 
 #include "viewport.h"
 #include "pointvisibility.h"
+#include <limits>
 #include "viewcube.h"
 #include "editortheme.h"
 #include <QElapsedTimer>
@@ -789,7 +790,42 @@ void Viewport::paintGL() {
     glDisable(GL_DEPTH_TEST); glDisable(GL_PROGRAM_POINT_SIZE);
     painter.endNativePainting();
     if (cleanCapture_ || sheetCapture_) return;
-    if (selectTool_ != SelectTool::None) {
+    if (!viewMarkers_.isEmpty()) {
+        updateMarkerOcclusion(model,view,projection*view);
+        painter.setRenderHint(QPainter::Antialiasing);QFont font("Segoe UI",8);font.setBold(true);painter.setFont(font);
+        const QColor violet(139,92,246);
+        for (int i=0;i<viewMarkers_.size();++i) {
+            const auto &marker=viewMarkers_[i];QPointF at;if (!projectPoint(marker.world,&at)) continue;
+            const QRectF disc(at.x()-9,at.y()-9,18,18);
+            if (marker.suggested) {
+                // A target: where the next marker probably goes. Enter takes it.
+                painter.setOpacity(1);painter.setBrush(Qt::NoBrush);
+                for (const auto &pen:{QPen(QColor(0,0,0,150),4),QPen(QColor(255,214,10),2)}) {
+                    painter.setPen(pen);painter.drawEllipse(at,13,13);
+                    painter.drawLine(QPointF(at.x()-19,at.y()),QPointF(at.x()-7,at.y()));painter.drawLine(QPointF(at.x()+7,at.y()),QPointF(at.x()+19,at.y()));
+                    painter.drawLine(QPointF(at.x(),at.y()-19),QPointF(at.x(),at.y()-7));painter.drawLine(QPointF(at.x(),at.y()+7),QPointF(at.x(),at.y()+19));
+                }
+                painter.setPen(QColor(255,214,10));painter.drawText(QRectF(at.x()+14,at.y()-24,60,16),Qt::AlignLeft|Qt::AlignVCenter,QString::number(marker.number)+QStringLiteral("?"));
+                continue;
+            }
+            // Behind splats: still there, but faint and with a broken ring, so it is not placed twice.
+            const bool hidden=i<int(markerHidden_.size()) && markerHidden_[size_t(i)];painter.setOpacity(hidden ? .4 : 1);
+            QPen ring(marker.selected ? Qt::white : QColor(20,20,24),marker.selected ? 2.0 : 1.0);if (hidden) {ring=QPen(Qt::white,1.5);ring.setStyle(Qt::DashLine);}
+            painter.setPen(ring);painter.setBrush(marker.paired ? violet : QColor(30,30,36,200));painter.drawEllipse(disc);
+            if (!marker.paired) {painter.setPen(QPen(violet,2));painter.setBrush(Qt::NoBrush);painter.drawEllipse(disc.adjusted(2,2,-2,-2));}
+            painter.setPen(Qt::white);painter.drawText(disc,Qt::AlignCenter,QString::number(marker.number));
+        }
+        painter.setOpacity(1);
+    }
+    if (!busyText_.isEmpty()) {
+        QFont font("Segoe UI",10);font.setBold(true);painter.setFont(font);const QRect box(width()/2-150,14,300,30);
+        painter.setPen(Qt::NoPen);painter.setBrush(QColor(20,20,24,210));painter.drawRoundedRect(box,6,6);
+        painter.setPen(QColor(220,210,255));painter.drawText(box,Qt::AlignCenter,busyText_);
+    }
+    if (pointPicking_ && selectTool_==SelectTool::None) {
+        painter.setPen(overlayText()); painter.setFont(QFont("Segoe UI", 9));
+        painter.drawText(18, height()-18, pickHint_.isEmpty() ? tr("Click: place a marker   ·   Drag: orbit   ·   Right drag: pan   ·   Esc: stop") : pickHint_);
+    } else if (selectTool_ != SelectTool::None) {
         painter.setRenderHint(QPainter::Antialiasing);
         // Pink picks; its inverse, green, while Alt is held or the stroke subtracts.
         const bool subtracting = selecting_ ? strokeMode_==SelectMode::Subtract : (QGuiApplication::queryKeyboardModifiers() & Qt::AltModifier);
@@ -946,6 +982,7 @@ void Viewport::mousePressEvent(QMouseEvent *event) {
         strokeMode_ = (event->modifiers() & Qt::AltModifier) ? SelectMode::Subtract : (event->modifiers() & Qt::ControlModifier) ? SelectMode::Replace : SelectMode::Add;
         update(); event->accept(); return;
     }
+    pickPress_ = event->button()==Qt::LeftButton && pointPicking_ ? event->position() : QPointF(-1e9,-1e9);
     if (event->button()==Qt::LeftButton && !(event->modifiers() & Qt::ShiftModifier)) {
         const int handle = pickHandle(event->position());
         if (handle >= 0) { beginManipulation(handle,event->position()); event->accept(); return; }
@@ -982,7 +1019,7 @@ void Viewport::mouseMoveEvent(QMouseEvent *event) {
     } else {
         const int handle = pickHandle(event->position());
         if (hoverHandle_ != handle) { hoverHandle_ = handle; update(); }
-        if (handle >= 0) setCursor(Qt::CrossCursor); else unsetCursor();
+        if (handle >= 0 || pointPicking_) setCursor(Qt::CrossCursor); else unsetCursor();
         return;
     }
     viewCube_->setCamera(camera_); update(); emit cameraChanged();
@@ -1000,6 +1037,11 @@ void Viewport::mouseReleaseEvent(QMouseEvent *event) {
         if (selectTool_==SelectTool::Lasso) region.closeSubpath();
         auto records = recordsInside(region); stroke_ = QPainterPath(); update();
         emit selectionStroke(std::move(records),strokeMode_); event->accept(); return;
+    }
+    // A click that stayed put places a marker; one that moved was an orbit.
+    if (event->button()==Qt::LeftButton && pointPicking_ && !dragging_ && QLineF(pickPress_,event->position()).length()<=4) {
+        pickPress_ = QPointF(-1e9,-1e9);
+        QVector3D point; if (pickPoint(event->position(),&point)) emit pointPicked(point);
     }
     if (event->button()==Qt::LeftButton) {
         if (dragging_) updateManipulation(event->position());
@@ -1023,6 +1065,58 @@ QImage Viewport::cleanImage(int side) {
     const int square = std::min(image.width(),image.height());
     image = image.copy((image.width()-square)/2,(image.height()-square)/2,square,square).convertToFormat(QImage::Format_RGB32);
     return image.scaled(side,side,Qt::IgnoreAspectRatio,Qt::SmoothTransformation);
+}
+void Viewport::setViewMarkers(const QVector<ViewMarker> &markers) {
+    auto same=[](const ViewMarker &a,const ViewMarker &b) {return a.world==b.world && a.number==b.number && a.paired==b.paired && a.selected==b.selected && a.suggested==b.suggested;};
+    if (markers.size()==viewMarkers_.size() && std::equal(markers.begin(),markers.end(),viewMarkers_.begin(),same)) return;
+    viewMarkers_=markers;markerHiddenValid_=false;update();
+}
+void Viewport::setBusyText(const QString &text) {if (busyText_!=text) {busyText_=text;update();}}
+bool Viewport::nearestVisiblePoint(const QVector3D &world, QVector3D *found) const {
+    if (!frame_) return false;
+    const auto model=transform_.matrix();auto stack=modifiers_;if (!modifierStack_) {Modifier m;m.crop=crop_;stack={m};}
+    const CompiledModifiers modifiers(stack);float best=std::numeric_limits<float>::max();
+    for (const auto &point:frame_->points) {
+        if (!keepsPreviewPoint(point,model,modifiers,frame_->greensApplied)) continue;
+        if (splats_ && size_t(point.id)<frame_->records.size() && frame_->records[size_t(point.id)].color[3]<.2f) continue; // faint ones are no surface
+        const QVector3D p=model.map({point.position[0],point.position[1],point.position[2]});const float d=(p-world).lengthSquared();
+        if (d<best) {best=d;*found=p;}
+    }
+    return best<std::numeric_limits<float>::max();
+}
+// A marker is hidden when the splats in front of it, a centimetre or more nearer, let less
+// than a third of the light through where it is drawn - as picking decides what is under a
+// pixel. Worked out again only when the view, the frame or the markers change.
+void Viewport::updateMarkerOcclusion(const QMatrix4x4 &model, const QMatrix4x4 &view, const QMatrix4x4 &viewProjection) {
+    if (markerHiddenValid_ && markerHiddenFrame_==frameSerial_ && markerHiddenView_==viewProjection && markerHiddenSplats_==splats_ && markerHidden_.size()==size_t(viewMarkers_.size())) return;
+    markerHiddenValid_=true;markerHiddenFrame_=frameSerial_;markerHiddenView_=viewProjection;markerHiddenSplats_=splats_;
+    const size_t count=size_t(viewMarkers_.size());markerHidden_.assign(count,false);if (!frame_ || !count) return;
+    struct Target {QPointF at;float depth;double light=1;};std::vector<Target> targets(count);
+    for (size_t i=0;i<count;++i) {projectPoint(viewMarkers_[int(i)].world,&targets[i].at);targets[i].depth=-view.map(viewMarkers_[int(i)].world).z();}
+    auto stack=modifiers_;if (!modifierStack_) {Modifier m;m.crop=crop_;stack={m};}const CompiledModifiers modifiers(stack);
+    const float modelScale=std::cbrt(std::abs(model.determinant()));const bool orthographic=camera_.orthographic && camera_.preset!=ViewPreset::Free;
+    const float tangent=std::tan(qDegreesToRadians(22.5f)),pixelsAtUnitDepth=height()*0.5f/tangent,orthographicPixels=height()*0.5f/std::max(1e-6f,camera_.distance*tangent);
+    for (const auto &point:frame_->points) {
+        const QVector3D p=model.map({point.position[0],point.position[1],point.position[2]});const float depth=-view.map(p).z();if (depth<=0) continue;
+        bool nearer=false;for (const auto &t:targets) nearer|=depth<t.depth-.01f;if (!nearer) continue;
+        if (!keepsPreviewPoint(point,model,modifiers,frame_->greensApplied)) continue;
+        const QVector4D clip=viewProjection*QVector4D(p,1);if (clip.w()<=1e-5f) continue;
+        const float sx=(clip.x()/clip.w()+1)*width()*0.5f,sy=(1-clip.y()/clip.w())*height()*0.5f;
+        float sigma=std::max(pointSize_*0.5f,3.f),opacity=1;
+        if (splats_ && size_t(point.id)<frame_->records.size()) {const auto &r=frame_->records[size_t(point.id)];
+            sigma=std::max(0.7f,std::max({r.scale[0],r.scale[1],r.scale[2]})*modelScale*(orthographic ? orthographicPixels : pixelsAtUnitDepth/depth));opacity=r.color[3];}
+        for (auto &t:targets) {
+            if (depth>=t.depth-.01f) continue;const float dx=sx-float(t.at.x()),dy=sy-float(t.at.y()),d2=dx*dx+dy*dy;
+            if (!splats_) {if (d2<=sigma*sigma) t.light=0;continue;}
+            if (d2>9*sigma*sigma) continue;t.light*=1-std::min(0.99f,opacity*std::exp(-0.5f*d2/(sigma*sigma)));
+        }
+    }
+    for (size_t i=0;i<count;++i) markerHidden_[i]=targets[i].light<1.0/3;
+}
+void Viewport::setPointPicking(bool picking, const QString &hint) {
+    if (pointPicking_==picking && pickHint_==hint) return;
+    pointPicking_=picking;pickHint_=hint;if (picking) setTransformMode(TransformMode::None);
+    setCursor(picking ? Qt::CrossCursor : Qt::ArrowCursor);if (!picking) unsetCursor();update();
 }
 void Viewport::setSelectTool(SelectTool tool, float radius) {
     if (tool!=SelectTool::None) { setTransformMode(TransformMode::None); setMouseTracking(true); }
@@ -1100,6 +1194,8 @@ void Viewport::keyPressEvent(QKeyEvent *event) {
     if (selectTool_!=SelectTool::None && event->key()==Qt::Key_Alt) update();
     if (handleViewKey(event->key(),event->modifiers())) { event->accept(); return; }
     if (event->key()==Qt::Key_Escape) { setTransformMode(TransformMode::None); emit escapePressed(); event->accept(); return; }
+    if (event->key()==Qt::Key_Return || event->key()==Qt::Key_Enter) { emit enterPressed(); event->accept(); return; }
+    if (event->key()==Qt::Key_Backspace) { emit backspacePressed(); event->accept(); return; }
     if (!event->modifiers() && !viewerMode_) {
         if (event->isAutoRepeat() && (event->key()==Qt::Key_G || event->key()==Qt::Key_R || event->key()==Qt::Key_S)) { event->accept(); return; }
         if (event->key()==Qt::Key_G) { activateTransformShortcut(TransformMode::Move); event->accept(); return; }

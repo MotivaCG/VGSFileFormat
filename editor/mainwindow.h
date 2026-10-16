@@ -21,6 +21,7 @@
 #include <QThread>
 #include <QTimer>
 #include <map>
+#include <set>
 #include <optional>
 #include <memory>
 #include <functional>
@@ -134,7 +135,8 @@ private:
     bool save(bool saveAs = false);
     void newProject();
     void setTime(double seconds, bool edited);
-    int timelineFrame(double displayedValue) const;
+    // A frame from a timeline field; `tail` lets it reach the Loop morph's frames after End.
+    int timelineFrame(double displayedValue, bool tail = false) const;
     void requestFrame();
     void play(bool playing);
     void receiveFrame(FramePtr frame);
@@ -225,6 +227,52 @@ private:
     int screenChunk_ = -1;
     void syncEraseTool();
     void applyStroke(const std::vector<uint32_t> &records, int mode);
+    // Loop morph: its length in seconds and in frames, its numbered markers, and placing them
+    // with a click on the End frame or the Start frame.
+    QGroupBox *morphProperties_;
+    QDoubleSpinBox *morphSeconds_;
+    QSpinBox *morphFrames_;
+    QToolButton *morphPlaceEnd_, *morphPlaceStart_;
+    // The morph's own transport: first and last frame, a frame either way, and play the seam.
+    QWidget *morphTransport_;
+    QPushButton *morphPlay_, *morphSeamPlay_;
+    QTableWidget *morphMarkerTable_;
+    QPushButton *morphRemoveMarker_, *morphClearMarkers_;
+    QLabel *morphStatus_;
+    enum class MorphSide { None, End, Start };
+    MorphSide morphPlacing_ = MorphSide::None;
+    // The side placing began on: a finished pair goes back to it for the next marker.
+    MorphSide morphHome_ = MorphSide::Start;
+    int morphSelected_ = 0; // the marker the next click places, 0 for none
+    // The markers selected in the list, by number: one or several, for removing.
+    std::set<int> morphChosen_;
+    // The points placed this session, newest last, for Backspace.
+    std::vector<std::pair<int,MorphSide>> morphHistory_;
+    // Where the next marker probably goes on the side being placed, in the world.
+    std::optional<QVector3D> morphSuggestion_;
+    // The Loop morph's own playback, over and over: its frames alone, or the seam - a second
+    // before End, the morph, and a second after Start.
+    enum class MorphPlay { None, Morph, Seam };
+    MorphPlay morphPlaying_ = MorphPlay::None;
+    void setMorphPlacing(MorphSide side);
+    void switchMorphSide(MorphSide side, int number);
+    void placeMorphMarker(const QVector3D &world);
+    void removeLastMorphPoint();
+    int morphFrameOf(MorphSide side) const;
+    bool morphPlaced(const MorphMarker &marker, MorphSide side) const;
+    // The number a click on a side places: the selected marker; else the first with its other
+    // point and not this one; else the next new number.
+    int morphTarget(MorphSide side) const;
+    void showMorph(const Modifier &m);
+    // The markers of the selected Loop morph on the frame shown, for the viewport.
+    void syncMorphMarkers();
+    // The frame the transform is evaluated at: the playhead's, End's on a Loop morph's frames.
+    int poseFrame() const;
+    bool showingMorph() const;
+    void syncViewportPose();
+    // With a Loop morph selected, Ctrl+Space, Ctrl+Home and Ctrl+End act on its frames.
+    bool morphSelected() const;
+    void toggleMorphPlay(MorphPlay mode);
     // What the Audio modifier plays, and where in it the timeline is now.
     void syncAudio();
     // What the pruning did to the chunk on screen, from the last decoded frame.

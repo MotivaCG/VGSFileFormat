@@ -17,14 +17,15 @@ QJsonObject CaptureSettings::json() const {
     return {{"version",1},{"catalogueId",catalogueId},{"title",title},{"author",author},{"projectName",projectName},
         {"takeName",takeName},{"studio",studio},{"copyright",copyright},{"softwareName",softwareName},{"softwareVersion",softwareVersion},
         {"tags",QJsonArray::fromStringList(tags)},{"extraJson",extraJson},{"plain",plain},{"shDegree",shDegree},{"playbackMode",playbackMode},
-        {"despill",despill},{"despillStrength",despillStrength},{"greenGain",greenGain},{"viewChromaScale",viewChromaScale},{"recoverSkin",recoverSkin}};
+        {"despill",despill},{"despillStrength",despillStrength},{"greenGain",greenGain},{"viewChromaScale",viewChromaScale},{"recoverSkin",recoverSkin},
+        {"normals",normals},{"normalRig",normalRig==1 ? QStringLiteral("THE4DSCANNER") : QStringLiteral("SMNV1")}};
 }
 bool CaptureSettings::validate(QString *error) const {
     for (const auto &value : {catalogueId,title,author,projectName,takeName,studio,copyright,softwareName,softwareVersion})
         if (value.toUtf8().size()>1024) { *error = QStringLiteral("Metadata fields must not exceed 1024 UTF-8 bytes."); return false; }
     if (tags.size()>256) { *error = QStringLiteral("Use no more than 256 tags."); return false; }
     for (const auto &tag : tags) if (tag.toUtf8().size()>1024) { *error = QStringLiteral("Each tag must not exceed 1024 UTF-8 bytes."); return false; }
-    if (shDegree<-1 || shDegree>3 || playbackMode<-1 || playbackMode>2 || !std::isfinite(despillStrength) || despillStrength<0 || despillStrength>1 ||
+    if (shDegree<-1 || shDegree>3 || playbackMode<-1 || playbackMode>2 || normalRig<0 || normalRig>1 || !std::isfinite(despillStrength) || despillStrength<0 || despillStrength>1 ||
         !std::isfinite(greenGain) || greenGain<0 || greenGain>2 || !std::isfinite(viewChromaScale) || viewChromaScale<0 || viewChromaScale>1) {
         *error = QStringLiteral("Invalid processing or output settings."); return false;
     }
@@ -48,6 +49,12 @@ bool CaptureSettings::fromJson(const QJsonObject &o,CaptureSettings *result,QStr
     s.plain = boolean("plain"); s.despill = boolean("despill"); s.recoverSkin = boolean("recoverSkin");
     s.shDegree = integer("shDegree"); s.playbackMode = integer("playbackMode");
     s.despillStrength = number("despillStrength"); s.greenGain = number("greenGain"); s.viewChromaScale = number("viewChromaScale");
+    // Added later: settings saved before them keep the defaults.
+    if (o.contains("normals")) s.normals = boolean("normals");
+    if (o.contains("normalRig")) {
+        const auto rig = string("normalRig");
+        valid &= rig==QLatin1String("SMNV1") || rig==QLatin1String("THE4DSCANNER"); s.normalRig = rig==QLatin1String("THE4DSCANNER") ? 1 : 0;
+    }
     if (!valid) { *error = QStringLiteral("Invalid metadata or processing configuration."); return false; }
     if (!s.validate(error)) return false; *result = s; return true;
 }

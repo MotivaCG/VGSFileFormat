@@ -289,9 +289,10 @@ private slots:
         auto *add=window.findChild<QToolButton *>("addModifier"),*remove=window.findChild<QToolButton *>("removeModifier"),*duplicate=window.findChild<QToolButton *>("duplicateModifier");QVERIFY(add);QVERIFY(remove);QVERIFY(duplicate);
         auto *newType=window.findChild<QComboBox *>("newModifierType");QVERIFY(newType);QCOMPARE(newType->findData(1),-1);
         for (int i=0;i<newType->count();++i) if (newType->itemData(i).isValid()) QVERIFY2(newType->itemData(i,Qt::ToolTipRole).toString().size()>40,qPrintable(newType->itemText(i)));
-        // Ten kinds, F1 to F10, in groups with separators between them.
-        {int kinds=0,separators=0;for (int i=0;i<newType->count();++i) (newType->itemData(i).isValid() ? kinds : separators)++;QCOMPARE(kinds,10);QCOMPARE(separators,4);
-         QCOMPARE(newType->itemText(0),QString("Crop  (F1)"));QCOMPARE(newType->itemText(newType->count()-1),QString("Bake anti-aliasing  (F10)"));}newType->setCurrentIndex(newType->findData(0));QCOMPARE(newType->currentText(),QString("Crop  (F1)"));add->click();
+        // Eleven kinds, F1 to F11, in groups with separators between them; the Loop morph with
+        // the motion, after Walk.
+        {int kinds=0,separators=0;for (int i=0;i<newType->count();++i) (newType->itemData(i).isValid() ? kinds : separators)++;QCOMPARE(kinds,11);QCOMPARE(separators,4);
+         QCOMPARE(newType->itemText(0),QString("Crop  (F1)"));QCOMPARE(newType->itemText(newType->findData(11)),QString("Loop morph  (F8)"));QCOMPARE(newType->itemText(newType->count()-1),QString("Bake anti-aliasing  (F11)"));}newType->setCurrentIndex(newType->findData(0));QCOMPARE(newType->currentText(),QString("Crop  (F1)"));add->click();
         QCOMPARE(modifiers->topLevelItem(0)->text(0),QString("Crop"));QCOMPARE(modifiers->topLevelItemCount(),2);QCOMPARE(modifiers->currentItem()->text(1),QString("Crop cylinder"));QCOMPARE(modifiers->currentItem()->text(0),QString("Crop 2"));
         auto *shape=window.findChild<QComboBox *>("cropShape");QVERIFY(shape);shape->setCurrentIndex(shape->findData(int(CropShape::Box)));
         QVERIFY(QMetaObject::invokeMethod(shape,"activated",Qt::DirectConnection,Q_ARG(int,shape->currentIndex())));QCOMPARE(modifiers->currentItem()->text(1),QString("Crop box"));

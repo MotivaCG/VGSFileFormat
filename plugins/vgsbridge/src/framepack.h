@@ -16,10 +16,11 @@ constexpr float SmallestScale = 1e-6f;
 struct FrameBuffers {
   uint64_t count = 0;
   int shCoefficients = 0;
+  bool hasNormals = false;
   // Keep the initialized high-water mark as slots are reused. Only count and
   // shCoefficients describe the published prefix; shrinking/regrowing a vector
   // would zero floats that the next frame immediately overwrites.
-  std::vector<float> positions, rotations, scales, radiance, sh;
+  std::vector<float> positions, rotations, scales, radiance, sh, normals;
 };
 
 inline bool keeps(size_t record, uint64_t threshold) {
@@ -60,6 +61,9 @@ inline void packFrame(const vgsdec::Frame &frame, FrameBuffers &slot, bool inclu
   grow(slot.scales, live * 3);
   grow(slot.radiance, live * 4);
   grow(slot.sh, live * 3 * size_t(coefficients));
+  const bool normals = frame.normals != nullptr;
+  if (normals)
+    grow(slot.normals, live * 3);
 
   size_t j = 0;
   for (size_t i = 0; i < total; ++i) {
@@ -94,10 +98,14 @@ inline void packFrame(const vgsdec::Frame &frame, FrameBuffers &slot, bool inclu
       for (int c = 0; c < 3; ++c)
         slot.sh[(size_t(k) * live + j) * 3 + size_t(c)] =
             frame.sphericalHarmonics[(i * size_t(coefficients) + size_t(k)) * 3 + size_t(c)];
+    if (normals)
+      for (int c = 0; c < 3; ++c)
+        slot.normals[j * 3 + c] = frame.normals[i * 3 + c];
     ++j;
   }
   slot.count = live;
   slot.shCoefficients = coefficients;
+  slot.hasNormals = normals;
 }
 
 } // namespace vgsbdetail

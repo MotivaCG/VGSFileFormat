@@ -784,7 +784,7 @@ SourceChunk spatialOrder(const SourceChunk &c, const uint8_t *mint) {
       case ScaleIndices: case PositionSamples: case ShStaticIndices: case ShTemporalIndices:
       case Lifetimes: case RotationSamples: case Sh0Terms: case Sh0Base: case OpacityTerms:
       case RotationBase: case RotationTerms: case RotationRanks: case PositionBase:
-      case PositionTerms: case PositionRanks: case OpacityScales:
+      case PositionTerms: case PositionRanks: case OpacityScales: case Normals:
         break;
       default:
         known = false;
@@ -1092,8 +1092,9 @@ static Bytes encodeSource(Source src, const uint8_t *mint, const EncodeOptions &
   for (const auto &kv : costs) {
     Policy p;
     p.attribute = kv.first;
-    // Readers that predate it may skip it: they draw the capture as it was before baking.
-    if (p.attribute == OpacityScales)
+    // Readers that predate them may skip these: they draw the capture as it was before
+    // baking, or without normals.
+    if (p.attribute == OpacityScales || p.attribute == Normals)
       p.flags = OptionalAttribute;
     p.family = kv.second.family;
     uint64_t best = kv.second.raw;

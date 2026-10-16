@@ -49,10 +49,11 @@ const char *attributeName(uint32_t id) {
                                 "position_base",
                                 "position_rq_coefficients",
                                 "position_rank_boundaries",
-                                "opacity_scales"};
+                                "opacity_scales",
+                                "normals"};
   if (id >= 1 && id <= MotionSamples)
     return shared[id - 1];
-  if (id >= 32 && id <= OpacityScales)
+  if (id >= 32 && id <= Normals)
     return group[id - 32];
   return "unknown";
 }

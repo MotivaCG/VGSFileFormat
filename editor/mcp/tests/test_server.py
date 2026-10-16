@@ -450,10 +450,14 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         desktop = json.loads((output / "claude-desktop.json").read_text())
         self.assertEqual(desktop["mcpServers"]["vgs-editor"]["args"], [str(root.resolve() / "server.py")])
         self.assertNotIn(token, (output / "stdio.json").read_text())
-        self.assertEqual(json.loads((output / "claude-code-http.json").read_text())["mcpServers"]["vgs-editor"]["headers"]["Authorization"], "Bearer " + token)
+        self.assertEqual(json.loads((output / "http.json").read_text())["mcpServers"]["vgs-editor"]["headers"]["Authorization"], "Bearer " + token)
+        self.assertEqual(json.loads((output / "claude-code-http.json").read_text()), json.loads((output / "http.json").read_text()))
+        vscode = json.loads((output / "vscode.json").read_text())["servers"]["vgs-editor"]
+        self.assertEqual((vscode["type"], vscode["args"]), ("stdio", [str(root.resolve() / "server.py")]))
+        self.assertEqual(json.loads((output / "vscode-http.json").read_text())["servers"]["vgs-editor"]["headers"]["Authorization"], "Bearer " + token)
         connections.generate(root, Path(sys.executable), output, data)
         self.assertEqual((data / "http-token").read_text().strip(), token)
-        self.assertEqual(len(paths), 6)
+        self.assertEqual(len(paths), 9)
 
 
 if __name__ == "__main__":

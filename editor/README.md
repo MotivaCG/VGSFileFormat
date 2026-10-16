@@ -31,7 +31,9 @@ without changing the saved preference.
   parameters and keys, the Start/End range, presets loaded and the export settings. A drag, or
   typing in one field without pausing, is one step. The camera, the playhead, display options
   and Global/Local are not edits, and opening a capture or project starts the history afresh.
-- Space: play or pause. Arrow keys: previous or next frame.
+- Space: play or pause. Arrow keys: previous or next frame. Home / End: the playback range's
+  Start / End. With a Loop morph selected, Ctrl+Space plays its frames, Alt+Space its seam, and Ctrl+Home / Ctrl+End go
+  to its first / last frame.
 - Drag: orbit; right/middle drag or Shift+drag: pan; wheel: zoom. Double-click: the pivot glides to
   the point under the cursor (what is seen there: through faint splats to the first that covers
   it), keeping the angle and distance, as the web viewer does; any navigation cancels the glide.
@@ -155,10 +157,10 @@ colours, whatever Color then does to them (despill shown in the viewport include
 it tests the colours Color leaves. The viewport and every export agree on this.
 
 The add list runs in the order a capture is usually worked on, with separators between the
-groups, and F1 to F10 add each kind directly (the key is in its name): clean it — Crop (F1),
+groups, and F1 to F11 add each kind directly (the key is in its name): clean it — Crop (F1),
 Remove green points (F2), Purge Isolated (F3), Eraser (F4); its look — Color (F5); its motion —
-Animate transform (F6), Walk (F7); its sound — Audio (F8); and delivery — Prune low
-contribution (F9), Bake anti-aliasing (F10).
+Animate transform (F6), Walk (F7), Loop morph (F8); its sound — Audio (F9); and delivery —
+Prune low contribution (F10), Bake anti-aliasing (F11).
 
 Modifiers form a flat list below all playback/timeline controls. Each row has a
 name, an eye toggle and a full-duration coloured bar without text. The eye switches
@@ -170,7 +172,7 @@ minimum height, including the initial crop. A fresh capture starts with an enabl
 crop automatically fitted to its bounds. The panel reserves enough height for
 four rows. Each group has its family of hues: reds darkening through cleaning (Crop
 #EF3450, Remove green points #D83A60, Purge Isolated #A3214F, Eraser #781638), grey for the
-look (Color #A0A6AD), blue and cyan for motion (Animate transform #3B82F6, Walk #20C9D2), yellow
+look (Color #A0A6AD), cyan, blue and violet for motion (Animate transform #20C9D2, Walk #3B82F6, Loop morph #8B5CF6), yellow
 for sound (Audio #F4C542) and greens for delivery (Prune low contribution #70C45A, Bake
 anti-aliasing #328D62). Crop wire volumes keep the section-heading red.
 
@@ -297,6 +299,41 @@ and `movingSpeed` to the header, for players to carry it along +Z (rotate the ca
 choose the direction). Several active Walk modifiers add up. MINT has no such field and
 reports that the walk is not stored.
 
+**Loop morph** closes a loop without a jump: it adds frames after End, as long as the
+two fields at the top of its panel say (in seconds or frames), that carry the End frame back into the Start frame. They follow End on the
+timeline in violet and play with the range; playback loops from the last of them to Start.
+Markers guide it. **Place on Start** (or Tab) goes to Start: a click places marker 1 there and
+the playhead goes to End for its pair; the click there places it and goes back to Start for
+marker 2, and so on. Ctrl+click stays on the same frame. **Place on End** does the same starting
+from End. With three pairs or more, a yellow target shows where the pair probably is (the
+pairs' rigid motion plus their own misfit nearby, on the nearest splat): Enter takes it, or a
+click places it elsewhere. Backspace removes the last point placed and goes back to place it
+again. Esc, or the button again, stops. Markers splats hide are drawn faint, with a broken ring.
+Select a marker in the list to place or replace that one. The list's *Off* column, from four
+pairs, says how far each End point is from where the other pairs put it; from five, one that
+leaving out makes the rest agree much better is flagged in orange, as a likely mis-pairing. Markers are kept
+in the capture's own coordinates with the frame they were picked on: moving End or Start leaves
+them unused until placed again. With no pairs the frames are aligned by their centres; three or
+more also give it the turn between them. At the top of its panel, before its length, the morph
+has its own transport, like the timeline's but about the morph alone: its first and last frame, a frame back and forward,
+play, which plays its frames alone (Ctrl+Space), and beside it the seam (Alt+Space) - a second before End,
+the morph and a second after Start - each over and over until pressed again or any other
+playback or seek.
+
+The End frame is deformed onto the Start frame and the Start frame back onto the End frame,
+each along a graph of a few hundred nodes fitted as rigidly as possible, pinned by the
+markers and drawn onto the other frame's surface. In between, every node turns part of the
+way and the rest is solved as rigidly as possible, so a limb that turns swings round rather
+than cutting through. The End frame's splats fade out as the Start frame's fade in, each
+taking on the colour of the other frame's nearest splat. The cleaning modifiers (Crop, Remove
+green, Purge Isolated, Eraser, Prune) above it shape the two frames it morphs; those below it
+apply to its frames as to any other, except Eraser and Prune, whose picks belong to source
+chunks. Every other kind applies to its frames wherever it is; during them the transform holds
+as it is at End. The first of its frames shown fits it (under a second on a 400 000-splat
+capture), shown over the view as it works; after that each frame takes tens of milliseconds. VGS/PGS exports write its frames
+after the range, as single-frame chunks (with motion samples when the capture moves); MINT
+exports leave them out.
+
 **Anti-aliased splats.** Gracia trains its captures with anti-aliasing, which leaves needle
 splats far thinner than a pixel; drawn at full opacity they show as solid coloured lines.
 The Gaussian view draws a `.mint` with the matching opacity compensation, and a `.vgs` when
@@ -362,6 +399,21 @@ information and extra JSON. Configure VGS/PGS, SH degree, playback and despill
 configuration in QSettings and stores it in the current project. The panel uses
 its own metadata/processing preset scope, sharing the same folder as the editor.
 Loading a metadata preset does not modify capture or crop transforms.
+
+**Write normals** (off by default) stores every splat's outward surface normal in the
+exported `.vgs`, for renderers that light splats (FORMAT.md, Normals); **Rig** names the
+studio that recorded the capture, SMNV1 or THE4DSCANNER, whose cameras are built into the
+editor (`normalrigs.cpp`, from SMNForge's `camera_priors`, both in the capture frame: Y up,
+metres). The method is SMNForge's *Fill Gaussian normals* (`gaussiannormals.cpp`): the
+shortest axis on flat splats, the neighbourhood plane on round ones, the side facing the
+cameras that see the splat through a coarse depth buffer, propagated and smoothed. It runs
+on what is written, with the cameras moved by the capture transform, at one instant per
+splat and chunk; the normal is stored in the splat's own frame, so it turns with it. The
+export notes say how much of the capture the rig's cameras saw: well under half means the
+wrong rig or a capture not in its own frame. On the boxing capture (SMNV1): +2.8% size,
+1.7 s to 2.3 s, 97.5% of opaque splats seen. A `.ply`, one frame or a sequence, carries them
+as `nx ny nz` (zero otherwise, as 3DGS training writes them), which the PLY importer of
+the Blender build here reads. MINT cannot hold normals; exporting one says so.
 
 These options are applied during **File > Export capture…** (Ctrl+E); preview
 colours continue to use source data. Export writes signed encoding-0 VGS (compressed)
@@ -616,7 +668,7 @@ Tests cover persisted recent-file history and dialog locations, project round
 trips, relocatable paths, invalid data, transform order
 and opaque points of equal size despite differing source opacity and scale.
 Transport icons are light grey. Buttons explain their operation and keyboard
-shortcut in tooltips; Ctrl+Home/Ctrl+End jump to playback range boundaries,
+shortcut in tooltips; Home/End jump to playback range boundaries,
 Alt+Home resets the current target, G toggles the grid and L toggles looping.
 
 Transform and reference-space buttons use the supplied PNGs in `assets/icons`,

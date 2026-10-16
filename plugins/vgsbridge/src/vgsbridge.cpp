@@ -567,6 +567,7 @@ int vgsb_acquire(vgsb_player *player, double seconds, double timeoutMs, vgsb_fra
   out->scales = slot.scales.data();
   out->radiance = slot.radiance.data();
   out->sh = slot.count && slot.shCoefficients ? slot.sh.data() : nullptr;
+  out->normals = slot.count && slot.hasNormals ? slot.normals.data() : nullptr;
   return VGSB_OK;
 }
 

@@ -272,6 +272,16 @@ bool Project::fromJson(const QJsonObject &root,const QString &baseDirectory,Proj
             } else if (item["type"]=="prune-low-contribution") {
                 m.type=ModifierType::PruneLowContribution;const auto p=item["prune"].toObject();
                 m.prune.percent=number(p,"percent",0,90);m.prune.protectAbove=number(p,"protectAbove",0,1000);valid &= p["protectUnit"]=="px-1080p-mean";
+            } else if (item["type"]=="loop-morph") {
+                m.type=ModifierType::LoopMorph;const auto morph=item["morph"].toObject();valid &= morph["space"]=="capture-local" && morph["markers"].isArray();
+                m.morphSeconds=number(morph,"seconds",1.0/1000,60);QSet<int> numbers;
+                for (const auto &value:morph["markers"].toArray()) {
+                    if (!value.isObject()) return fail();const auto entry=value.toObject();MorphMarker marker;
+                    const double n=number(entry,"number",1,1000);valid &= n==std::floor(n) && !numbers.contains(int(n));numbers.insert(int(n));marker.number=int(n);
+                    if ((marker.hasEnd=entry.contains("end"))) {marker.end=vector(entry,"end",-1e6,1e6);const double f=number(entry,"endFrame",0,1000000);valid &= f==std::floor(f);marker.endFrame=int(f);}
+                    if ((marker.hasStart=entry.contains("start"))) {marker.start=vector(entry,"start",-1e6,1e6);const double f=number(entry,"startFrame",0,1000000);valid &= f==std::floor(f);marker.startFrame=int(f);}
+                    m.morphMarkers.append(marker);
+                }
             } else if (item["type"]=="walk") {
                 m.type=ModifierType::Walk;const auto w=item["walk"].toObject();valid &= w["axis"]=="+z";m.walkSpeed=number(w,"speed",0,100);
                 valid &= !w.contains("display") || w["display"]=="m/s" || w["display"]=="km/h";m.walkKmh=w["display"]=="km/h";
@@ -298,6 +308,8 @@ bool Project::fromJson(const QJsonObject &root,const QString &baseDirectory,Proj
         const auto &s=p.captureSettings;despill.colourDespillStrength=s.despillStrength;despill.colourGreenGain=s.greenGain;despill.colourViewChroma=s.viewChromaScale;despill.colourRecoverSkin=s.recoverSkin;
         p.modifiers.append(despill);p.captureSettings.despill=false;
     }
-    if (!valid || p.out < p.in || p.time < p.in || p.time > p.out) return fail();
+    // The playhead can be on a Loop morph's frames, after End.
+    const double tail=p.loopMorph() ? p.loopMorph()->morphSeconds+1 : 0;
+    if (!valid || p.out < p.in || p.time < p.in || p.time > p.out+tail) return fail();
     *result = p; return true;
 }

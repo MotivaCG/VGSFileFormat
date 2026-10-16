@@ -33,6 +33,7 @@ constexpr const char *UseSh = "usesh";
 constexpr const char *NoShPlaying = "noshplaying";
 constexpr const char *Linearize = "linearize";
 constexpr const char *CastShadows = "castshadows";
+constexpr const char *Normals = "normals";
 constexpr const char *FitScene = "fitscene";
 constexpr const char *ScatterHeading = "scatterheading";
 constexpr const char *Points = "points";

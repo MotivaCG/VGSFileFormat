@@ -218,6 +218,12 @@ struct Frame {
 
   /** Which chunk this instant came from. */
   size_t chunkIndex = 0;
+
+  /**
+   * 3 per splat: the outward surface normal, for renderers that light splats; null when
+   * the capture carries none. Unit length, in the same space as `positions`.
+   */
+  const float *normals = nullptr;
 };
 
 /**

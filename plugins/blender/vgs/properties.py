@@ -8,6 +8,8 @@ from bpy.props import (BoolProperty, EnumProperty, FloatProperty, IntProperty, P
                        StringProperty)
 from bpy.types import AddonPreferences, PropertyGroup
 
+from . import shading
+
 
 # What happens past either end of the capture. Shared with the import operator.
 LOOP_MODES = (
@@ -37,6 +39,15 @@ def _path_changed(self, context):
     from . import playback
     playback.reload(self.id_data)
     playback.refresh(context)
+
+
+def _get_shading(self):
+    return 1 if shading.get_mode(self.id_data) == 'SHADED' else 0
+
+
+def _set_shading(self, value):
+    # Not stored: the mode is the material's wiring. See shading.py.
+    shading.set_mode(self.id_data, shading.SHADING_MODES[value][0])
 
 
 class VGSCaptureSettings(PropertyGroup):
@@ -114,6 +125,13 @@ class VGSCaptureSettings(PropertyGroup):
         items=LOOP_MODES,
         default='CAPTURE',
         update=_refresh,
+    )
+    shading: EnumProperty(
+        name="Shading",
+        description="How the capture answers the scene's lights",
+        items=shading.SHADING_MODES,
+        get=_get_shading,
+        set=_set_shading,
     )
 
 

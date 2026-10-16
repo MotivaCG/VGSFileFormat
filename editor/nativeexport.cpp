@@ -73,6 +73,7 @@ void normalizeSchemas(vgs::DecodedChunk &chunk) {
         case vgs::ScaleIndices:case vgs::Sh0Base:scalar(3,n,1,3);break;
         case vgs::Lifetimes:scalar(2,n,1,5);break;
         case vgs::OpacityScales:scalar(1,n,1,0);break;
+        case vgs::Normals:scalar(2,n,1,3);break;
         case vgs::Sh0Terms:case vgs::OpacityTerms:packed(8,n,0,{12,12,12,12,12,4});break;
         case vgs::PositionBase:packed(8,n,0,{1,21,21,21});break;
         case vgs::PositionSamples:packed(8,n*S,1,{1,21,21,21});s.samples=S;break;
@@ -547,6 +548,56 @@ void transformPositions(vgs::DecodedChunk &c,const Project &p) {
     }
     if (simple) {c.groups[0].trajectoryMin*=scale;c.groups[0].trajectoryMax*=scale;}
 }
+}
+
+gaussiannormals::Result addNormals(vgs::DecodedChunk &c,const std::vector<gaussiannormals::View> &views,const ExportProgress &progress) {
+    normalizeSchemas(c);const size_t T=c.groups[0].intervals;
+    std::vector<size_t> offsets(c.groups.size()+1,0);
+    for (size_t group=1;group<c.groups.size();++group) offsets[group+1]=offsets[group]+size_t(c.groups[group].splats);
+    const size_t records=offsets.back();gaussiannormals::Result total;
+    std::vector<uint8_t> pending(records,1),codes(records*2);
+    for (size_t i=0;i<records;++i) {codes[i*2]=128;codes[i*2+1]=128;} // the shortest axis, for a splat never alive
+    // Alive at interval s: lifetime begin <= s < end, as the frame decoder counts it.
+    std::vector<uint8_t> lifetimes(records*2);
+    for (size_t group=1;group<c.groups.size();++group) {
+        const auto &life=get(c,vgs::Lifetimes,uint32_t(group)).bytes;
+        std::copy(life.begin(),life.begin()+ptrdiff_t((offsets[group+1]-offsets[group])*2),lifetimes.begin()+ptrdiff_t(offsets[group]*2));
+    }
+    auto alive=[&](size_t record,size_t s) {return s>=lifetimes[record*2] && s+1<=lifetimes[record*2+1];};
+    vgs::FrameDecoder decoder(c);vgs::Frame frame;std::vector<float> world(records*3,0.f);
+    // A normal is constant over the chunk in its splat's frame, so each splat is taken at one
+    // instant it is alive at, with everything alive then as its neighbourhood: the middle
+    // first, then wherever most of the ones still missing are.
+    for (size_t s=T/2,round=0;T>0;++round) {
+        if (round) {
+            size_t best=0,most=0;
+            for (size_t k=0;k<T;++k) {size_t n=0;for (size_t i=0;i<records;++i) n+=pending[i] && alive(i,k);if (n>most) {most=n;best=k;}}
+            if (!most) break;s=best;
+        }
+        report(progress,QStringLiteral("Computing normals at sample %1 / %2").arg(s+1).arg(T));
+        decoder.evaluateInto(std::min(s/double(T),1.-1e-9),false,&frame);
+        if (frame.count!=records) throw std::runtime_error("Normals: the decoded frame does not match the chunk.");
+        gaussiannormals::Splats splats;splats.count=records;splats.position=frame.position.data();splats.rotation=frame.rotation.data();
+        splats.scale=frame.scale.data();splats.opacity=frame.opacity.data();splats.use=frame.active.data();
+        const auto result=gaussiannormals::computeNormals(splats,views,world.data());
+        if (!round) total=result;
+        for (size_t group=1;group<c.groups.size();++group) {
+            const auto &indices=get(c,vgs::ScaleIndices,uint32_t(group)).bytes;
+            for (size_t row=0;row<c.groups[group].splats;++row) {
+                const size_t record=offsets[group]+row;if (!pending[record] || !frame.active[record]) continue;
+                // Into the splat's own frame: the inverse of its rotation, q in xyzw.
+                const float *q=frame.rotation.data()+record*4;const QQuaternion inverse=QQuaternion(q[3],q[0],q[1],q[2]).conjugated();
+                const QVector3D local=inverse.rotatedVector({world[record*3],world[record*3+1],world[record*3+2]});
+                const float n[3]={local.x(),local.y(),local.z()};
+                vgs::encodeNormal(n,indices.data()+row*3,codes.data()+record*2);pending[record]=0;
+            }
+        }
+    }
+    for (uint32_t group=1;group<c.groups.size();++group) {
+        vgs::DecodedPage page;page.descriptor.attribute=vgs::Normals;page.descriptor.group=group;
+        page.bytes.assign(codes.begin()+ptrdiff_t(offsets[group]*2),codes.begin()+ptrdiff_t(offsets[group+1]*2));c.pages.push_back(std::move(page));
+    }
+    normalizeSchemas(c);return total;
 }
 
 bool supportsNativeTransform(const Project &p) {

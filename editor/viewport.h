@@ -115,6 +115,20 @@ public:
     // The box of the points on screen, each axis without `trim` of them at either end so a
     // few floaters do not stretch it. False when nothing is visible.
     bool visibleExtent(QVector3D *minimum, QVector3D *maximum, float trim = 0.01f) const;
+    // A Loop morph's markers, drawn numbered over the capture where they are in the world;
+    // hollow until placed on both frames, ringed while selected, and dimmed with a broken ring
+    // where splats in front hide them. A suggested one is a target where the next one
+    // probably goes.
+    struct ViewMarker {QVector3D world;int number=0;bool paired=false,selected=false,suggested=false;};
+    void setViewMarkers(const QVector<ViewMarker> &markers);
+    // Placing markers: a left click that does not drag picks the point under it (pointPicked);
+    // dragging still orbits. `hint` says what the click places.
+    void setPointPicking(bool picking, const QString &hint = {});
+    bool pointPicking() const { return pointPicking_; }
+    // The visible splat or point nearest a world position, in the world; false with none.
+    bool nearestVisiblePoint(const QVector3D &world, QVector3D *found) const;
+    // A line over the view while something slow is being worked out; empty for none.
+    void setBusyText(const QString &text);
     bool setGhost(bool enabled);
     void setGhostOpacity(float opacity);
     float ghostOpacity() const {return ghostOpacity_;}
@@ -135,6 +149,10 @@ signals:
     void brushRadiusRequested(float radius);
     // Esc in the viewport: the owner leaves its editing modes too.
     void escapePressed();
+    void pointPicked(QVector3D world);
+    // Enter and Backspace in the viewport, for what is being placed there.
+    void enterPressed();
+    void backspacePressed();
 protected:
     bool event(QEvent *event) override;
     void initializeGL() override;
@@ -171,6 +189,17 @@ private:
     std::vector<QVector3D> visibleWorldPoints() const;
     void drawGhost(const QMatrix4x4 &viewProjection,const QSize &pixels,float dpr);
     Transform worldTransformed(const Transform &start,const QMatrix4x4 &delta) const;
+    QVector<ViewMarker> viewMarkers_;
+    // Which markers splats hide, and the view, frame and markers that was worked out for.
+    std::vector<bool> markerHidden_;
+    QMatrix4x4 markerHiddenView_;
+    quint64 markerHiddenFrame_ = 0;
+    bool markerHiddenSplats_ = false, markerHiddenValid_ = false;
+    void updateMarkerOcclusion(const QMatrix4x4 &model, const QMatrix4x4 &view, const QMatrix4x4 &viewProjection);
+    QString busyText_;
+    bool pointPicking_ = false;
+    QString pickHint_;
+    QPointF pickPress_{-1e9,-1e9};
     bool cleanCapture_ = false, sheetCapture_ = false, sheetShowRemoved_ = false, sheetCrop_ = false;
     SelectTool selectTool_ = SelectTool::None;
     float brushRadius_ = 20;

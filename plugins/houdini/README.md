@@ -42,6 +42,7 @@ The controls, and what they correspond to in Blender:
 | Fit Scene          | Fit Scene              | sets the frame rate exactly, fractions too    |
 | Linearize Color    | —                      | Houdini wants scene-linear `Cd`               |
 | Cast Shadows in Karma | —                   | off, as Bake GSplats leaves it                |
+| Write Normals      | (always written)       | off: `N`, for SOP work; Houdini draws no splat with it |
 | `VGS_SLOTS`, `VGS_THREADS`, `VGS_PLAYBACK_WAIT_MS` | add-on preferences | environment variables, defaults 4 / 0 / 250 |
 | Points, Variants, Phase Spread, Speed Variation, Seed, Output | — | scatter: a copy per point, see below |
 | `VGS_CACHE_MB`     | —                      | what a scatter may keep decoded, default 4096 |
@@ -60,6 +61,11 @@ infos were read off that node's output, not guessed.
   `orient` (quaternion, xyzw); `scale` (activated); `GS_Alpha` (activated opacity);
 - with harmonics, `GS_SPH_R/G/B` (16 floats each: the DC term, then the coefficients,
   zeros past the capture's degree) and `restorient`;
+- with Write Normals, and a capture exported with normals (FORMAT.md, Normals), `N` (normal
+  type info, unit length, turned with the splats). Houdini 22.0.429 draws no splat with it:
+  Karma XPU's documentation says splats do not receive lighting, and the viewport's
+  `glsl/gsplat/VK` shaders read `Cd`, `GS_Alpha`, `orient`, `scale`, the harmonics and
+  nothing else, multiplying by a light's colour and shadow only. It is there for SOP work;
 - detail `karma:object:rendervisibility = "-shadow"` unless Cast Shadows is on;
 - detail `vgs_seconds`, the capture time shown.
 

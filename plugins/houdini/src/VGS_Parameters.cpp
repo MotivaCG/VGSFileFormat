@@ -235,6 +235,7 @@ PRM_Name useShName(parm::UseSh, "Harmonics");
 PRM_Name noShPlayingName(parm::NoShPlaying, "Off While Playing");
 PRM_Name linearizeName(parm::Linearize, "Linearize Color");
 PRM_Name castShadowsName(parm::CastShadows, "Cast Shadows in Karma");
+PRM_Name normalsName(parm::Normals, "Write Normals");
 PRM_Name fitSceneName(parm::FitScene, "Fit Scene");
 PRM_Name scatterHeadingName(parm::ScatterHeading, "Scatter");
 PRM_Name pointsName(parm::Points, "Points");
@@ -332,6 +333,12 @@ PRM_Template captureTemplates[] = {
                  nullptr, 1,
                  "Let the splats cast shadows in Karma. Off, as Bake GSplats leaves it: "
                  "shadows from splats are slow and seldom wanted."),
+    PRM_Template(PRM_TOGGLE, 1, &normalsName, PRMzeroDefaults, nullptr, nullptr, nullptr,
+                 nullptr, 1,
+                 "Write the capture's outward surface normals to N, when it carries them (an "
+                 "editor export with Write normals). Nothing in Houdini draws Gaussian splats "
+                 "with them - Karma does not light splats, nor does the viewport: N is for "
+                 "your own conversion or shading in SOPs."),
     PRM_Template(PRM_CALLBACK, 1, &fitSceneName, nullptr, nullptr, nullptr, onFitScene, nullptr, 1,
                  "Set the scene's frame rate to the capture's, and its frame range to play it "
                  "once at this speed."),
@@ -370,7 +377,7 @@ PRM_Template captureTemplates[] = {
 const char *const linkedParms[] = {
     parm::File,  parm::Phase,  parm::StartFrame,  parm::Speed,     parm::LoopMode,    parm::Density,
     parm::UpAxis, parm::UseSh, parm::NoShPlaying, parm::Linearize, parm::CastShadows,
-    parm::Points, parm::Variants, parm::PhaseSpread, parm::SpeedVariation, parm::Seed,
+    parm::Normals, parm::Points, parm::Variants, parm::PhaseSpread, parm::SpeedVariation, parm::Seed,
     parm::Output, nullptr,
 };
 

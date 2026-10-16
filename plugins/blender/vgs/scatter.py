@@ -322,11 +322,12 @@ def _capture_state(capture):
     settings = capture.data.vgs
     values = [(prop.identifier, _plain(getattr(settings, prop.identifier)))
               for prop in settings.bl_rna.properties
-              if prop.identifier not in ("rna_type", "speed", "start_frame")
+              if prop.identifier not in _NOT_COPIED + ("speed",)
               and not prop.is_readonly]
     transform = (capture.rotation_mode, tuple(capture.rotation_euler),
                  tuple(capture.rotation_quaternion), tuple(capture.scale))
-    return (values, transform)
+    materials = tuple(m.name if m is not None else "" for m in capture.data.materials)
+    return (values, transform, materials)
 
 
 def _state(modifier, capture):
@@ -335,10 +336,15 @@ def _state(modifier, capture):
     return repr((shape, _capture_state(capture)))
 
 
+# Settings a variant does not take from its capture: start frame follows phase, and shading
+# is the material's, which the variants share with the capture.
+_NOT_COPIED = ("rna_type", "start_frame", "shading")
+
+
 def _copy_settings(source, target):
     for prop in source.bl_rna.properties:
         name = prop.identifier
-        if name == "rna_type" or prop.is_readonly or name == "start_frame":
+        if name in _NOT_COPIED or prop.is_readonly:
             continue
         setattr(target, name, getattr(source, name))
 
@@ -380,6 +386,10 @@ def sync(points):
         for k, obj in enumerate(objects):
             settings = obj.data.vgs
             _copy_settings(source, settings)
+            if list(obj.data.materials) != list(capture.data.materials):
+                obj.data.materials.clear()
+                for mat in capture.data.materials:
+                    obj.data.materials.append(mat)
             phase = source.phase + spread * k / variants
             settings.phase = phase - math.floor(phase)
             chance = random.Random(seed * 1000003 + k).random()

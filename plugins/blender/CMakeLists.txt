@@ -15,6 +15,8 @@ set(addon_dir ${CMAKE_CURRENT_SOURCE_DIR}/${addon})
 
 file(STRINGS ${addon_dir}/blender_manifest.toml version_line REGEX "^version *=")
 string(REGEX REPLACE "^version *= *\"([^\"]+)\".*" "\\1" addon_version "${version_line}")
+# Configure again when the manifest changes, so a new version names the zip.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${addon_dir}/blender_manifest.toml)
 
 set(addon_files
     blender_manifest.toml
@@ -26,6 +28,7 @@ set(addon_files
     properties.py
     operators.py
     scatter.py
+    shading.py
     interface.py
     logo.png)
 set(addon_sources "")

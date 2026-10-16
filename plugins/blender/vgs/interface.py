@@ -10,7 +10,7 @@ import bpy
 import bpy.utils.previews
 from bpy.types import Panel
 
-from . import playback, scatter
+from . import playback, scatter, shading
 from .operators import VGS_OT_fit_scene, VGS_OT_import, VGS_OT_reload
 
 
@@ -83,6 +83,20 @@ class DATA_PT_vgs_capture(Panel):
         row = layout.row(align=True)
         row.operator(VGS_OT_fit_scene.bl_idname, icon='TIME')
         row.operator(VGS_OT_reload.bl_idname, text="", icon='FILE_REFRESH')
+        # How the capture answers the scene's lights. The two modes as buttons in a row,
+        # with no label: the panel's name already says what they choose.
+        header, body = layout.panel("vgs_lighting", default_closed=True)
+        header.label(text="Lighting")
+        if body:
+            body.row().prop(settings, "shading", expand=True)
+            mix = shading.mix_node(pointcloud)
+            if mix is not None:
+                body.prop(mix.inputs["Fac"], "default_value", text="Shaded Amount",
+                          slider=True)
+                # The material, with its user count and the button that makes it this
+                # capture's own: it is shared by every capture of the same file.
+                if context.object is not None:
+                    body.template_ID(context.object, "active_material")
         # Ways to lay copies of the capture out. One sample for now, offered as such: a
         # scatter onto the other selected object's points, which the operator explains.
         header, body = layout.panel("vgs_distribution", default_closed=True)

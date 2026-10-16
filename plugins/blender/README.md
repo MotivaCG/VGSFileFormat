@@ -30,13 +30,55 @@ Blender 5.3 or later, Windows x64.
   viewport density (0.01 to 1, falling faster than the slider: 0.5 draws about a fifth
   of the splats in the viewport; renders draw them all),
   spherical harmonics, *Harmonics: Off While Playing* (on by default), *Fit Scene*,
-  *Reload*.
+  *Reload*, and folded panels *Lighting* (see Shading below) and *Distribution*.
 - **Preferences** (*Add-ons > VGS*): frames decoded ahead per capture, decoder threads
   (0 is half the cores), how long playback waits for a late frame, and whether decoded
   splats are kept out of saved `.blend` files (on by default).
 
 The capture is a reference to its file. Moving or renaming the file breaks it; *Reload*
 after fixing the path.
+
+## Shading
+
+A Gaussian splat point cloud with no material is self-illuminated: Blender draws its
+colour as emission (Attribute `radiance`, the colour with harmonics evaluated, into
+Emission), and lights do nothing to it. The *Lighting* panel, folded under the capture's
+settings, picks between that and *Shaded* with two buttons in a row (`shading.py`; the
+property is `vgs.shading`, the panel is not called Shading so the word is not said twice):
+
+- **Self-Illumination**, the default, adds nothing. A new import has no material.
+- **Shaded** gives the point cloud a material and wires its output to a Mix Shader, *VGS
+  Mix*: input 1 is the self-illumination that was there (Blender's Emission), input 2 *VGS
+  Shaded*, a Principled BSDF with the same `radiance` as base colour, roughness 1 and IOR 1
+  (no Fresnel: diffuse only). *Shaded Amount*, the mix's factor, starts at 0.9 and is in
+  the panel, with the material's selector under it.
+- **Shared:** the material carries `vgs_filepath`, and a capture with no material going
+  Shaded takes the one already made for its file. Making it single user, the usual way,
+  gives a capture its own. A material the user made (Blender's own *New* on a Gaussian
+  splat) is used as it is: whatever feeds its output when it goes Shaded becomes the
+  mix's self-illumination, remembered by name on the material.
+- **Back to Self-Illumination** wires that node straight to the output again and leaves
+  the mix and the BSDF in place, so going Shaded once more keeps what was set on them.
+- **Not stored:** the mode is read from the material's wiring (the output fed by *VGS Mix*
+  or not), so captures sharing a material can never show different modes, and rewiring
+  by hand in the node editor shows in the panel.
+- **Scatter variants** take their capture's materials, so they follow it.
+
+The captured colour already holds the studio's light, so shaded captures are lit twice:
+darker, with shadows on top of the recorded ones; that is why some self-illumination stays.
+Lights shade a splat by its `normal` attribute when it has one (the PLY importer in the
+user's Blender build reads it), and by the shortest axis of its ellipsoid otherwise, which
+looks grainy on round splats such as skin. A capture exported from the editor with *Write
+normals* carries them (FORMAT.md, Normals; library API 5): the add-on writes them into
+`normal` every frame and removes it when a capture has none. Rendered Shaded in Cycles
+with a side light, the boxing capture's skin is smooth with them and blotchy without
+(`vgsbridge.dll` of API 4 still opens such a capture and ignores the normals).
+
+Tested in Blender 5.3 Beta through the MCP, with two imports of `boxingfull.vgs`: one
+material for both (two users), the second going Shaded took it, Self-Illumination and back
+kept a Shaded Amount of 0.7, a single-user copy stayed apart, Blender's own material got
+the mix on its own Attribute and Emission, and scatter variants followed the capture's
+material through a change. An EEVEE render side by side shows the shaded copy lit by a sun.
 
 ## Scatter
 

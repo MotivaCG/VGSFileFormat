@@ -54,6 +54,9 @@ struct Frame {
   float sampleAlpha = 0;
   uint64_t count = 0;
   std::vector<float> position, rotation, scale, opacity, colorDc, shRest;
+  // The outward surface normal of every splat, xyz, in the frame's space; empty when the
+  // capture carries none, and zero for a splat of a group written without them.
+  std::vector<float> normal;
   // Coefficients per splat in shRest; 0 when the frame was evaluated without SH.
   int shCoefficients = 0;
   std::vector<uint8_t> active;

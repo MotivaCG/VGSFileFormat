@@ -26,6 +26,11 @@
 #include <QFile>
 #include <QtTest>
 #include <cstring>
+#include <random>
+#include <QElapsedTimer>
+#include <QImage>
+#include <QPainter>
+#include <numeric>
 #include <qfloat16.h>
 #include <mutex>
 #include <thread>
@@ -100,6 +105,29 @@ void sourceFile(const QString &path,int frames=3,bool allEmpty=false) {
     QFile file(path);if (!file.open(QIODevice::WriteOnly)) throw std::runtime_error("Cannot create fixture.");
     vgs::encodeSequence(h,[&](size_t i) {auto f=sample();if (allEmpty || i==1) f.active={0,0,0};return packExportFrame(f,3);},
         [&](uint64_t offset,const uint8_t *bytes,size_t count) {if (!file.seek(qint64(offset)) || file.write(reinterpret_cast<const char *>(bytes),qint64(count))!=qint64(count)) throw std::runtime_error("Cannot write fixture.");},options);
+}
+// A ball of flat splats inside the SMNV1 rig, each tangent to it but with its shortest axis
+// turned inwards for half of them, and that axis on x, y or z at random: what normals must
+// sort out from the cameras alone.
+const Eigen::Vector3f kBallCentre(0,1,0);
+void ballFile(const QString &path,int count=60000) {
+    vgs::Frame f;f.count=uint64_t(count);std::mt19937 random(7);std::normal_distribution<float> gauss;std::uniform_int_distribution<int> pick(0,5);
+    for (int i=0;i<count;++i) {
+        Eigen::Vector3f d(gauss(random),gauss(random),gauss(random));d.normalize();const Eigen::Vector3f p=kBallCentre+.4f*d;
+        const int shortest=pick(random)%3;const bool inwards=pick(random)<3;
+        // Rotation taking local axis `shortest` to +-d.
+        const Eigen::Quaternionf q=Eigen::Quaternionf::FromTwoVectors(Eigen::Vector3f::Unit(shortest),inwards ? -d : d);
+        f.position.insert(f.position.end(),{p.x(),p.y(),p.z()});f.rotation.insert(f.rotation.end(),{q.x(),q.y(),q.z(),q.w()});
+        float s[3]={.03f,.035f,.04f};s[shortest]=.002f;f.scale.insert(f.scale.end(),{s[0],s[1],s[2]});
+        f.opacity.push_back(.9f);f.colorDc.insert(f.colorDc.end(),{.6f,.5f,.4f});f.active.push_back(1);
+    }
+    f.shCoefficients=15;f.shRest.assign(size_t(count)*45,0.f);
+    vgs::Header h;h.frameCount=h.durationTicks=2;h.timeDenominator=25;h.chunks.resize(2);
+    for (int i=0;i<2;++i) {h.chunks[i].startTick=i;h.chunks[i].intervals=1;}
+    vgs::EncodeOptions options;options.signer=vgs::authoringSigner();options.compression=vgs::Compression::None;
+    QFile file(path);if (!file.open(QIODevice::WriteOnly)) throw std::runtime_error("Cannot create fixture.");
+    vgs::encodeSequence(h,[&](size_t) {return packExportFrame(f,3);},
+        [&](uint64_t offset,const uint8_t *bytes,size_t n) {if (!file.seek(qint64(offset)) || file.write(reinterpret_cast<const char *>(bytes),qint64(n))!=qint64(n)) throw std::runtime_error("Cannot write fixture.");},options);
 }
 Eigen::Matrix3d covariance(const float *q,const float *s) {
     Eigen::Quaterniond rotation(q[3],q[0],q[1],q[2]);rotation.normalize();auto r=rotation.toRotationMatrix();
@@ -384,6 +412,139 @@ private slots:
         const auto full=dir.filePath("long.vgs");exportCaptureFile(project,full);const double size=double(QFileInfo(full).size());
         QVERIFY2(std::abs(sampled.bytes-size)<0.15*size,qPrintable(QString("%1 vs %2").arg(sampled.bytes).arg(size)));
     }
+    void loopMorphFramesFollowTheRangeAndCloseTheLoop() {
+        // Four frames of a body with an arm that turns 10 degrees about Y each frame, and a
+        // floater above it in every frame. A Loop morph after End carries it back to Start.
+        QTemporaryDir dir;const auto source=dir.filePath("arm.pgs");
+        auto armFrame=[](int f) {
+            vgs::Frame frame;std::mt19937 random(11+f);std::uniform_real_distribution<float> unit(0,1);
+            QMatrix4x4 turn;turn.rotate(10.f*f,0,1,0);
+            auto add=[&](QVector3D p) {frame.position.insert(frame.position.end(),{p.x(),p.y(),p.z()});frame.rotation.insert(frame.rotation.end(),{0,0,0,1});
+                frame.scale.insert(frame.scale.end(),{.01f,.01f,.01f});frame.opacity.push_back(.9f);frame.colorDc.insert(frame.colorDc.end(),{.5f,.4f,.3f});frame.active.push_back(1);};
+            for (int i=0;i<3000;++i) {const float a=unit(random)*6.2831853f;add({.1f*std::cos(a),1.6f*unit(random),.1f*std::sin(a)});}
+            for (int i=0;i<2000;++i) {const float a=unit(random)*6.2831853f;add(turn.map(QVector3D(.1f+.8f*unit(random),1.3f+.04f*std::cos(a),.04f*std::sin(a))));}
+            for (int i=0;i<50;++i) add({unit(random)*.05f,3+unit(random)*.05f,0}); // the floater
+            frame.count=frame.opacity.size();frame.shCoefficients=15;frame.shRest.assign(frame.count*45,0.f);return frame;
+        };
+        {
+            vgs::Header h;h.frameCount=h.durationTicks=4;h.timeDenominator=25;h.chunks.resize(4);
+            for (int i=0;i<4;++i) {h.chunks[i].startTick=i;h.chunks[i].intervals=1;}
+            vgs::EncodeOptions options;options.signer=vgs::authoringSigner();options.compression=vgs::Compression::None;
+            QFile file(source);QVERIFY(file.open(QIODevice::WriteOnly));
+            vgs::encodeSequence(h,[&](size_t i) {return packExportFrame(armFrame(int(i)),3);},
+                [&](uint64_t offset,const uint8_t *bytes,size_t n) {file.seek(qint64(offset));file.write(reinterpret_cast<const char *>(bytes),qint64(n));},options);
+        }
+        Project project;project.asset=source;project.in=0;project.out=3./25;project.modifiers.clear();
+        Modifier floater;floater.id=Project::newId();floater.name="Floater";floater.crop.enabled=true;floater.crop.remove=true;floater.crop.radius=.3f;floater.crop.height=.4f;floater.crop.transform.position={0,2.8f,0};
+        Modifier morph;morph.id=Project::newId();morph.name="Loop morph";morph.type=ModifierType::LoopMorph;morph.morphSeconds=.2;
+        // The arm's root, middle and tip on End (frame 3, 30 degrees) and on Start (frame 0).
+        QMatrix4x4 end;end.rotate(30,0,1,0);int number=1;
+        for (QVector3D p:{QVector3D(.1f,1.3f,.04f),QVector3D(.5f,1.3f,.04f),QVector3D(.9f,1.3f,.04f),QVector3D(0,1.6f,.1f)}) {
+            MorphMarker k;k.number=number++;k.hasEnd=k.hasStart=true;k.end=p.x()<.05f ? p : end.map(p);k.start=p;k.endFrame=3;k.startFrame=0;morph.morphMarkers.append(k);}
+        project.modifiers={floater,morph};
+        QCOMPARE(project.morphFrames(25),5);QCOMPARE(project.morphPairs(25).size(),4);
+        QVERIFY(project.inMorph(4./25,25) && project.inMorph(8./25,25) && !project.inMorph(3./25,25) && !project.inMorph(9./25,25));
+        const auto path=dir.filePath("looped.vgs");const auto result=exportCaptureFile(project,path);
+        QCOMPARE(result.frames,4);
+        auto capture=vgsdec::Capture::openFile(path.toStdString());QCOMPARE(capture.frameCount(),uint64_t(9));
+        // The arm's direction about Y in the world, from the opacity-weighted mean of its outer half.
+        auto armAngle=[](const vgs::Frame &f) {
+            double x=0,z=0;for (size_t i=0;i<f.count;++i) {
+                if (!f.active[i]) continue;const double px=f.position[3*i],py=f.position[3*i+1],pz=f.position[3*i+2];
+                if (std::hypot(px,pz)<.45 || std::abs(py-1.3)>.15) continue;x+=f.opacity[i]*px;z+=f.opacity[i]*pz;}
+            return qRadiansToDegrees(std::atan2(-z,x));
+        };
+        auto floaterGone=[](const vgs::Frame &f) {
+            for (size_t i=0;i<f.count;++i) if (f.active[i] && f.opacity[i]>.01f && QVector3D(f.position[3*i],f.position[3*i+1]-3,f.position[3*i+2]).length()<.5f) return false;
+            return true;
+        };
+        // Frame k of the five is k/6 of the way: the arm from End's 30 degrees down to Start's 0,
+        // and the Remove crop above the morph took the floater from the frames it morphs.
+        for (int k=1;k<=5;++k) {
+            const auto f=copy(capture.setTime((3+k)/25.,false));const double angle=armAngle(f),expected=30*(1-k/6.);
+            QVERIFY2(std::abs(angle-expected)<3,qPrintable(QString("frame %1: %2 degrees, not %3").arg(3+k).arg(angle).arg(expected)));QVERIFY(floaterGone(f));
+        }
+        QVERIFY(std::abs(armAngle(copy(capture.setTime(0,false))))<1);QVERIFY(std::abs(armAngle(copy(capture.setTime(3/25.,false)))-30)<1);
+        // The preview shows the same frames: halfway, the arm at 15 degrees, its splats in no
+        // source chunk, and the floater gone.
+        {
+            CaptureWorker worker;QSignalSpy decoded(&worker,&CaptureWorker::decoded);worker.open(source,1,true);worker.decode(6/25.,1,true,project);QCOMPARE(decoded.size(),1);
+            const auto preview=qvariant_cast<FramePtr>(decoded[0][0]);QCOMPARE(preview->chunkIndex,RenderFrame::MorphChunk);
+            vgs::Frame shown;shown.count=preview->records.size();
+            for (const auto &r:preview->records) {shown.position.insert(shown.position.end(),r.position,r.position+3);shown.opacity.push_back(r.color[3]);shown.active.push_back(1);}
+            QVERIFY2(std::abs(armAngle(shown)-15)<3,qPrintable(QString::number(armAngle(shown))));QVERIFY(floaterGone(shown));
+            // Moving End re-fits it; frames up to End stay the capture's own.
+            worker.decode(3/25.,1,true,project);QVERIFY(qvariant_cast<FramePtr>(decoded[1][0])->chunkIndex!=RenderFrame::MorphChunk);
+        }
+        // Moving as a whole, the morph's frames carry motion samples as End is placed (turned
+        // 45 degrees), and they still end where Start is in the world: the arm sweeps from 75
+        // degrees to 0.
+        Modifier spin;spin.id=Project::newId();spin.name="Spin";spin.type=ModifierType::AnimateTransform;Transform a,b;b.rotation={0,45,0};spin.animation.setKey(0,a);spin.animation.setKey(3,b);
+        project.modifiers.append(spin);QVERIFY(project.hasAnimatedMotion());
+        const auto moving=dir.filePath("moving.vgs");exportCaptureFile(project,moving);
+        auto movingCapture=vgsdec::Capture::openFile(moving.toStdString());QVERIFY(movingCapture.hasMotion());QCOMPARE(movingCapture.frameCount(),uint64_t(9));
+        QVERIFY(std::abs(armAngle(copy(movingCapture.setTime(3/25.,false)))-75)<1);
+        for (int k=1;k<=5;++k) {
+            const double angle=armAngle(copy(movingCapture.setTime((3+k)/25.,false))),expected=75*(1-k/6.);
+            QVERIFY2(std::abs(angle-expected)<4,qPrintable(QString("moving frame %1: %2 degrees, not %3").arg(3+k).arg(angle).arg(expected)));
+        }
+        // MINT holds its source's frames only.
+        project.modifiers={floater,morph};const auto mint=exportCaptureFile(project,dir.filePath("looped.mint"));
+        QVERIFY(std::any_of(mint.notes.begin(),mint.notes.end(),[](const QString &n) {return n.contains("Loop morph");}));
+    }
+    void loopMorphTimingOnARealCapture() {
+        // How long the preview waits on a real capture: the fit, on the first of the morph's
+        // frames, and then each frame after it.
+        // Or a project's own Loop morph (LOOP_MORPH_PROJECT).
+        const QString projectPath=qEnvironmentVariable("LOOP_MORPH_PROJECT");Project project;QString error;
+        if (!projectPath.isEmpty()) QVERIFY2(Project::read(projectPath,&project,&error),qPrintable(error));
+        const QString path=projectPath.isEmpty() ? qEnvironmentVariable("LOOP_MORPH_CAPTURE") : project.asset;
+        if (path.isEmpty()) QSKIP("Set LOOP_MORPH_CAPTURE to a .vgs or .mint, or LOOP_MORPH_PROJECT to a project, to time the Loop morph.");
+        CaptureWorker worker;QSignalSpy opened(&worker,&CaptureWorker::opened),decoded(&worker,&CaptureWorker::decoded),failed(&worker,&CaptureWorker::failed);
+        worker.open(path,1,true);QCOMPARE(opened.size(),1);const auto info=qvariant_cast<CaptureInfo>(opened[0][0]);
+        if (projectPath.isEmpty()) {
+            project.asset=path;project.modifiers.clear();project.in=0;project.out=std::min(3.0,(info.frames-1)/info.fps);
+            Modifier morph;morph.id=Project::newId();morph.name="Loop morph";morph.type=ModifierType::LoopMorph;morph.morphSeconds=1;project.modifiers={morph};
+        }
+        const int frames=project.morphFrames(info.fps);QElapsedTimer timer;
+        for (int k:{1,2,frames/2}) {
+            timer.start();worker.decode(project.out+k/info.fps,1,true,project);const double ms=timer.nsecsElapsed()/1e6;
+            QVERIFY2(failed.isEmpty(),failed.isEmpty() ? "" : qPrintable(failed.back()[0].toString()));
+            const auto f=qvariant_cast<FramePtr>(decoded.back()[0]);qInfo("morph frame %d of %d: %.0f ms, %zu splats",k,frames,ms,f->records.size());
+        }
+        // How saturated the colours are, weighted by opacity, at End, through the morph and at
+        // Start: blending two patterns that do not line up washes them out.
+        for (int k:{0,frames/4,frames/2,3*frames/4,frames+1}) {
+            worker.decode(k==frames+1 ? project.in : project.out+k/info.fps,1,false,project);const auto f=qvariant_cast<FramePtr>(decoded.back()[0]);
+            double weight=0,saturation=0,value=0;
+            for (const auto &p:f->points) {
+                if (p.modifierVisibility<.5f) continue;const float o=f->records[size_t(p.id)].color[3];
+                const float hi=std::clamp(std::max({p.color[0],p.color[1],p.color[2]}),0.f,1.f),lo=std::clamp(std::min({p.color[0],p.color[1],p.color[2]}),0.f,1.f);
+                weight+=o;saturation+=o*(hi>0 ? (hi-lo)/hi : 0);value+=o*hi;
+            }
+            qInfo("morph frame %d of %d: %zu splats, saturation %.3f, value %.3f",k,frames,f->points.size(),saturation/weight,value/weight);
+        }
+        // A strip of front views, End to Start through the morph, drawn from the splats' centres.
+        const QString strip=qEnvironmentVariable("LOOP_MORPH_STRIP");if (strip.isEmpty()) return;
+        const QVector<double> times{project.out,project.out+frames/6./info.fps,project.out+frames/3./info.fps,project.out+frames/2./info.fps,project.out+2*frames/3./info.fps,project.out+5*frames/6./info.fps,project.in};
+        const int side=360;QImage image(side*int(times.size()),side*2,QImage::Format_RGB32);image.fill(QColor(24,24,28));QPainter painter(&image);
+        for (int view=0;view<2;++view) for (int column=0;column<times.size();++column) {
+            worker.decode(times[column],1,false,project);const auto f=qvariant_cast<FramePtr>(decoded.back()[0]);
+            std::vector<size_t> order(f->points.size());std::iota(order.begin(),order.end(),size_t(0));
+            auto depth=[&](const PointVertex &p) {return view==0 ? p.position[2] : -p.position[0];};
+            std::sort(order.begin(),order.end(),[&](size_t a,size_t b) {return depth(f->points[a])<depth(f->points[b]);});
+            const QVector3D low=info.minimum,high=info.maximum;const float span=std::max({high.x()-low.x(),high.y()-low.y(),high.z()-low.z()});
+            for (size_t i:order) {
+                const auto &p=f->points[i];const auto &r=f->records[size_t(p.id)];if (p.modifierVisibility<.5f) continue;
+                const float across=view==0 ? p.position[0]-low.x() : p.position[2]-low.z();
+                const float x=column*side+side*.05f+across/span*side*.9f,y=view*side+side*.95f-(p.position[1]-low.y())/span*side*.9f;
+                QColor c=QColor::fromRgbF(std::clamp(p.color[0],0.f,1.f),std::clamp(p.color[1],0.f,1.f),std::clamp(p.color[2],0.f,1.f),std::clamp(r.color[3],0.f,1.f)*.6f);
+                painter.fillRect(QRectF(x,y,1.6,1.6),c);
+            }
+            painter.setPen(Qt::white);painter.drawText(column*side+8,view*side+18,column==0 ? QString("End") : column+1==times.size() ? QString("Start") : QString("morph %1/6").arg(column));
+        }
+        painter.end();QVERIFY(image.save(strip));qInfo("strip: %s",qPrintable(strip));
+    }
     void erasedSplatsAreNotExported() {
         // The fixture's chunks each hold three records (live at x=0 and x=3, and a dead one).
         // Erasing the one at x=3 in the last chunk removes it there and nowhere else.
@@ -427,6 +588,71 @@ private slots:
             QObject::connect(&worker,&CaptureWorker::opened,[&](CaptureInfo i,FramePtr,quint64) {info=i;done=true;});worker.open(path,1,false);return done ? int(info.antialiased) : -1;};
         QCOMPARE(opened(fromPlain),0);QCOMPARE(opened(viaMint),1);QCOMPARE(opened(kept),1);QCOMPARE(opened(mint),1);
         if (!qEnvironmentVariable("CHECK_VGS").isEmpty()) for (const auto &path:qEnvironmentVariable("CHECK_VGS").split(';')) qInfo("%s: antialiased %d",qPrintable(QFileInfo(path).fileName()),opened(path));
+    }
+    void normalCodesStayWithinADegree() {
+        // Every direction, every axis order: under a degree, and a flat splat's normal at the pole.
+        std::mt19937 random(3);std::normal_distribution<float> gauss;std::uniform_int_distribution<int> index(0,255);double worst=0;
+        for (int i=0;i<200000;++i) {
+            Eigen::Vector3f n(gauss(random),gauss(random),gauss(random));n.normalize();
+            const uint8_t scales[3]={uint8_t(index(random)),uint8_t(index(random)),uint8_t(index(random))};uint8_t code[2];float back[3];
+            vgs::encodeNormal(n.data(),scales,code);vgs::decodeNormal(code,scales,back);
+            worst=std::max(worst,std::acos(std::clamp(double(n.dot(Eigen::Vector3f(back[0],back[1],back[2]))),-1.,1.))*180/3.14159265358979);
+        }
+        QVERIFY2(worst<1.0,qPrintable(QString("worst %1 degrees").arg(worst)));
+        const uint8_t scales[3]={40,7,90};const float axis[3]={0,-1,0};uint8_t code[2];vgs::encodeNormal(axis,scales,code);
+        QCOMPARE(int(code[0]),128);QCOMPARE(int(code[1]),129);
+    }
+    void normalsFaceOutwardsInEveryFrame_data() {
+        QTest::addColumn<bool>("transformed");QTest::newRow("as captured")<<false;QTest::newRow("moved and turned")<<true;
+    }
+    void normalsFaceOutwardsInEveryFrame() {
+        QFETCH(bool,transformed);
+        QTemporaryDir dir;const auto source=dir.filePath("ball.vgs");ballFile(source);
+        Project project;project.asset=source;project.in=0;project.out=1.0/25;project.modifiers.clear();
+        project.captureSettings.normals=true;project.captureSettings.normalRig=0;
+        if (transformed) {project.transform.position={2,0,-1};project.transform.rotation={0,90,0};project.transform.scale={1.5f,1.5f,1.5f};}
+        const auto path=dir.filePath("normals.vgs");const auto result=exportCaptureFile(project,path);
+        QVERIFY2(result.notes.join(' ').contains("Normals written: the SMNV1 cameras"),qPrintable(result.notes.join(' ')));
+        // Optional, so readers that predate normals still play it.
+        QFile file(path);QVERIFY(file.open(QIODevice::ReadOnly));const auto bytes=file.read(1<<20);
+        const auto header=vgs::readHeader(reinterpret_cast<const uint8_t *>(bytes.constData()),size_t(bytes.size()));
+        bool optional=false;for (const auto &policy:header.policies) if (policy.attribute==vgs::Normals) optional=(policy.flags & vgs::OptionalAttribute)!=0;
+        QVERIFY(optional);
+        const QMatrix4x4 model=project.transform.matrix();const QVector3D centre=model.map(QVector3D(kBallCentre.x(),kBallCentre.y(),kBallCentre.z()));
+        auto capture=vgsdec::Capture::openFile(path.toStdString());
+        for (double t:{0.0,1.0/25}) {
+            const auto &frame=capture.setTime(t,false);QVERIFY(frame.normals);size_t outwards=0,live=0;
+            for (size_t i=0;i<frame.splatCount;++i) if (frame.active[i]) {
+                const QVector3D n(frame.normals[i*3],frame.normals[i*3+1],frame.normals[i*3+2]);
+                const QVector3D radial=(QVector3D(frame.positions[i*3],frame.positions[i*3+1],frame.positions[i*3+2])-centre).normalized();
+                QVERIFY(std::abs(n.length()-1)<1e-3f);++live;outwards+=QVector3D::dotProduct(n,radial)>.9f;
+            }
+            QVERIFY2(outwards>=live*98/100,qPrintable(QString("%1 of %2 face outwards").arg(outwards).arg(live)));
+        }
+        // Off by default, and then the capture carries none.
+        Project plain=project;plain.captureSettings.normals=false;const auto without=dir.filePath("without.vgs");exportCaptureFile(plain,without);
+        auto other=vgsdec::Capture::openFile(without.toStdString());QVERIFY(!other.setTime(0,false).normals);
+        if (!transformed) {
+            // MINT cannot hold them: said, and the export goes on.
+            const auto mint=exportCaptureFile(project,dir.filePath("normals.mint"));QVERIFY(mint.notes.join(' ').contains("MINT cannot hold normals"));
+            qInfo("normals add %lld bytes to %lld",qlonglong(QFileInfo(path).size()-QFileInfo(without).size()),qlonglong(QFileInfo(without).size()));
+        }
+    }
+    void normalsOnARealCapture() {
+        // EDITOR_NORMALS_CAPTURE=<capture>;<SMNV1|THE4DSCANNER>[;<out.vgs>]: what normals cost.
+        const auto spec=qEnvironmentVariable("EDITOR_NORMALS_CAPTURE").split(';');
+        if (spec.size()<2) QSKIP("Set EDITOR_NORMALS_CAPTURE to measure normals on a real capture.");
+        QTemporaryDir dir;Project project;project.asset=spec[0];project.in=0;project.out=1e9;project.modifiers.clear();
+        auto timed=[&](bool normals,const QString &path) {
+            project.captureSettings.normals=normals;project.captureSettings.normalRig=spec[1]=="THE4DSCANNER" ? 1 : 0;
+            QElapsedTimer timer;timer.start();const auto result=exportCaptureFile(project,path);
+            qInfo("%s: %lld bytes in %.1f s. %s",normals ? "with normals" : "without",qlonglong(QFileInfo(path).size()),timer.elapsed()/1000.0,qPrintable(result.notes.join(' ')));
+            return QFileInfo(path).size();
+        };
+        const auto without=timed(false,dir.filePath("without.vgs")),with=timed(true,spec.size()>2 ? spec[2] : dir.filePath("with.vgs"));
+        auto capture=vgsdec::Capture::openFile((spec.size()>2 ? spec[2] : dir.filePath("with.vgs")).toStdString());
+        const auto &frame=capture.setTime(0,false);QVERIFY(frame.normals);
+        qInfo("normals: +%lld bytes, +%.2f%%",qlonglong(with-without),100.0*double(with-without)/double(without));
     }
     void bakedAntialiasingWidensSplatsAndFadesThem() {
         // From a Gracia source (anti-aliased), unbaked and baked: every axis grows to
@@ -515,6 +741,33 @@ private slots:
         // A frame where nothing is alive has nothing to write.
         bool threw=false;try {exportFramePly(project,1.0/25,dir.filePath("empty.ply"));} catch (const std::exception &) {threw=true;}
         QVERIFY(threw);QVERIFY(!QFile::exists(dir.filePath("empty.ply")));
+    }
+    void plyCarriesNormalsWhenAsked() {
+        // nx ny nz face outwards in a frame and in every file of a sequence, moved and turned;
+        // without Write normals they stay zero, as 3DGS training writes them.
+        QTemporaryDir dir;const auto source=dir.filePath("ball.vgs");ballFile(source);
+        Project project;project.asset=source;project.in=0;project.out=1.0/25;project.modifiers.clear();
+        project.transform.position={2,0,-1};project.transform.rotation={0,90,0};
+        const QMatrix4x4 model=project.transform.matrix();const QVector3D centre=model.map(QVector3D(kBallCentre.x(),kBallCentre.y(),kBallCentre.z()));
+        auto outwards=[&](const QString &path) {
+            QFile file(path);if (!file.open(QIODevice::ReadOnly)) return -1.0;const auto bytes=file.readAll();
+            const int end=bytes.indexOf("end_header\n");const int stride=bytes.left(end).count("property float");
+            const auto *v=reinterpret_cast<const float *>(bytes.constData()+end+11);const size_t n=size_t(bytes.size()-end-11)/size_t(stride*4);
+            size_t facing=0;
+            for (size_t i=0;i<n;++i) {
+                const float *row=v+i*size_t(stride);const QVector3D normal(row[3],row[4],row[5]);
+                facing+=QVector3D::dotProduct(normal,(QVector3D(row[0],row[1],row[2])-centre).normalized())>.9f;
+            }
+            return n ? double(facing)/double(n) : -1.0;
+        };
+        QCOMPARE(outwards((exportFramePly(project,0,dir.filePath("plain.ply")),dir.filePath("plain.ply"))),0.0);
+        project.captureSettings.normals=true;
+        const auto frame=exportFramePly(project,0,dir.filePath("frame.ply"));
+        QVERIFY2(frame.notes.join(' ').contains("Normals written: the SMNV1 cameras"),qPrintable(frame.notes.join(' ')));
+        QVERIFY(outwards(dir.filePath("frame.ply"))>=.98);
+        const auto sequence=exportCaptureFile(project,dir.filePath("seq.ply"));QCOMPARE(sequence.frames,2);
+        QVERIFY2(sequence.notes.join(' ').contains("Normals written"),qPrintable(sequence.notes.join(' ')));
+        for (const char *file:{"seq0000.ply","seq0001.ply"}) QVERIFY2(outwards(dir.filePath(file))>=.98,file);
     }
     void walkMarksTheHeaderAndLeavesTheDataInPlace() {
         QTemporaryDir dir;const auto source=dir.filePath("source.pgs");sourceFile(source,5);
