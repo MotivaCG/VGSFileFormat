@@ -65,7 +65,7 @@ QString MainWindow::automationViewId(const QString &connectionId) const {
     return QString::fromLatin1(QCryptographicHash::hash(QJsonDocument(root).toJson(QJsonDocument::Compact),QCryptographicHash::Sha256).toHex());
 }
 void MainWindow::requireAutomationReady() const {
-    if (!loaded_) fail("Open a capture first.");
+    if (!loaded_) fail("Import a capture or open a project first.");
     if (loading_ || decoding_ || pendingDecode_) fail("Editor is busy. Wait for ready=true.");
     if (playback_.isActive()) fail("Pause playback before editing or taking a snapshot.");
 }

@@ -55,6 +55,8 @@
 #include <QImage>
 #include <QInputDialog>
 #include <QLineEdit>
+#include <QAbstractSpinBox>
+#include <QPointer>
 #include <QJsonDocument>
 #include <QIcon>
 #include <QLabel>
@@ -358,6 +360,10 @@ MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory,const QStr
     qRegisterMetaType<Project>();
     project_ = defaultProject();
     buildUi();
+    // A typed number takes effect when it is entered (Enter, Tab or leaving the field), not at
+    // every key: "0.355" is not applied as 0, 0.3 and 0.35 on the way, each a recompute and
+    // a reformatting of what is being typed. Arrows, the wheel and scrubbing still apply at once.
+    for (auto *spin:findChildren<QAbstractSpinBox *>()) spin->setKeyboardTracking(false);
     worker_->moveToThread(&thread_);
     connect(&thread_, &QThread::finished, worker_, &QObject::deleteLater);
     connect(this, &MainWindow::openRequested, worker_, &CaptureWorker::openRequest);
@@ -372,7 +378,7 @@ MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory,const QStr
         chunkFrames.reserve(info.chunkBoundaries.size());
         for (double seconds : info.chunkBoundaries) chunkFrames.append(seconds * info.fps);
         slider_->setChunkBoundaries(chunkFrames); modifierPanel_->setChunks(chunkFrames);
-        viewport_->setGhost(false); slider_->resetView(); // a newly opened capture is seen whole
+        viewport_->setGhost(false); slider_->resetView(); // a newly imported capture is seen whole
         viewport_->setSplatAntialiasing(info.antialiased);
         processingState_={};
         project_ = pendingProject_.value_or(defaultProject()); project_.asset = info.path;
@@ -493,12 +499,13 @@ void MainWindow::buildUi() {
     resize(1400, 900); setAcceptDrops(true);
     auto *file = menuBar()->addMenu(tr("File"));
     auto *newAction = file->addAction(tr("New project"), QKeySequence::New, this, &MainWindow::newProject);
-    auto *openAction = file->addAction(tr("Open capture…"), QKeySequence::Open, this, [this] {
-        const QString path = QFileDialog::getOpenFileName(this, tr("Open capture"), history_.openPath("Capture"), tr("Captures (*.vgs *.pgs *.mint)"));
+    // Projects open; a capture is imported, into a new project.
+    auto *openProject = file->addAction(tr("Open project…"), QKeySequence::Open, this, [this] {
+        const QString path = QFileDialog::getOpenFileName(this, tr("Open project"), history_.openPath("Project"), tr("VGS project (*.vgsproj)"));
         if (!path.isEmpty()) openPath(path);
     });
-    auto *openProject = file->addAction(tr("Open project…"), QKeySequence("Ctrl+Shift+O"), this, [this] {
-        const QString path = QFileDialog::getOpenFileName(this, tr("Open project"), history_.openPath("Project"), tr("VGS project (*.vgsproj)"));
+    auto *openAction = file->addAction(tr("Import capture…"), QKeySequence("Ctrl+I"), this, [this] {
+        const QString path = QFileDialog::getOpenFileName(this, tr("Import capture"), history_.openPath("Capture"), tr("Captures (*.vgs *.pgs *.mint)"));
         if (!path.isEmpty()) openPath(path);
     });
     recentMenu_ = file->addMenu(tr("Open recent")); recentMenu_->setToolTipsVisible(true);
@@ -533,7 +540,7 @@ void MainWindow::buildUi() {
     estimateAction_->setIcon(themeIcon(QIcon::ThemeIcon::DocumentProperties,style()->standardIcon(QStyle::SP_FileDialogInfoView)));
     // Pictures of the capture, apart from the exports of it.
     exportMenu->addSeparator();
-    imageAction_ = exportMenu->addAction(tr("Export viewport image\u2026"), QKeySequence("Ctrl+I"), this, &MainWindow::exportImage);
+    imageAction_ = exportMenu->addAction(tr("Export viewport image\u2026"), QKeySequence("Ctrl+Shift+I"), this, &MainWindow::exportImage);
     inspectionAction_ = exportMenu->addAction(tr("Export inspection image\u2026"), QKeySequence("Ctrl+Alt+I"), this, &MainWindow::exportInspection);
     inspectionAction_->setObjectName("exportInspection");
     inspectionAction_->setToolTip(tr("Save one image to check a cleanup: the view on screen, nine views of this frame from every side and from above and below, and top and front views across Start/End with the crop drawn (Ctrl+Alt+I)."));
@@ -545,7 +552,7 @@ void MainWindow::buildUi() {
     processAction->setToolTip(tr("Open one or more .vgstask files and export them one after another (Ctrl+Shift+T)."));
     taskAction_->setIcon(themeIcon(QIcon::ThemeIcon::ListAdd,style()->standardIcon(QStyle::SP_FileDialogNewFolder)));
     processAction->setIcon(themeIcon(QIcon::ThemeIcon::MediaPlaybackStart,style()->standardIcon(QStyle::SP_MediaPlay)));
-    imageAction_->setToolTip(tr("Save the viewport as it looks now as a PNG (Ctrl+I)."));
+    imageAction_->setToolTip(tr("Save the viewport as it looks now as a PNG (Ctrl+Shift+I)."));
     newAction->setIcon(themeIcon(QIcon::ThemeIcon::DocumentNew,style()->standardIcon(QStyle::SP_FileIcon)));
     openAction->setIcon(themeIcon(QIcon::ThemeIcon::DocumentOpen,style()->standardIcon(QStyle::SP_DirOpenIcon)));
     saveAction_->setIcon(themeIcon(QIcon::ThemeIcon::DocumentSave,style()->standardIcon(QStyle::SP_DialogSaveButton)));
@@ -559,8 +566,8 @@ void MainWindow::buildUi() {
     imageAction_->setIcon(themeIcon(QIcon::ThemeIcon::CameraPhoto,style()->standardIcon(QStyle::SP_DesktopIcon)));
     updateRecentMenu();
     newAction->setToolTip(tr("Create an empty project (Ctrl+N)."));
-    openAction->setToolTip(tr("Open a VGS, PGS or MINT capture (Ctrl+O)."));
-    openProject->setToolTip(tr("Restore a saved editor project (Ctrl+Shift+O)."));
+    openAction->setToolTip(tr("Import a VGS, PGS or MINT capture into a new project (Ctrl+I)."));
+    openProject->setToolTip(tr("Restore a saved editor project (Ctrl+O)."));
     saveAction_->setToolTip(tr("Save this project and its crop settings (Ctrl+S)."));
     auto *center = new QWidget; auto *layout = new QVBoxLayout(center);
     layout->setContentsMargins(0,0,0,0); layout->setSpacing(0);
@@ -1258,7 +1265,7 @@ void MainWindow::buildUi() {
     shortcut("Ctrl+Alt+P",[this] { openPresetFolder(); });
     shortcut("Ctrl+M",[this] { editCaptureSettings(); });
     shortcut("L",[this] { if (loaded_ && !loading_) loop_->toggle(); });
-    statusBar()->showMessage(tr("Open a capture to begin."));
+    statusBar()->showMessage(tr("Import a capture (Ctrl+I) or open a project (Ctrl+O) to begin."));
 }
 
 void MainWindow::syncModifiers() {
@@ -1328,7 +1335,27 @@ void MainWindow::showCropKeys(const Modifier &m) {
     cropRemoveKey_->setToolTip(keys.isEmpty() ? tr("No keys yet.\nEdit the crop or press Set key to add the first one at the current frame.") : tr("Remove the selected key, or the key at the current frame."));
     cropKeyTable_->setFixedHeight(std::clamp(cropKeyTable_->horizontalHeader()->height()+4+28*std::max(1,int(keys.size())),100,220));
 }
+namespace {
+// A number half typed into a field stays as typed, cursor and all, while the rest of the window
+// is brought up to date around it - during playback that is every frame. Setting the field's
+// value would format it ("0.3" becoming "0.300") and leave nothing to type into.
+class KeepTyping {
+public:
+    KeepTyping() {
+        QWidget *focus=QApplication::focusWidget();auto *spin=qobject_cast<QAbstractSpinBox *>(focus);
+        if (!spin && focus) spin=qobject_cast<QAbstractSpinBox *>(focus->parentWidget());
+        if (auto *edit=spin ? spin->findChild<QLineEdit *>() : nullptr;edit && edit->isModified()) {edit_=edit;text_=edit->text();cursor_=edit->cursorPosition();}
+    }
+    ~KeepTyping() {
+        if (!edit_ || edit_->text()==text_) return;
+        const QSignalBlocker block(edit_.data());edit_->setText(text_);edit_->setCursorPosition(cursor_);edit_->setModified(true);
+    }
+private:
+    QPointer<QLineEdit> edit_;QString text_;int cursor_=0;
+};
+}
 void MainWindow::syncUi() {
+    const KeepTyping typing;
     syncing_ = true;
     // Animated crops show their pose at this frame. Edits are keyed before they get here.
     project_.showCropsAtFrame(currentFrame());
@@ -1573,7 +1600,7 @@ bool MainWindow::save(bool saveAs) {
     return true;
 }
 bool MainWindow::saveTo(const QString &path, QString *error) {
-    if (!loaded_ || loading_) {if (error) *error=tr("Open a capture first and wait for loading.");return false;}
+    if (!loaded_ || loading_) {if (error) *error=tr("Import a capture or open a project first, and wait for loading.");return false;}
     project_.camera=viewport_->camera();QString failure;
     if (!project_.write(path,&failure)) {if (error) *error=failure;return false;}
     projectPath_=QFileInfo(path).absoluteFilePath();history_.remember(projectPath_);updateRecentMenu();

@@ -23,21 +23,21 @@ MCP is **off by default**. Toggle **Edit > Enable MCP**; the editor remembers yo
 between launches. See [MCP setup and usage](mcp/README.md). Use `--no-mcp` to start with it off
 without changing the saved preference.
 
-- `Ctrl+O`: open a capture. Drag and drop or a command-line path also work.
-- `Ctrl+Shift+O`: open a `.vgsproj` project.
+- `Ctrl+O`: open a `.vgsproj` project.
+- `Ctrl+I`: import a capture (File > Import capture). Drag and drop or a command-line path also work.
 - `Ctrl+S` / `Ctrl+Shift+S`: save project / save as. Project commands are in File; there is no Project toolbar.
 - `Ctrl+Z`: undo, `Ctrl+Y` or `Ctrl+Shift+Z`: redo (Edit menu). Undone are edits to the project:
   the capture transform, adding, removing, reordering, renaming or toggling modifiers, their
   parameters and keys, the Start/End range, presets loaded and the export settings. A drag, or
   typing in one field without pausing, is one step. The camera, the playhead, display options
-  and Global/Local are not edits, and opening a capture or project starts the history afresh.
+  and Global/Local are not edits, and importing a capture or opening a project starts the history afresh.
 - Space: play or pause. Arrow keys: previous or next frame. Home / End: the playback range's
   Start / End. With a Loop morph selected, Ctrl+Space plays its frames, Alt+Space its seam, and Ctrl+Home / Ctrl+End go
   to its first / last frame.
 - Drag: orbit; right/middle drag or Shift+drag: pan; wheel: zoom. Double-click: the pivot glides to
   the point under the cursor (what is seen there: through faint splats to the first that covers
   it), keeping the angle and distance, as the web viewer does; any navigation cancels the glide.
-- `Numpad decimal` / `Numpad Del` / `F`: Focus visible. `Ctrl+E`: export the edited capture. `Ctrl+I`: export the viewport as PNG. `Ctrl+Alt+I`: export an inspection image, one PNG to check a cleanup: the view on screen, nine views of the frame (five sides, high and low diagonals) and top and front views across Start/End with the crop drawn.
+- `Numpad decimal` / `Numpad Del` / `F`: Focus visible. `Ctrl+E`: export the edited capture. `Ctrl+Shift+I`: export the viewport as PNG. `Ctrl+Alt+I`: export an inspection image, one PNG to check a cleanup: the view on screen, nine views of the frame (five sides, high and low diagonals) and top and front views across Start/End with the crop drawn.
 - `G` / `R` / `S`: activate Move / Rotate / Scale. Repeat the active mode's key to switch Global/Local. `Esc`: leave all transform modes, and what `Tab` entered (crop or Eraser editing).
 - `Shift+G` or **View > Grid**: toggle the floor grid. **View > Axes** toggles the coloured
   X/Y/Z axes and **View > Origin and front marker** a faint square round the origin and a grey chevron on
@@ -525,7 +525,7 @@ offers it, and recovering opens it as unsaved changes to the project it came fro
 On Windows, QSettings stores preferences under
 `HKEY_CURRENT_USER\Software\THE4DSCANNER\VGS Editor`.
 The File menu offers **Open recent**, listing up to ten successfully
-opened captures/projects or saved projects, most recent first. Entries persist
+imported captures, opened projects or saved projects, most recent first. Entries persist
 across restarts and are deduplicated; **Clear recent** clears the list while
 preserving dialog folders. Missing files produce a message when selected.
 
@@ -534,7 +534,7 @@ button that flips the viewport between Dark (default) and Light. It only changes
 the viewport background, grid contrast and overlay text; the rest of the
 interface is unchanged and the choice is never saved in projects, presets or
 settings. The full-width Point size field follows and stays enabled before
-opening a capture. Point size starts at **5 px**; projects and user settings
+importing a capture. Point size starts at **5 px**; projects and user settings
 retain overrides. The floor grid (`Shift+G`), the axes and the front marker are
 toggled separately from **View**, and saved with the project. The top-left viewport statistics remain unobstructed.
 The small **Ghost comparison** toggle below Point size starts off. Turning it
@@ -545,7 +545,7 @@ a frozen ghost. Opacity is composited
 once per pixel, so overlapping points do not turn opaque. The centred button uses
 separate Ghost/Ghost off icons, with the off state in grey.
 Time, transforms and modifier edits do not alter the snapshot; camera
-navigation still works. Turning it off or opening another capture removes it.
+navigation still works. Turning it off or importing another capture removes it.
 The ghost is a transient preview overlay and is not saved/exported as capture data.
 Ghost state, opacity, background, Point size and Grid and axes are excluded from reusable
 presets; loading older presets ignores their preview settings as well. Capture

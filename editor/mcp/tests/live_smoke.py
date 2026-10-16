@@ -72,7 +72,7 @@ async def main():
                 raise AssertionError(f"{name}: {r.content}")
             return r.structured_content
 
-        await call("open_capture", path=source)
+        await call("import_capture", path=source)
         s = await call("get_editor_state")
         assert s["loaded"] and s["ready"] and len(s["chunk_boundaries"]) == 3
         await call("set_render_mode", mode="points")

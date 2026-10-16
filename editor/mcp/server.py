@@ -20,7 +20,7 @@ from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
 HERE = Path(__file__).resolve().parent
 WORKFLOW = (HERE / "workflows.md").read_text(encoding="utf-8")
 TOOLS_REFERENCE = (HERE / "tools.md").read_text(encoding="utf-8")
-mcp = MCPServer("VGS Editor", version="1.2.0", instructions=WORKFLOW)
+mcp = MCPServer("VGS Editor", version="1.3.0", instructions=WORKFLOW)
 READ = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
 EDIT = ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=False)
 SET = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False)
@@ -289,9 +289,20 @@ async def pause_playback() -> dict[str, Any]:
     return await _request("pause")
 
 
-@mcp.tool(title="Open capture or project", annotations=WRITE)
-async def open_capture(path: str, discard_unsaved: bool = False) -> dict[str, Any]:
-    """Load a local .vgs/.pgs/.mint/.vgsproj path on the editor PC and wait for decoding. Replaces the current project and resets undo history. Unsaved work blocks opening unless discard_unsaved=true explicitly abandons it. Does not overwrite the source."""
+@mcp.tool(title="Import capture", annotations=WRITE)
+async def import_capture(path: str, discard_unsaved: bool = False) -> dict[str, Any]:
+    """Import a local .vgs/.pgs/.mint capture on the editor PC into a new project (File > Import capture) and wait for decoding. Replaces the current project and resets undo history. Unsaved work blocks it unless discard_unsaved=true explicitly abandons it. Does not overwrite the source. For a .vgsproj use open_project."""
+    if Path(path).suffix.lower() not in (".vgs", ".pgs", ".mint"):
+        raise ToolError("import_capture takes a .vgs, .pgs or .mint capture; open a .vgsproj with open_project.")
+    await _request("open", {"path": path, "discard_unsaved": discard_unsaved})
+    return await _settled()
+
+
+@mcp.tool(title="Open project", annotations=WRITE)
+async def open_project(path: str, discard_unsaved: bool = False) -> dict[str, Any]:
+    """Open a saved .vgsproj project on the editor PC (File > Open project) and wait for its capture to decode. Replaces the current project and resets undo history. Unsaved work blocks it unless discard_unsaved=true explicitly abandons it. For a capture use import_capture."""
+    if Path(path).suffix.lower() != ".vgsproj":
+        raise ToolError("open_project takes a .vgsproj project; import a .vgs, .pgs or .mint with import_capture.")
     await _request("open", {"path": path, "discard_unsaved": discard_unsaved})
     return await _settled()
 
@@ -431,7 +442,7 @@ async def measure_timeline(samples: Annotated[int, Field(strict=True, ge=1, le=6
     """Count and locate the visible subject at `samples` frames spread over Start/End, then return to the current frame. Gives per-frame chunk/counts and totals (roughly how much the current modifiers remove across the whole take) and `extent`: the box the visible points occupy over all sampled frames, in metres, its X/Z centre and the horizontal radius around that centre. Each frame's extremes (0.5% per side of up to 2000 sampled points) are ignored, so a few floaters do not stretch it, but dense noise still does: confirm in images. Use the centre to place a whole group over its full motion and the radius to size a keep cylinder; the floor height must still be judged by eye. Each sample decodes a frame, so larger values take longer. Requires a loaded, paused editor with Crop editing off."""
     state = await _settled()
     if not state.get("ready"):
-        raise ToolError("Open a capture and pause playback first.")
+        raise ToolError("Import a capture or open a project, and pause playback first.")
     if state.get("crop_editing"):
         raise ToolError("Turn Crop editing off first: while editing, removed points are shown and counted.")
     start, end, original = state["start_frame"], state["end_frame"], state["frame"]
@@ -513,7 +524,7 @@ async def redo_edit() -> dict[str, Any]:
 
 @mcp.tool(title="List recent files", annotations=READ)
 async def list_recent_files() -> dict[str, Any]:
-    """List the editor's File > Open recent entries, most recent first, with whether each still exists. Use a listed path with open_capture when the user refers to a recent or last capture/project. Works without a loaded capture."""
+    """List the editor's File > Open recent entries, most recent first, with whether each still exists. Use a listed path with import_capture (a capture) or open_project (a .vgsproj) when the user refers to a recent or last capture/project. Works without a loaded capture."""
     return await _request("recent_files")
 
 

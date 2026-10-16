@@ -849,7 +849,7 @@ void Viewport::paintGL() {
         painter.setPen(lightBackground_ ? QColor("#333") : QColor("#ddd")); painter.setFont(QFont("Segoe UI", 18));
         painter.drawText(rect().adjusted(30,30,-30,-30), Qt::AlignCenter,
                          viewerMode_ ? tr("Open or drop a .vgs or .pgs capture\n\nCtrl+O")
-                                     : tr("Open a .vgs or .mint capture\n\nCtrl+O"));
+                                     : tr("Import a .vgs or .mint capture\n\nCtrl+I"));
     }
 }
 void Viewport::setFrame(FramePtr frame) {

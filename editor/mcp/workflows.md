@@ -88,7 +88,7 @@ Erase picks must be repeated chunk by chunk. Use Erase only for what the global 
   around image_centre_world. In the top view image up is -Z.
 - Edits return a compact state; read only the fields you need. Call get_editor_state or
   get_project only when you need chunk boundaries or modifier settings.
-- A newly opened capture already has a Crop fitted to everything: edit that one.
+- A newly imported capture already has a Crop fitted to everything: edit that one.
 - If the crop and Purge Isolated remove almost nothing (removed_percent near 0), the
   capture is already clean: inspect for local residues and stop, rather than iterating.
 - Purge Isolated does not remove dense sprays attached to the subject (sweat, motion
@@ -131,7 +131,7 @@ Erase picks must be repeated chunk by chunk. Use Erase only for what the global 
    - Check a few frames; for people, feet lift during motion, so align to frames where
      the feet are planted. Re-take the images after moving to confirm.
 5. Remove the bulk with crops, the most effective tool for large unwanted regions. A newly
-   opened capture usually already has a Crop fitted to everything, noise included: edit
+   imported capture usually already has a Crop fitted to everything, noise included: edit
    that one (get_editor_state lists its id) rather than adding another. Crops
    act on every frame and chunk at once. Typically a `keep` cylinder with its base at
    Y=0, centred on X=0, Z=0, around the full motion of the subject. Because the crop's

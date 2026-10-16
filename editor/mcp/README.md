@@ -156,7 +156,8 @@ Titles and operation hints describe which calls are idempotent or replace existi
 See [modifier meanings and cleanup examples](tools.md), also exposed as
 `vgs-editor://tools`, for the eleven modifier types and an example cleanup sequence.
 
-Version 1.2 uses `erase_brush`, `erase_lasso` and `set_erase_editing` consistently for Erase
+Version 1.3 splits `open_capture` into `import_capture` (.vgs, .pgs, .mint) and `open_project`
+(.vgsproj), as the editor's File menu does. Version 1.2 uses `erase_brush`, `erase_lasso` and `set_erase_editing` consistently for Erase
 operations (previously `paint_brush`, `select_lasso`, `set_eraser_editing`). Reload tool
 discovery after updating; update saved workflows using the previous names. Changing render
 mode preserves the current point size unless a value is explicitly provided.
@@ -170,7 +171,7 @@ Export returns `job_id` immediately. Poll `get_export_status` until `done`, `fai
 `cancelled`. It exports a frozen project snapshot, allowing the live editor to continue
 working. Cancellation takes effect at the next exporter progress callback and may leave
 a partial output. Source files cannot be overwritten by export. Existing output files
-require `overwrite=true`. Opening another capture preserves unsaved edits unless
+require `overwrite=true`. Importing another capture or opening a project preserves unsaved edits unless
 `discard_unsaved=true` is explicitly supplied.
 
 ## Session discovery and troubleshooting

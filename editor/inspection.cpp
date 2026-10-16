@@ -89,7 +89,7 @@ QImage MainWindow::renderSurvey(const InspectionFraming &f,bool splats,bool show
 void MainWindow::inspect(const InspectionOptions &options,std::function<void(const Inspection &,const QString &)> done,int waited) {
     auto fail=[&](const QString &error) {done({},error);};
     if (inspection_) return fail(tr("An inspection is already running."));
-    if (!loaded_ || loading_) return fail(tr("Open a capture first."));
+    if (!loaded_ || loading_) return fail(tr("Import a capture or open a project first."));
     if (!viewport_->isValid()) return fail(tr("The viewport has no OpenGL context."));
     // Playing or just moved: pause, and start once the frame on screen is decoded.
     play(false);
