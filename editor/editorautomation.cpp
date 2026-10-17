@@ -208,22 +208,34 @@ QJsonObject EditorAutomation::execute(const QString &method,const QJsonObject &a
         if (method=="cancel_export") it->second->cancel=true;
         std::lock_guard<std::mutex> lock(it->second->mutex);return it->second->status;
     }
-    if (method!="export") return window_->automationCommand(method,a,connectionId());
+    // Exports, the frame shown as PLY, size estimates and saved tasks run as background jobs,
+    // one at a time with any export the editor runs, each polled through export_status.
+    const bool exporting=method=="export",frame=method=="export_frame_ply",estimate=method=="estimate_export",saved=method=="run_export_task";
+    if (!exporting && !frame && !estimate && !saved) return window_->automationCommand(method,a,connectionId());
     auto lease=ExportLease::tryAcquire();
     if (!lease) fail("An export is already running in the editor or task queue. Wait for it to finish.");
-    const ExportTask task=window_->prepareAutomationExport(text(a,"path"),flag(a,"overwrite"));
+    const ExportTask task=exporting ? window_->prepareAutomationExport(text(a,"path"),flag(a,"overwrite"))
+        : frame ? window_->prepareAutomationFramePly(text(a,"path"),flag(a,"overwrite"))
+        : estimate ? window_->prepareAutomationEstimate() : window_->prepareAutomationTask(text(a,"task_path"));
     const QString id=QUuid::createUuid().toString(QUuid::WithoutBraces);auto job=std::make_shared<Job>();
     job->sequence=++jobSequence_;job->lease=std::move(lease);
-    job->status={{"job_id",id},{"status","running"},{"percent",0},{"path",task.output}};jobs_[id]=job;
+    job->status={{"job_id",id},{"status","running"},{"percent",0},{"kind",method}};if (!estimate) job->status["path"]=task.output;jobs_[id]=job;
     try {
-        job->thread=std::thread([job,task] {
+        job->thread=std::thread([job,task,frame,estimate] {
             QJsonObject terminal;
             try {
-                StayAwake awake;const auto result=runExportTask(task,[job](int percent,const QString &message) {
+                StayAwake awake;
+                const ExportProgress progress=[job](int percent,const QString &message) {
                     {std::lock_guard<std::mutex> lock(job->mutex);job->status["percent"]=percent;job->status["message"]=message;}return !job->cancel;
-                });
-                terminal={{"status","done"},{"percent",100},{"frames",result.frames},{"kept",double(result.kept)},{"removed",double(result.removed)}};
-                QJsonArray notes;for (const auto &note:result.notes) notes.append(note);terminal["notes"]=notes;
+                };
+                if (estimate) {
+                    const auto e=estimateExportSize(task.project,progress,task.thumbnail);
+                    terminal={{"status","done"},{"percent",100},{"seconds",e.seconds},{"bytes",e.bytes},{"average_mbps",e.averageMbps},{"peak_mbps",e.peakMbps},{"exact",e.exact},{"windows",e.windows}};
+                } else {
+                    const auto result=frame ? exportFramePly(task.project,task.project.time,task.output,progress) : runExportTask(task,progress);
+                    terminal={{"status","done"},{"percent",100},{"frames",result.frames},{"kept",double(result.kept)},{"removed",double(result.removed)}};
+                    QJsonArray notes;for (const auto &note:result.notes) notes.append(note);terminal["notes"]=notes;
+                }
             } catch (const std::exception &e) {
                 terminal={{"status",job->cancel ? "cancelled" : "failed"},{"error",QString::fromUtf8(e.what())}};
             }

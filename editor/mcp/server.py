@@ -298,6 +298,12 @@ async def import_capture(path: str, discard_unsaved: bool = False) -> dict[str, 
     return await _settled()
 
 
+@mcp.tool(title="New project", annotations=WRITE)
+async def new_project(discard_unsaved: bool = False) -> dict[str, Any]:
+    """File > New project: closes the capture and project, leaving the editor empty with nothing to undo. Unsaved edits block it unless discard_unsaved=true explicitly abandons them."""
+    return await _request("new_project", {"discard_unsaved": discard_unsaved})
+
+
 @mcp.tool(title="Open project", annotations=WRITE)
 async def open_project(path: str, discard_unsaved: bool = False) -> dict[str, Any]:
     """Open a saved .vgsproj project on the editor PC (File > Open project) and wait for its capture to decode. Replaces the current project and resets undo history. Unsaved work blocks it unless discard_unsaved=true explicitly abandons it. For a capture use import_capture."""
@@ -362,8 +368,9 @@ async def inspect_capture(
         render: Literal["points", "splats", "current"] = "points",
         motion_frames: Annotated[int, Field(strict=True, ge=2, le=8)] = 6,
         target: CameraVector | None = None,
-        distance: Annotated[float, Field(strict=True, ge=0.05, le=1e4, allow_inf_nan=False)] | None = None) -> CallToolResult:
-    """The main way to look at a capture: images rendered by the editor without moving the user's view. Returns `current` (the viewport as shown), `survey` (one 3x3 image of the frame on screen: back-left high, back, back-right low / left, top, right / front-left high, front, front-right low; top view image up is -Z) and, with include_motion, `motion` (top row and front row at motion_frames frames across Start/End, one fixed framing, the first active crop's wire drawn). Framing is automatic on the visible subject without its extreme points; pass target/distance to look closer. render points (default) shows floaters best, splats the final look. show_removed draws what the modifiers remove in red instead of hiding it, from every view: use it to validate crop, Purge Isolated, Erase and Remove green. Metadata give frame, chunk, counts, framing and pixels_per_metre for orthographic cells. Motion decodes frames twice and returns to the frame shown, so it takes seconds: use it for the first survey and the final check. Not for strokes: use get_viewport_image for those."""
+        distance: Annotated[float, Field(strict=True, ge=0.05, le=1e4, allow_inf_nan=False)] | None = None,
+        save_path: str | None = None, overwrite: bool = False) -> CallToolResult:
+    """The main way to look at a capture: images rendered by the editor without moving the user's view. Returns `current` (the viewport as shown), `survey` (one 3x3 image of the frame on screen: back-left high, back, back-right low / left, top, right / front-left high, front, front-right low; top view image up is -Z) and, with include_motion, `motion` (top row and front row at motion_frames frames across Start/End, one fixed framing, the first active crop's wire drawn). Framing is automatic on the visible subject without its extreme points; pass target/distance to look closer. render points (default) shows floaters best, splats the final look. show_removed draws what the modifiers remove in red instead of hiding it, from every view: use it to validate crop, Purge Isolated, Erase and Remove green. Metadata give frame, chunk, counts, framing and pixels_per_metre for orthographic cells. Motion decodes frames twice and returns to the frame shown, so it takes seconds: use it for the first survey and the final check. Not for strokes: use get_viewport_image for those. save_path also saves the images as one PNG on the editor PC (File > Export > inspection image); an existing file needs overwrite=true."""
     await _settled()
     arguments: dict[str, Any] = {"include_motion": include_motion, "show_removed": show_removed, "render": render,
                                  "motion_frames": motion_frames}
@@ -371,6 +378,9 @@ async def inspect_capture(
         arguments["target"] = target
     if distance is not None:
         arguments["distance"] = distance
+    if save_path is not None:
+        arguments["save_path"] = save_path
+        arguments["overwrite"] = overwrite
     d = await asyncio.to_thread(_descriptor)
     r = await asyncio.to_thread(_exchange, d, "inspect", arguments, 240 if include_motion else 60)
     content: list[Any] = [TextContent(type="text", text=json.dumps(r["meta"]))]
@@ -378,7 +388,10 @@ async def inspect_capture(
         if name in r:
             content.append(TextContent(type="text", text=name))
             content.append(ImageContent(type="image", data=r[name], mimeType="image/png"))
-    return CallToolResult(content=content, structuredContent=r["meta"])
+    meta = dict(r["meta"])
+    if "saved" in r:
+        meta["saved"] = r["saved"]
+    return CallToolResult(content=content, structuredContent=meta)
 
 
 @mcp.tool(title="Sample point data", annotations=READ)
@@ -421,14 +434,78 @@ async def move_modifier(modifier_id: str, position: NonnegativeInt) -> dict[str,
 
 
 @mcp.tool(title="Set display options", annotations=SET)
-async def set_display_options(sh_degree: Literal[0, 1, 2, 3, "all"] | None = None, background: Literal["dark", "light"] | None = None) -> dict[str, Any]:
-    """Preview-only display settings; omitted values are kept. sh_degree limits the spherical-harmonic bands of view-dependent splat colour: 0 shows base colour only, "all" every band the capture has. Compare 0 against "all" from the same camera to tell a view-dependent colour artifact (only some angles) from geometry or opacity. background "light" makes green spill, dark fringes and haze easier to see. Neither changes the project or export; refresh stroke images."""
+async def set_display_options(sh_degree: Literal[0, 1, 2, 3, "all"] | None = None, background: Literal["dark", "light"] | None = None,
+                              ghost: bool | None = None, ghost_opacity: Annotated[float, Field(strict=True, ge=0, le=1, allow_inf_nan=False)] | None = None,
+                              grid: bool | None = None, axes: bool | None = None, front_marker: bool | None = None) -> dict[str, Any]:
+    """Preview-only display settings; omitted values are kept. ghost freezes the points shown now as a faint white copy that stays while seeking or transforming, to compare against; ghost_opacity sets how strong it is. grid, axes and front_marker are the View menu's floor grid, coloured axes and origin/front marker (these three are saved with the project). sh_degree limits the spherical-harmonic bands of view-dependent splat colour: 0 shows base colour only, "all" every band the capture has. Compare 0 against "all" from the same camera to tell a view-dependent colour artifact (only some angles) from geometry or opacity. background "light" makes green spill, dark fringes and haze easier to see. Neither changes the project or export; refresh stroke images."""
     arguments: dict[str, Any] = {}
     if sh_degree is not None:
         arguments["sh_degree"] = sh_degree
     if background is not None:
         arguments["background"] = background
+    if ghost is not None:
+        arguments["ghost"] = ghost
+    if ghost_opacity is not None:
+        arguments["ghost_opacity"] = ghost_opacity
+    for name, value in (("grid", grid), ("axes", axes), ("front_marker", front_marker)):
+        if value is not None:
+            arguments[name] = value
     return await _edit("display_options", arguments)
+
+
+@mcp.tool(title="Playback speed, loop and play", annotations=SET)
+async def set_playback(speed: Annotated[float, Field(strict=True, ge=0.1, le=4, allow_inf_nan=False)] | None = None, loop: bool | None = None, playing: bool | None = None) -> dict[str, Any]:
+    """Playback speed (1 is real time), whether it loops over Start/End (and an active Loop morph's frames), and start or stop it. While playing the editor is busy: other tools wait, so stop it (playing=false or pause_playback) before inspecting or editing."""
+    args: dict[str, Any] = {}
+    if speed is not None:
+        args["speed"] = speed
+    if loop is not None:
+        args["loop"] = loop
+    if playing is not None:
+        args["playing"] = playing
+    return await _request("playback", args)
+
+
+@mcp.tool(title="Save viewport image", annotations=WRITE)
+async def save_viewport_image(path: str, overwrite: bool = False) -> dict[str, Any]:
+    """Save the viewport as it looks now as a PNG on the editor PC (File > Export > Export viewport image). Existing files need overwrite=true."""
+    return await _edit("save_viewport_image", {"path": path, "overwrite": overwrite})
+
+
+@mcp.tool(title="Save settings as preset", annotations=WRITE)
+async def save_preset(name: Annotated[str, Field(min_length=1, max_length=120)], overwrite: bool = False) -> dict[str, Any]:
+    """Save the current transform, modifiers and export settings as a named editor preset (as Save preset does), for apply_preset later. An existing user preset of that name needs overwrite=true; a built-in one is kept and shadowed."""
+    return await _edit("save_preset", {"name": name, "overwrite": overwrite})
+
+
+@mcp.tool(title="Export the frame as PLY", annotations=WRITE)
+async def export_frame_ply(path: str, overwrite: bool = False) -> dict[str, Any]:
+    """Start writing the frame shown, edited, as one 3DGS .ply (File > Export > current frame). Returns job_id: poll get_export_status. Not for a Loop morph's frames."""
+    return await _edit("export_frame_ply", {"path": path, "overwrite": overwrite})
+
+
+@mcp.tool(title="Estimate export size", annotations=READ)
+async def estimate_export() -> dict[str, Any]:
+    """Start estimating the .vgs export's size and bit rate for the current project and range, by exporting sample windows. Returns job_id: poll get_export_status for bytes, average_mbps, peak_mbps and exact. Shares the one export slot."""
+    return await _edit("estimate_export", {})
+
+
+@mcp.tool(title="Add export task", annotations=WRITE)
+async def add_export_task(path: str, overwrite: bool = False) -> dict[str, Any]:
+    """Save the current project and range as an export task to run later (.vgstask beside the .vgs/.pgs/.mint/.ply output), as File > Export task does. Returns task_path."""
+    return await _edit("add_export_task", {"path": path, "overwrite": overwrite})
+
+
+@mcp.tool(title="List export tasks", annotations=READ)
+async def list_export_tasks(folder: str) -> dict[str, Any]:
+    """The .vgstask files in a folder of the editor PC: each task's output, frame count, source capture and whether its output already exists."""
+    return await _request("list_export_tasks", {"folder": folder})
+
+
+@mcp.tool(title="Run export task", annotations=WRITE)
+async def run_export_task(task_path: str) -> dict[str, Any]:
+    """Start running a saved .vgstask in the background. Returns job_id: poll get_export_status. One export at a time across the editor, its task queue and MCP."""
+    return await _request("run_export_task", {"task_path": task_path})
 
 
 @mcp.tool(title="Toggle Crop editing", annotations=SET)
@@ -584,7 +661,7 @@ async def set_export_settings(patch: dict[str, Any]) -> dict[str, Any]:
 
 @mcp.tool(title="Start capture export", annotations=WRITE)
 async def start_export(path: str, overwrite: bool = False) -> dict[str, Any]:
-    """Start background .vgs/.pgs/.mint export to a local path, freezing current project/modifiers/range. One export across GUI, MCP and task queues. Source overwrite is forbidden; existing output needs overwrite=true. Returns job_id, NOT completion: poll status. Does not save the project. Inspect format notes."""
+    """Start background .vgs/.pgs/.mint export to a local path (or .ply: a numbered 3DGS frame sequence beside it), freezing current project/modifiers/range. One export across GUI, MCP and task queues. Source overwrite is forbidden; existing output needs overwrite=true. Returns job_id, NOT completion: poll status. Does not save the project. Inspect format notes."""
     return await _edit("export", {"path": path, "overwrite": overwrite})
 
 

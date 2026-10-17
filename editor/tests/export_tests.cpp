@@ -488,9 +488,13 @@ private slots:
             const double angle=armAngle(copy(movingCapture.setTime((3+k)/25.,false))),expected=75*(1-k/6.);
             QVERIFY2(std::abs(angle-expected)<4,qPrintable(QString("moving frame %1: %2 degrees, not %3").arg(3+k).arg(angle).arg(expected)));
         }
-        // MINT holds its source's frames only.
-        project.modifiers={floater,morph};const auto mint=exportCaptureFile(project,dir.filePath("looped.mint"));
-        QVERIFY(std::any_of(mint.notes.begin(),mint.notes.end(),[](const QString &n) {return n.contains("Loop morph");}));
+        // MINT carries the morph's frames too: 4 of the range and 5 after End; and a .ply
+        // sequence numbers them on from End, 0004 to 0008.
+        project.modifiers={floater,morph};exportCaptureFile(project,dir.filePath("looped.mint"));
+        {MintFile looped;QString error;QVERIFY2(looped.open(dir.filePath("looped.mint"),&error),qPrintable(error));QCOMPARE(int(std::lround(looped.duration()*looped.frameRate())),9);}
+        exportCaptureFile(project,dir.filePath("looped.ply"));
+        for (int f=0;f<=8;++f) QVERIFY2(QFileInfo::exists(dir.filePath(QString("looped%1.ply").arg(f,4,10,QChar('0')))),qPrintable(QString::number(f)));
+        QVERIFY(!QFileInfo::exists(dir.filePath("looped0009.ply")));
     }
     void loopMorphTimingOnARealCapture() {
         // How long the preview waits on a real capture: the fit, on the first of the morph's

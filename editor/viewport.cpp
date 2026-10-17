@@ -982,7 +982,7 @@ void Viewport::mousePressEvent(QMouseEvent *event) {
         strokeMode_ = (event->modifiers() & Qt::AltModifier) ? SelectMode::Subtract : (event->modifiers() & Qt::ControlModifier) ? SelectMode::Replace : SelectMode::Add;
         update(); event->accept(); return;
     }
-    pickPress_ = event->button()==Qt::LeftButton && pointPicking_ ? event->position() : QPointF(-1e9,-1e9);
+    pickPress_ = event->button()==Qt::LeftButton ? event->position() : QPointF(-1e9,-1e9);
     if (event->button()==Qt::LeftButton && !(event->modifiers() & Qt::ShiftModifier)) {
         const int handle = pickHandle(event->position());
         if (handle >= 0) { beginManipulation(handle,event->position()); event->accept(); return; }
@@ -1038,10 +1038,18 @@ void Viewport::mouseReleaseEvent(QMouseEvent *event) {
         auto records = recordsInside(region); stroke_ = QPainterPath(); update();
         emit selectionStroke(std::move(records),strokeMode_); event->accept(); return;
     }
-    // A click that stayed put places a marker; one that moved was an orbit.
-    if (event->button()==Qt::LeftButton && pointPicking_ && !dragging_ && QLineF(pickPress_,event->position()).length()<=4) {
+    // A click that stayed put: with Alt, on a marker, asks for that marker to go; otherwise,
+    // while placing, places one. One that moved was an orbit.
+    if (event->button()==Qt::LeftButton && !dragging_ && QLineF(pickPress_,event->position()).length()<=4) {
         pickPress_ = QPointF(-1e9,-1e9);
-        QVector3D point; if (pickPoint(event->position(),&point)) emit pointPicked(point);
+        if (event->modifiers() & Qt::AltModifier) {
+            int nearest=0;double best=11*11;
+            for (const auto &marker:viewMarkers_) {
+                if (marker.suggested) continue;QPointF at;if (!projectPoint(marker.world,&at)) continue;
+                const QPointF d=at-event->position();const double d2=d.x()*d.x()+d.y()*d.y();if (d2<best) {best=d2;nearest=marker.number;}
+            }
+            if (nearest) emit markerRemoveRequested(nearest);
+        } else if (pointPicking_) {QVector3D point; if (pickPoint(event->position(),&point)) emit pointPicked(point);}
     }
     if (event->button()==Qt::LeftButton) {
         if (dragging_) updateManipulation(event->position());

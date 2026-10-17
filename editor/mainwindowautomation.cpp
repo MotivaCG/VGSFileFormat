@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: LicenseRef-VGS-Editor-Proprietary
 // Copyright (c) 2026 Victor M. Feliz. All rights reserved.
 #include "mainwindow.h"
+#include <QCheckBox>
+#include <QSlider>
+#include <QToolButton>
 #include <set>
 #include "viewport.h"
 #include "exporttask.h"
@@ -115,6 +118,12 @@ QJsonObject MainWindow::automationCommand(const QString &method,const QJsonObjec
         if (!w.openPath(text(a,"path"),Interaction::Automation,flag(a,"discard_unsaved"),&error)) fail(error);
         return state();
     }
+    if (method=="new_project") {
+        // File > New project: the window empty again, no capture and nothing to undo.
+        if (w.loading_) fail("A capture is opening. Wait for it first.");
+        if (w.isWindowModified() && !flag(a,"discard_unsaved")) fail("The project has unsaved edits. Save it, or set discard_unsaved=true to abandon them.");
+        w.setWindowModified(false);w.newProject();return state();
+    }
     if (method=="recent_files") {
         // File > Open recent, most recent first; a missing file stays listed, as in the menu.
         QJsonArray files;for (const auto &path:w.history_.recent()) files.append(QJsonObject{{"path",path},{"exists",QFileInfo(path).isFile()}});
@@ -219,7 +228,57 @@ QJsonObject MainWindow::automationCommand(const QString &method,const QJsonObjec
             const QString background=text(a,"background");if (background!="dark" && background!="light") fail("background must be dark or light.");
             w.viewport_->setLightBackground(background=="light");
         }
+        // The ghost: the points shown now frozen as a faint white copy, to compare another
+        // frame or transform against.
+        // View menu: the floor grid, the coloured axes, the origin and front marker.
+        if (a.contains("grid")) w.gridAction_->setChecked(flag(a,"grid"));
+        if (a.contains("axes")) w.axesAction_->setChecked(flag(a,"axes"));
+        if (a.contains("front_marker")) w.markerAction_->setChecked(flag(a,"front_marker"));
+        if (a.contains("ghost")) {const bool on=flag(a,"ghost");if (w.ghostButton_->isChecked()!=on) w.ghostButton_->click();}
+        if (a.contains("ghost_opacity")) w.ghostOpacitySlider_->setValue(int(std::lround(number(a,"ghost_opacity",0,1)*100)));
         return state();
+    }
+    if (method=="playback") {
+        if (a.contains("speed")) w.speed_->setValue(number(a,"speed",0.1,4));
+        if (a.contains("loop")) w.loop_->setChecked(flag(a,"loop"));
+        if (a.contains("playing")) w.play(flag(a,"playing"));
+        auto result=state();result["speed"]=w.project_.speed;result["loop"]=w.project_.loop;result["playing"]=w.playback_.isActive();return result;
+    }
+    if (method=="save_viewport_image") {
+        if (!w.viewport_->isValid()) fail("Viewport has no OpenGL context. Open the editor on a desktop with OpenGL support.");
+        QString path=QFileInfo(text(a,"path")).absoluteFilePath();if (!path.endsWith(".png",Qt::CaseInsensitive)) path+=".png";
+        if (QFileInfo(path).exists() && !flag(a,"overwrite")) fail("Destination exists. Set overwrite=true explicitly.");
+        if (!w.viewport_->grabFramebuffer().save(path)) fail("Could not save the image.");
+        w.history_.rememberImage(path);auto result=state();result["saved"]=path;return result;
+    }
+    if (method=="save_preset") {
+        const QString name=text(a,"name").trimmed();if (name.isEmpty() || name.size()>120) fail("Give a preset name of 1 to 120 characters.");
+        for (const auto &entry:w.presetStore_.list()) if (entry.name.compare(name,Qt::CaseInsensitive)==0 && !entry.system && !flag(a,"overwrite")) fail("A preset with that name exists. Set overwrite=true to replace it.");
+        w.project_.camera=w.viewport_->camera();QString path,error;
+        if (!w.presetStore_.save(name,w.project_,&path,&error,PresetScope::Editor)) fail(error);
+        w.refreshPresets(path);auto result=state();result["preset_path"]=path;return result;
+    }
+    if (method=="add_export_task") {
+        // As File > Export > Export task: the project and range now, to export later.
+        QString output=QFileInfo(text(a,"path")).absoluteFilePath();const QString suffix=QFileInfo(output).suffix().toLower();
+        if (suffix!="vgs" && suffix!="pgs" && suffix!="mint" && suffix!="ply") fail("The task's output must be .vgs, .pgs, .mint or .ply.");
+        ExportTask task;task.output=output;task.project=w.project_;task.project.camera=w.viewport_->camera();task.path=exportTaskPath(output);task.frames=exportFrameCount(w.project_,w.info_.fps);
+        if (QFileInfo(task.path).exists() && !flag(a,"overwrite")) fail("That task file exists. Set overwrite=true to replace it.");
+        if (suffix!="mint" && suffix!="ply" && w.viewport_->isValid()) task.thumbnail=w.thumbnailJpeg();
+        const QString problem=checkExportTask(task);if (!problem.isEmpty()) fail(problem);
+        QString error;if (!writeExportTask(task,&error)) fail(error);
+        return {{"task_path",task.path},{"output",task.output},{"frames",task.frames}};
+    }
+    if (method=="list_export_tasks") {
+        const QDir folder(QFileInfo(text(a,"folder")).absoluteFilePath());if (!folder.exists()) fail("No such folder.");
+        QJsonArray tasks;
+        for (const auto &info:folder.entryInfoList({"*.vgstask"},QDir::Files,QDir::Name)) {
+            ExportTask task;QString error;QJsonObject entry{{"task_path",info.absoluteFilePath()}};
+            if (readExportTask(info.absoluteFilePath(),&task,&error)) {entry["output"]=task.output;entry["frames"]=task.frames;entry["asset"]=task.project.asset;entry["output_exists"]=QFileInfo(task.output).exists();}
+            else entry["error"]=error;
+            tasks.append(entry);
+        }
+        return {{"tasks",tasks}};
     }
     if (method=="crop_editing") {
         // The selected crop's wire volume, with what it removes shown as the editor's preview
@@ -340,11 +399,30 @@ ExportTask MainWindow::prepareAutomationExport(const QString &path, bool overwri
     if (closePending_) fail("The editor is closing.");
     requireAutomationReady();
     const QString output=QFileInfo(path).absoluteFilePath();const QString suffix=QFileInfo(output).suffix().toLower();
-    if (suffix!="vgs" && suffix!="pgs" && suffix!="mint") fail("Export to .vgs, .pgs or .mint.");
+    if (suffix!="vgs" && suffix!="pgs" && suffix!="mint" && suffix!="ply") fail("Export to .vgs, .pgs, .mint, or .ply for a numbered frame sequence.");
     if (QFileInfo(output).exists() && !overwrite) fail("Destination exists. Set overwrite=true explicitly.");
     ExportTask task;task.output=output;task.project=project_;task.project.camera=viewport_->camera();task.project.captureSettings.plain=suffix=="pgs";
-    task.thumbnail=viewport_->isValid() ? thumbnailJpeg() : QByteArray();task.frames=exportFrameCount(task.project,info_.fps);
+    task.thumbnail=viewport_->isValid() && suffix!="ply" && suffix!="mint" ? thumbnailJpeg() : QByteArray();task.frames=exportFrameCount(task.project,info_.fps);
     const QString error=checkExportTask(task);if (!error.isEmpty()) fail(error);
+    return task;
+}
+ExportTask MainWindow::prepareAutomationFramePly(const QString &path, bool overwrite) {
+    if (closePending_) fail("The editor is closing.");
+    requireAutomationReady();
+    if (project_.inMorph(project_.time,info_.fps)) fail("A Loop morph's frame cannot be written as a single PLY yet; seek a frame of the capture.");
+    QString output=QFileInfo(path).absoluteFilePath();if (QFileInfo(output).suffix().compare("ply",Qt::CaseInsensitive)!=0) output+=".ply";
+    if (QFileInfo(output).exists() && !overwrite) fail("Destination exists. Set overwrite=true explicitly.");
+    ExportTask task;task.output=output;task.project=project_;task.frames=1;return task;
+}
+ExportTask MainWindow::prepareAutomationEstimate() {
+    if (closePending_) fail("The editor is closing.");
+    requireAutomationReady();
+    ExportTask task;task.project=project_;task.thumbnail=viewport_->isValid() ? thumbnailJpeg() : QByteArray();return task;
+}
+ExportTask MainWindow::prepareAutomationTask(const QString &taskPath) {
+    if (closePending_) fail("The editor is closing.");
+    ExportTask task;QString error;if (!readExportTask(QFileInfo(taskPath).absoluteFilePath(),&task,&error)) fail(error);
+    const QString problem=checkExportTask(task);if (!problem.isEmpty()) fail(problem);
     return task;
 }
 
@@ -367,12 +445,20 @@ void MainWindow::automationInspect(const QJsonObject &a,std::function<void(const
         options.target=QVector3D(float(number(xyz,"x",-1e6,1e6)),float(number(xyz,"y",-1e6,1e6)),float(number(xyz,"z",-1e6,1e6)));
     }
     if (a.contains("distance")) options.distance=number(a,"distance",0.05,1e4);
+    // Optionally saved as one PNG too, as Export inspection image does.
+    const QString savePath=a.contains("save_path") ? QFileInfo(text(a,"save_path")).absoluteFilePath() : QString();
+    if (!savePath.isEmpty() && QFileInfo(savePath).exists() && !flag(a,"overwrite")) fail("Destination exists. Set overwrite=true explicitly.");
     const QScopedValueRollback<bool> origin(remoteCommand_,true);
-    inspect(options,[reply](const Inspection &inspection,const QString &error) {
+    inspect(options,[this,reply,savePath](const Inspection &inspection,const QString &error) {
         if (!error.isEmpty()) {reply({{"ok",false},{"error",error}});return;}
+        if (!savePath.isEmpty()) {
+            if (!composeInspection(inspection).save(savePath)) {reply({{"ok",false},{"error",QStringLiteral("Could not save the image to %1.").arg(savePath)}});return;}
+            history_.rememberImage(savePath);
+        }
         auto png=[](const QImage &image) {QByteArray bytes;QBuffer buffer(&bytes);buffer.open(QIODevice::WriteOnly);image.save(&buffer,"PNG");return QString::fromLatin1(bytes.toBase64());};
         QJsonObject result{{"meta",inspection.meta},{"current",png(inspection.current)},{"survey",png(inspection.survey)}};
         if (!inspection.motion.isNull()) result["motion"]=png(inspection.motion);
+        if (!savePath.isEmpty()) result["saved"]=savePath;
         reply({{"ok",true},{"result",result}});
     });
 }

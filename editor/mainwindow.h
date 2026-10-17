@@ -64,6 +64,11 @@ public:
     QJsonObject automationState(const QString &connectionId) const;
     QJsonObject automationCommand(const QString &method, const QJsonObject &arguments, const QString &connectionId);
     ExportTask prepareAutomationExport(const QString &path, bool overwrite);
+    // Automation's other background jobs, prepared on the editor's thread: the frame shown as a
+    // PLY (its project's time is that frame), the size estimate, and a saved task file.
+    ExportTask prepareAutomationFramePly(const QString &path, bool overwrite);
+    ExportTask prepareAutomationEstimate();
+    ExportTask prepareAutomationTask(const QString &taskPath);
     // Inspection images of the capture on screen: the view as shown, a survey of nine views of
     // this frame and, optionally, top and front views across Start/End (motion), which visits
     // frames and so finishes later, returning to the frame shown. `render` -1 keeps the

@@ -990,7 +990,7 @@ void MainWindow::buildUi() {
     morphFrames_->setToolTip(tr("The same length, in frames of the capture."));
     morphPlaceEnd_=new QToolButton;morphPlaceEnd_->setText(tr("Place on End"));morphPlaceEnd_->setObjectName("morphPlaceEnd");morphPlaceEnd_->setCheckable(true);
     morphPlaceStart_=new QToolButton;morphPlaceStart_->setText(tr("Place on Start"));morphPlaceStart_->setObjectName("morphPlaceStart");morphPlaceStart_->setCheckable(true);
-    morphPlaceStart_->setToolTip(tr("Place markers, starting on the Start frame (Tab).\nA click places marker N on Start and goes to End for its pair; the click there\ngoes back to Start for the next one. Ctrl+click stays on the same frame.\nWith three pairs a yellow target suggests where the pair goes: Enter takes it.\nBackspace removes the last point. Esc or this button again stops. A drag still orbits."));
+    morphPlaceStart_->setToolTip(tr("Place markers, starting on the Start frame (Tab).\nA click places marker N on Start and goes to End for its pair; the click there\ngoes back to Start for the next one. Ctrl+click stays on the same frame.\nWith three pairs a yellow target suggests where the pair goes: Enter takes it.\nBackspace removes the last point; Alt+click on a marker removes its pair, here or not placing.\nEsc or this button again stops. A drag still orbits."));
     morphPlaceEnd_->setToolTip(tr("Place markers starting on the End frame instead, alternating the same way."));
     auto *placeRow=new QWidget;auto *placeLayout=new QHBoxLayout(placeRow);placeLayout->setContentsMargins(0,0,0,0);
     placeLayout->addWidget(morphPlaceStart_);placeLayout->addWidget(morphPlaceEnd_);placeLayout->addStretch();morphForm->addRow(tr("Markers"),placeRow);
@@ -1039,6 +1039,16 @@ void MainWindow::buildUi() {
     connect(viewport_,&Viewport::pointPicked,this,&MainWindow::placeMorphMarker);
     connect(viewport_,&Viewport::enterPressed,this,[this] {if (morphPlacing_!=MorphSide::None && morphSuggestion_) placeMorphMarker(*morphSuggestion_);});
     connect(viewport_,&Viewport::backspacePressed,this,&MainWindow::removeLastMorphPoint);
+    // Alt+click on a marker: the whole pair goes, placing or not.
+    connect(viewport_,&Viewport::markerRemoveRequested,this,[this](int number) {
+        auto *m=project_.modifier();if (!m || m->type!=ModifierType::LoopMorph) return;
+        const int before=int(m->morphMarkers.size());
+        m->morphMarkers.erase(std::remove_if(m->morphMarkers.begin(),m->morphMarkers.end(),[number](const MorphMarker &k) {return k.number==number;}),m->morphMarkers.end());
+        if (int(m->morphMarkers.size())==before) return;
+        morphHistory_.erase(std::remove_if(morphHistory_.begin(),morphHistory_.end(),[number](const auto &entry) {return entry.first==number;}),morphHistory_.end());
+        if (morphSelected_==number) morphSelected_=0;morphChosen_.erase(number);
+        statusBar()->showMessage(tr("Marker %1 removed from both frames.").arg(number),4000);syncUi();dirty();
+    });
     connect(worker_,&CaptureWorker::morphFitting,this,[this](bool fitting) {
         morphFitting_=fitting;
         viewport_->setBusyText(fitting ? tr("Fitting the loop morph\u2026") : QString());
@@ -1927,7 +1937,7 @@ void MainWindow::syncMorphMarkers() {
         if (const auto guess=morphGuess(*m,side,number)) {morphSuggestion_=guess;shown.append({*guess,number,false,false,true});}
         hint=(end ? tr("Click marker %1 on End") : tr("Click marker %1 on Start")).arg(number)
             +(morphSuggestion_ ? tr("   ·   Enter: take the target") : QString())
-            +tr("   ·   Ctrl+click: stay here   ·   Backspace: undo the last   ·   Drag: orbit   ·   Esc: stop");
+            +tr("   ·   Ctrl+click: stay here   ·   Alt+click a marker: remove its pair   ·   Backspace: undo the last   ·   Drag: orbit   ·   Esc: stop");
     }
     viewport_->setViewMarkers(shown);
     viewport_->setPointPicking(morph && morphPlacing_!=MorphSide::None,hint);

@@ -11,7 +11,9 @@
 #pragma once
 #include <QVector3D>
 #include <functional>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 // Loop morph: the frames that carry the end of a playback range back to its start, so a
@@ -49,12 +51,20 @@ public:
     // show at `s` is left out. `source`, when given, says where each splat came from: i for
     // the End frame's i-th, the End frame's count plus j for the Start frame's j-th.
     Cloud evaluate(double s, std::vector<uint32_t> *source = nullptr) const;
+    // Keeps each frame's shape - which splats show, where, turned how and how opaque, some 36
+    // bytes a splat - once worked out, so the morph plays again without deforming anything:
+    // about 11 MB a frame for 300 000 splats. Colour and SH are mixed afresh each time. The
+    // cache goes with this object, which is fitted again whenever anything it depends on
+    // changes. Off by default (an export evaluates each frame once).
+    void setCaching(bool caching);
     // Where the markers land, on average, from where they were picked on the other frame,
     // in the clouds' units: how well the fit honours them.
     double markerError() const;
     size_t nodes() const; // in both graphs
 private:
     struct Data;
+    struct Shape;
+    std::shared_ptr<const Shape> shape(double s) const;
     std::unique_ptr<Data> d_;
 };
 

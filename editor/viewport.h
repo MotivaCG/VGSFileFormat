@@ -155,6 +155,8 @@ signals:
     void pointPicked(QVector3D world);
     // Enter and Backspace in the viewport, for what is being placed there.
     void enterPressed();
+    // Alt+click on a marker drawn in the view: its number.
+    void markerRemoveRequested(int number);
     void backspacePressed();
 protected:
     bool event(QEvent *event) override;

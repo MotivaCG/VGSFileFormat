@@ -307,7 +307,8 @@ the playhead goes to End for its pair; the click there places it and goes back t
 marker 2, and so on. Ctrl+click stays on the same frame. **Place on End** does the same starting
 from End. With three pairs or more, a yellow target shows where the pair probably is (the
 pairs' rigid motion plus their own misfit nearby, on the nearest splat): Enter takes it, or a
-click places it elsewhere. Backspace removes the last point placed and goes back to place it
+click places it elsewhere. Alt+click on a marker removes its pair from both frames, placing or
+not. Backspace removes the last point placed and goes back to place it
 again. Esc, or the button again, stops. Markers splats hide are drawn faint, with a broken ring.
 Select a marker in the list to place or replace that one. The list's *Off* column, from four
 pairs, says how far each End point is from where the other pairs put it; from five, one that
@@ -330,9 +331,9 @@ green, Purge Isolated, Eraser, Prune) above it shape the two frames it morphs; t
 apply to its frames as to any other, except Eraser and Prune, whose picks belong to source
 chunks. Every other kind applies to its frames wherever it is; during them the transform holds
 as it is at End. The first of its frames shown fits it (under a second on a 400 000-splat
-capture), shown over the view as it works; after that each frame takes tens of milliseconds. VGS/PGS exports write its frames
-after the range, as single-frame chunks (with motion samples when the capture moves); MINT
-exports leave them out.
+capture), shown over the view as it works; after that each frame takes tens of milliseconds. Every export writes its frames
+after the range: VGS/PGS and MINT as single-frame chunks (VGS/PGS with motion samples when the
+capture moves), a .ply sequence as further files numbered on from End.
 
 **Anti-aliased splats.** Gracia trains its captures with anti-aliasing, which leaves needle
 splats far thinner than a pixel; drawn at full opacity they show as solid coloured lines.

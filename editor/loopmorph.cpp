@@ -312,11 +312,17 @@ std::vector<float> deviations(const std::vector<Pair> &pairs) {
 float endOpacity(double s,float alpha) {return float(1-std::pow(1-std::min(.999,double(alpha)),1-smoothstep(.2,.8,s)));}
 float startOpacity(double s,float alpha) {return float(1-std::pow(1-std::min(.999,double(alpha)),smoothstep(.2,.8,s)));}
 
+// A frame's shape: the splats that show - by their index, the End frame's first, then the
+// Start frame's - and where they are, turned how and how opaque.
+struct Morph::Shape {std::vector<uint32_t> source;std::vector<float> position,rotation,opacity;};
 struct Morph::Data {
     Cloud end,start;
     Graph forward,backward; // on the end frame, taking it to the start; and the other way
     std::vector<uint32_t> endPartner,startPartner; // each splat's nearest in the other frame, once deformed onto it
     double error=0;
+    bool caching=false;
+    mutable std::mutex mutex;
+    mutable std::map<double,std::shared_ptr<const Shape>> shapes;
 };
 Morph::Morph(Cloud end,Cloud start,const std::vector<Pair> &pairs,const std::function<bool()> &cancelled) : d_(std::make_unique<Data>()) {
     if (!end.size() || !start.size()) throw std::runtime_error("The loop morph needs splats on both the End and the Start frame.");
@@ -349,45 +355,59 @@ Morph::Morph(Cloud end,Cloud start,const std::vector<Pair> &pairs,const std::fun
 Morph::~Morph()=default;
 double Morph::markerError() const {return d_->error;}
 size_t Morph::nodes() const {return d_->forward.rest.size()+d_->backward.rest.size();}
-Cloud Morph::evaluate(double s,std::vector<uint32_t> *source) const {
-    const auto &d=*d_;s=std::clamp(s,0.,1.);
-    const bool ends=s<1,starts=s>0;
-    const size_t ne=ends ? d.end.size() : 0,ns=starts ? d.start.size() : 0,n=ne+ns;const int sh=d.end.shCoefficients;const size_t terms=size_t(sh)*3;
-    Cloud out;out.shCoefficients=sh;out.position.resize(3*n);out.rotation.resize(4*n);out.scale.resize(3*n);out.colour.resize(3*n);out.opacity.resize(n);out.sh.resize(terms*n);
-    // One frame's splats, carried `along` of the way by its graph, their colour and SH `mix`
-    // of the way to their partner's, showing as much as their place has changed over.
-    auto carry=[&](const Graph &g,const Cloud &own,const Cloud &other,const std::vector<uint32_t> &partner,double along,double mix,bool isEnd,size_t offset) {
+void Morph::setCaching(bool caching) {
+    std::lock_guard<std::mutex> lock(d_->mutex);d_->caching=caching;if (!caching) d_->shapes.clear();
+}
+std::shared_ptr<const Morph::Shape> Morph::shape(double s) const {
+    const auto &d=*d_;
+    {std::lock_guard<std::mutex> lock(d.mutex);if (const auto it=d.shapes.find(s);it!=d.shapes.end()) return it->second;}
+    const bool ends=s<1,starts=s>0;const size_t ne=ends ? d.end.size() : 0,ns=starts ? d.start.size() : 0,n=ne+ns;
+    std::vector<float> position(3*n),rotation(4*n),opacity(n);
+    // One frame's splats, carried `along` of the way by its graph, showing their part of the fade.
+    auto carry=[&](const Graph &g,const Cloud &own,double along,bool isEnd,size_t offset) {
         const auto pose=g.pose(along);const auto &place=pose.first;const auto &turns=pose.second;
         std::vector<Eigen::Vector4d> quats(turns.size());for (size_t j=0;j<turns.size();++j) quats[j]=Quat(turns[j]).coeffs();
         parallel(own.size(),[&](size_t first,size_t last) {for (size_t i=first;i<last;++i) {
-            const size_t o=offset+i,p=partner[i];const auto &skin=g.skins[i];
-            const Vec moved=g.deform(skin,at(own.position,i),place,turns);for (int c=0;c<3;++c) out.position[3*o+c]=float(moved[c]);
+            const size_t o=offset+i;const auto &skin=g.skins[i];
+            const Vec moved=g.deform(skin,at(own.position,i),place,turns);for (int c=0;c<3;++c) position[3*o+c]=float(moved[c]);
             // The skin's turn, averaged on one side of the quaternion sphere, before the splat's own.
             Eigen::Vector4d sum=Eigen::Vector4d::Zero();const Eigen::Vector4d &reference=quats[size_t(skin.node[0])];
             for (int k=0;k<4;++k) if (skin.weight[k]>0) {const Eigen::Vector4d &q=quats[size_t(skin.node[k])];sum+=double(skin.weight[k])*(q.dot(reference)<0 ? Eigen::Vector4d(-q) : q);}
             const Quat turn=Quat(sum[3],sum[0],sum[1],sum[2]).normalized();
             const Quat own_q=Quat(own.rotation[4*i+3],own.rotation[4*i],own.rotation[4*i+1],own.rotation[4*i+2]).normalized();
-            const Quat q=(turn*own_q).normalized();out.rotation[4*o]=float(q.x());out.rotation[4*o+1]=float(q.y());out.rotation[4*o+2]=float(q.z());out.rotation[4*o+3]=float(q.w());
-            for (int c=0;c<3;++c) {out.scale[3*o+c]=own.scale[3*i+c];out.colour[3*o+c]=float((1-mix)*own.colour[3*i+c]+mix*other.colour[3*p+c]);}
-            for (size_t k=0;k<terms;++k) out.sh[terms*o+k]=float((1-mix)*own.sh[terms*i+k]+mix*other.sh[terms*p+k]);
-            out.opacity[o]=isEnd ? endOpacity(s,own.opacity[i]) : startOpacity(s,own.opacity[i]);
+            const Quat q=(turn*own_q).normalized();rotation[4*o]=float(q.x());rotation[4*o+1]=float(q.y());rotation[4*o+2]=float(q.z());rotation[4*o+3]=float(q.w());
+            opacity[o]=isEnd ? endOpacity(s,own.opacity[i]) : startOpacity(s,own.opacity[i]);
         }});
     };
-    if (ends) carry(d.forward,d.end,d.start,d.endPartner,s,s,true,0);
-    if (starts) carry(d.backward,d.start,d.end,d.startPartner,1-s,1-s,false,ne);
+    if (ends) carry(d.forward,d.end,s,true,0);
+    if (starts) carry(d.backward,d.start,1-s,false,ne);
     // What does not show is not drawn, nor exported.
-    size_t kept=0;if (source) source->clear();
+    auto shape=std::make_shared<Shape>();size_t kept=0;for (size_t i=0;i<n;++i) kept+=opacity[i]>=1.f/512;
+    shape->source.reserve(kept);shape->position.reserve(3*kept);shape->rotation.reserve(4*kept);shape->opacity.reserve(kept);
     for (size_t i=0;i<n;++i) {
-        if (out.opacity[i]<1.f/512) continue;
-        if (kept!=i) {
-            std::copy_n(out.position.begin()+std::ptrdiff_t(3*i),3,out.position.begin()+std::ptrdiff_t(3*kept));std::copy_n(out.rotation.begin()+std::ptrdiff_t(4*i),4,out.rotation.begin()+std::ptrdiff_t(4*kept));
-            std::copy_n(out.scale.begin()+std::ptrdiff_t(3*i),3,out.scale.begin()+std::ptrdiff_t(3*kept));std::copy_n(out.colour.begin()+std::ptrdiff_t(3*i),3,out.colour.begin()+std::ptrdiff_t(3*kept));
-            out.opacity[kept]=out.opacity[i];if (terms) std::copy_n(out.sh.begin()+std::ptrdiff_t(terms*i),terms,out.sh.begin()+std::ptrdiff_t(terms*kept));
-        }
-        if (source) source->push_back(uint32_t(starts && !ends ? d.end.size()+i : i));
-        ++kept;
+        if (opacity[i]<1.f/512) continue;
+        shape->source.push_back(uint32_t(ends ? i : d.end.size()+i));
+        shape->position.insert(shape->position.end(),position.begin()+std::ptrdiff_t(3*i),position.begin()+std::ptrdiff_t(3*i+3));
+        shape->rotation.insert(shape->rotation.end(),rotation.begin()+std::ptrdiff_t(4*i),rotation.begin()+std::ptrdiff_t(4*i+4));
+        shape->opacity.push_back(opacity[i]);
     }
-    out.position.resize(3*kept);out.rotation.resize(4*kept);out.scale.resize(3*kept);out.colour.resize(3*kept);out.opacity.resize(kept);out.sh.resize(terms*kept);
+    std::lock_guard<std::mutex> lock(d.mutex);if (d.caching) d.shapes[s]=shape;
+    return shape;
+}
+Cloud Morph::evaluate(double s,std::vector<uint32_t> *source) const {
+    const auto &d=*d_;s=std::clamp(s,0.,1.);
+    const auto shape=this->shape(s);const size_t n=shape->source.size(),ne=d.end.size();const int sh=d.end.shCoefficients;const size_t terms=size_t(sh)*3;
+    Cloud out;out.shCoefficients=sh;out.position=shape->position;out.rotation=shape->rotation;out.opacity=shape->opacity;
+    out.scale.resize(3*n);out.colour.resize(3*n);out.sh.resize(terms*n);
+    // Size as its own; colour and SH as far toward its partner's as it has come.
+    parallel(n,[&](size_t first,size_t last) {for (size_t o=first;o<last;++o) {
+        const size_t from=shape->source[o];const bool isEnd=from<ne;const size_t i=isEnd ? from : from-ne;
+        const Cloud &own=isEnd ? d.end : d.start,&other=isEnd ? d.start : d.end;const size_t p=(isEnd ? d.endPartner : d.startPartner)[i];
+        const double mix=isEnd ? s : 1-s;
+        for (int c=0;c<3;++c) {out.scale[3*o+c]=own.scale[3*i+c];out.colour[3*o+c]=float((1-mix)*own.colour[3*i+c]+mix*other.colour[3*p+c]);}
+        for (size_t k=0;k<terms;++k) out.sh[terms*o+k]=float((1-mix)*own.sh[terms*i+k]+mix*other.sh[terms*p+k]);
+    }});
+    if (source) *source=shape->source;
     return out;
 }
 }

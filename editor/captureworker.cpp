@@ -284,6 +284,7 @@ FramePtr CaptureWorker::morphFrame(double time,double fraction,bool sh,const Pro
         auto endCloud=cloud(endFrame,QMatrix4x4()),startCloud=cloud(startFrame,toEnd);
         std::vector<loopmorph::Pair> pairs;for (const auto &pair:project.morphPairs(fps)) pairs.push_back({pair.end,toEnd.map(pair.start)});
         morph_=std::make_unique<loopmorph::Morph>(std::move(endCloud),std::move(startCloud),pairs);morphKey_=key;
+        morph_->setCaching(true); // played again, its frames are not deformed again
     }
     const auto c=morph_->evaluate(fraction);
     auto out=std::make_shared<RenderFrame>();
