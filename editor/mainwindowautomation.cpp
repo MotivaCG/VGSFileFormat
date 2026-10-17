@@ -140,8 +140,8 @@ QJsonObject MainWindow::automationCommand(const QString &method,const QJsonObjec
     if (method=="project") {auto copy=w.project_;copy.camera=w.viewport_->camera();return copy.json(w.projectPath_);}
     if (method=="seek") {
         // Up to End, or through a Loop morph's frames after it.
-        const int frame=integer(a,"frame",0,std::max(0,w.info_.frames-1)+w.project_.morphFrames(w.info_.fps));
-        if (frame<w.project_.in*w.info_.fps-1e-6 || frame>w.project_.playbackEnd(w.info_.fps)*w.info_.fps+1e-6) fail("Frame is outside Start/End and the Loop morph's frames. Change the range first.");
+        const int frame=integer(a,"frame",0,std::max(0,w.info_.frames-1)+w.project_.morphTail(w.info_.fps));
+        if (frame<w.project_.in*w.info_.fps-1e-6 || frame>w.project_.timelineEnd(w.info_.fps)*w.info_.fps+1e-6) fail("Frame is outside Start/End and the Loop morph's frames. Change the range first.");
         w.automationError_.clear();w.setTime(frame/w.info_.fps,false);return state();
     }
     if (method=="range") {
@@ -350,8 +350,10 @@ QJsonObject MainWindow::automationCommand(const QString &method,const QJsonObjec
             markers.append(entry);
         }
         const int frames=w.project_.morphFrames(fps);
-        QJsonObject result{{"modifier_id",m->id},{"enabled",m->enabled},{"seconds",m->morphSeconds},{"frames",std::max(1,int(std::lround(m->morphSeconds*fps)))},
-            {"start_frame",startFrame},{"end_frame",endFrame},{"morph_frames",frames ? QJsonArray{endFrame+1,endFrame+frames} : QJsonArray{}},
+        const int first=int(std::lround(w.project_.morphStart(fps)*fps));
+        QJsonObject result{{"modifier_id",m->id},{"enabled",m->enabled},{"seconds",m->morphSeconds},{"frames",std::max(1,int(std::lround(std::abs(m->morphSeconds)*fps)))},
+            {"overlaps",m->morphSeconds<0},{"lead_in",m->morphLeadIn},{"leads_in",w.project_.morphLeadsIn(fps)},
+            {"start_frame",startFrame},{"end_frame",endFrame},{"morph_frames",frames ? QJsonArray{first,first+frames-1} : QJsonArray{}},
             {"fitting",w.morphFitting_},{"pairs",pairs},{"markers",markers},{"frame_shown",frame},{"side_shown",shown==Side::End ? "end" : shown==Side::Start ? "start" : "none"}};
         if (shown!=Side::None) {
             const int next=w.morphTarget(shown);

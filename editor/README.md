@@ -281,7 +281,12 @@ A point is removed when `d_N > median(d_N) * percentage / 100`. Defaults follow
 SMNForge's Nth-neighbour rule: **N=4**, **700%** (7 times median). Lower percentages
 remove more. Each frame is evaluated independently; small populations with at most
 N points and a zero median are preserved. Preview processing runs in the decode
-worker, so camera navigation does not rebuild the KD-tree. VGS/PGS/MINT export uses
+worker, so camera navigation does not rebuild the KD-tree. What Crop, Remove green,
+Purge Isolated, Eraser and Prune leave visible on each frame is kept in memory as it
+plays - a bit per splat, stored as runs, at most 256 MB, the oldest frames going first - so
+the next time round those frames are not worked out again. Any change to the modifiers,
+the transform or the processing settings empties it, and only playing fills it again;
+it is never written to disk. VGS/PGS/MINT export uses
 the same rule, retaining temporal blocks when the capture transform is constant.
 An animated transform (moving, rotating, uniform scale) exports to VGS/PGS as the
 native temporal blocks plus the capture's motion stored as samples, so the file is
@@ -309,7 +314,7 @@ from End. With three pairs or more, a yellow target shows where the pair probabl
 pairs' rigid motion plus their own misfit nearby, on the nearest splat): Enter takes it, or a
 click places it elsewhere. Alt+click on a marker removes its pair from both frames, placing or
 not. Backspace removes the last point placed and goes back to place it
-again. Esc, or the button again, stops. Markers splats hide are drawn faint, with a broken ring.
+again. Esc, or the button again, stops. Markers splats hide are drawn fainter, with a broken ring, and cannot be clicked, not even to remove them.
 Select a marker in the list to place or replace that one. The list's *Off* column, from four
 pairs, says how far each End point is from where the other pairs put it; from five, one that
 leaving out makes the rest agree much better is flagged in orange, as a likely mis-pairing. Markers are kept
@@ -321,6 +326,23 @@ play, which plays its frames alone (Ctrl+Space), and beside it the seam (Alt+Spa
 the morph and a second after Start - each over and over until pressed again or any other
 playback or seek.
 
+A **negative length** makes the morph overlap the range's last frames instead of following End,
+for cycles such as a walk, where frames added after End would stand still: put End on the pose
+that matches Start (a cycle later) and the frames before End carry the capture into Start while
+it goes on moving. End itself stands for Start: playback loops from the frame before it, and no
+export writes it. The markers stay on End and Start; the correction between them is fitted once,
+as for a morph after End, and carried back through the overlapped frames by following the End
+frame's deformation graph back through the capture. Within a chunk each node moves as the
+splats around it do, the same splats from frame to frame; at a chunk change the splats go on as
+their nodes were moving and a graph of their own is then fitted onto the earlier frame's surface
+as rigidly as possible. Each overlapped frame is the capture's own, its splats taking on the
+correction gradually, turned as the subject has turned since; on them the markers are drawn
+where the morph carries them. **Blend into the frames before Start** also blends the motion
+into that of as many frames before Start, which are followed back the same way: the classic
+cross-fade of a loop, when the source has those frames (otherwise the target is Start held
+still, and the panel says so). The overlap takes at most all the range's frames but Start's;
+the panel and the timeline (violet over the range) show which.
+
 The End frame is deformed onto the Start frame and the Start frame back onto the End frame,
 each along a graph of a few hundred nodes fitted as rigidly as possible, pinned by the
 markers and drawn onto the other frame's surface. In between, every node turns part of the
@@ -331,7 +353,7 @@ green, Purge Isolated, Eraser, Prune) above it shape the two frames it morphs; t
 apply to its frames as to any other, except Eraser and Prune, whose picks belong to source
 chunks. Every other kind applies to its frames wherever it is; during them the transform holds
 as it is at End. The first of its frames shown fits it (under a second on a 400 000-splat
-capture), shown over the view as it works; after that each frame takes tens of milliseconds. Every export writes its frames
+capture), pausing playback and dimming the view with a message in its middle as it works; after that each frame takes tens of milliseconds. Every export writes its frames
 after the range: VGS/PGS and MINT as single-frame chunks (VGS/PGS with motion samples when the
 capture moves), a .ply sequence as further files numbered on from End.
 

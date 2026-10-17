@@ -124,6 +124,15 @@ void RangeSlider::setTailFrames(int frames)
     update();
 }
 
+void RangeSlider::setOverlapFrames(int frames)
+{
+    frames = std::max(0, frames);
+    if (m_overlapFrames == frames)
+        return;
+    m_overlapFrames = frames;
+    update();
+}
+
 void RangeSlider::setPlayheadValue(int value)
 {
     const int clamped = std::clamp(value, m_minimum, m_maximum);
@@ -295,6 +304,15 @@ void RangeSlider::paintEvent(QPaintEvent*)
         painter.setBrush(QColor(139, 92, 246));
         if (tail.width() > 0)
             painter.drawRoundedRect(tail, 2, 2);
+    }
+    // Or the frames before End it overlaps, in the same violet over the range.
+    if (m_overlapFrames > 0) {
+        QRect overlap = track;
+        overlap.setLeft(std::max(track.left(), valueToX(m_end - m_overlapFrames)));
+        overlap.setRight(std::min(track.right(), valueToX(m_end - 1)));
+        painter.setBrush(QColor(139, 92, 246));
+        if (overlap.width() > 0)
+            painter.drawRoundedRect(overlap, 2, 2);
     }
 
     // A tick every second, in a much lighter green, and one per frame halfway between that and

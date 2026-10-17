@@ -169,6 +169,90 @@ private slots:
         std::vector<uint32_t> from;const auto nearlyThere=morph.evaluate(.98,&from);const QVector3D there=mean(nearlyThere,from,hand);
         QVERIFY2((there-QVector3D(.5f,.5f,0)).length()<.08f,qPrintable(QString::number((there-QVector3D(.5f,.5f,0)).length())));
     }
+    void loopMorphOverlapsTheRangesEnd() {
+        Project project;project.modifiers.clear();project.in=1;project.out=2;
+        Modifier morph;morph.id=Project::newId();morph.name="Morph";morph.type=ModifierType::LoopMorph;morph.morphSeconds=-.2;project.modifiers={morph};
+        // Five frames before End (frame 50) are the morph's, 45 to 49: End stands for Start, so
+        // playback loops after frame 49, and a seek still reaches End to place markers on it.
+        QVERIFY(project.morphOverlaps());QCOMPARE(project.morphFrames(25),5);QCOMPARE(project.morphTail(25),0);
+        QVERIFY(std::abs(project.playbackEnd(25)-49/25.)<1e-9);QVERIFY(std::abs(project.timelineEnd(25)-2)<1e-9);QVERIFY(std::abs(project.morphStart(25)-45/25.)<1e-9);
+        double fraction=0;int source=0;
+        QVERIFY(project.inMorph(45/25.,25,&fraction,&source));QVERIFY(std::abs(fraction-1/6.)<1e-9);QCOMPARE(source,45);
+        QVERIFY(project.inMorph(49/25.,25,&fraction,&source));QVERIFY(std::abs(fraction-5/6.)<1e-9);QCOMPARE(source,49);
+        QVERIFY(!project.inMorph(44/25.,25));QVERIFY(!project.inMorph(2,25));
+        // Leading in needs as many frames before Start (frame 25) as it is long.
+        QVERIFY(!project.morphLeadsIn(25));project.modifiers[0].morphLeadIn=true;QVERIFY(project.morphLeadsIn(25));
+        project.in=4/25.;QVERIFY(!project.morphLeadsIn(25));project.in=1;
+        // At most all but Start's frames; none when the range has no room.
+        project.modifiers[0].morphSeconds=-10;QCOMPARE(project.morphFrames(25),24);
+        project.out=project.in+1/25.;QCOMPARE(project.morphFrames(25),0);QVERIFY(std::abs(project.playbackEnd(25)-project.out)<1e-9);QVERIFY(!project.inMorph(project.out,25));
+        project.out=2;project.modifiers[0].morphSeconds=-.2;
+        // Saved and read back with its sign and lead-in; a zero length is refused.
+        QTemporaryDir dir;project.asset=dir.filePath("source.vgs");project.time=1.9;const auto json=project.json(dir.filePath("scene.vgsproj"));
+        Project restored;QString error;QVERIFY2(Project::fromJson(json,dir.path(),&restored,&error),qPrintable(error));
+        QCOMPARE(restored.modifiers[0].morphSeconds,-.2);QVERIFY(restored.modifiers[0].morphLeadIn);QCOMPARE(restored.modifierJson(),project.modifierJson());
+        auto invalid=json;auto mods=invalid["modifiers"].toArray();auto m=mods[0].toObject();auto data=m["morph"].toObject();
+        data["seconds"]=0;m["morph"]=data;mods[0]=m;invalid["modifiers"]=mods;QVERIFY(!Project::fromJson(invalid,dir.path(),&restored,&error));
+        // A project from before the option reads as not leading in.
+        data["seconds"]=.5;data.remove("leadIn");m["morph"]=data;mods[0]=m;invalid["modifiers"]=mods;
+        QVERIFY2(Project::fromJson(invalid,dir.path(),&restored,&error),qPrintable(error));QVERIFY(!restored.modifiers[0].morphLeadIn);
+    }
+    void loopMorphFollowsTheFramesBeforeEnd() {
+        // A body and an arm that moves along +Z 1.5 cm a frame. End is that body; Start the same
+        // shape turned 12 degrees about Y and set 5 cm back. Followed back through eight frames
+        // - frames 0 to 3 before End in End's chunk, the same splats, then a chunk of other ones -
+        // its nodes keep up with the body, and each frame takes on the correction as it moves.
+        std::mt19937 random(5);
+        auto body=[&](const QMatrix4x4 &at) {loopmorph::Cloud c;
+            addRod(c,at.map({0,0,0}),at.mapVector({0,1,0}),1.6f,.15f,6000,random);addRod(c,at.map({-.4f,1.3f,0}),at.mapVector({1,0,0}),.8f,.05f,2000,random);return c;};
+        const QVector3D velocity(0,0,.015f);QMatrix4x4 turn;turn.translate(0,0,-.05f);turn.rotate(12,0,1,0);
+        const loopmorph::Cloud end=body({}),start=body(turn),other=body({});
+        std::vector<loopmorph::Pair> pairs;for (QVector3D p:{QVector3D(0,0,.15f),QVector3D(0,1.6f,.15f),QVector3D(-.4f,1.3f,.05f),QVector3D(.4f,1.3f,.05f)}) pairs.push_back({p,turn.map(p)});
+        loopmorph::Morph morph(end,start,pairs);
+        auto frame=[&](const loopmorph::Cloud &from,int back,long long chunk) {
+            loopmorph::Track t;t.chunk=chunk;
+            for (size_t i=0;i<from.size();++i) {const QVector3D p=splatAt(from,i)-velocity*float(back);t.position.insert(t.position.end(),{p.x(),p.y(),p.z()});t.colour.insert(t.colour.end(),{.5f,.5f,.5f});t.record.push_back(uint32_t(i));}
+            return t;
+        };
+        auto moved=[&](const loopmorph::Cloud &from,int back) {loopmorph::Cloud c=from;for (size_t i=0;i<c.size();++i) c.position[3*i+2]-=velocity.z()*float(back);return c;};
+        std::vector<loopmorph::Track> back;for (int k=0;k<=8;++k) back.push_back(k<=3 ? frame(end,k,7) : frame(other,k,6));
+        morph.follow(false,back);QCOMPARE(morph.followed(false),size_t(8));QCOMPARE(morph.followed(true),size_t(0));
+        // Carried with no correction, a point of End is where the body was that many frames back,
+        // across the chunk change too; with it, the correction rides along with the body.
+        const QVector3D probes[]={{0,.3f,.15f},{0,1.5f,-.15f},{-.4f,1.3f,.05f},{.35f,1.3f,-.05f}};
+        for (int k:{1,3,4,8}) for (const auto &p:probes) {
+            const float still=(morph.carry(p,0,size_t(k))-(p-velocity*float(k))).length();
+            QVERIFY2(still<.01f,qPrintable(QString("%1 frames back: %2 m off").arg(k).arg(still)));
+            for (double s:{.3,.7}) {
+                const float carried=(morph.carry(p,s,size_t(k))-(morph.carry(p,s)-velocity*float(k))).length();
+                QVERIFY2(carried<.01f,qPrintable(QString("%1 frames back at %2: %3 m off").arg(k).arg(s).arg(carried)));
+            }
+        }
+        // At 0 the frame shown is the capture's own, untouched.
+        const auto live=moved(other,5);loopmorph::Morph::Live at;at.back=5;at.end=&live;
+        std::vector<uint32_t> from;const auto still=morph.evaluate(0,at,&from);QCOMPARE(still.size(),live.size());
+        for (size_t i=0;i<still.size();i+=53) QVERIFY((splatAt(still,i)-splatAt(live,from[i])).length()<1e-3f);
+        // Further on, the frame's own splats move as the End frame's would there: skinned to the
+        // nodes where they have been followed rather than where they were, they differ only at
+        // the ends of a limb, where the fit is least rigid.
+        const auto later=morph.evaluate(.5,at,&from);std::vector<float> off;
+        for (size_t i=0;i<later.size();i+=41) if (from[i]<live.size()) off.push_back((splatAt(later,i)-(morph.carry(splatAt(live,from[i])+velocity*5.f,.5)-velocity*5.f)).length());
+        std::sort(off.begin(),off.end());const float median=off[off.size()/2],high=off[off.size()*99/100];
+        QVERIFY2(median<.003f && high<.015f,qPrintable(QString("median %1, 99th percentile %2").arg(median).arg(high)));
+        QVERIFY_EXCEPTION_THROWN(morph.evaluate(.5,loopmorph::Morph::Live{9,&live,nullptr}),std::runtime_error);
+        // Leading in, the motion passes from End's frames to Start's: here Start's frames move
+        // along -X, so the motion is the blend of the two.
+        const QVector3D lead(-.02f,0,0);std::vector<loopmorph::Track> before;
+        for (int k=0;k<=8;++k) {loopmorph::Track t;t.chunk=k<=2 ? 3 : 2;
+            for (size_t i=0;i<start.size();++i) {const QVector3D p=splatAt(start,i)-lead*float(k);t.position.insert(t.position.end(),{p.x(),p.y(),p.z()});t.colour.insert(t.colour.end(),{.5f,.5f,.5f});t.record.push_back(uint32_t(i));}
+            before.push_back(std::move(t));}
+        morph.follow(true,before);QCOMPARE(morph.followed(true),size_t(8));
+        for (int k:{2,6}) for (double s:{.25,.75}) for (const auto &p:probes) {
+            const QVector3D expected=morph.carry(p,s)-float(1-s)*velocity*float(k)-float(s)*lead*float(k);
+            const float off=(morph.carry(p,s,size_t(k),true)-expected).length();
+            QVERIFY2(off<.012f,qPrintable(QString("lead-in, %1 frames back at %2: %3 m off").arg(k).arg(s).arg(off)));
+        }
+    }
     void compactDensityMatchesFullHdAndFourK() {
         QCOMPARE(compactDisplayScale({1920,1080}),.875);QCOMPARE(compactDisplayScale({3840,2160}),1.0);
         QCOMPARE(compactDisplayScale({1080,1920}),.875);QCOMPARE(compactDisplayScale({2560,1440}),1.0);

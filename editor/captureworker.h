@@ -16,6 +16,7 @@
 #include "vgsdecoder/vgsdecoder.h"
 #include <QObject>
 #include <QVector3D>
+#include <deque>
 #include <map>
 #include <memory>
 #include <vector>
@@ -40,6 +41,9 @@ struct RenderFrame {
     size_t chunkIndex = 0;
     // The chunkIndex of a Loop morph's frames: their splats belong to no source chunk.
     static constexpr size_t MorphChunk = size_t(-1);
+    // On a Loop morph's frame, where each marker pair has been carried to, in End's capture
+    // coordinates: the marker's number and its point.
+    std::vector<std::pair<int, QVector3D>> morphMarkers;
     double decodeMs = 0;
     // What each active Prune low contribution did to this frame's chunk, in stack order.
     std::vector<PruneStats> prune;
@@ -80,6 +84,12 @@ public slots:
     void decode(double time, quint64 generation, bool sh,Project project = {});
     void openRequest(const QString &path, quint64 generation, bool sh, quint64 request);
     void decodeRequest(double time, quint64 generation, bool sh, Project project, quint64 request);
+public:
+    // The visibility cache: frames held, and the memory they take.
+    size_t visibilityFrames() const { return visibility_.size(); }
+    size_t visibilityBytes() const { return visibilityBytes_; }
+    static constexpr size_t VisibilityBudget = 256ull * 1024 * 1024;
+public slots:
 signals:
     void opened(CaptureInfo info, FramePtr frame, quint64 generation);
     void decoded(FramePtr frame, quint64 generation);
@@ -100,8 +110,19 @@ private:
     // Prune low contribution's scores, per source chunk: they depend on the capture alone.
     std::map<size_t, std::vector<float>> pruneScores_;
     FramePtr frame(double time, bool sh);
-    FramePtr processed(double time, bool sh, const Project &project, const QVector<Modifier> &stack);
-    FramePtr morphFrame(double time, double fraction, bool sh, const Project &project);
+    // `cached`: a frame of the timeline, whose visibility the cache may answer or keep.
+    FramePtr processed(double time, bool sh, const Project &project, const QVector<Modifier> &stack, bool cached = false);
+    // What Crop, Remove green, Purge Isolated, Erase and Prune leave visible on each frame, as
+    // played: the points' visibility as alternate runs, visible first. Kept while the
+    // project's modifiers, transform and processing stay as they were - any change empties it
+    // - and filled only during playback, up to VisibilityBudget, the oldest going first.
+    struct Visibility {std::vector<uint32_t> runs;bool greensApplied=false;std::vector<PruneStats> prune;size_t bytes() const;};
+    QByteArray visibilityKey_;
+    std::map<int, Visibility> visibility_;
+    std::deque<int> visibilityOrder_;
+    size_t visibilityBytes_ = 0;
+    void clearVisibility();
+    FramePtr morphFrame(double time, bool sh, const Project &project);
     // The Loop morph fitted last, and what it was fitted for.
     std::unique_ptr<loopmorph::Morph> morph_;
     QByteArray morphKey_;

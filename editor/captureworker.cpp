@@ -43,8 +43,10 @@ public:
 CaptureWorker::CaptureWorker(QObject *parent) : QObject(parent) {}
 CaptureWorker::~CaptureWorker() = default;
 void CaptureWorker::clear() {
-    vgs_.reset(); source_.reset(); mint_.reset(); info_ = {}; generation_ = 0; pruneScores_.clear(); morph_.reset(); morphKey_.clear();
+    vgs_.reset(); source_.reset(); mint_.reset(); info_ = {}; generation_ = 0; pruneScores_.clear(); morph_.reset(); morphKey_.clear(); clearVisibility();
 }
+void CaptureWorker::clearVisibility() {visibilityKey_.clear();visibility_.clear();visibilityOrder_.clear();visibilityBytes_=0;}
+size_t CaptureWorker::Visibility::bytes() const {return sizeof(Visibility)+runs.size()*sizeof(uint32_t)+prune.size()*sizeof(PruneStats)+64;}
 const std::vector<float> &CaptureWorker::pruneScores(size_t chunk) {
     if (auto it = pruneScores_.find(chunk); it != pruneScores_.end()) return it->second;
     double start, end;
@@ -174,7 +176,7 @@ void CaptureWorker::open(const QString &path, quint64 generation, bool sh) {
         auto first = candidate.frame(0, sh);
         vgs_.reset(); source_.reset(); mint_.reset();
         source_ = std::move(candidate.source_); vgs_ = std::move(candidate.vgs_); mint_ = std::move(candidate.mint_);
-        info_ = candidate.info_; generation_ = generation; pruneScores_.clear(); morph_.reset(); morphKey_.clear();
+        info_ = candidate.info_; generation_ = generation; pruneScores_.clear(); morph_.reset(); morphKey_.clear(); clearVisibility();
         emit opened(info_, first, generation);
         emit openedRequest(info_, first, generation, request_);
     } catch (const std::exception &e) {
@@ -185,8 +187,7 @@ void CaptureWorker::open(const QString &path, quint64 generation, bool sh) {
 void CaptureWorker::decode(double time, quint64 generation, bool sh,Project project) {
     if (generation != generation_) { emit failed("Capture replaced.", generation, false);emit failedRequest("Capture replaced.",generation,false,request_);return; }
     try {
-        double fraction=0;
-        const auto out=project.inMorph(time,info_.fps,&fraction) ? morphFrame(time,fraction,sh,project) : processed(time,sh,project,project.modifiersAtFrame(std::round(time*info_.fps)));
+        const auto out=project.inMorph(time,info_.fps) ? morphFrame(time,sh,project) : processed(time,sh,project,project.modifiersAtFrame(std::round(time*info_.fps)),true);
         emit decoded(out,generation);emit decodedRequest(out,generation,request_);
         // Decode the next VGS chunk in small pieces while this one is on screen.
         // Both the viewer and editor use this worker; doing it here keeps a chunk
@@ -201,9 +202,29 @@ void CaptureWorker::decode(double time, quint64 generation, bool sh,Project proj
 // A source frame with the modifiers of `stack` decided on it, as the viewport needs them:
 // despilled when a Colour modifier despills always, and the splats that pruning, Erase,
 // Purge Isolated (and Remove green, when the colours shown are despilled) remove marked.
-FramePtr CaptureWorker::processed(double time,bool sh,const Project &project,const QVector<Modifier> &stack) {
+FramePtr CaptureWorker::processed(double time,bool sh,const Project &project,const QVector<Modifier> &stack,bool cached) {
     {
         QElapsedTimer processingTimer;processingTimer.start();auto out=frame(time,sh);CompiledModifiers modifiers(stack);
+        // Answered by the cache when nothing has changed since the frame was played. While
+        // Erase marks its picks rather than removing them, the frame is not one played.
+        const bool masks=!modifiers.prunes.isEmpty() || !modifiers.erased.empty() || !modifiers.isolations.isEmpty() || (modifiers.despillPreview && !modifiers.greens.isEmpty());
+        const bool cacheable=cached && masks && !modifiers.showErased;const int frameIndex=int(std::lround(out->seconds*info_.fps));
+        if (cacheable) {
+            const auto v=[](const QVector3D &x) {return QJsonArray{x.x(),x.y(),x.z()};};
+            const QByteArray key=QJsonDocument(QJsonObject{{"modifiers",project.modifierJson()},{"processing",project.captureSettings.json()},
+                {"transform",QJsonArray{v(project.transform.position),v(project.transform.rotation),v(project.transform.scale)}}}).toJson(QJsonDocument::Compact);
+            if (key!=visibilityKey_) {clearVisibility();visibilityKey_=key;}
+        } else if (cached && !masks) clearVisibility();
+        const auto hit=cacheable ? visibility_.find(frameIndex) : visibility_.end();
+        bool answered=false;
+        if (hit!=visibility_.end()) {
+            size_t total=0;for (const uint32_t run:hit->second.runs) total+=run;
+            if (total==out->points.size()) {
+                size_t at=0;bool visible=true;
+                for (const uint32_t run:hit->second.runs) {for (uint32_t k=0;k<run;++k) out->points[at++].modifierVisibility=visible ? 1.f : 0.f;visible=!visible;}
+                out->greensApplied=hit->second.greensApplied;out->prune=hit->second.prune;answered=true;
+            }
+        }
         // A Colour modifier that despills always: the export's despill on what is shown. The
         // source's colours are kept for Remove green above it, which tests them, not these.
         std::vector<std::array<float,3>> sourceColours;
@@ -219,6 +240,7 @@ FramePtr CaptureWorker::processed(double time,bool sh,const Project &project,con
             for (auto &p:out->points) std::copy_n(f.colorDc.data()+size_t(p.id)*3,3,p.color);
             out->sh=f.shRest;
         }
+        if (answered) {out->decodeMs=processingTimer.nsecsElapsed()/1e6;return out;}
         // Pruning is decided for the whole chunk; Purge Isolated then sees only what it keeps.
         std::vector<uint8_t> pruned;
         if (!modifiers.prunes.isEmpty()) pruned=pruneKeep(pruneScores(out->chunkIndex),modifiers.prunes,&out->prune);
@@ -236,16 +258,36 @@ FramePtr CaptureWorker::processed(double time,bool sh,const Project &project,con
             applyIsolation(positions,keep,modifiers.isolations);for (size_t i=0;i<keep.size();++i) out->points[i].modifierVisibility=keep[i] ? 1.f : 0.f;
         } else if (!pruned.empty() || erasing || greensHere) for (size_t i=0;i<out->points.size();++i) out->points[i].modifierVisibility=unpruned(out->points[i]) && !greenGone(i) ? 1.f : 0.f;
         if (erasing && modifiers.showErased) for (auto &p:out->points) if (p.modifierVisibility>=.5f && erasedHere(p)) p.modifierVisibility=.75f;
+        if (cacheable && project.previewPlaying) {
+            Visibility kept;kept.greensApplied=out->greensApplied;kept.prune=out->prune;bool visible=true;uint32_t run=0;
+            for (const auto &p:out->points) {if ((p.modifierVisibility>=.5f)!=visible) {kept.runs.push_back(run);run=0;visible=!visible;}++run;}
+            kept.runs.push_back(run);kept.runs.shrink_to_fit();
+            auto &slot=visibility_[frameIndex];visibilityBytes_-=slot.runs.empty() ? 0 : slot.bytes();if (slot.runs.empty()) visibilityOrder_.push_back(frameIndex);
+            slot=std::move(kept);visibilityBytes_+=slot.bytes();
+            while (visibilityBytes_>VisibilityBudget && !visibilityOrder_.empty()) {
+                const auto oldest=visibility_.find(visibilityOrder_.front());visibilityOrder_.pop_front();
+                if (oldest!=visibility_.end()) {visibilityBytes_-=oldest->second.bytes();visibility_.erase(oldest);}
+            }
+        }
         out->decodeMs=processingTimer.nsecsElapsed()/1e6;
         return out;
     }
 }
 // One of a Loop morph's frames. The morph is fitted once for the End and Start frames as the
-// modifiers above it leave them, and kept until any of that changes.
-FramePtr CaptureWorker::morphFrame(double time,double fraction,bool sh,const Project &project) {
+// modifiers above it leave them, and kept until any of that changes. Overlapping, it is also
+// followed back through the frames before End (and before Start, leading in), and each of its
+// frames carries the capture's own frame there.
+FramePtr CaptureWorker::morphFrame(double time,bool sh,const Project &project) {
     QElapsedTimer timer;timer.start();
     const double fps=info_.fps;const int endFrame=int(std::lround(project.out*fps)),startFrame=int(std::lround(project.in*fps));
+    double fraction=0;int sourceFrame=endFrame;project.inMorph(time,fps,&fraction,&sourceFrame);
+    const bool overlaps=project.morphOverlaps(),leadIn=project.morphLeadsIn(fps);const int frames=project.morphFrames(fps);
+    const size_t back=size_t(endFrame-sourceFrame);
     const QMatrix4x4 endModel=project.transformAtFrame(endFrame).matrix(),startModel=project.transformAtFrame(startFrame).matrix();
+    bool invertible=false;const QMatrix4x4 unEnd=endModel.inverted(&invertible);
+    if (!invertible) throw std::runtime_error("The loop morph needs an invertible transform at End.");
+    // A frame's capture coordinates carried into End's: its transform, then End's taken back out.
+    auto intoEnd=[&](int frame) {return unEnd*project.transformAtFrame(frame).matrix();};
     auto above=[&](int frame) {
         auto stack=project.modifiersAboveMorph(frame);
         for (auto &m:stack) m.showErased=false; // what Erase removes, even while its picks are edited
@@ -254,41 +296,67 @@ FramePtr CaptureWorker::morphFrame(double time,double fraction,bool sh,const Pro
     auto matrixJson=[](const QMatrix4x4 &m) {QJsonArray a;for (int i=0;i<16;++i) a.append(double(m.constData()[i]));return a;};
     auto stackJson=[](const QVector<Modifier> &stack) {Project p;p.modifiers=stack;return p.modifierJson();};
     Project own;own.modifiers={*project.loopMorph()};
+    // The frames an overlapping morph shows, and those before Start it leads into: how each is
+    // placed and what shapes it, since the morph's frames are kept once worked out.
+    QJsonArray followedFrames;
+    if (overlaps) for (int k=1;k<=frames;++k) for (const int frame:{endFrame-k,leadIn ? startFrame-k : -1}) if (frame>=0)
+        followedFrames.append(QJsonObject{{"frame",frame},{"model",matrixJson(project.transformAtFrame(frame).matrix())},{"stack",stackJson(above(frame))}});
     const QByteArray key=QJsonDocument(QJsonObject{{"end",stackJson(above(endFrame))},{"start",stackJson(above(startFrame))},{"morph",own.modifierJson()},
-        {"endFrame",endFrame},{"startFrame",startFrame},{"endModel",matrixJson(endModel)},{"startModel",matrixJson(startModel)},{"sh",sh}}).toJson(QJsonDocument::Compact);
+        {"endFrame",endFrame},{"startFrame",startFrame},{"endModel",matrixJson(endModel)},{"startModel",matrixJson(startModel)},{"sh",sh},
+        {"frames",frames},{"leadIn",leadIn},{"followed",followedFrames}}).toJson(QJsonDocument::Compact);
+    auto cloud=[&](int frame,const QMatrix4x4 &into) {
+        const auto stack=above(frame);
+        const auto f=processed(frame/fps,sh,project,stack);const CompiledModifiers compiled(stack);const QMatrix4x4 model=project.transformAtFrame(frame).matrix();
+        // The rotation and uniform scale `into` carries a splat's orientation and size by.
+        Eigen::Matrix3d a;for (int r=0;r<3;++r) for (int c=0;c<3;++c) a(r,c)=into(r,c);
+        Eigen::JacobiSVD<Eigen::Matrix3d> svd(a,Eigen::ComputeFullU|Eigen::ComputeFullV);Eigen::Matrix3d rotation=svd.matrixU()*svd.matrixV().transpose();
+        if (rotation.determinant()<0) rotation=-rotation;
+        const Eigen::Quaterniond turn(rotation);const float grow=float(std::cbrt(std::abs(a.determinant())));
+        loopmorph::Cloud c;c.shCoefficients=f->coefficients;c.reserve(f->points.size());const size_t terms=size_t(c.shCoefficients)*3;
+        for (const auto &point:f->points) {
+            if (!keepsPreviewPoint(point,model,compiled,f->greensApplied)) continue;
+            const auto &r=f->records[size_t(point.id)];const QVector3D p=into.map({r.position[0],r.position[1],r.position[2]});
+            const Eigen::Quaterniond q=(turn*Eigen::Quaterniond(r.rotation[3],r.rotation[0],r.rotation[1],r.rotation[2]).normalized()).normalized();
+            c.position.insert(c.position.end(),{p.x(),p.y(),p.z()});c.rotation.insert(c.rotation.end(),{float(q.x()),float(q.y()),float(q.z()),float(q.w())});
+            c.scale.insert(c.scale.end(),{r.scale[0]*grow,r.scale[1]*grow,r.scale[2]*grow});c.colour.insert(c.colour.end(),{point.color[0],point.color[1],point.color[2]});c.opacity.push_back(r.color[3]);
+            if (terms) c.sh.insert(c.sh.end(),f->sh.begin()+std::ptrdiff_t(terms*size_t(point.id)),f->sh.begin()+std::ptrdiff_t(terms*(size_t(point.id)+1)));
+        }
+        return c;
+    };
     if (!morph_ || key!=morphKey_) {
         morph_.reset();morphKey_.clear();emit morphFitting(true);
         struct Done {CaptureWorker *worker;~Done() {emit worker->morphFitting(false);}} done{this};
         // Both frames in the End frame's capture coordinates: its transform draws the morph.
-        bool invertible=false;const QMatrix4x4 toEnd=endModel.inverted(&invertible)*startModel;
-        if (!invertible) throw std::runtime_error("The loop morph needs an invertible transform at End.");
-        auto cloud=[&](int frame,const QMatrix4x4 &into) {
-            const auto stack=above(frame);
-            const auto f=processed(frame/fps,sh,project,stack);const CompiledModifiers compiled(stack);const QMatrix4x4 model=project.transformAtFrame(frame).matrix();
-            // The rotation and uniform scale `into` carries a splat's orientation and size by.
-            Eigen::Matrix3d a;for (int r=0;r<3;++r) for (int c=0;c<3;++c) a(r,c)=into(r,c);
-            Eigen::JacobiSVD<Eigen::Matrix3d> svd(a,Eigen::ComputeFullU|Eigen::ComputeFullV);Eigen::Matrix3d rotation=svd.matrixU()*svd.matrixV().transpose();
-            if (rotation.determinant()<0) rotation=-rotation;
-            const Eigen::Quaterniond turn(rotation);const float grow=float(std::cbrt(std::abs(a.determinant())));
-            loopmorph::Cloud c;c.shCoefficients=f->coefficients;c.reserve(f->points.size());const size_t terms=size_t(c.shCoefficients)*3;
-            for (const auto &point:f->points) {
-                if (!keepsPreviewPoint(point,model,compiled,f->greensApplied)) continue;
-                const auto &r=f->records[size_t(point.id)];const QVector3D p=into.map({r.position[0],r.position[1],r.position[2]});
-                const Eigen::Quaterniond q=(turn*Eigen::Quaterniond(r.rotation[3],r.rotation[0],r.rotation[1],r.rotation[2]).normalized()).normalized();
-                c.position.insert(c.position.end(),{p.x(),p.y(),p.z()});c.rotation.insert(c.rotation.end(),{float(q.x()),float(q.y()),float(q.z()),float(q.w())});
-                c.scale.insert(c.scale.end(),{r.scale[0]*grow,r.scale[1]*grow,r.scale[2]*grow});c.colour.insert(c.colour.end(),{point.color[0],point.color[1],point.color[2]});c.opacity.push_back(r.color[3]);
-                if (terms) c.sh.insert(c.sh.end(),f->sh.begin()+std::ptrdiff_t(terms*size_t(point.id)),f->sh.begin()+std::ptrdiff_t(terms*(size_t(point.id)+1)));
-            }
-            return c;
-        };
+        const QMatrix4x4 toEnd=intoEnd(startFrame);
         auto endCloud=cloud(endFrame,QMatrix4x4()),startCloud=cloud(startFrame,toEnd);
         std::vector<loopmorph::Pair> pairs;for (const auto &pair:project.morphPairs(fps)) pairs.push_back({pair.end,toEnd.map(pair.start)});
-        morph_=std::make_unique<loopmorph::Morph>(std::move(endCloud),std::move(startCloud),pairs);morphKey_=key;
+        auto morph=std::make_unique<loopmorph::Morph>(std::move(endCloud),std::move(startCloud),pairs);
+        // Followed on every splat the source shows there, whatever the modifiers keep.
+        auto followBack=[&](bool start,int from) {
+            std::vector<loopmorph::Track> track;
+            for (int k=0;k<=frames && from-k>=0;++k) {
+                const auto f=frame((from-k)/fps,false);const QMatrix4x4 into=intoEnd(from-k);loopmorph::Track t;t.chunk=(long long)f->chunkIndex;
+                for (const auto &point:f->points) {
+                    const auto &r=f->records[size_t(point.id)];const QVector3D p=into.map({r.position[0],r.position[1],r.position[2]});
+                    t.position.insert(t.position.end(),{p.x(),p.y(),p.z()});t.colour.insert(t.colour.end(),{r.color[0],r.color[1],r.color[2]});t.record.push_back(uint32_t(point.id));
+                }
+                track.push_back(std::move(t));
+            }
+            morph->follow(start,track);
+        };
+        if (overlaps) {followBack(false,endFrame);if (leadIn) followBack(true,startFrame);}
+        morph_=std::move(morph);morphKey_=key;
         morph_->setCaching(true); // played again, its frames are not deformed again
     }
-    const auto c=morph_->evaluate(fraction);
+    loopmorph::Cloud liveEnd,liveStart;loopmorph::Morph::Live live;
+    if (overlaps) {
+        live.back=back;liveEnd=cloud(sourceFrame,intoEnd(sourceFrame));live.end=&liveEnd;
+        if (leadIn) {liveStart=cloud(startFrame-int(back),intoEnd(startFrame-int(back)));live.start=&liveStart;}
+    }
+    const auto c=morph_->evaluate(fraction,live);
     auto out=std::make_shared<RenderFrame>();
     out->seconds=time;out->total=c.size();out->coefficients=c.shCoefficients;out->chunkIndex=RenderFrame::MorphChunk;out->sh=c.sh;
+    for (const auto &pair:project.morphPairs(fps)) out->morphMarkers.push_back({pair.number,morph_->carry(pair.end,fraction,overlaps ? back : 0,leadIn)});
     out->records.resize(c.size());out->active.assign(c.size(),1);out->points.resize(c.size());
     for (size_t i=0;i<c.size();++i) {
         auto &r=out->records[i];std::copy_n(c.position.data()+3*i,3,r.position);std::copy_n(c.rotation.data()+4*i,4,r.rotation);std::copy_n(c.scale.data()+3*i,3,r.scale);

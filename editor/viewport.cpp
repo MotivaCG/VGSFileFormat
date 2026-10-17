@@ -808,8 +808,9 @@ void Viewport::paintGL() {
                 painter.setPen(QColor(255,214,10));painter.drawText(QRectF(at.x()+14,at.y()-24,60,16),Qt::AlignLeft|Qt::AlignVCenter,QString::number(marker.number)+QStringLiteral("?"));
                 continue;
             }
-            // Behind splats: still there, but faint and with a broken ring, so it is not placed twice.
-            const bool hidden=i<int(markerHidden_.size()) && markerHidden_[size_t(i)];painter.setOpacity(hidden ? .4 : 1);
+            // Behind splats: still there, but faint and with a broken ring, so it is not placed
+            // twice - and not to be clicked through the subject.
+            const bool hidden=i<int(markerHidden_.size()) && markerHidden_[size_t(i)];painter.setOpacity(hidden ? .2 : 1);
             QPen ring(marker.selected ? Qt::white : QColor(20,20,24),marker.selected ? 2.0 : 1.0);if (hidden) {ring=QPen(Qt::white,1.5);ring.setStyle(Qt::DashLine);}
             painter.setPen(ring);painter.setBrush(marker.paired ? violet : QColor(30,30,36,200));painter.drawEllipse(disc);
             if (!marker.paired) {painter.setPen(QPen(violet,2));painter.setBrush(Qt::NoBrush);painter.drawEllipse(disc.adjusted(2,2,-2,-2));}
@@ -818,9 +819,10 @@ void Viewport::paintGL() {
         painter.setOpacity(1);
     }
     if (!busyText_.isEmpty()) {
-        QFont font("Segoe UI",10);font.setBold(true);painter.setFont(font);const QRect box(width()/2-150,14,300,30);
-        painter.setPen(Qt::NoPen);painter.setBrush(QColor(20,20,24,210));painter.drawRoundedRect(box,6,6);
-        painter.setPen(QColor(220,210,255));painter.drawText(box,Qt::AlignCenter,busyText_);
+        // The whole view dimmed while it works, the message in its middle.
+        painter.fillRect(rect(),QColor(0,0,0,190));
+        // In the font the empty view asks for a capture in.
+        painter.setFont(QFont("Segoe UI",18));painter.setPen(Qt::white);painter.drawText(rect(),Qt::AlignCenter,busyText_);
     }
     if (pointPicking_ && selectTool_==SelectTool::None) {
         painter.setPen(overlayText()); painter.setFont(QFont("Segoe UI", 9));
@@ -1044,8 +1046,9 @@ void Viewport::mouseReleaseEvent(QMouseEvent *event) {
         pickPress_ = QPointF(-1e9,-1e9);
         if (event->modifiers() & Qt::AltModifier) {
             int nearest=0;double best=11*11;
-            for (const auto &marker:viewMarkers_) {
-                if (marker.suggested) continue;QPointF at;if (!projectPoint(marker.world,&at)) continue;
+            for (int i=0;i<viewMarkers_.size();++i) {
+                const auto &marker=viewMarkers_[i];
+                if (marker.suggested || (i<int(markerHidden_.size()) && markerHidden_[size_t(i)])) continue;QPointF at;if (!projectPoint(marker.world,&at)) continue;
                 const QPointF d=at-event->position();const double d2=d.x()*d.x()+d.y()*d.y();if (d2<best) {best=d2;nearest=marker.number;}
             }
             if (nearest) emit markerRemoveRequested(nearest);

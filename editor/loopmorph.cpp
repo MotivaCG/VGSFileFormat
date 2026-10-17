@@ -70,9 +70,9 @@ struct Surface {
     }
     Eigen::Vector3d position(size_t i) const {return {points.p[i][0],points.p[i][1],points.p[i][2]};}
 };
-// Runs body(first, last) over [0, n) on the machine's cores.
-void parallel(size_t n,const std::function<void(size_t,size_t)> &body) {
-    const unsigned workers=n<8192 ? 1u : std::min(16u,std::max(1u,std::thread::hardware_concurrency()));
+// Runs body(first, last) over [0, n) on the machine's cores, when there are at least `least`.
+void parallel(size_t n,const std::function<void(size_t,size_t)> &body,size_t least=8192) {
+    const unsigned workers=n<least ? 1u : std::min(16u,std::max(1u,std::thread::hardware_concurrency()));
     if (workers==1) {body(0,n);return;}
     std::vector<std::future<void>> jobs;const size_t step=(n+workers-1)/workers;
     for (unsigned w=0;w<workers;++w) {const size_t first=w*step,last=std::min(n,first+step);if (first<last) jobs.push_back(std::async(std::launch::async,body,first,last));}
@@ -106,6 +106,26 @@ Mat nearestRotation(const Mat &m) {
     d(2,2)=(svd.matrixU()*svd.matrixV().transpose()).determinant()<0 ? -1 : 1;return svd.matrixU()*d*svd.matrixV().transpose();
 }
 struct Skin {std::array<int,4> node{};std::array<float,4> weight{};};
+// A point skinned to its four nearest nodes, weighted as Sumner et al. do, by how much nearer
+// than the fifth they are.
+Skin skinOn(const Index &nodes,const Vec &p) {
+    std::array<size_t,5> index{};std::array<float,5> distance{};const size_t found=nodes.nearest(p,5,index.data(),distance.data());
+    Skin s;const float far=found==5 ? std::sqrt(distance[4]) : std::sqrt(distance[found-1])*1.5f+1e-6f;float total=0;
+    for (size_t k=0;k<4;++k) {
+        if (k>=found) {s.node[k]=int(index[0]);s.weight[k]=0;continue;}
+        const float w=std::max(0.f,1-std::sqrt(distance[k])/far);s.node[k]=int(index[k]);s.weight[k]=w*w;total+=w*w;
+    }
+    if (total<=0) {s.weight={1,0,0,0};total=1;}
+    for (auto &w:s.weight) w/=total;
+    return s;
+}
+// The weighted mean of rotations, on one side of the quaternion sphere.
+Quat meanTurn(const Skin &s,const std::vector<Quat> &turns) {
+    Eigen::Vector4d sum=Eigen::Vector4d::Zero();const Eigen::Vector4d reference=turns[size_t(s.node[0])].coeffs();
+    for (int k=0;k<4;++k) if (s.weight[k]>0) {const Eigen::Vector4d q=turns[size_t(s.node[k])].coeffs();sum+=double(s.weight[k])*(q.dot(reference)<0 ? Eigen::Vector4d(-q) : q);}
+    if (sum.squaredNorm()<1e-24) return Quat::Identity();
+    return Quat(sum[3],sum[0],sum[1],sum[2]).normalized();
+}
 
 // A frame's deformation graph: nodes spread evenly over its splats, each with a rotation and
 // the place it moves to, and every splat skinned to its four nearest nodes, weighted as
@@ -119,17 +139,7 @@ struct Graph {
     Sparse laplacian;
     Eigen::SimplicialLDLT<Sparse> between; // laplacian + anchor: the frames in between
 
-    Skin skin(const Vec &p) const {
-        std::array<size_t,5> index{};std::array<float,5> distance{};const size_t found=nodes->nearest(p,5,index.data(),distance.data());
-        Skin s;const float far=found==5 ? std::sqrt(distance[4]) : std::sqrt(distance[found-1])*1.5f+1e-6f;float total=0;
-        for (size_t k=0;k<4;++k) {
-            if (k>=found) {s.node[k]=int(index[0]);s.weight[k]=0;continue;}
-            const float w=std::max(0.f,1-std::sqrt(distance[k])/far);s.node[k]=int(index[k]);s.weight[k]=w*w;total+=w*w;
-        }
-        if (total<=0) {s.weight={1,0,0,0};total=1;}
-        for (auto &w:s.weight) w/=total;
-        return s;
-    }
+    Skin skin(const Vec &p) const {return skinOn(*nodes,p);}
     void build(const std::vector<float> &position,size_t target) {
         const size_t n=position.size()/3;Vec low=at(position,0),high=low;
         for (size_t i=1;i<n;++i) {low=low.cwiseMin(at(position,i));high=high.cwiseMax(at(position,i));}
@@ -313,23 +323,47 @@ float endOpacity(double s,float alpha) {return float(1-std::pow(1-std::min(.999,
 float startOpacity(double s,float alpha) {return float(1-std::pow(1-std::min(.999,double(alpha)),smoothstep(.2,.8,s)));}
 
 // A frame's shape: the splats that show - by their index, the End frame's first, then the
-// Start frame's - and where they are, turned how and how opaque.
-struct Morph::Shape {std::vector<uint32_t> source;std::vector<float> position,rotation,opacity;};
+// Start frame's - where they are, turned how and how opaque, and the splat of the other frame
+// whose colour each takes on.
+struct Morph::Shape {std::vector<uint32_t> source,partner;std::vector<float> position,rotation,opacity;};
+// Where a graph's nodes have been followed to, some frames before its own: each node's turn
+// and place, its own frame's points near it going as y -> turn (y - rest) + place.
+struct Motion {std::vector<Quat> turn;std::vector<Vec> place;};
 struct Morph::Data {
     Cloud end,start;
     Graph forward,backward; // on the end frame, taking it to the start; and the other way
+    std::unique_ptr<Surface> endSurface,startSurface;
     std::vector<uint32_t> endPartner,startPartner; // each splat's nearest in the other frame, once deformed onto it
+    std::vector<Motion> endTrack,startTrack;       // [i]: the graph followed i frames back
     double error=0;
     bool caching=false;
     mutable std::mutex mutex;
-    mutable std::map<double,std::shared_ptr<const Shape>> shapes;
+    mutable std::map<std::pair<double,size_t>,std::shared_ptr<const Shape>> shapes;
 };
+namespace {
+// A graph's motion `back` frames before its own: none when it was not followed that far.
+Motion motionAt(const Graph &g,const std::vector<Motion> &track,size_t back) {
+    if (back && back<track.size()) return track[back];
+    return {std::vector<Quat>(g.rest.size(),Quat::Identity()),g.rest};
+}
+// Where a motion takes a point of its graph's frame, and the turn it gives it there.
+std::pair<Vec,Mat> moved(const Graph &g,const Motion &m,const Vec &p) {
+    const Skin s=g.skin(p);Vec out=Vec::Zero();
+    for (int k=0;k<4;++k) if (s.weight[k]>0) {const size_t j=size_t(s.node[k]);out+=double(s.weight[k])*(m.turn[j]*(p-g.rest[j])+m.place[j]);}
+    return {out,meanTurn(s,m.turn).toRotationMatrix()};
+}
+// One side of a frame: each node's map, taking a point y of the frame shown near it to
+// turn (y - pivot) + target. Its pivot is where the node is on that frame.
+struct NodeMaps {std::vector<Mat> turn;std::vector<Quat> quat;std::vector<Vec> pivot,target;};
+}
+
 Morph::Morph(Cloud end,Cloud start,const std::vector<Pair> &pairs,const std::function<bool()> &cancelled) : d_(std::make_unique<Data>()) {
     if (!end.size() || !start.size()) throw std::runtime_error("The loop morph needs splats on both the End and the Start frame.");
     // Both frames come from one capture and share its SH degree; if not, base colour only.
     if (end.shCoefficients!=start.shCoefficients) {end.sh.clear();start.sh.clear();end.shCoefficients=start.shCoefficients=0;}
     d_->end=std::move(end);d_->start=std::move(start);auto &d=*d_;
-    check(cancelled);const Surface endSurface(d.end.position,d.end.colour),startSurface(d.start.position,d.start.colour);
+    check(cancelled);d.endSurface=std::make_unique<Surface>(d.end.position,d.end.colour);d.startSurface=std::make_unique<Surface>(d.start.position,d.start.colour);
+    const Surface &endSurface=*d.endSurface,&startSurface=*d.startSurface;
     // About 4000 nodes, some 4-5 cm apart on a person: fine enough to follow a face's
     // expression rather than blend two (500 left them 13 cm apart, more than half a face).
     constexpr size_t nodeTarget=4000;
@@ -358,56 +392,193 @@ size_t Morph::nodes() const {return d_->forward.rest.size()+d_->backward.rest.si
 void Morph::setCaching(bool caching) {
     std::lock_guard<std::mutex> lock(d_->mutex);d_->caching=caching;if (!caching) d_->shapes.clear();
 }
-std::shared_ptr<const Morph::Shape> Morph::shape(double s) const {
-    const auto &d=*d_;
-    {std::lock_guard<std::mutex> lock(d.mutex);if (const auto it=d.shapes.find(s);it!=d.shapes.end()) return it->second;}
-    const bool ends=s<1,starts=s>0;const size_t ne=ends ? d.end.size() : 0,ns=starts ? d.start.size() : 0,n=ne+ns;
-    std::vector<float> position(3*n),rotation(4*n),opacity(n);
-    // One frame's splats, carried `along` of the way by its graph, showing their part of the fade.
-    auto carry=[&](const Graph &g,const Cloud &own,double along,bool isEnd,size_t offset) {
-        const auto pose=g.pose(along);const auto &place=pose.first;const auto &turns=pose.second;
-        std::vector<Eigen::Vector4d> quats(turns.size());for (size_t j=0;j<turns.size();++j) quats[j]=Quat(turns[j]).coeffs();
+size_t Morph::followed(bool start) const {const auto &t=start ? d_->startTrack : d_->endTrack;return t.empty() ? 0 : t.size()-1;}
+
+// Each frame back, every node takes the motion that carries its frame's splats to the earlier
+// one. Within a chunk those are the same splats, found by their record: each node takes the
+// rigid motion that best carries those around it, and one with too few takes on its
+// neighbours'. Across a chunk change there is no such thing. The splats go on first as their
+// nodes were moving, and from there a deformation graph of their own is fitted onto the
+// earlier frame's surface as rigid as possible, as the morph itself is: a patch of a plain
+// surface could slide along itself unnoticed, but held to the whole limb it cannot.
+void Morph::follow(bool start,const std::vector<Track> &back,const std::function<bool()> &cancelled) {
+    auto &d=*d_;const Graph &g=start ? d.backward : d.forward;auto &out=start ? d.startTrack : d.endTrack;
+    {std::lock_guard<std::mutex> lock(d.mutex);d.shapes.clear();}
+    out.clear();if (back.empty()) return;
+    const size_t count=g.rest.size();Motion now=motionAt(g,{},0);out.push_back(now);
+    std::vector<std::vector<int>> neighbours(count);for (const auto &[j,k]:g.edges) neighbours[size_t(j)].push_back(k);
+    // The step each node took last, x -> turn x + move, for going on across a chunk change.
+    std::vector<Mat> stepTurn(count,Mat::Identity());std::vector<Vec> stepMove(count,Vec::Zero());
+    auto positions=[](const Track &t) {std::vector<Eigen::Vector3f> p(t.size());for (size_t i=0;i<t.size();++i) p[i]={t.position[3*i],t.position[3*i+1],t.position[3*i+2]};return p;};
+    const double radius=1.5*g.spacing;constexpr size_t around=48,fewest=4;
+    for (size_t i=1;i<back.size();++i) {
+        check(cancelled);
+        const Track &from=back[i-1],&to=back[i];
+        std::vector<Mat> turn(stepTurn);std::vector<Vec> move(stepMove);std::vector<uint8_t> known(count,0);
+        const bool same=from.chunk>=0 && from.chunk==to.chunk;
+        if (from.size() && to.size() && same) {
+            const Index later(positions(from));
+            uint32_t most=0;for (const uint32_t r:to.record) most=std::max(most,r);
+            std::vector<int> where(size_t(most)+1,-1);for (size_t k=0;k<to.size();++k) where[to.record[k]]=int(k);
+            parallel(count,[&](size_t first,size_t last) {for (size_t j=first;j<last;++j) {
+                std::array<size_t,around> index{};std::array<float,around> distance{};const size_t found=later.nearest(now.place[j],around,index.data(),distance.data());
+                std::vector<Vec> a,b;
+                for (size_t k=0;k<found;++k) {
+                    if (std::sqrt(distance[k])>radius && a.size()>=fewest) break;
+                    const uint32_t r=from.record[index[k]];if (r<where.size() && where[r]>=0) {a.push_back(at(from.position,index[k]));b.push_back(at(to.position,size_t(where[r])));}
+                }
+                if (a.size()>=fewest) {rigid(a,b,&turn[j],&move[j]);known[j]=1;}
+            }},64);
+        } else if (from.size() && to.size()) {
+            // Where the splats would be had their nodes gone on as they were moving.
+            std::vector<Eigen::Vector3f> nodes(count);for (size_t j=0;j<count;++j) nodes[j]=now.place[j].cast<float>();const Index at_nodes(std::move(nodes));
+            std::vector<float> ahead(from.position.size());
+            parallel(from.size(),[&](size_t first,size_t last) {for (size_t k=first;k<last;++k) {
+                const Vec p=at(from.position,k);const Skin s=skinOn(at_nodes,p);Vec q=Vec::Zero();
+                for (int n=0;n<4;++n) if (s.weight[n]>0) q+=double(s.weight[n])*(stepTurn[size_t(s.node[n])]*p+stepMove[size_t(s.node[n])]);
+                for (int c=0;c<3;++c) ahead[3*k+c]=float(q[c]);
+            }});
+            Vec centre=Vec::Zero();for (size_t k=0;k<from.size();++k) centre+=at(ahead,k);centre/=double(from.size());
+            Graph fit;fit.build(ahead,count);fit.fit(ahead,from.colour,Surface(to.position,to.colour),centre,{},{},cancelled);
+            std::vector<Mat> turns(fit.rest.size());for (size_t n=0;n<turns.size();++n) turns[n]=fit.turn[n].toRotationMatrix();
+            parallel(count,[&](size_t first,size_t last) {for (size_t j=first;j<last;++j) {
+                const Vec q=stepTurn[j]*now.place[j]+stepMove[j];const Skin s=fit.skin(q);
+                turn[j]=meanTurn(s,fit.turn).toRotationMatrix()*stepTurn[j];move[j]=fit.deform(s,q,fit.fitted,turns)-turn[j]*now.place[j];known[j]=1;
+            }},64);
+        }
+        // A node with too few splats of its own takes on what its neighbours' motions would do
+        // to it; with none it goes on as it was moving.
+        auto fromNeighbours=[&](size_t j,const std::vector<uint8_t> &use,Mat *r,Vec *t) {
+            Vec sum=Vec::Zero();Eigen::Vector4d q=Eigen::Vector4d::Zero();int n=0;Eigen::Vector4d reference=Eigen::Vector4d::Zero();
+            for (const int k:neighbours[j]) {
+                if (!use[size_t(k)]) continue;
+                sum+=turn[size_t(k)]*now.place[j]+move[size_t(k)];Eigen::Vector4d c=Quat(turn[size_t(k)]).coeffs();
+                if (!n) reference=c;q+=c.dot(reference)<0 ? Eigen::Vector4d(-c) : c;++n;
+            }
+            if (!n) return false;
+            *r=Quat(q[3],q[0],q[1],q[2]).normalized().toRotationMatrix();*t=sum/double(n)-*r*now.place[j];return true;
+        };
+        for (int pass=0;pass<16;++pass) {
+            std::vector<uint8_t> next=known;bool more=false;
+            for (size_t j=0;j<count;++j) if (!known[j]) {Mat r;Vec t;if (fromNeighbours(j,known,&r,&t)) {turn[j]=r;move[j]=t;next[j]=1;} else more=true;}
+            known=std::move(next);if (!more) break;
+        }
+        for (size_t j=0;j<count;++j) {now.turn[j]=(Quat(turn[j])*now.turn[j]).normalized();now.place[j]=turn[j]*now.place[j]+move[j];}
+        stepTurn=std::move(turn);stepMove=std::move(move);out.push_back(now);
+    }
+}
+
+std::shared_ptr<const Morph::Shape> Morph::shape(double s,const Live &live) const {
+    const auto &d=*d_;const auto key=std::make_pair(s,live.back);
+    {std::lock_guard<std::mutex> lock(d.mutex);if (const auto it=d.shapes.find(key);it!=d.shapes.end()) return it->second;}
+    const bool leadIn=live.start!=nullptr;
+    const Cloud &endOwn=live.end ? *live.end : d.end,&startOwn=live.start ? *live.start : d.start;
+    const bool ends=s<1,starts=s>0;const size_t ne=ends ? endOwn.size() : 0,ns=starts ? startOwn.size() : 0,n=ne+ns;
+    std::vector<float> position(3*n),rotation(4*n),opacity(n);std::vector<uint32_t> partner(n);
+    const Motion endMotion=motionAt(d.forward,d.endTrack,live.back),startMotion=motionAt(d.backward,d.startTrack,leadIn ? live.back : 0);
+    // Each side's node maps. The End side's frame is the capture `back` frames before End,
+    // its nodes followed there; the correction `s` of the way is turned as they have turned.
+    // Toward a lead-in, the motion itself also passes from the End side's to the Start
+    // side's, which is followed as far before Start; the other side's motion is read where
+    // the node lands on its frame. `toOther` maps the same points all the way onto the other
+    // frame, as it is, for their partners.
+    auto maps=[&](bool endSide,double along,NodeMaps *now,NodeMaps *toOther) {
+        const Graph &g=endSide ? d.forward : d.backward,&other=endSide ? d.backward : d.forward;
+        const Motion &own=endSide ? endMotion : startMotion,&otherMotion=endSide ? startMotion : endMotion;
+        const auto pose=g.pose(along),full=g.pose(1);const size_t count=g.rest.size();
+        now->turn.resize(count);now->quat.resize(count);now->pivot=own.place;now->target.resize(count);
+        toOther->turn.resize(count);toOther->quat.resize(count);toOther->pivot=own.place;toOther->target=full.first;
+        parallel(count,[&](size_t first,size_t last) {for (size_t j=first;j<last;++j) {
+            const Mat ownTurn=own.turn[j].toRotationMatrix(),back=ownTurn.transpose();
+            const auto there=moved(other,otherMotion,g.fitted[j]);
+            // The End side's motion and the Start side's, and the share of each by now.
+            const Mat endTurn=endSide ? ownTurn : there.second,startTurn=endSide ? there.second : ownTurn;
+            const Vec onEnd=endSide ? Vec(ownTurn*(pose.first[j]-g.rest[j])+own.place[j]) : Vec(there.second*(pose.first[j]-g.fitted[j])+there.first);
+            Vec target=onEnd;Mat carried=endTurn;
+            if (leadIn) {
+                const Vec onStart=endSide ? Vec(there.second*(pose.first[j]-g.fitted[j])+there.first) : Vec(ownTurn*(pose.first[j]-g.rest[j])+own.place[j]);
+                target=(1-s)*onEnd+s*onStart;carried=Quat(endTurn).slerp(s,Quat(startTurn)).toRotationMatrix();
+            }
+            now->turn[j]=carried*pose.second[j]*back;now->quat[j]=Quat(now->turn[j]).normalized();now->target[j]=target;
+            toOther->turn[j]=full.second[j]*back;toOther->quat[j]=Quat(toOther->turn[j]).normalized();
+        }},64);
+    };
+    // One side's splats carried by its maps, showing their part of the fade. Splats of the
+    // graph's own frame keep their skins; a frame it was followed to is skinned afresh.
+    auto carry=[&](bool endSide,const Cloud &own,bool followedFrame,size_t offset) {
+        const Graph &g=endSide ? d.forward : d.backward;NodeMaps now,toOther;maps(endSide,endSide ? s : 1-s,&now,&toOther);
+        std::unique_ptr<Index> pivots;
+        if (followedFrame) {std::vector<Eigen::Vector3f> p(now.pivot.size());for (size_t j=0;j<p.size();++j) p[j]=now.pivot[j].cast<float>();pivots=std::make_unique<Index>(std::move(p));}
+        const Surface &other=endSide ? *d.startSurface : *d.endSurface;const auto &fixedPartner=endSide ? d.endPartner : d.startPartner;
         parallel(own.size(),[&](size_t first,size_t last) {for (size_t i=first;i<last;++i) {
-            const size_t o=offset+i;const auto &skin=g.skins[i];
-            const Vec moved=g.deform(skin,at(own.position,i),place,turns);for (int c=0;c<3;++c) position[3*o+c]=float(moved[c]);
-            // The skin's turn, averaged on one side of the quaternion sphere, before the splat's own.
-            Eigen::Vector4d sum=Eigen::Vector4d::Zero();const Eigen::Vector4d &reference=quats[size_t(skin.node[0])];
-            for (int k=0;k<4;++k) if (skin.weight[k]>0) {const Eigen::Vector4d &q=quats[size_t(skin.node[k])];sum+=double(skin.weight[k])*(q.dot(reference)<0 ? Eigen::Vector4d(-q) : q);}
-            const Quat turn=Quat(sum[3],sum[0],sum[1],sum[2]).normalized();
-            const Quat own_q=Quat(own.rotation[4*i+3],own.rotation[4*i],own.rotation[4*i+1],own.rotation[4*i+2]).normalized();
-            const Quat q=(turn*own_q).normalized();rotation[4*o]=float(q.x());rotation[4*o+1]=float(q.y());rotation[4*o+2]=float(q.z());rotation[4*o+3]=float(q.w());
-            opacity[o]=isEnd ? endOpacity(s,own.opacity[i]) : startOpacity(s,own.opacity[i]);
+            const size_t o=offset+i;const Vec p=at(own.position,i);const Skin skin=followedFrame ? skinOn(*pivots,p) : g.skins[i];
+            Vec placed=Vec::Zero(),onOther=Vec::Zero();
+            for (int k=0;k<4;++k) if (skin.weight[k]>0) {
+                const size_t j=size_t(skin.node[k]);const double w=skin.weight[k];
+                placed+=w*(now.turn[j]*(p-now.pivot[j])+now.target[j]);
+                if (followedFrame) onOther+=w*(toOther.turn[j]*(p-toOther.pivot[j])+toOther.target[j]);
+            }
+            for (int c=0;c<3;++c) position[3*o+c]=float(placed[c]);
+            const Quat ownTurn=Quat(own.rotation[4*i+3],own.rotation[4*i],own.rotation[4*i+1],own.rotation[4*i+2]).normalized();
+            const Quat q=(meanTurn(skin,now.quat)*ownTurn).normalized();rotation[4*o]=float(q.x());rotation[4*o+1]=float(q.y());rotation[4*o+2]=float(q.z());rotation[4*o+3]=float(q.w());
+            opacity[o]=endSide ? endOpacity(s,own.opacity[i]) : startOpacity(s,own.opacity[i]);
+            partner[o]=followedFrame ? uint32_t(other.nearest(onOther,own.colour.data()+3*i)) : fixedPartner[i];
         }});
     };
-    if (ends) carry(d.forward,d.end,s,true,0);
-    if (starts) carry(d.backward,d.start,1-s,false,ne);
+    if (ends) carry(true,endOwn,live.end!=nullptr,0);
+    if (starts) carry(false,startOwn,live.start!=nullptr,ne);
     // What does not show is not drawn, nor exported.
     auto shape=std::make_shared<Shape>();size_t kept=0;for (size_t i=0;i<n;++i) kept+=opacity[i]>=1.f/512;
-    shape->source.reserve(kept);shape->position.reserve(3*kept);shape->rotation.reserve(4*kept);shape->opacity.reserve(kept);
+    shape->source.reserve(kept);shape->partner.reserve(kept);shape->position.reserve(3*kept);shape->rotation.reserve(4*kept);shape->opacity.reserve(kept);
     for (size_t i=0;i<n;++i) {
         if (opacity[i]<1.f/512) continue;
-        shape->source.push_back(uint32_t(ends ? i : d.end.size()+i));
+        shape->source.push_back(uint32_t(ends ? i : endOwn.size()+i));shape->partner.push_back(partner[i]);
         shape->position.insert(shape->position.end(),position.begin()+std::ptrdiff_t(3*i),position.begin()+std::ptrdiff_t(3*i+3));
         shape->rotation.insert(shape->rotation.end(),rotation.begin()+std::ptrdiff_t(4*i),rotation.begin()+std::ptrdiff_t(4*i+4));
         shape->opacity.push_back(opacity[i]);
     }
-    std::lock_guard<std::mutex> lock(d.mutex);if (d.caching) d.shapes[s]=shape;
+    std::lock_guard<std::mutex> lock(d.mutex);if (d.caching) d.shapes[key]=shape;
     return shape;
 }
-Cloud Morph::evaluate(double s,std::vector<uint32_t> *source) const {
-    const auto &d=*d_;s=std::clamp(s,0.,1.);
-    const auto shape=this->shape(s);const size_t n=shape->source.size(),ne=d.end.size();const int sh=d.end.shCoefficients;const size_t terms=size_t(sh)*3;
-    Cloud out;out.shCoefficients=sh;out.position=shape->position;out.rotation=shape->rotation;out.opacity=shape->opacity;
+Cloud Morph::mix(double s,const Shape &shape,const Live &live,std::vector<uint32_t> *source) const {
+    const auto &d=*d_;const Cloud &endOwn=live.end ? *live.end : d.end,&startOwn=live.start ? *live.start : d.start;
+    const size_t n=shape.source.size(),ne=endOwn.size();const int sh=d.end.shCoefficients;const size_t terms=size_t(sh)*3;
+    Cloud out;out.shCoefficients=sh;out.position=shape.position;out.rotation=shape.rotation;out.opacity=shape.opacity;
     out.scale.resize(3*n);out.colour.resize(3*n);out.sh.resize(terms*n);
+    // A followed frame from the same capture has the same SH terms; if not, base colour only.
+    const bool shOk=terms && endOwn.shCoefficients==sh && startOwn.shCoefficients==sh;
     // Size as its own; colour and SH as far toward its partner's as it has come.
     parallel(n,[&](size_t first,size_t last) {for (size_t o=first;o<last;++o) {
-        const size_t from=shape->source[o];const bool isEnd=from<ne;const size_t i=isEnd ? from : from-ne;
-        const Cloud &own=isEnd ? d.end : d.start,&other=isEnd ? d.start : d.end;const size_t p=(isEnd ? d.endPartner : d.startPartner)[i];
+        const size_t from=shape.source[o];const bool isEnd=from<ne;const size_t i=isEnd ? from : from-ne;
+        const Cloud &own=isEnd ? endOwn : startOwn,&other=isEnd ? d.start : d.end;const size_t p=shape.partner[o];
         const double mix=isEnd ? s : 1-s;
         for (int c=0;c<3;++c) {out.scale[3*o+c]=own.scale[3*i+c];out.colour[3*o+c]=float((1-mix)*own.colour[3*i+c]+mix*other.colour[3*p+c]);}
-        for (size_t k=0;k<terms;++k) out.sh[terms*o+k]=float((1-mix)*own.sh[terms*i+k]+mix*other.sh[terms*p+k]);
+        if (shOk) for (size_t k=0;k<terms;++k) out.sh[terms*o+k]=float((1-mix)*own.sh[terms*i+k]+mix*other.sh[terms*p+k]);
     }});
-    if (source) *source=shape->source;
+    if (source) *source=shape.source;
     return out;
+}
+Cloud Morph::evaluate(double s,std::vector<uint32_t> *source) const {return evaluate(s,Live{},source);}
+Cloud Morph::evaluate(double s,const Live &live,std::vector<uint32_t> *source) const {
+    s=std::clamp(s,0.,1.);
+    if (live.end && live.back>followed(false)) throw std::runtime_error("The loop morph was not followed that far back from End.");
+    if (live.start && live.back>followed(true)) throw std::runtime_error("The loop morph was not followed that far back from Start.");
+    return mix(s,*shape(s,live),live,source);
+}
+QVector3D Morph::carry(const QVector3D &onEnd,double s,size_t back,bool leadIn) const {
+    const auto &d=*d_;s=std::clamp(s,0.,1.);const Vec e=vec(onEnd);
+    const Motion endMotion=motionAt(d.forward,d.endTrack,back),startMotion=motionAt(d.backward,d.startTrack,leadIn ? back : 0);
+    const auto pose=d.forward.pose(s);const Skin skin=d.forward.skin(e);Vec out=Vec::Zero();
+    for (int k=0;k<4;++k) if (skin.weight[k]>0) {
+        const size_t j=size_t(skin.node[k]);const Mat endTurn=endMotion.turn[j].toRotationMatrix();
+        // As the End side's maps take it: its motion to the frame shown, then the correction.
+        Vec target=endTurn*(pose.first[j]-d.forward.rest[j])+endMotion.place[j];Mat carried=endTurn;
+        if (leadIn) {
+            const auto there=moved(d.backward,startMotion,d.forward.fitted[j]);
+            target=(1-s)*target+s*(there.second*(pose.first[j]-d.forward.fitted[j])+there.first);carried=Quat(endTurn).slerp(s,Quat(there.second)).toRotationMatrix();
+        }
+        out+=double(skin.weight[k])*(carried*pose.second[j]*(e-d.forward.rest[j])+target);
+    }
+    return {float(out.x()),float(out.y()),float(out.z())};
 }
 }

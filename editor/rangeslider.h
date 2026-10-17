@@ -37,6 +37,9 @@ public:
     // frame range must reach them. 0 for none.
     void setTailFrames(int frames);
     int tailFrames() const { return m_tailFrames; }
+    // Frames just before End that a Loop morph overlaps instead, drawn over the range. 0 for none.
+    void setOverlapFrames(int frames);
+    int overlapFrames() const { return m_overlapFrames; }
     void setPlayheadValue(int value);
     int startValue() const { return m_start; }
     int endValue() const { return m_end; }
@@ -88,6 +91,7 @@ private:
     int m_end = 0;
     int m_playhead = 0;
     int m_tailFrames = 0;
+    int m_overlapFrames = 0;
     int m_leftInset = 10, m_rightInset = 10;
     QString m_label;
     double m_viewFirst = 0, m_viewLast = 0;

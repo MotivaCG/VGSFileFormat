@@ -479,37 +479,96 @@ static vgs::Frame morphFrameOf(const loopmorph::Cloud &c,double seconds) {
 // starts and ends.
 using SourceFrameReader=std::function<vgs::Frame(double seconds,int *chunk,double *chunkStart,double *chunkEnd)>;
 // A project's Loop morph for an export, fitted on its End and Start frames (`last`, `first`) as
-// the modifiers above it leave them. `project` carries the full transform and stack.
-static std::unique_ptr<loopmorph::Morph> fitExportMorph(const Project &project,int first,int last,double rate,int degree,bool antialiased,
-                                                        const SourceFrameReader &read,const ExportProgress &progress,int *pairCount) {
-    report(progress,0,QStringLiteral("Loop morph: reading End and Start"));
-    const QMatrix4x4 endModel=project.transformAtFrame(last).matrix(),startModel=project.transformAtFrame(first).matrix();
-    bool invertible=false;const QMatrix4x4 toEnd=endModel.inverted(&invertible)*startModel;
-    if (!invertible) throw std::runtime_error("The loop morph needs an invertible transform at End.");
-    auto shaped=[&](int frame) {
-        int chunk=0;double start=0,end=0;const vgs::Frame f=read(frame/rate,&chunk,&start,&end);
-        Project above=project;above.transform=project.transformAtFrame(frame);above.modifiers=project.modifiersAboveMorph(frame);
+// the modifiers above it leave them and, when it overlaps the range's end, followed back
+// through the frames before End (and before Start, leading in). `project` carries the full
+// transform and stack. Its frames read the source as they are made, through `read`, which
+// must be safe to call from the thread making each.
+class ExportMorph {
+public:
+    int frames=0,pairs=0;bool overlaps=false,leadIn=false;
+    ExportMorph(const Project &project,int first,int last,double rate,int degree,bool antialiased,SourceFrameReader read,const ExportProgress &progress)
+        : project_(project),first_(first),last_(last),rate_(rate),degree_(degree),antialiased_(antialiased),read_(std::move(read)) {
+        frames=project.morphFrames(rate);overlaps=project.morphOverlaps();leadIn=project.morphLeadsIn(rate);
+        report(progress,0,QStringLiteral("Loop morph: reading End and Start"));
+        bool invertible=false;unEnd_=project.transformAtFrame(last).matrix().inverted(&invertible);
+        if (!invertible) throw std::runtime_error("The loop morph needs an invertible transform at End.");
+        const QMatrix4x4 toEnd=intoEnd(first);
+        std::vector<loopmorph::Pair> list;for (const auto &pair:project.morphPairs(rate)) list.push_back({pair.end,toEnd.map(pair.start)});
+        pairs=int(list.size());
+        auto end=shaped(last,progress),start=shaped(first,progress);
+        report(progress,0,QStringLiteral("Loop morph: fitting"));
+        const auto cancelled=[&] {return progress && !progress(0,QStringLiteral("Loop morph: fitting"));};
+        morph_=std::make_unique<loopmorph::Morph>(std::move(end),std::move(start),list,cancelled);
+        if (overlaps && frames) {
+            report(progress,0,QStringLiteral("Loop morph: following the frames before End"));
+            morph_->follow(false,followed(last),cancelled);
+            if (leadIn) morph_->follow(true,followed(first),cancelled);
+        }
+    }
+    // The morph's frame k of `frames`, k/(frames+1) of the way, so neither End nor Start shows
+    // twice, in End's capture coordinates. Overlapping, it is the capture's frame as many
+    // before End as there are morph frames still to come, End itself standing for Start.
+    vgs::Frame frame(int k,double seconds,const ExportProgress &progress) const {
+        const double s=double(k)/double(frames+1);
+        if (!overlaps) return morphFrameOf(morph_->evaluate(s),seconds);
+        loopmorph::Morph::Live live;live.back=size_t(frames+1-k);
+        const auto end=shaped(last_-int(live.back),progress);live.end=&end;
+        loopmorph::Cloud start;if (leadIn) {start=shaped(first_-int(live.back),progress);live.start=&start;}
+        return morphFrameOf(morph_->evaluate(s,live),seconds);
+    }
+private:
+    const Project &project_;int first_,last_;double rate_;int degree_;bool antialiased_;SourceFrameReader read_;
+    QMatrix4x4 unEnd_;std::unique_ptr<loopmorph::Morph> morph_;
+    mutable std::mutex pruneMutex_;mutable std::map<int,std::vector<uint8_t>> pruned_; // per source chunk
+    // A frame's capture coordinates carried into End's.
+    QMatrix4x4 intoEnd(int frame) const {return unEnd_*project_.transformAtFrame(frame).matrix();}
+    // A frame as the modifiers above the morph leave it, in End's capture coordinates.
+    loopmorph::Cloud shaped(int frame,const ExportProgress &progress) const {
+        int chunk=0;double start=0,end=0;const vgs::Frame f=read_(frame/rate_,&chunk,&start,&end);
+        Project above=project_;above.transform=project_.transformAtFrame(frame);above.modifiers=project_.modifiersAboveMorph(frame);
         for (auto &m:above.modifiers) m.showErased=false;
         const CompiledModifiers stack(above.modifiers);std::vector<uint8_t> mask;
-        if (!stack.prunes.isEmpty())
-            mask=pruneChunk(start,end,[&](double t) {int c;double a,b;auto sample=read(t,&c,&a,&b);sample.shRest.clear();sample.shCoefficients=0;return sample;},
-                            antialiased,stack.prunes,[&] {report(progress,0,QStringLiteral("Loop morph: scoring splats"));return false;},nullptr);
+        if (!stack.prunes.isEmpty()) {
+            std::lock_guard<std::mutex> guard(pruneMutex_);auto found=pruned_.find(chunk);
+            if (found==pruned_.end()) found=pruned_.emplace(chunk,pruneChunk(start,end,[&](double t) {int c;double a,b;auto sample=read_(t,&c,&a,&b);sample.shRest.clear();sample.shCoefficients=0;return sample;},
+                antialiased_,stack.prunes,[&] {report(progress,0,QStringLiteral("Loop morph: scoring splats"));return false;},nullptr)).first;
+            mask=found->second;
+        }
         if (!stack.erased.empty()) {const auto erase=stack.eraseKeep(chunk,f.count);if (mask.empty()) mask=erase;else for (size_t i=0;i<mask.size() && i<erase.size();++i) mask[i]&=erase[i];}
-        return std::make_pair(f,Baker(above,degree).keeps(f,progress,mask.empty() ? nullptr : &mask));
-    };
-    const auto endFrame=shaped(last),startFrame=shaped(first);
-    std::vector<loopmorph::Pair> pairs;for (const auto &pair:project.morphPairs(rate)) pairs.push_back({pair.end,toEnd.map(pair.start)});
-    if (pairCount) *pairCount=int(pairs.size());
-    report(progress,0,QStringLiteral("Loop morph: fitting"));
-    return std::make_unique<loopmorph::Morph>(morphCloud(endFrame.first,endFrame.second,QMatrix4x4()),morphCloud(startFrame.first,startFrame.second,toEnd),pairs,
-                                              [&] {return progress && !progress(0,QStringLiteral("Loop morph: fitting"));});
-}
-// One of the morph's frames, `k` of `count`, baked as the capture is: in the world as End is
-// placed (or, `baked` given, in that baked frame's coordinates), through what is below the morph.
-static vgs::Frame bakeMorphFrame(const loopmorph::Morph &morph,int k,int count,const Project &project,int last,double rate,int degree,const ExportProgress &progress,
+        return morphCloud(f,Baker(above,degree_).keeps(f,progress,mask.empty() ? nullptr : &mask),intoEnd(frame));
+    }
+    // Every splat the source shows at `from` and the morph's length of frames before it, in
+    // End's capture coordinates, for the morph to follow.
+    std::vector<loopmorph::Track> followed(int from) const {
+        std::vector<loopmorph::Track> back;
+        for (int k=0;k<=frames && from-k>=0;++k) {
+            int chunk=0;double start=0,end=0;const vgs::Frame f=read_((from-k)/rate_,&chunk,&start,&end);const QMatrix4x4 into=intoEnd(from-k);
+            loopmorph::Track t;t.chunk=chunk;
+            for (size_t i=0;i<f.count;++i) {
+                if (!f.active.empty() && !f.active[i]) continue;
+                const QVector3D p=into.map({f.position[3*i],f.position[3*i+1],f.position[3*i+2]});
+                t.position.insert(t.position.end(),{p.x(),p.y(),p.z()});t.colour.insert(t.colour.end(),{f.colorDc[3*i],f.colorDc[3*i+1],f.colorDc[3*i+2]});t.record.push_back(uint32_t(i));
+            }
+            back.push_back(std::move(t));
+        }
+        return back;
+    }
+};
+// One of the morph's frames, `k`, baked as the capture is: in the world as End is placed (or,
+// `baked` given, in that baked frame's coordinates), through what is below the morph.
+static vgs::Frame bakeMorphFrame(const ExportMorph &morph,int k,const Project &project,int last,int degree,const ExportProgress &progress,
                                  double seconds,const Transform *baked=nullptr) {
     Project pose=project;pose.transform=baked ? *baked : project.transformAtFrame(last);pose.modifiers=project.modifiersBelowMorph(last);
-    return Baker(pose,degree).bake(morphFrameOf(morph.evaluate(double(k)/double(count+1)),seconds),progress);
+    return Baker(pose,degree).bake(morph.frame(k,seconds,progress),progress);
+}
+// What an export says of its Loop morph.
+static QString morphNote(const ExportMorph &morph,const Project &project,int last) {
+    if (!morph.overlaps) return QStringLiteral("Loop morph: %1 frames after End (%2 marker pairs).").arg(morph.frames).arg(morph.pairs);
+    QString note=QStringLiteral("Loop morph: the %1 frames before End (%2 to %3) carry the capture into Start, End standing for Start (%4 marker pairs).")
+        .arg(morph.frames).arg(last-morph.frames).arg(last-1).arg(morph.pairs);
+    if (morph.leadIn) note+=QStringLiteral(" It blends into the frames before Start.");
+    else if (project.loopMorph()->morphLeadIn) note+=QStringLiteral(" The source has fewer than %1 frames before Start, so it does not blend into them.").arg(morph.frames);
+    return note;
 }
 
 ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &destination,const ExportProgress &progress,const QByteArray &thumbnailJpeg) {
@@ -570,8 +629,11 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
     const int available=std::max(1,int(std::ceil(duration*rate-1e-6)));
     const int first=std::clamp(int(std::round(project.in*rate)),0,available-1),last=std::clamp(int(std::round(project.out*rate)),first,available-1);
     result.frames=last-first+1;
-    // A Loop morph's frames follow the range, in every format.
-    const int morphFrames=project.morphFrames(rate),totalFrames=result.frames+morphFrames;
+    // A Loop morph's frames follow the range, in every format. Overlapping, they take the place
+    // of the range's last frames instead, and End, which stands for Start, is not written.
+    const int morphFrames=project.morphFrames(rate);
+    if (project.morphOverlaps() && morphFrames) result.frames-=morphFrames+1;
+    const int totalFrames=result.frames+morphFrames;
     const int degree=project.captureSettings.shDegree<0 ? sourceDegree : project.captureSettings.shDegree;
     // Where the range starts on the audio's timeline, for players: the source's own track runs
     // on the source's timeline; a file starts `offset` seconds into the capture's. Players
@@ -670,7 +732,7 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
     auto &m=options.metadata;m.id=utf(s.catalogueId);m.title=utf(s.title);m.author=utf(s.author);m.projectName=utf(s.projectName);m.takeName=utf(s.takeName);
     m.captureStudio=utf(s.studio);m.copyright=utf(s.copyright);m.softwareName=utf(s.softwareName);m.softwareVersion=utf(s.softwareVersion);
     for (const auto &tag : s.tags) m.tags.push_back(utf(tag));
-    QJsonObject provenance{{"editorExportVersion",2},{"colourProcessingVersion",2},{"sampling",native ? "native-temporal" : "native-frame-hold"},{"sourceInFrame",first},{"sourceOutFrame",last},{"loopMorphFrames",morphFrames},
+    QJsonObject provenance{{"editorExportVersion",2},{"colourProcessingVersion",2},{"sampling",native ? "native-temporal" : "native-frame-hold"},{"sourceInFrame",first},{"sourceOutFrame",last},{"loopMorphFrames",morphFrames},{"loopMorphOverlaps",project.morphOverlaps()},
         {"transform",inputProject.json({})["transform"]},{"crop",project.json({})["crop"]},{"modifiers",project.modifierJson()},{"processing",s.json()},
         // The editor's view as the export was made: where players without a camera of their
         // own look from. The exported data is in these coordinates, transform baked.
@@ -726,11 +788,12 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
     };
     // The Loop morph: fitted once here for the End and Start frames as the modifiers above it
     // leave them, then each of its frames is a sampled chunk after the range, drawn with the
-    // modifiers below it and moving, when the capture does, as it is at End.
-    std::unique_ptr<loopmorph::Morph> morph;
+    // modifiers below it and moving, when the capture does, as it is at End. Its frames read
+    // the source as they are made, beside native chunks on other workers: under the lock.
+    std::unique_ptr<ExportMorph> morph;
     if (morphFrames) {
         const SourceFrameReader read=[&](double seconds,int *chunk,double *start,double *end) {
-            seconds=std::min(seconds,duration-1e-7);
+            std::lock_guard<std::mutex> guard(readerMutex);seconds=std::min(seconds,duration-1e-7);
             if (mint) {
                 MintFrame decoded;if (!mint->decode(seconds,&decoded,true,&error)) throw std::runtime_error(error.toStdString());
                 const auto &c=mint->chunks().at(decoded.chunkIndex);*chunk=decoded.chunkIndex;*start=c.start;*end=c.start+c.duration;return copyFrame(decoded);
@@ -738,8 +801,8 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
             const size_t index=capture->chunkAt(seconds);const auto &c=capture->chunk(index);*chunk=int(index);*start=c.startSeconds;*end=c.endSeconds;
             return copyFrame(capture->setTime(seconds,true));
         };
-        int pairs=0;morph=fitExportMorph(inputProject,first,last,rate,degree,sourceAntialiased,read,progress,&pairs);
-        result.notes << QStringLiteral("Loop morph: %1 frames after End (%2 marker pairs).").arg(morphFrames).arg(pairs);
+        morph=std::make_unique<ExportMorph>(inputProject,first,last,rate,degree,sourceAntialiased,read,progress);
+        result.notes << morphNote(*morph,inputProject,last);
     }
     const QMatrix4x4 morphWorld=inputProject.transformAtFrame(last).matrix();
     auto provider=[&](size_t index) {
@@ -749,7 +812,7 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
             // morph is in End's capture coordinates: the baked transform takes it to the world,
             // or, moving, to where the data is baked, and its motion samples the rest.
             const int k=int(index-rangeChunks)+1;
-            auto baked=bakeMorphFrame(*morph,k,morphFrames,inputProject,last,rate,degree,innerProgress,double(result.frames+k-1)/rate,&project.transform);
+            auto baked=bakeMorphFrame(*morph,k,inputProject,last,degree,innerProgress,double(result.frames+k-1)/rate,&project.transform);
             if (!writing) {std::lock_guard<std::mutex> guard(stateMutex);result.kept+=baked.count;}
             auto chunk=withNormals(packFrame(std::move(baked),degree));
             if (moving) {const auto sample=similarityFrom(morphWorld*unbake,last);chunk.pages.push_back(motionPage({sample,sample}));}
@@ -1041,14 +1104,16 @@ ExportResult exportPlySequence(const Project &projectAsGiven,const QString &dest
     // at frame 30 writes name0030.ply first.
     const int available=std::max(1,int(std::ceil(source.duration*rate-1e-6)));
     const int first=std::clamp(int(std::round(project.in*rate)),0,available-1),last=std::clamp(int(std::round(project.out*rate)),first,available-1);
-    // A Loop morph's frames follow, numbered on from End.
-    const int morphFrames=project.morphFrames(rate);
-    const int digits=std::max(4,int(QString::number(last+morphFrames).size()));
+    // A Loop morph's frames follow, numbered on from End; overlapping, they are the frames
+    // before End, numbered as those, and End, which stands for Start, is not written.
+    const int morphFrames=project.morphFrames(rate);const bool overlaps=project.morphOverlaps() && morphFrames;
+    const int plainLast=overlaps ? last-morphFrames-1 : last,firstMorph=plainLast+1,lastWritten=plainLast+morphFrames;
+    const int digits=std::max(4,int(QString::number(lastWritten).size()));
     const int degree=project.captureSettings.shDegree<0 ? source.sourceDegree : project.captureSettings.shDegree;
     ExportResult result;std::vector<uint8_t> keep;int empty=0;size_t seenOpaque=0,seenBy=0;
-    for (int f=first;f<=last;++f) {
-        const int percent=int(100.0*(f-first)/std::max(1,last-first+1));
-        report(progress,percent,QStringLiteral("Frame %1 of %2").arg(f-first+1).arg(last-first+1));
+    for (int f=first;f<=plainLast;++f) {
+        const int percent=int(100.0*(f-first)/std::max(1,lastWritten-first+1));
+        report(progress,percent,QStringLiteral("Frame %1 of %2").arg(f-first+1).arg(lastWritten-first+1));
         const auto frame=source.frame(f/rate,&keep,result);
         // Each frame through its own pose and keyframed modifiers, as the capture export does;
         // the progress of baking it stays inside the frame's step.
@@ -1061,23 +1126,24 @@ ExportResult exportPlySequence(const Project &projectAsGiven,const QString &dest
         result.bytes+=quint64(QFileInfo(file).size());++result.frames;
     }
     if (morphFrames) {
-        int pairs=0;const auto morph=fitExportMorph(project,first,last,rate,degree,source.antialiased(),
-            [&](double seconds,int *chunk,double *start,double *end) {return source.raw(seconds,chunk,start,end);},progress,&pairs);
+        const ExportMorph morph(project,first,last,rate,degree,source.antialiased(),
+            [&](double seconds,int *chunk,double *start,double *end) {return source.raw(seconds,chunk,start,end);},progress);
         for (int k=1;k<=morphFrames;++k) {
-            report(progress,99,QStringLiteral("Loop morph frame %1 of %2").arg(k).arg(morphFrames));
-            auto written=bakeMorphFrame(*morph,k,morphFrames,project,last,rate,degree,progress,(last+k)/rate);
+            const int percent=int(100.0*(firstMorph+k-1-first)/std::max(1,lastWritten-first+1));
+            report(progress,percent,QStringLiteral("Loop morph frame %1 of %2").arg(k).arg(morphFrames));
+            auto written=bakeMorphFrame(morph,k,project,last,degree,progress,(plainLast+k)/rate);
             if (!written.count) ++empty;result.kept+=written.count;
             if (project.captureSettings.normals) {const auto seen=bakeFrameNormals(written,project,rate);seenOpaque+=seen.opaque;seenBy+=seen.opaqueSeen;}
-            const QString file=plySequenceFile(destination,last+k,digits);writePly(written,file);
+            const QString file=plySequenceFile(destination,plainLast+k,digits);writePly(written,file);
             result.bytes+=quint64(QFileInfo(file).size());++result.frames;
         }
-        result.notes << QStringLiteral("Loop morph: %1 frames after End, %2 to %3 (%4 marker pairs).").arg(morphFrames)
-            .arg(QFileInfo(plySequenceFile(destination,last+1,digits)).fileName(),QFileInfo(plySequenceFile(destination,last+morphFrames,digits)).fileName()).arg(pairs);
+        result.notes << morphNote(morph,project,last)+QStringLiteral(" Files %1 to %2.")
+            .arg(QFileInfo(plySequenceFile(destination,firstMorph,digits)).fileName(),QFileInfo(plySequenceFile(destination,lastWritten,digits)).fileName());
     }
     report(progress,100,QStringLiteral("Finishing export"));
     if (project.captureSettings.normals) {gaussiannormals::Result seen;seen.opaque=seenOpaque;seen.opaqueSeen=seenBy;normalsNote(seen,project.captureSettings,&result);}
     result.notes << QStringLiteral("%1 .ply files, %2 to %3, numbered by the source's frame.").arg(result.frames)
-        .arg(QFileInfo(plySequenceFile(destination,first,digits)).fileName(),QFileInfo(plySequenceFile(destination,last+morphFrames,digits)).fileName());
+        .arg(QFileInfo(plySequenceFile(destination,first,digits)).fileName(),QFileInfo(plySequenceFile(destination,lastWritten,digits)).fileName());
     if (empty) result.notes << QStringLiteral("%1 frame(s) kept no Gaussian records and are empty .ply files.").arg(empty);
     if (const auto note=pruningNote(result);!note.isEmpty()) result.notes << note;
     result.notes << QStringLiteral("A .ply holds no audio, thumbnail, metadata or motion samples: an animated transform is baked into each frame.");

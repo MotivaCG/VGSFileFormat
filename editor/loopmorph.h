@@ -38,6 +38,15 @@ struct Cloud {
 };
 // The same point of the subject on the end frame and on the start frame.
 struct Pair { QVector3D end, start; };
+// A source frame's splats as followed from frame to frame: where each is, its colour, and
+// which record of which source chunk it is. Within a chunk a record is the same splat in
+// every frame; across chunks nothing is.
+struct Track {
+    std::vector<float> position, colour;
+    std::vector<uint32_t> record;
+    long long chunk = -1;
+    size_t size() const { return record.size(); }
+};
 
 class Morph {
 public:
@@ -51,6 +60,29 @@ public:
     // show at `s` is left out. `source`, when given, says where each splat came from: i for
     // the End frame's i-th, the End frame's count plus j for the Start frame's j-th.
     Cloud evaluate(double s, std::vector<uint32_t> *source = nullptr) const;
+
+    // A morph that overlaps the range's last frames rather than following End: the capture
+    // plays on and takes the End-to-Start correction on gradually. Each deformation graph is
+    // followed back through the frames before its own: `back[0]` is that frame (End, or
+    // Start) and `back[i]` the one i frames earlier, all in the clouds' space. Within a chunk
+    // each node moves as its splats do; at a chunk change it goes on as it was moving and is
+    // then fitted onto the earlier frame's surface. Throws "Loop morph canceled." likewise.
+    void follow(bool start, const std::vector<Track> &back, const std::function<bool()> &cancelled = {});
+    // How many frames back each graph has been followed.
+    size_t followed(bool start) const;
+    // A frame of an overlapping morph, `back` frames before End: `end` is the capture's own
+    // frame there, carried `s` of the way to Start by the correction moved along with it.
+    // `start`, given, is the frame as many frames before Start, the morph then blending the
+    // two motions as well (a lead-in); without it the Start frame itself is the target.
+    // Sources number `end`'s splats first, then `start`'s (or the Start frame's).
+    struct Live {
+        size_t back = 0;
+        const Cloud *end = nullptr, *start = nullptr;
+    };
+    Cloud evaluate(double s, const Live &live, std::vector<uint32_t> *source = nullptr) const;
+    // Where a point of the End frame, in the clouds' space, is carried to at `s`, `back`
+    // frames before End (0 for a morph that follows End) - the marker on the morph's frame.
+    QVector3D carry(const QVector3D &onEnd, double s, size_t back = 0, bool leadIn = false) const;
     // Keeps each frame's shape - which splats show, where, turned how and how opaque, some 36
     // bytes a splat - once worked out, so the morph plays again without deforming anything:
     // about 11 MB a frame for 300 000 splats. Colour and SH are mixed afresh each time. The
@@ -64,7 +96,8 @@ public:
 private:
     struct Data;
     struct Shape;
-    std::shared_ptr<const Shape> shape(double s) const;
+    std::shared_ptr<const Shape> shape(double s, const Live &live) const;
+    Cloud mix(double s, const Shape &shape, const Live &live, std::vector<uint32_t> *source) const;
     std::unique_ptr<Data> d_;
 };
 

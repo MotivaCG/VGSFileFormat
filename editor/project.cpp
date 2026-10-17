@@ -274,7 +274,8 @@ bool Project::fromJson(const QJsonObject &root,const QString &baseDirectory,Proj
                 m.prune.percent=number(p,"percent",0,90);m.prune.protectAbove=number(p,"protectAbove",0,1000);valid &= p["protectUnit"]=="px-1080p-mean";
             } else if (item["type"]=="loop-morph") {
                 m.type=ModifierType::LoopMorph;const auto morph=item["morph"].toObject();valid &= morph["space"]=="capture-local" && morph["markers"].isArray();
-                m.morphSeconds=number(morph,"seconds",1.0/1000,60);QSet<int> numbers;
+                m.morphSeconds=number(morph,"seconds",-60,60);valid &= std::abs(m.morphSeconds)>=1.0/1000;QSet<int> numbers;
+                valid &= !morph.contains("leadIn") || morph["leadIn"].isBool();m.morphLeadIn=morph["leadIn"].toBool();
                 for (const auto &value:morph["markers"].toArray()) {
                     if (!value.isObject()) return fail();const auto entry=value.toObject();MorphMarker marker;
                     const double n=number(entry,"number",1,1000);valid &= n==std::floor(n) && !numbers.contains(int(n));numbers.insert(int(n));marker.number=int(n);
@@ -309,7 +310,7 @@ bool Project::fromJson(const QJsonObject &root,const QString &baseDirectory,Proj
         p.modifiers.append(despill);p.captureSettings.despill=false;
     }
     // The playhead can be on a Loop morph's frames, after End.
-    const double tail=p.loopMorph() ? p.loopMorph()->morphSeconds+1 : 0;
+    const double tail=p.loopMorph() ? std::max(0.,p.loopMorph()->morphSeconds)+1 : 0;
     if (!valid || p.out < p.in || p.time < p.in || p.time > p.out+tail) return fail();
     *result = p; return true;
 }

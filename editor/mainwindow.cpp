@@ -392,7 +392,7 @@ MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory,const QStr
         if (!pendingProject_) project_.out = last;
         project_.in = std::clamp(project_.in, 0.0, last);
         project_.out = std::clamp(project_.out, project_.in, last);
-        project_.time = std::clamp(project_.time, project_.in, project_.playbackEnd(info.fps));
+        project_.time = std::clamp(project_.time, project_.in, project_.timelineEnd(info.fps));
         // Keep all transport controls on the capture's actual frame boundaries.
         project_.in = std::round(project_.in*info.fps)/info.fps;
         project_.out = std::round(project_.out*info.fps)/info.fps;
@@ -462,8 +462,8 @@ MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory,const QStr
             // The morph's frames alone; or a second before End, through the morph, then a
             // second after Start.
             const double frame=1.0/info_.fps,u=double(clock_.elapsed())/1000.0*project_.speed;
-            if (morphPlaying_==MorphPlay::Morph) {const double first=project_.out+frame;setTime(first+std::fmod(u,end-first+frame),false);return;}
-            const double before=std::max(project_.in,project_.out-1.0),after=std::min(project_.out,project_.in+1.0);
+            if (morphPlaying_==MorphPlay::Morph) {const double first=project_.morphStart(info_.fps);setTime(first+std::fmod(u,end-first+frame),false);return;}
+            const double before=std::max(project_.in,project_.morphStart(info_.fps)-frame-1.0),after=std::min(project_.out,project_.in+1.0);
             const double first=end-before+frame,second=after-project_.in+frame,v=std::fmod(u,first+second);
             setTime(v<first ? before+v : project_.in+(v-first),false);return;
         }
@@ -984,10 +984,15 @@ void MainWindow::buildUi() {
     // placed by clicking the same points of the subject on both frames.
     morphProperties_=new QGroupBox(tr("Loop morph"));morphProperties_->setObjectName("loopMorphProperties");auto *morphForm=new QFormLayout(morphProperties_);
     morphProperties_->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Minimum);
-    morphSeconds_=new QDoubleSpinBox;morphSeconds_->setObjectName("morphSeconds");morphSeconds_->setRange(0.001,60);morphSeconds_->setDecimals(3);morphSeconds_->setSingleStep(.1);morphSeconds_->setSuffix(" s");
-    morphFrames_=new QSpinBox;morphFrames_->setObjectName("morphFrames");morphFrames_->setRange(1,60000);morphFrames_->setSuffix(tr(" frames"));
-    morphSeconds_->setToolTip(tr("How long the morph from End back to Start lasts. Its frames are added after End and play with the range."));
+    morphSeconds_=new QDoubleSpinBox;morphSeconds_->setObjectName("morphSeconds");morphSeconds_->setRange(-60,60);morphSeconds_->setDecimals(3);morphSeconds_->setSingleStep(.1);morphSeconds_->setSuffix(" s");
+    morphFrames_=new QSpinBox;morphFrames_->setObjectName("morphFrames");morphFrames_->setRange(-60000,60000);morphFrames_->setSuffix(tr(" frames"));
+    morphSeconds_->setToolTip(tr("How long the morph from End back to Start lasts. Its frames are added after End and play with the range.\n"
+        "Negative, it overlaps the frames before End instead: the capture plays on and takes the correction on\n"
+        "gradually, End standing for Start - for cycles such as a walk, with End on the pose that matches Start."));
     morphFrames_->setToolTip(tr("The same length, in frames of the capture."));
+    morphLeadIn_=new QCheckBox(tr("Blend into the frames before Start"));morphLeadIn_->setObjectName("morphLeadIn");
+    morphLeadIn_->setToolTip(tr("Overlapping only: the motion passes into that of as many frames before Start as the morph is long,\n"
+        "rather than into the Start frame held still. The source needs those frames before Start."));
     morphPlaceEnd_=new QToolButton;morphPlaceEnd_->setText(tr("Place on End"));morphPlaceEnd_->setObjectName("morphPlaceEnd");morphPlaceEnd_->setCheckable(true);
     morphPlaceStart_=new QToolButton;morphPlaceStart_->setText(tr("Place on Start"));morphPlaceStart_->setObjectName("morphPlaceStart");morphPlaceStart_->setCheckable(true);
     morphPlaceStart_->setToolTip(tr("Place markers, starting on the Start frame (Tab).\nA click places marker N on Start and goes to End for its pair; the click there\ngoes back to Start for the next one. Ctrl+click stays on the same frame.\nWith three pairs a yellow target suggests where the pair goes: Enter takes it.\nBackspace removes the last point; Alt+click on a marker removes its pair, here or not placing.\nEsc or this button again stops. A drag still orbits."));
@@ -1014,7 +1019,7 @@ void MainWindow::buildUi() {
         auto *b=new QPushButton;b->setObjectName(name);b->setIcon(transportIcon(style(),icon));b->setToolTip(tip);b->setFixedSize(34,30);
         morphTransportLayout->addWidget(b);connect(b,&QPushButton::clicked,this,action);return b;
     };
-    morphButton(QStyle::SP_MediaSkipBackward,"morphFirst",tr("Go to the morph's first frame (Ctrl+Home)."),[this] {play(false);setTime(project_.out+1.0/info_.fps,true);});
+    morphButton(QStyle::SP_MediaSkipBackward,"morphFirst",tr("Go to the morph's first frame (Ctrl+Home)."),[this] {play(false);setTime(project_.morphStart(info_.fps),true);});
     morphButton(QStyle::SP_MediaSeekBackward,"morphBack",tr("Pause and step back one frame."),[this] {play(false);setTime(project_.time-1.0/info_.fps,true);})->setIcon(frameStepIcon(false));
     morphPlay_=morphButton(QStyle::SP_MediaPlay,"morphPlay",tr("Play the morph's frames alone, over and over (Ctrl+Space).\nAgain, or any other playback or seek, stops it."),[this] {toggleMorphPlay(MorphPlay::Morph);});
     morphSeamPlay_=morphButton(QStyle::SP_MediaSeekForward,"morphSeamPlay",tr("Play the seam over and over (Alt+Space): a second before End, the morph,\nand a second after Start. Again, or any other playback or seek, stops it."),[this] {toggleMorphPlay(MorphPlay::Seam);});
@@ -1024,15 +1029,23 @@ void MainWindow::buildUi() {
     morphSeconds_->setMinimumWidth(70);morphFrames_->setMinimumWidth(70);
     morphTransportLayout->addSpacing(6);morphTransportLayout->addWidget(morphSeconds_,1);morphTransportLayout->addWidget(morphFrames_,1);
     morphForm->insertRow(0,morphTransport_);
+    morphForm->insertRow(1,morphLeadIn_);
     morphStatus_=new QLabel;morphStatus_->setObjectName("morphStatus");morphStatus_->setWordWrap(true);morphForm->addRow(morphStatus_);
     auto *morphNote=new QLabel(tr("The End frame is deformed onto the Start frame and back as rigidly as the markers allow, fading from one into the other. "
-        "Cleaning modifiers above this one shape the two frames; those below it apply to its frames too. Its frames follow End on the timeline, in violet, and are exported after the range."));
+        "Cleaning modifiers above this one shape the two frames; those below it apply to its frames too. Its frames follow End on the timeline, in violet, and are exported after the range. "
+        "With a negative length they are the frames before End instead, the capture moving on through them."));
     morphNote->setWordWrap(true);morphForm->addRow(morphNote);side->addWidget(morphProperties_);
+    // No length is zero: stepping through it goes on to a frame the other way.
     connect(morphSeconds_,&QDoubleSpinBox::valueChanged,this,[this](double value) {
-        auto *m=project_.modifier();if (syncing_ || !m || m->type!=ModifierType::LoopMorph) return;m->morphSeconds=value;syncUi();dirty();
+        auto *m=project_.modifier();if (syncing_ || !m || m->type!=ModifierType::LoopMorph) return;
+        m->morphSeconds=std::abs(value)>=.0005 ? value : (m->morphSeconds>0 ? -1 : 1)/std::max(1.,info_.fps);syncUi();dirty();
     });
     connect(morphFrames_,&QSpinBox::valueChanged,this,[this](int frames) {
-        auto *m=project_.modifier();if (syncing_ || !m || m->type!=ModifierType::LoopMorph || !(info_.fps>0)) return;m->morphSeconds=frames/info_.fps;syncUi();dirty();
+        auto *m=project_.modifier();if (syncing_ || !m || m->type!=ModifierType::LoopMorph || !(info_.fps>0)) return;
+        m->morphSeconds=(frames ? frames : m->morphSeconds>0 ? -1 : 1)/info_.fps;syncUi();dirty();
+    });
+    connect(morphLeadIn_,&QCheckBox::toggled,this,[this](bool on) {
+        auto *m=project_.modifier();if (syncing_ || !m || m->type!=ModifierType::LoopMorph) return;m->morphLeadIn=on;syncUi();dirty();
     });
     connect(morphPlaceEnd_,&QToolButton::clicked,this,[this](bool on) {setMorphPlacing(on ? MorphSide::End : MorphSide::None);viewport_->setFocus();});
     connect(morphPlaceStart_,&QToolButton::clicked,this,[this](bool on) {setMorphPlacing(on ? MorphSide::Start : MorphSide::None);viewport_->setFocus();});
@@ -1051,6 +1064,10 @@ void MainWindow::buildUi() {
     });
     connect(worker_,&CaptureWorker::morphFitting,this,[this](bool fitting) {
         morphFitting_=fitting;
+        // The fit takes a while: playing on would only skip through it. Playback waits for it,
+        // and goes on as it was - the timeline's, or the morph's own - once the fit is done.
+        if (fitting && playback_.isActive()) {const auto mode=morphPlaying_;play(false);resumeAfterFit_=mode;}
+        else if (!fitting && resumeAfterFit_) {morphPlaying_=*resumeAfterFit_;play(true);}
         viewport_->setBusyText(fitting ? tr("Fitting the loop morph\u2026") : QString());
         if (fitting) statusBar()->showMessage(tr("Fitting the loop morph to the End and Start frames\u2026"));else statusBar()->clearMessage();
     });
@@ -1251,7 +1268,7 @@ void MainWindow::buildUi() {
     shortcut("Home",[this] { play(false); setTime(project_.in,true); });
     shortcut("End",[this] { play(false); setTime(project_.out,true); });
     // With a Loop morph selected, Ctrl+Home/End/Space are its transport's; otherwise the timeline's.
-    shortcut("Ctrl+Home",[this] { play(false); setTime(morphSelected() ? project_.out+1.0/info_.fps : project_.in,true); });
+    shortcut("Ctrl+Home",[this] { play(false); setTime(morphSelected() ? project_.morphStart(info_.fps) : project_.in,true); });
     shortcut("Ctrl+End",[this] { play(false); setTime(morphSelected() ? project_.playbackEnd(info_.fps) : project_.out,true); });
     shortcut("Ctrl+Space",[this] { if (morphSelected()) toggleMorphPlay(MorphPlay::Morph); else play(!playback_.isActive()); });
     shortcut("Alt+Space",[this] { if (morphSelected()) toggleMorphPlay(MorphPlay::Seam); });
@@ -1441,8 +1458,8 @@ void MainWindow::syncUi() {
     const auto target = viewport_->displayedTransform();
     const QVector3D vectors[] = {target.position,target.rotation,target.scale};
     for (int g=0; g<3; ++g) for (int a=0; a<3; ++a) transform_[g][a]->setValue(vectors[g][a]);
-    const int maximum = std::max(0, info_.frames-1), tail = loaded_ ? project_.morphFrames(info_.fps) : 0;
-    slider_->setTailFrames(tail); slider_->setFrameRange(0,maximum+tail); slider_->setFrameRate(info_.fps); slider_->setLabelsInSeconds(timelineSecondsButton_->isChecked()); slider_->setRangeValues(int(std::round(project_.in*info_.fps)),int(std::round(project_.out*info_.fps)));
+    const int maximum = std::max(0, info_.frames-1), tail = loaded_ ? project_.morphTail(info_.fps) : 0;
+    slider_->setTailFrames(tail); slider_->setOverlapFrames(loaded_ && project_.morphOverlaps() ? project_.morphFrames(info_.fps) : 0); slider_->setFrameRange(0,maximum+tail); slider_->setFrameRate(info_.fps); slider_->setLabelsInSeconds(timelineSecondsButton_->isChecked()); slider_->setRangeValues(int(std::round(project_.in*info_.fps)),int(std::round(project_.out*info_.fps)));
     const bool seconds=timelineSecondsButton_->isChecked();const double divisor=seconds ? info_.fps : 1.0;
     const int decimals=seconds ? std::max(3,int(std::ceil(std::log10(std::max(1.0,info_.fps))))+1) : 0;
     for (auto *field:{frameSpin_,inFrame_,outFrame_}) {field->setDecimals(decimals);field->setRange(0,(field==frameSpin_ ? maximum+tail : maximum)/divisor);field->setSingleStep(1.0/divisor);field->setSuffix(seconds ? tr(" s") : QString());}
@@ -1580,7 +1597,7 @@ void MainWindow::stepUndo(bool redo) {
     if (project_.selectedModifier!=target.selectedModifier) viewport_->setTransformMode(TransformMode::None);
     project_.transform=target.transform;project_.modifiers=target.modifiers;project_.selectedModifier=target.selectedModifier;
     project_.in=target.in;project_.out=target.out;project_.captureSettings=target.captureSettings;
-    project_.time=std::clamp(project_.time,project_.in,project_.playbackEnd(info_.fps));
+    project_.time=std::clamp(project_.time,project_.in,project_.timelineEnd(info_.fps));
     if (viewport_->cropEditing() && !(project_.modifier() && project_.modifier()->type==ModifierType::Crop)) viewport_->setCropEditing(false);
     project_.showCropsAtFrame(currentFrame());viewport_->setCrop(project_.crop());
     undoBase_=project_;undoKey_=undoKey(project_);undoOpen_=false;
@@ -1657,12 +1674,12 @@ bool MainWindow::openPath(const QString &path, Interaction interaction, bool dis
     emit openRequested(asset, openingGeneration_, true, openingRequest_);return true;
 }
 int MainWindow::timelineFrame(double displayedValue, bool tail) const {
-    const int last=std::max(0,info_.frames-1)+(tail ? project_.morphFrames(info_.fps) : 0);
+    const int last=std::max(0,info_.frames-1)+(tail ? project_.morphTail(info_.fps) : 0);
     return int(std::clamp(std::round(displayedValue*(timelineSecondsButton_->isChecked() ? info_.fps : 1.0)),0.0,double(last)));
 }
 void MainWindow::setTime(double seconds, bool edited) {
     if (!loaded_ || loading_) return;
-    seconds = std::clamp(std::round(seconds*info_.fps)/info_.fps, project_.in, project_.playbackEnd(info_.fps));
+    seconds = std::clamp(std::round(seconds*info_.fps)/info_.fps, project_.in, project_.timelineEnd(info_.fps));
     if (std::abs(project_.time-seconds) < 1e-8) return;
     project_.time = seconds; syncUi(); if (edited) dirty(); requestFrame();
 }
@@ -1690,10 +1707,12 @@ void MainWindow::requestFrame() {
     if (decoding_) { pendingDecode_ = true;pendingDecodeRemote_=remoteCommand_;return; }
     Project snapshot=project_;if (viewport_->cropEditing()) for (auto &m:snapshot.modifiers) if (m.type==ModifierType::Crop) m.enabled=false;
     for (auto &m:snapshot.modifiers) if (m.type==ModifierType::Erase) m.showErased=m.id==project_.selectedModifier && eraseEditing_;
+    snapshot.previewPlaying=playback_.isActive();
     decoding_ = true;decodeRemote_=remoteCommand_;decodeRequest_=++requestSerial_;
     emit decodeRequested(project_.time, generation_, true,snapshot,decodeRequest_);
 }
 void MainWindow::play(bool playing) {
+    resumeAfterFit_.reset(); // playing or stopping by hand while a morph is fitted overrides going on after it
     if (playing && (!loaded_ || loading_)) return;
     if (playing) {
         if (project_.time >= project_.playbackEnd(info_.fps)) setTime(project_.in,false);
@@ -1865,7 +1884,9 @@ void MainWindow::removeLastMorphPoint() {
 // the current frames, missing, or picked with an End or Start since moved.
 void MainWindow::showMorph(const Modifier &m) {
     morphProperties_->setTitle(tr("Loop morph: %1").arg(m.name));
-    morphSeconds_->setValue(m.morphSeconds);morphFrames_->setValue(std::max(1,int(std::lround(m.morphSeconds*info_.fps))));
+    const int asked=std::max(1,int(std::lround(std::abs(m.morphSeconds)*info_.fps))),overlaps=m.morphSeconds<0;
+    morphSeconds_->setValue(m.morphSeconds);morphFrames_->setValue(overlaps ? -asked : asked);
+    morphLeadIn_->setChecked(m.morphLeadIn);morphLeadIn_->setEnabled(overlaps);
     const int endFrame=int(std::lround(project_.out*info_.fps)),startFrame=int(std::lround(project_.in*info_.fps));
     const bool seconds=timelineSecondsButton_->isChecked();
     auto label=[&](int frame) {return seconds ? tr("%1 s").arg(frame/info_.fps,0,'f',3) : tr("frame %1").arg(frame);};
@@ -1903,9 +1924,17 @@ void MainWindow::showMorph(const Modifier &m) {
     morphMarkerTable_->setFixedHeight(std::clamp(morphMarkerTable_->horizontalHeader()->height()+4+26*std::max(1,int(m.morphMarkers.size())),70,200));
     morphRemoveMarker_->setEnabled(!morphChosen_.empty());morphClearMarkers_->setEnabled(!m.morphMarkers.isEmpty());
     for (auto *button:morphTransport_->findChildren<QPushButton *>()) button->setEnabled(m.enabled && loaded_ && !loading_);
-    QString text=tr("%n frame(s) after End, from %1 to %2.","",project_.morphFrames(info_.fps) ? project_.morphFrames(info_.fps) : std::max(1,int(std::lround(m.morphSeconds*info_.fps))))
-        .arg(label(endFrame+1)).arg(label(endFrame+std::max(1,int(std::lround(m.morphSeconds*info_.fps)))));
-    if (!m.enabled) text=tr("Disabled: no frames are added after End.");
+    QString text=tr("%n frame(s) after End, from %1 to %2.","",asked).arg(label(endFrame+1)).arg(label(endFrame+asked));
+    if (overlaps) {
+        // The frames it can take: all but Start's, before End.
+        const int room=std::max(0,endFrame-startFrame-1),frames=std::min(asked,room);
+        text=frames ? tr("Overlaps the %n frame(s) before End, from %1 to %2: the capture plays on into Start. End stands for Start and is not played.","",frames).arg(label(endFrame-frames)).arg(label(endFrame-1))
+                    : tr("The range is too short to overlap: it needs at least three frames.");
+        if (frames && frames<asked) text+=" "+tr("The range has room for %n of them.","",frames);
+        if (frames && m.morphLeadIn) text+=" "+(startFrame>=frames ? tr("It blends into the frames before Start, %1 to %2.").arg(label(startFrame-frames)).arg(label(startFrame-1))
+                                                                     : tr("There are only %n frame(s) before Start, so it ends on the Start frame held still.","",startFrame));
+    }
+    if (!m.enabled) text=overlaps ? tr("Disabled: the range plays to End as it is.") : tr("Disabled: no frames are added after End.");
     text+="\n"+(pairs ? tr("%n marker pair(s) guide the morph.","",pairs) : tr("No marker pairs yet: the frames are aligned by their centres. Three or more pairs also give it the turn."));
     if (pairs>0 && pairs<3) text+=" "+tr("With fewer than three, the turn between the frames is left to their shapes.");
     if (!incomplete.isEmpty()) text+="\n"+tr("Waiting for their second point: %1.").arg(incomplete.join(", "));
@@ -1925,6 +1954,12 @@ void MainWindow::syncMorphMarkers() {
             const bool paired=morphPlaced(k,MorphSide::End) && morphPlaced(k,MorphSide::Start),selected=k.number==morphSelected_;
             if (frame==endFrame && morphPlaced(k,MorphSide::End)) shown.append({model.map(k.end),k.number,paired,selected});
             else if (frame==startFrame && morphPlaced(k,MorphSide::Start)) shown.append({model.map(k.start),k.number,paired,selected});
+        }
+        // On the morph's own frames, each pair where the morph has carried its End point: it
+        // should stay on its feature and reach its Start point.
+        if (const auto f=viewport_->frame();f && showingMorph()) {
+            const QMatrix4x4 placed=project_.transformAtFrame(endFrame).matrix();
+            for (const auto &[number,point]:f->morphMarkers) shown.append({placed.map(point),number,true,number==morphSelected_});
         }
     }
     QString hint;

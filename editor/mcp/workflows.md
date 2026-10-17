@@ -198,7 +198,10 @@ start), the result depends on the markers: numbered pairs that say which point o
 subject on the End frame is which point on the Start frame. Place them with care:
 
 1. add_modifier type "loop-morph" (or select the existing one) and set `morph.seconds` with
-   edit_modifier if asked; get_loop_morph reads its state at any time.
+   edit_modifier if asked; get_loop_morph reads its state at any time. For a cycle (a walk,
+   a run) the capture should keep moving through the seam: a negative `morph.seconds` makes
+   the morph overlap the frames before End, with End on the pose that matches Start (one
+   cycle later), and `morph.leadIn` true also blends into the frames before Start.
 2. Look before placing: seek the Start frame and the End frame and take images of each from
    several angles (front, both sides, back, and closer views of the face and hands), so the
    same features are found on both. Compare the two poses; note what moved and what changed.
@@ -217,15 +220,15 @@ subject on the End frame is which point on the Start frame. Place them with care
    the frame shown: check it in the image and correct it rather than trusting it.
 5. Check the result: get_loop_morph flags pairs far from where the others put them
    (`flagged`, `off_cm`) - usually two different points; look again and fix or remove them
-   (remove_morph_markers). Then seek the morph's frames (End+1 to the last of
-   `morph_frames`) and look at them from several angles, the face closely: limbs should
+   (remove_morph_markers). Then seek the morph's frames (`morph_frames`: after End, or
+   before it when overlapping) and look at them from several angles, the face closely: limbs should
    swing, not cut through, and features should not double or smear. Add markers where they do.
 
 ## Other operations
 
 - get_project returns the native JSON schema. Modifier patches merge into existing fields;
   use the spellings returned by get_editor_state (colour, isolation, prune, green, etc.).
-- Seeking is constrained to the current Start/End range, plus an active Loop morph's frames after End. Expand it with set_frame_range
+- Seeking is constrained to the current Start/End range, plus an active Loop morph's frames after End (overlapping, they are inside it). Expand it with set_frame_range
   if inspection outside it is required, then restore the user's range afterwards.
 - Export is asynchronous: start_export returns a job_id. Poll get_export_status until
   done/failed/cancelled; cancellation is cooperative and can leave a partial output.

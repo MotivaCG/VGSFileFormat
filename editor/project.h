@@ -177,8 +177,12 @@ struct Modifier {
     // as a distance at bakeDistance.
     double bakeSize() const;
     // Loop morph: frames added after End, `morphSeconds` long, that carry the capture back
-    // to Start so a loop has no jump, guided by the markers.
+    // to Start so a loop has no jump, guided by the markers. Negative, the morph overlaps the
+    // range's last frames instead: the capture plays on and takes the correction on gradually,
+    // End itself standing for Start. With `morphLeadIn` the motion then also passes into that
+    // of the frames before Start, when the source has them.
     double morphSeconds = 1;
+    bool morphLeadIn = false;
     QVector<MorphMarker> morphMarkers;
     bool active() const { return enabled && (type!=ModifierType::Crop || crop.enabled); }
 };
@@ -215,12 +219,25 @@ struct Project {
     QVector<const Modifier *> audioModifiers() const;
     // The Loop morph that applies - the first active one - or none.
     const Modifier *loopMorph() const;
-    // How many frames it adds after End at a frame rate, and the last time playback reaches.
+    // Whether it overlaps the range's last frames (a negative length) rather than following End.
+    bool morphOverlaps() const;
+    // How many frames are the morph's at a frame rate: after End, or overlapping, the frames
+    // just before End - at most all but Start's, none when the range has no room.
     int morphFrames(double fps) const;
+    // The frames it adds after End: none when it overlaps.
+    int morphTail(double fps) const;
+    // The last time playback reaches before looping (overlapping, the frame before End, as End
+    // stands for Start), the last a seek can reach (End at least), and the morph's first frame.
     double playbackEnd(double fps) const;
+    double timelineEnd(double fps) const;
+    double morphStart(double fps) const;
     // Whether a time is one of those frames, and how far through the morph it is: frame k of
-    // n is k/(n+1) of the way from End (0) to Start (1), so neither end shows twice.
-    bool inMorph(double seconds,double fps,double *fraction=nullptr) const;
+    // n is k/(n+1) of the way from End (0) to Start (1), so neither end shows twice. `source`
+    // is the capture's frame it shows: End's after End, its own when overlapping.
+    bool inMorph(double seconds,double fps,double *fraction=nullptr,int *source=nullptr) const;
+    // Whether an overlapping morph blends into the frames before Start: asked for, and the
+    // source has as many frames before Start as the morph is long.
+    bool morphLeadsIn(double fps) const;
     // The stack at a frame split at the Loop morph: what shapes the End and Start frames it
     // morphs (every kind but the removing ones below it), and what its own frames are drawn
     // and exported with (every kind but the removing ones above it). The Loop morph itself is
@@ -236,6 +253,9 @@ struct Project {
     double time = 0, in = 0, out = 0, speed = 1;
     double pointSize = 5;
     bool loop = true, grid = true, axes = false, frontMarker = true;
+    // Not saved: the editor is playing as this snapshot is decoded, so what the removing
+    // modifiers leave on the frame is kept for the next time round.
+    bool previewPlaying = false;
     CoordinateSpace spaces[3] = {CoordinateSpace::Global,CoordinateSpace::Global,CoordinateSpace::Global};
     QJsonObject json(const QString &projectPath) const;
     static bool read(const QString &path, Project *project, QString *error);

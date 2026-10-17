@@ -237,6 +237,7 @@ private:
     QGroupBox *morphProperties_;
     QDoubleSpinBox *morphSeconds_;
     QSpinBox *morphFrames_;
+    QCheckBox *morphLeadIn_;
     QToolButton *morphPlaceEnd_, *morphPlaceStart_;
     // The morph's own transport: first and last frame, a frame either way, and play the seam.
     QWidget *morphTransport_;
@@ -278,6 +279,8 @@ private:
     bool placeMorphPoint(Modifier &m,MorphSide side,int number,const QVector3D &world,int *placed);
     // Whether the worker is fitting the Loop morph now.
     bool morphFitting_ = false;
+    // How playback went before a Loop morph's fit paused it, to go on once it is done.
+    std::optional<MorphPlay> resumeAfterFit_;
     void showMorph(const Modifier &m);
     // The markers of the selected Loop morph on the frame shown, for the viewport.
     void syncMorphMarkers();

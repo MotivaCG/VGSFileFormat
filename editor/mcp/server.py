@@ -321,7 +321,7 @@ async def get_project() -> dict[str, Any]:
 
 @mcp.tool(title="Seek source frame", annotations=SET)
 async def seek_frame(frame: NonnegativeInt) -> dict[str, Any]:
-    """Seek a zero-based source frame within inclusive Start/End, or one of an active Loop morph's frames after End (End+1 to End+its frame count), and wait for decoding. Returns state including chunk. No undo step. Refresh stroke images after seeking; picks do not transfer between source chunks."""
+    """Seek a zero-based source frame within inclusive Start/End, or one of an active Loop morph's frames after End (End+1 to End+its frame count; an overlapping morph's are inside the range, before End), and wait for decoding. Returns state including chunk. No undo step. Refresh stroke images after seeking; picks do not transfer between source chunks."""
     return await _edit("seek", {"frame": frame})
 
 
@@ -589,7 +589,7 @@ async def clear_erased(all_chunks: bool = False) -> dict[str, Any]:
 
 @mcp.tool(title="Read the Loop morph", annotations=READ)
 async def get_loop_morph() -> dict[str, Any]:
-    """The selected (or active) Loop morph: seconds and frames it adds after End, the frames it occupies, whether it is fitting, and each marker - its Start and End point (placed on the current Start/End frame, placed on another frame and so unused, or missing) and, from four pairs, off_cm: how far its End point is from where the other pairs put it, flagged when far beyond the rest (likely two different points paired). With Start or End shown and three pairs or more, suggestion gives where the next marker probably goes, as a normalised point of the current view (view_id) to pass to place_morph_marker after checking it in a snapshot."""
+    """The selected (or active) Loop morph: seconds and frames it adds after End (negative: overlapping the frames before End), whether it overlaps and leads in, the frames it occupies, whether it is fitting, and each marker - its Start and End point (placed on the current Start/End frame, placed on another frame and so unused, or missing) and, from four pairs, off_cm: how far its End point is from where the other pairs put it, flagged when far beyond the rest (likely two different points paired). With Start or End shown and three pairs or more, suggestion gives where the next marker probably goes, as a normalised point of the current view (view_id) to pass to place_morph_marker after checking it in a snapshot."""
     return await _edit("loop_morph", {})
 
 

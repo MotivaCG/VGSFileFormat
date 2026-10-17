@@ -496,6 +496,92 @@ private slots:
         for (int f=0;f<=8;++f) QVERIFY2(QFileInfo::exists(dir.filePath(QString("looped%1.ply").arg(f,4,10,QChar('0')))),qPrintable(QString::number(f)));
         QVERIFY(!QFileInfo::exists(dir.filePath("looped0009.ply")));
     }
+    void loopMorphOverlapCarriesThePlayingCaptureIntoStart() {
+        // A body and an arm swinging about Y, wider each cycle: twelve frames make a cycle, so End
+        // (frame 15) is on Start's pose (frame 3) but 6 degrees further. Every frame is a chunk of
+        // its own, so following the frames back always crosses a chunk change.
+        QTemporaryDir dir;const auto source=dir.filePath("swing.pgs");
+        auto swing=[](int f) {return (4+.5*f)*std::sin(2*M_PI*f/12);};
+        {
+            constexpr int frames=18;vgs::Header h;h.frameCount=h.durationTicks=frames;h.timeDenominator=25;h.chunks.resize(frames);
+            for (int i=0;i<frames;++i) {h.chunks[i].startTick=i;h.chunks[i].intervals=1;}
+            vgs::EncodeOptions options;options.signer=vgs::authoringSigner();options.compression=vgs::Compression::None;
+            QFile file(source);QVERIFY(file.open(QIODevice::WriteOnly));
+            vgs::encodeSequence(h,[&](size_t i) {
+                vgs::Frame frame;std::mt19937 random(31+int(i));std::uniform_real_distribution<float> unit(0,1);QMatrix4x4 turn;turn.rotate(float(swing(int(i))),0,1,0);
+                auto add=[&](QVector3D p) {frame.position.insert(frame.position.end(),{p.x(),p.y(),p.z()});frame.rotation.insert(frame.rotation.end(),{0,0,0,1});
+                    frame.scale.insert(frame.scale.end(),{.01f,.01f,.01f});frame.opacity.push_back(.9f);frame.colorDc.insert(frame.colorDc.end(),{.5f,.4f,.3f});frame.active.push_back(1);};
+                for (int k=0;k<3000;++k) {const float a=unit(random)*6.2831853f;add({.1f*std::cos(a),1.6f*unit(random),.1f*std::sin(a)});}
+                for (int k=0;k<2000;++k) {const float a=unit(random)*6.2831853f;add(turn.map(QVector3D(.1f+.8f*unit(random),1.3f+.04f*std::cos(a),.04f*std::sin(a))));}
+                frame.count=frame.opacity.size();frame.shCoefficients=15;frame.shRest.assign(frame.count*45,0.f);return packExportFrame(frame,3);},
+                [&](uint64_t offset,const uint8_t *bytes,size_t n) {file.seek(qint64(offset));file.write(reinterpret_cast<const char *>(bytes),qint64(n));},options);
+        }
+        // Three frames overlapped, with the arm's root, middle and tip and the head as markers.
+        Project project;project.asset=source;project.in=3./25;project.out=15./25;project.modifiers.clear();
+        Modifier morph;morph.id=Project::newId();morph.name="Loop morph";morph.type=ModifierType::LoopMorph;morph.morphSeconds=-3./25;
+        QMatrix4x4 end,start;end.rotate(float(swing(15)),0,1,0);start.rotate(float(swing(3)),0,1,0);int number=1;
+        for (QVector3D p:{QVector3D(.1f,1.3f,.04f),QVector3D(.5f,1.3f,.04f),QVector3D(.9f,1.3f,.04f),QVector3D(0,1.6f,.1f)}) {
+            MorphMarker k;k.number=number++;k.hasEnd=k.hasStart=true;k.end=p.x()<.05f ? p : end.map(p);k.start=p.x()<.05f ? p : start.map(p);k.endFrame=15;k.startFrame=3;morph.morphMarkers.append(k);}
+        project.modifiers={morph};
+        QCOMPARE(project.morphFrames(25),3);QCOMPARE(project.morphTail(25),0);QVERIFY(project.inMorph(12./25,25) && project.inMorph(14./25,25) && !project.inMorph(11./25,25) && !project.inMorph(15./25,25));
+        auto armAngle=[](const vgs::Frame &f) {
+            double x=0,z=0;for (size_t i=0;i<f.count;++i) {
+                if (!f.active[i]) continue;const double px=f.position[3*i],py=f.position[3*i+1],pz=f.position[3*i+2];
+                if (std::hypot(px,pz)<.45 || std::abs(py-1.3)>.15) continue;x+=f.opacity[i]*px;z+=f.opacity[i]*pz;}
+            return qRadiansToDegrees(std::atan2(-z,x));
+        };
+        // Frames 3 to 11 as they are, then 12 to 14 the morph's, k/4 of the way: the arm swings
+        // on as captured and takes k/4 of the 6 degrees off - or, leading in, the motion also
+        // passes into that of frames 0 to 2, as far before Start. End is not written.
+        for (const bool leadIn:{false,true}) {
+            project.modifiers[0].morphLeadIn=leadIn;QCOMPARE(project.morphLeadsIn(25),leadIn);
+            const auto path=dir.filePath(leadIn ? "lead.vgs" : "overlap.vgs");const auto result=exportCaptureFile(project,path);
+            QCOMPARE(result.frames,9);QVERIFY2(result.notes.join('\n').contains(leadIn ? "It blends into the frames before Start." : "carry the capture into Start"),qPrintable(result.notes.join('\n')));
+            auto capture=vgsdec::Capture::openFile(path.toStdString());QCOMPARE(capture.frameCount(),uint64_t(12));
+            for (int i=0;i<12;++i) {
+                const int f=3+i;double expected=swing(f);
+                if (f>=12) {const double s=(f-11)/4.;const int back=15-f;expected=leadIn ? (1-s)*swing(f)+s*swing(3-back) : swing(f)+s*(swing(3)-swing(15));}
+                const double angle=armAngle(copy(capture.setTime(i/25.,false)));
+                QVERIFY2(std::abs(angle-expected)<1.5,qPrintable(QString("%1frame %2: %3 degrees, not %4").arg(leadIn ? "lead-in " : "").arg(f).arg(angle).arg(expected)));
+            }
+        }
+        project.modifiers[0].morphLeadIn=false;
+        // The preview shows the same frame, its markers carried with it; End is the capture's own.
+        {
+            CaptureWorker worker;QSignalSpy decoded(&worker,&CaptureWorker::decoded);worker.open(source,1,true);worker.decode(13/25.,1,true,project);QCOMPARE(decoded.size(),1);
+            const auto preview=qvariant_cast<FramePtr>(decoded[0][0]);QCOMPARE(preview->chunkIndex,RenderFrame::MorphChunk);QCOMPARE(preview->morphMarkers.size(),size_t(4));
+            vgs::Frame shown;shown.count=preview->records.size();
+            for (const auto &r:preview->records) {shown.position.insert(shown.position.end(),r.position,r.position+3);shown.opacity.push_back(r.color[3]);shown.active.push_back(1);}
+            const double expected=swing(13)+.5*(swing(3)-swing(15));
+            QVERIFY2(std::abs(armAngle(shown)-expected)<1.5,qPrintable(QString("%1 vs %2").arg(armAngle(shown)).arg(expected)));
+            // The tip's marker rides on the arm: at the tip's angle by now.
+            for (const auto &[n,p]:preview->morphMarkers) if (n==3) {const double tip=qRadiansToDegrees(std::atan2(-p.z(),p.x()));QVERIFY2(std::abs(tip-expected)<2,qPrintable(QString::number(tip)));}
+            worker.decode(15/25.,1,true,project);QVERIFY(qvariant_cast<FramePtr>(decoded[1][0])->chunkIndex!=RenderFrame::MorphChunk);
+        }
+        // A .ply sequence numbers them as the frames they take the place of: 0003 to 0014.
+        exportCaptureFile(project,dir.filePath("overlap.ply"));
+        for (int f=3;f<=14;++f) QVERIFY2(QFileInfo::exists(dir.filePath(QString("overlap%1.ply").arg(f,4,10,QChar('0')))),qPrintable(QString::number(f)));
+        QVERIFY(!QFileInfo::exists(dir.filePath("overlap0015.ply")));
+    }
+    void visibilityIsKeptAsPlayedAndDroppedOnAnyChange() {
+        QTemporaryDir dir;const auto source=dir.filePath("cached.pgs");sourceFile(source,5);
+        Project project;project.asset=source;project.in=0;project.out=4./25;project.modifiers.clear();
+        Modifier purge;purge.id=Project::newId();purge.name="Purge";purge.type=ModifierType::PurgeIsolated;purge.isolation={4,300};project.modifiers={purge};
+        CaptureWorker worker;QSignalSpy decoded(&worker,&CaptureWorker::decoded);worker.open(source,1,true);
+        auto visibility=[&] {std::vector<float> v;for (const auto &p:qvariant_cast<FramePtr>(decoded.back()[0])->points) v.push_back(p.modifierVisibility);return v;};
+        // Seeking keeps nothing; playing keeps every frame it shows.
+        worker.decode(2/25.,1,true,project);QCOMPARE(worker.visibilityFrames(),size_t(0));const auto computed=visibility();
+        project.previewPlaying=true;for (int f=0;f<5;++f) worker.decode(f/25.,1,true,project);
+        QCOMPARE(worker.visibilityFrames(),size_t(5));QVERIFY(worker.visibilityBytes()>0 && worker.visibilityBytes()<64*1024);
+        // Seen again, the frame is the same, from the cache.
+        project.previewPlaying=false;worker.decode(2/25.,1,true,project);QCOMPARE(visibility(),computed);QCOMPARE(worker.visibilityFrames(),size_t(5));
+        // Any change empties it, and only playing fills it again.
+        project.modifiers[0].isolation.neighbour=6;worker.decode(2/25.,1,true,project);QCOMPARE(worker.visibilityFrames(),size_t(0));
+        project.previewPlaying=true;worker.decode(2/25.,1,true,project);QCOMPARE(worker.visibilityFrames(),size_t(1));
+        project.transform.position={0,.1f,0};worker.decode(3/25.,1,true,project);QCOMPARE(worker.visibilityFrames(),size_t(1)); // emptied, then frame 3
+        // Nothing that removes splats: nothing kept.
+        project.modifiers.clear();worker.decode(3/25.,1,true,project);QCOMPARE(worker.visibilityFrames(),size_t(0));
+    }
     void loopMorphTimingOnARealCapture() {
         // How long the preview waits on a real capture: the fit, on the first of the morph's
         // frames, and then each frame after it.

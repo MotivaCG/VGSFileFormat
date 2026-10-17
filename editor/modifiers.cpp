@@ -128,16 +128,33 @@ bool removesSplats(ModifierType type) {
     return type==ModifierType::Crop || type==ModifierType::RemoveGreen || type==ModifierType::PurgeIsolated || type==ModifierType::Erase || type==ModifierType::PruneLowContribution;
 }
 const Modifier *Project::loopMorph() const {for (const auto &m:modifiers) if (m.active() && m.type==ModifierType::LoopMorph) return &m;return nullptr;}
+bool Project::morphOverlaps() const {const auto *m=loopMorph();return m && m->morphSeconds<0;}
 int Project::morphFrames(double fps) const {
     const auto *m=loopMorph();if (!m || !(fps>0)) return 0;
-    return std::max(1,int(std::lround(m->morphSeconds*fps)));
+    const int frames=std::max(1,int(std::lround(std::abs(m->morphSeconds)*fps)));
+    if (m->morphSeconds>=0) return frames;
+    const int first=int(std::lround(in*fps)),last=int(std::lround(out*fps));
+    return std::clamp(frames,0,std::max(0,last-first-1));
 }
-double Project::playbackEnd(double fps) const {return fps>0 ? out+morphFrames(fps)/fps : out;}
-bool Project::inMorph(double seconds,double fps,double *fraction) const {
+int Project::morphTail(double fps) const {return morphOverlaps() ? 0 : morphFrames(fps);}
+double Project::playbackEnd(double fps) const {
+    if (!(fps>0)) return out;
+    const int frames=morphFrames(fps);
+    return morphOverlaps() ? (frames ? out-1/fps : out) : out+frames/fps;
+}
+double Project::timelineEnd(double fps) const {return std::max(out,playbackEnd(fps));}
+double Project::morphStart(double fps) const {return fps>0 ? (morphOverlaps() ? out-morphFrames(fps)/fps : out+1/fps) : out;}
+bool Project::inMorph(double seconds,double fps,double *fraction,int *source) const {
     const int frames=morphFrames(fps);if (!frames) return false;
-    const int k=int(std::lround((seconds-out)*fps));if (k<1 || k>frames) return false;
+    const int frame=int(std::lround(seconds*fps)),last=int(std::lround(out*fps)),overlaps=morphOverlaps();
+    const int k=overlaps ? frame-(last-frames-1) : frame-last;if (k<1 || k>frames) return false;
     if (fraction) *fraction=double(k)/double(frames+1);
+    if (source) *source=overlaps ? frame : last;
     return true;
+}
+bool Project::morphLeadsIn(double fps) const {
+    const auto *m=loopMorph();const int frames=morphFrames(fps);
+    return m && m->morphSeconds<0 && m->morphLeadIn && frames>0 && int(std::lround(in*fps))-frames>=0;
 }
 // The Loop morph splits only what removes splats; the stack is otherwise the same both ways.
 static QVector<Modifier> splitAtMorph(const QVector<Modifier> &stack,bool above) {
@@ -290,7 +307,7 @@ QJsonArray Project::modifierJson() const {
                     if (marker.hasStart) {entry["start"]=vector(marker.start);entry["startFrame"]=marker.startFrame;}
                     markers.append(entry);
                 }
-                item["morph"]=QJsonObject{{"seconds",m.morphSeconds},{"space","capture-local"},{"markers",markers}};
+                item["morph"]=QJsonObject{{"seconds",m.morphSeconds},{"leadIn",m.morphLeadIn},{"space","capture-local"},{"markers",markers}};
             }
             else if (m.type==ModifierType::PurgeIsolated) item["isolation"]=QJsonObject{{"neighbour",m.isolation.neighbour},{"medianPercent",m.isolation.medianPercent}};
             result.append(item);
