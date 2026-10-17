@@ -17,6 +17,8 @@
 #include <QApplication>
 #include <QAction>
 #include <QFile>
+#include <QPainter>
+#include <QDir>
 #include <QFileDialog>
 #include <QJsonDocument>
 #include <QSettings>
@@ -48,6 +50,35 @@ class AutomationTests : public QObject {
         QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir);
     }
 private slots:
+    void loopMorphIsReadSeekedAndEditedByAutomation() {try {loopMorphAutomation(0);} catch (const std::exception &e) {QFAIL(e.what());}}
+    void loopMorphAutomation(int) { // a slot with an argument, so QTest does not run it on its own
+        QTemporaryDir dir;QVERIFY(dir.isValid());settings(dir.path());const auto path=capture(dir.path(),6);
+        MainWindow window(nullptr,dir.path()+"/presets");EditorAutomation bridge(&window,dir.path()+"/sessions");
+        bridge.execute("open",{{"path",path}});QTRY_VERIFY_WITH_TIMEOUT(bridge.state()["ready"].toBool(),5000);
+        auto settle=[&] {QTRY_VERIFY_WITH_TIMEOUT(bridge.state()["ready"].toBool(),10000);};
+        bridge.execute("range",{{"start",0},{"end",3}});settle();
+        QVERIFY_EXCEPTION_THROWN(bridge.execute("loop_morph",{}),std::runtime_error); // none yet
+        const auto added=bridge.execute("add_modifier",{{"type","loop-morph"}});const QString id=added["modifier_id"].toString();settle();
+        // Two frames at the capture's 25 fps; with markers written by number.
+        bridge.execute("edit_modifier",{{"modifier_id",id},{"patch",QJsonObject{{"morph",QJsonObject{{"seconds",.08},{"space","capture-local"},{"markers",QJsonArray{
+            QJsonObject{{"number",1},{"start",QJsonArray{0,1,0}},{"startFrame",0},{"end",QJsonArray{0,1,0}},{"endFrame",3}},
+            QJsonObject{{"number",2},{"start",QJsonArray{.2,1,0}},{"startFrame",0}}}}}}}}});settle();
+        auto morph=bridge.execute("loop_morph",{});
+        QCOMPARE(morph["frames"].toInt(),2);QCOMPARE(morph["morph_frames"].toArray(),QJsonArray({4,5}));QCOMPARE(morph["pairs"].toInt(),1);
+        const auto markers=morph["markers"].toArray();QCOMPARE(markers.size(),2);QCOMPARE(markers[1].toObject()["end"].toString(),QString("missing"));
+        // The morph's frames can be seeked, past End; not beyond them.
+        bridge.execute("seek",{{"frame",5}});QTRY_VERIFY_WITH_TIMEOUT(bridge.state()["ready"].toBool(),10000);QCOMPARE(bridge.state()["frame"].toInt(),5);
+        QVERIFY_EXCEPTION_THROWN(bridge.execute("seek",{{"frame",6}}),std::runtime_error);
+        QCOMPARE(bridge.execute("loop_morph",{})["side_shown"].toString(),QString("none"));
+        // A marker is placed on Start or End only, from a current view.
+        QVERIFY_EXCEPTION_THROWN(bridge.execute("morph_marker",{{"view_id",bridge.state()["view_id"]},{"point",QJsonArray{.5,.5}}}),std::runtime_error);
+        bridge.execute("seek",{{"frame",3}});QTRY_VERIFY_WITH_TIMEOUT(bridge.state()["ready"].toBool(),10000);
+        QCOMPARE(bridge.execute("loop_morph",{})["side_shown"].toString(),QString("end"));
+        QVERIFY_EXCEPTION_THROWN(bridge.execute("morph_marker",{{"view_id","stale"},{"point",QJsonArray{.5,.5}}}),std::runtime_error);
+        bridge.execute("remove_morph_markers",{{"numbers",QJsonArray{2}}});settle();QCOMPARE(bridge.execute("loop_morph",{})["markers"].toArray().size(),1);
+        bridge.execute("remove_morph_markers",{{"all",true}});settle();QCOMPARE(bridge.execute("loop_morph",{})["markers"].toArray().size(),0);
+        bridge.execute("undo",{});settle();QCOMPARE(bridge.execute("loop_morph",{})["markers"].toArray().size(),1);
+    }
     void choosingGuiExportDestinationDoesNotReserveTheExporter() {
         QTemporaryDir dir;QVERIFY(dir.isValid());settings(dir.path());const auto path=capture(dir.path());
         MainWindow window(nullptr,dir.path()+"/presets");EditorAutomation bridge(&window,dir.path()+"/sessions");
@@ -425,6 +456,68 @@ private slots:
         QVERIFY(QFileInfo(output).size()>0);
         QVERIFY_EXCEPTION_THROWN(bridge.execute("export",{{"path",output}}),std::runtime_error);
         QVERIFY_EXCEPTION_THROWN(bridge.execute("save",{{"path",path}}),std::runtime_error);
+    }
+    // A project's Loop morph as the viewport draws it, from the project's own camera: End, the
+    // morph's frames at quarters, and Start, saved as PNGs in LOOP_MORPH_RENDERS, with the mean
+    // brightness and saturation of the middle of the view for each.
+    void loopMorphRenders() {
+        const QString project=qEnvironmentVariable("LOOP_MORPH_PROJECT"),output=qEnvironmentVariable("LOOP_MORPH_RENDERS");
+        if (project.isEmpty() || output.isEmpty()) QSKIP("Set LOOP_MORPH_PROJECT and LOOP_MORPH_RENDERS to render a project's Loop morph.");
+        QTemporaryDir dir;QVERIFY(dir.isValid());settings(dir.path());QVERIFY(QDir().mkpath(output));
+        MainWindow window(nullptr,dir.path()+"/presets");window.resize(1400,1000);window.show();
+        EditorAutomation bridge(&window,dir.path()+"/sessions");auto *viewport=window.findChild<Viewport *>();QVERIFY(viewport);
+        bridge.execute("open",{{"path",project}});QTRY_VERIFY_WITH_TIMEOUT(bridge.state()["ready"].toBool(),120000);
+        bridge.execute("display",{{"mode","splats"}});
+        const auto state=bridge.state();const double fps=state["fps"].toDouble();
+        const auto range=bridge.execute("project",{})["timeline"].toObject();
+        const int in=int(std::lround(range["in"].toDouble()*fps)),out=int(std::lround(range["out"].toDouble()*fps));
+        int frames=0;for (const auto &m:bridge.execute("project",{})["modifiers"].toArray()) if (m.toObject()["type"]=="loop-morph" && m.toObject()["enabled"].toBool()) frames=std::max(1,int(std::lround(m.toObject()["morph"].toObject()["seconds"].toDouble()*fps)));
+        QVERIFY(frames>0);
+        const QVector<QPair<QString,int>> shots{{"0_end",out},{"1_quarter",out+std::max(1,(frames+1)/4)},{"2_half",out+std::max(1,(frames+1)/2)},{"3_three_quarters",out+std::max(1,3*(frames+1)/4)},{"4_start",in}};
+        std::vector<QImage> strip;
+        for (const auto &[name,frame]:shots) {
+            bridge.execute("seek",{{"frame",frame}});QTRY_VERIFY_WITH_TIMEOUT(bridge.state()["ready"].toBool(),120000);
+            QTest::qWait(200);const QImage image=viewport->grabFramebuffer();QVERIFY(!image.isNull());image.save(output+"/"+name+".png");
+            // The middle of the view, where the project's camera was left on the subject.
+            const QRect box(image.width()/5,image.height()/10,image.width()*3/5,image.height()*4/5);const QImage face=image.copy(box);
+            strip.push_back(face);
+            double light=0,saturation=0,sharp=0;int count=0;
+            auto luma=[&](int x,int y) {const QColor c=face.pixelColor(x,y);return .2126*c.redF()+.7152*c.greenF()+.0722*c.blueF();};
+            for (int y=1;y<face.height()-1;++y) for (int x=1;x<face.width()-1;++x) {
+                const QColor c=face.pixelColor(x,y);const double hi=std::max({c.redF(),c.greenF(),c.blueF()}),lo=std::min({c.redF(),c.greenF(),c.blueF()});
+                light+=luma(x,y);saturation+=hi>0 ? (hi-lo)/hi : 0;sharp+=std::abs(4*luma(x,y)-luma(x-1,y)-luma(x+1,y)-luma(x,y-1)-luma(x,y+1));++count;
+            }
+            qInfo("%s (frame %d): brightness %.4f, saturation %.4f, sharpness %.4f",qPrintable(name),frame,light/count,saturation/count,sharp/count);
+        }
+        QImage sheet(strip.front().width()*int(strip.size()),strip.front().height(),QImage::Format_RGB32);QPainter painter(&sheet);
+        for (int i=0;i<int(strip.size());++i) painter.drawImage(i*strip.front().width(),0,strip[size_t(i)]);
+        painter.end();sheet.save(output+"/faces.png");
+    }
+    // Placing markers on a project as a user does: Tab from Start, a click on the subject, and
+    // on End the target where its pair probably is (LOOP_MORPH_PROJECT).
+    void loopMorphSuggestsWhilePlacing() {
+        const QString project=qEnvironmentVariable("LOOP_MORPH_PROJECT");if (project.isEmpty()) QSKIP("Set LOOP_MORPH_PROJECT.");
+        QTemporaryDir dir;QVERIFY(dir.isValid());settings(dir.path());
+        MainWindow window(nullptr,dir.path()+"/presets");window.resize(1400,1000);window.show();
+        EditorAutomation bridge(&window,dir.path()+"/sessions");auto *viewport=window.findChild<Viewport *>();QVERIFY(viewport);
+        bridge.execute("open",{{"path",project}});QTRY_VERIFY_WITH_TIMEOUT(bridge.state()["ready"].toBool(),120000);
+        bridge.execute("display",{{"mode","splats"}});
+        QString id;for (const auto &m:bridge.execute("project",{})["modifiers"].toArray()) if (m.toObject()["type"]=="loop-morph") id=m.toObject()["id"].toString();
+        bridge.execute("select_modifier",{{"modifier_id",id}});QTRY_VERIFY_WITH_TIMEOUT(bridge.state()["ready"].toBool(),60000);
+        viewport->setFocus();QTest::keyClick(viewport,Qt::Key_Tab);QTRY_VERIFY_WITH_TIMEOUT(bridge.state()["ready"].toBool(),60000);QTest::qWait(300);
+        qInfo("after Tab: frame %d, picking %d, markers %d",bridge.state()["frame"].toInt(),int(viewport->pointPicking()),int(viewport->viewMarkers().size()));
+        // A click on the middle of the face: marker on Start, then off to End.
+        const QPoint at(viewport->width()/2,viewport->height()*2/5);QTest::mouseClick(viewport,Qt::LeftButton,Qt::NoModifier,at);
+        QTRY_VERIFY_WITH_TIMEOUT(bridge.state()["ready"].toBool(),60000);QTest::qWait(500);
+        int suggested=0;for (const auto &m:viewport->viewMarkers()) suggested+=m.suggested;
+        qInfo("after the click: frame %d, picking %d, markers %d, suggested %d",bridge.state()["frame"].toInt(),int(viewport->pointPicking()),int(viewport->viewMarkers().size()),suggested);
+        const auto morph=bridge.execute("loop_morph",{});qInfo("suggestion %s",QJsonDocument(morph["suggestion"].toObject()).toJson(QJsonDocument::Compact).constData());
+        for (const auto &m:viewport->viewMarkers()) if (m.suggested) {QPointF p;const bool in=viewport->projectToView(m.world,&p);qInfo("target %d world %.3f %.3f %.3f -> %d (%.0f,%.0f) of %dx%d",m.number,m.world.x(),m.world.y(),m.world.z(),int(in),p.x(),p.y(),viewport->width(),viewport->height());}
+        if (const QString shot=qEnvironmentVariable("LOOP_MORPH_RENDERS");!shot.isEmpty()) viewport->grabFramebuffer().save(shot+"/placing.png");
+        QVERIFY(suggested==1);
+        // The target is on the subject in view, where it was drawn first, and stays there once
+        // the End frame has arrived and it is put on the splat nearest it.
+        for (const auto &m:viewport->viewMarkers()) if (m.suggested) {QPointF p;QVERIFY(viewport->projectToView(m.world,&p));QVERIFY2(viewport->rect().contains(p.toPoint()),qPrintable(QString("%1,%2").arg(p.x()).arg(p.y())));}
     }
     void realMcpClientControlsTheNativeEditor() {
         const QString python=qEnvironmentVariable("VGS_MCP_TEST_PYTHON");

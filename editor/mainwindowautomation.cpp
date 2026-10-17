@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-VGS-Editor-Proprietary
 // Copyright (c) 2026 Victor M. Feliz. All rights reserved.
 #include "mainwindow.h"
+#include <set>
 #include "viewport.h"
 #include "exporttask.h"
 #include "rangeslider.h"
@@ -129,8 +130,9 @@ QJsonObject MainWindow::automationCommand(const QString &method,const QJsonObjec
     }
     if (method=="project") {auto copy=w.project_;copy.camera=w.viewport_->camera();return copy.json(w.projectPath_);}
     if (method=="seek") {
-        const int frame=integer(a,"frame",0,std::max(0,w.info_.frames-1));
-        if (frame<w.project_.in*w.info_.fps-1e-6 || frame>w.project_.out*w.info_.fps+1e-6) fail("Frame is outside Start/End. Change the range first.");
+        // Up to End, or through a Loop morph's frames after it.
+        const int frame=integer(a,"frame",0,std::max(0,w.info_.frames-1)+w.project_.morphFrames(w.info_.fps));
+        if (frame<w.project_.in*w.info_.fps-1e-6 || frame>w.project_.playbackEnd(w.info_.fps)*w.info_.fps+1e-6) fail("Frame is outside Start/End and the Loop morph's frames. Change the range first.");
         w.automationError_.clear();w.setTime(frame/w.info_.fps,false);return state();
     }
     if (method=="range") {
@@ -249,6 +251,58 @@ QJsonObject MainWindow::automationCommand(const QString &method,const QJsonObjec
         const int operation=int(mode=="replace" ? Viewport::SelectMode::Replace : mode=="subtract" ? Viewport::SelectMode::Subtract : Viewport::SelectMode::Add);
         w.undoOpen_=false;w.automationError_.clear();w.applyStroke(records,operation);w.undoOpen_=false;
         auto result=state();result["picked_records"]=double(records.size());return result;
+    }
+    if (method=="loop_morph" || method=="morph_marker" || method=="remove_morph_markers") {
+        // The selected Loop morph, or else the one that applies.
+        Modifier *m=w.project_.modifier();
+        if (!m || m->type!=ModifierType::LoopMorph) {m=nullptr;for (auto &other:w.project_.modifiers) if (other.type==ModifierType::LoopMorph && other.active()) {m=&other;break;}}
+        if (!m) fail("Add a Loop morph modifier first.");
+        using Side=MainWindow::MorphSide;const double fps=w.info_.fps;
+        const int endFrame=w.morphFrameOf(Side::End),startFrame=w.morphFrameOf(Side::Start),frame=w.currentFrame();
+        const Side shown=frame==startFrame ? Side::Start : frame==endFrame ? Side::End : Side::None;
+        if (method=="morph_marker") {
+            if (text(a,"view_id")!=automationViewId(connectionId)) fail("Stale view: camera, frame or scene changed. Take a new snapshot first.");
+            if (shown==Side::None) fail("Seek the Start or the End frame first: a marker is placed on the frame shown.");
+            if (!m->enabled) fail("Enable the Loop morph first.");
+            const auto p=a["point"].toArray();if (p.size()!=2) fail("point must be [x,y].");
+            const QJsonObject xy{{"x",p[0]},{"y",p[1]}};const QPointF at(number(xy,"x",0,1)*w.viewport_->width(),number(xy,"y",0,1)*w.viewport_->height());
+            QVector3D world;if (!w.viewport_->pickPoint(at,&world)) fail("No splat under that point.");
+            const int wanted=a.contains("number") ? integer(a,"number",1,1000) : 0;int placed=0;
+            if (!w.placeMorphPoint(*m,shown,wanted,world,&placed)) fail("The transform at that frame cannot be inverted.");
+            automationChanged();auto result=state();result["placed_marker"]=placed;result["side"]=shown==Side::End ? "end" : "start";return result;
+        }
+        if (method=="remove_morph_markers") {
+            if (flag(a,"all")) m->morphMarkers.clear();
+            else {
+                if (!a["numbers"].isArray()) fail("Give numbers, or all=true.");
+                std::set<int> numbers;for (const auto &v:a["numbers"].toArray()) numbers.insert(v.toInt());
+                m->morphMarkers.erase(std::remove_if(m->morphMarkers.begin(),m->morphMarkers.end(),[&](const MorphMarker &k) {return numbers.count(k.number)>0;}),m->morphMarkers.end());
+            }
+            automationChanged();return state();
+        }
+        // Read: the length, the markers and what the panel says about them, and where the next one
+        // probably goes on the frame shown, in the current view's normalised coordinates.
+        float flagAbove=0;const auto off=w.morphOffsets(*m,&flagAbove);QJsonArray markers;int pairs=0;
+        for (const auto &k:m->morphMarkers) {
+            const bool endHere=w.morphPlaced(k,Side::End),startHere=w.morphPlaced(k,Side::Start);pairs+=endHere && startHere;
+            QJsonObject entry{{"number",k.number},{"start",k.hasStart ? (startHere ? "placed" : "placed-on-another-frame") : "missing"},{"end",k.hasEnd ? (endHere ? "placed" : "placed-on-another-frame") : "missing"}};
+            if (k.hasStart) entry["start_frame"]=k.startFrame;if (k.hasEnd) entry["end_frame"]=k.endFrame;
+            if (const auto d=off.find(k.number);d!=off.end()) {entry["off_cm"]=std::round(d->second*1000)/10;entry["flagged"]=d->second>flagAbove;}
+            markers.append(entry);
+        }
+        const int frames=w.project_.morphFrames(fps);
+        QJsonObject result{{"modifier_id",m->id},{"enabled",m->enabled},{"seconds",m->morphSeconds},{"frames",std::max(1,int(std::lround(m->morphSeconds*fps)))},
+            {"start_frame",startFrame},{"end_frame",endFrame},{"morph_frames",frames ? QJsonArray{endFrame+1,endFrame+frames} : QJsonArray{}},
+            {"fitting",w.morphFitting_},{"pairs",pairs},{"markers",markers},{"frame_shown",frame},{"side_shown",shown==Side::End ? "end" : shown==Side::Start ? "start" : "none"}};
+        if (shown!=Side::None) {
+            const int next=w.morphTarget(shown);
+            if (const auto guess=w.morphGuess(*m,shown,next)) {
+                QPointF at;QJsonObject suggestion{{"number",next},{"side",shown==Side::End ? "end" : "start"}};
+                if (w.viewport_->projectToView(*guess,&at)) suggestion["point"]=QJsonArray{at.x()/std::max(1,w.viewport_->width()),at.y()/std::max(1,w.viewport_->height())};
+                suggestion["view_id"]=automationViewId(connectionId);result["suggestion"]=suggestion;
+            }
+        }
+        return result;
     }
     if (method=="clear_erased") {
         auto *m=w.project_.modifier();if (!m || m->type!=ModifierType::Erase) fail("Select an Erase modifier.");

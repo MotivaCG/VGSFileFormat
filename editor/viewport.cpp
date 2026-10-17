@@ -1072,8 +1072,9 @@ void Viewport::setViewMarkers(const QVector<ViewMarker> &markers) {
     viewMarkers_=markers;markerHiddenValid_=false;update();
 }
 void Viewport::setBusyText(const QString &text) {if (busyText_!=text) {busyText_=text;update();}}
-bool Viewport::nearestVisiblePoint(const QVector3D &world, QVector3D *found) const {
+bool Viewport::nearestVisiblePoint(const QVector3D &near, QVector3D *found) const {
     if (!frame_) return false;
+    const QVector3D world=near; // `found` may be `near` itself: keep where the search is from
     const auto model=transform_.matrix();auto stack=modifiers_;if (!modifierStack_) {Modifier m;m.crop=crop_;stack={m};}
     const CompiledModifiers modifiers(stack);float best=std::numeric_limits<float>::max();
     for (const auto &point:frame_->points) {

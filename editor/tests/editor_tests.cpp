@@ -24,6 +24,7 @@
 #include <QtTest>
 #include <cmath>
 #include <random>
+#include <set>
 
 namespace {
 // A rod of splats along `axis` from `from`, `length` long and `radius` thick, as a body's
@@ -114,17 +115,34 @@ private slots:
         for (size_t i=0;i<end.size();i+=97) QVERIFY((splatAt(first,i)-splatAt(end,i)).length()<1e-4f);
         for (size_t i=0;i<start.size();i+=97) QVERIFY((splatAt(last,i)-splatAt(start,i)).length()<1e-4f);
         // Halfway the end frame's splats are the subject, rigid: the arm's tips as far apart.
-        const auto middle=morph.evaluate(.5);QCOMPARE(middle.size(),end.size()+start.size());
+        std::vector<uint32_t> from;const auto middle=morph.evaluate(.5,&from);QCOMPARE(from.size(),middle.size());
+        QCOMPARE(middle.size(),end.size()+start.size()); // halfway both frames show, each in part
+        // Where splat `i` of the End frame is in the morph's frame; the arm's tips show halfway.
+        auto in=[&](const std::vector<uint32_t> &f,size_t i) {return size_t(std::find(f.begin(),f.end(),uint32_t(i))-f.begin());};
         const size_t left=nearestSplat(end,end.size(),{-.4f,1.3f,.05f}),right=nearestSplat(end,end.size(),{.4f,1.3f,.05f});
-        const float span=(splatAt(end,left)-splatAt(end,right)).length(),now=(splatAt(middle,left)-splatAt(middle,right)).length();
+        // Pick tips that still show halfway: the change-over noise may have hidden the nearest.
+        auto shown=[&](size_t i) {return in(from,i)<from.size();};
+        size_t l=left,r=right;for (size_t i=0;i<end.size() && !shown(l);++i) if (shown(i) && (splatAt(end,i)-splatAt(end,left)).length()<.08f) l=i;
+        for (size_t i=0;i<end.size() && !shown(r);++i) if (shown(i) && (splatAt(end,i)-splatAt(end,right)).length()<.08f) r=i;
+        QVERIFY(shown(l) && shown(r));
+        const float span=(splatAt(end,l)-splatAt(end,r)).length(),now=(splatAt(middle,in(from,l))-splatAt(middle,in(from,r))).length();
         QVERIFY2(std::abs(now-span)<.03f*span,qPrintable(QString("%1 vs %2").arg(now).arg(span)));
         // Turned about halfway: the arm's direction 20 degrees from where it was.
-        const QVector3D was=(splatAt(end,right)-splatAt(end,left)).normalized(),is=(splatAt(middle,right)-splatAt(middle,left)).normalized();
+        const QVector3D was=(splatAt(end,r)-splatAt(end,l)).normalized(),is=(splatAt(middle,in(from,r))-splatAt(middle,in(from,l))).normalized();
         const float turned=qRadiansToDegrees(std::acos(std::clamp(QVector3D::dotProduct(was,is),-1.f,1.f)));
         QVERIFY2(std::abs(turned-20)<5,qPrintable(QString::number(turned)));
-        // Fading: the start frame in over the first half, the end frame out over the second.
-        QCOMPARE(loopmorph::endOpacity(0),1.f);QCOMPARE(loopmorph::startOpacity(0),0.f);QCOMPARE(loopmorph::endOpacity(1),0.f);QCOMPARE(loopmorph::startOpacity(1),1.f);
-        QVERIFY(loopmorph::endOpacity(.5)>.7f && loopmorph::startOpacity(.5)>.7f);
+        // The End frame hands its optical depth to the Start frame between 0.2 and 0.8 of the
+        // way: before, only End shows, as it is; after, only Start; and in between, a splat of
+        // each lying on one another stops as much light as either alone - not less, which would
+        // let what is inside show through and read paler.
+        for (float alpha:{.05f,.4f,.9f}) {
+            QCOMPARE(loopmorph::endOpacity(0,alpha),alpha);QCOMPARE(loopmorph::startOpacity(0,alpha),0.f);
+            QVERIFY(std::abs(loopmorph::endOpacity(1,alpha))<1e-6f);QVERIFY(std::abs(loopmorph::startOpacity(1,alpha)-alpha)<1e-6f);
+            for (double s:{.3,.5,.7}) {
+                const float together=1-(1-loopmorph::endOpacity(s,alpha))*(1-loopmorph::startOpacity(s,alpha));
+                QVERIFY2(std::abs(together-alpha)<1e-5f,qPrintable(QString("alpha %1 at %2: %3").arg(alpha).arg(s).arg(together)));
+            }
+        }
     }
     void loopMorphSwingsABendingArmRoundTheElbow() {
         // An arm that bends 90 degrees at the elbow between the frames.
@@ -136,13 +154,20 @@ private slots:
         QVERIFY2(morph.markerError()<.03,qPrintable(QString::number(morph.markerError())));
         // The hand keeps its distance from the elbow all the way: it swings round on an arc
         // rather than cutting the corner, where it would come within 0.35 m.
-        const size_t hand=nearestSplat(end,end.size(),{1,0,.05f}),elbow=nearestSplat(end,end.size(),{.5f,0,.05f});
+        // The splats of the hand (the last 3 cm of the arm) and of the elbow in both frames, and
+        // where those that show are on average: whichever frame they come from.
+        std::set<uint32_t> hand,elbow;
+        for (size_t i=0;i<end.size();++i) {if ((splatAt(end,i)-QVector3D(1,0,0)).length()<.06f) hand.insert(uint32_t(i));if ((splatAt(end,i)-QVector3D(.5f,0,0)).length()<.06f) elbow.insert(uint32_t(i));}
+        for (size_t j=0;j<start.size();++j) {if ((splatAt(start,j)-QVector3D(.5f,.5f,0)).length()<.06f) hand.insert(uint32_t(end.size()+j));if ((splatAt(start,j)-QVector3D(.5f,0,0)).length()<.06f) elbow.insert(uint32_t(end.size()+j));}
+        auto mean=[](const loopmorph::Cloud &c,const std::vector<uint32_t> &from,const std::set<uint32_t> &which) {
+            QVector3D sum;int n=0;for (size_t i=0;i<from.size();++i) if (which.count(from[i])) {sum+=splatAt(c,i);++n;}return n ? sum/float(n) : QVector3D(1e9f,0,0);};
         for (double s:{.25,.5,.75}) {
-            const auto frame=morph.evaluate(s);const float reach=(splatAt(frame,hand)-splatAt(frame,elbow)).length();
-            QVERIFY2(reach>.44f && reach<.56f,qPrintable(QString("s=%1: %2").arg(s).arg(reach)));
+            std::vector<uint32_t> from;const auto frame=morph.evaluate(s,&from);const float reach=(mean(frame,from,hand)-mean(frame,from,elbow)).length();
+            QVERIFY2(reach>.42f && reach<.56f,qPrintable(QString("s=%1: %2").arg(s).arg(reach)));
         }
         // And it ends where the start frame's hand is.
-        const auto nearlyThere=morph.evaluate(.98);QVERIFY2((splatAt(nearlyThere,hand)-QVector3D(.5f,.5f,0)).length()<.08f,qPrintable(QString::number((splatAt(nearlyThere,hand)-QVector3D(.5f,.5f,0)).length())));
+        std::vector<uint32_t> from;const auto nearlyThere=morph.evaluate(.98,&from);const QVector3D there=mean(nearlyThere,from,hand);
+        QVERIFY2((there-QVector3D(.5f,.5f,0)).length()<.08f,qPrintable(QString::number((there-QVector3D(.5f,.5f,0)).length())));
     }
     void compactDensityMatchesFullHdAndFourK() {
         QCOMPARE(compactDisplayScale({1920,1080}),.875);QCOMPARE(compactDisplayScale({3840,2160}),1.0);

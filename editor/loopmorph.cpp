@@ -309,8 +309,8 @@ std::vector<float> deviations(const std::vector<Pair> &pairs) {
     }
     return out;
 }
-float endOpacity(double s) {return float(1-smoothstep(0.35,1.0,s));}
-float startOpacity(double s) {return float(smoothstep(0.0,0.65,s));}
+float endOpacity(double s,float alpha) {return float(1-std::pow(1-std::min(.999,double(alpha)),1-smoothstep(.2,.8,s)));}
+float startOpacity(double s,float alpha) {return float(1-std::pow(1-std::min(.999,double(alpha)),smoothstep(.2,.8,s)));}
 
 struct Morph::Data {
     Cloud end,start;
@@ -324,7 +324,10 @@ Morph::Morph(Cloud end,Cloud start,const std::vector<Pair> &pairs,const std::fun
     if (end.shCoefficients!=start.shCoefficients) {end.sh.clear();start.sh.clear();end.shCoefficients=start.shCoefficients=0;}
     d_->end=std::move(end);d_->start=std::move(start);auto &d=*d_;
     check(cancelled);const Surface endSurface(d.end.position,d.end.colour),startSurface(d.start.position,d.start.colour);
-    check(cancelled);d.forward.build(d.end.position,500);check(cancelled);d.backward.build(d.start.position,500);
+    // About 4000 nodes, some 4-5 cm apart on a person: fine enough to follow a face's
+    // expression rather than blend two (500 left them 13 cm apart, more than half a face).
+    constexpr size_t nodeTarget=4000;
+    check(cancelled);d.forward.build(d.end.position,nodeTarget);check(cancelled);d.backward.build(d.start.position,nodeTarget);
     std::vector<Vec> onEnd,onStart;for (const auto &p:pairs) {onEnd.push_back(vec(p.end));onStart.push_back(vec(p.start));}
     d.forward.fit(d.end.position,d.end.colour,startSurface,centreOf(d.start),onEnd,onStart,cancelled);
     d.backward.fit(d.start.position,d.start.colour,endSurface,centreOf(d.end),onStart,onEnd,cancelled);
@@ -346,14 +349,14 @@ Morph::Morph(Cloud end,Cloud start,const std::vector<Pair> &pairs,const std::fun
 Morph::~Morph()=default;
 double Morph::markerError() const {return d_->error;}
 size_t Morph::nodes() const {return d_->forward.rest.size()+d_->backward.rest.size();}
-Cloud Morph::evaluate(double s) const {
+Cloud Morph::evaluate(double s,std::vector<uint32_t> *source) const {
     const auto &d=*d_;s=std::clamp(s,0.,1.);
-    const float fadeEnd=endOpacity(s),fadeStart=startOpacity(s);const bool ends=fadeEnd>0,starts=fadeStart>0;
+    const bool ends=s<1,starts=s>0;
     const size_t ne=ends ? d.end.size() : 0,ns=starts ? d.start.size() : 0,n=ne+ns;const int sh=d.end.shCoefficients;const size_t terms=size_t(sh)*3;
     Cloud out;out.shCoefficients=sh;out.position.resize(3*n);out.rotation.resize(4*n);out.scale.resize(3*n);out.colour.resize(3*n);out.opacity.resize(n);out.sh.resize(terms*n);
     // One frame's splats, carried `along` of the way by its graph, their colour and SH `mix`
-    // of the way to their partner's.
-    auto carry=[&](const Graph &g,const Cloud &own,const Cloud &other,const std::vector<uint32_t> &partner,double along,double mix,float fade,size_t offset) {
+    // of the way to their partner's, showing as much as their place has changed over.
+    auto carry=[&](const Graph &g,const Cloud &own,const Cloud &other,const std::vector<uint32_t> &partner,double along,double mix,bool isEnd,size_t offset) {
         const auto pose=g.pose(along);const auto &place=pose.first;const auto &turns=pose.second;
         std::vector<Eigen::Vector4d> quats(turns.size());for (size_t j=0;j<turns.size();++j) quats[j]=Quat(turns[j]).coeffs();
         parallel(own.size(),[&](size_t first,size_t last) {for (size_t i=first;i<last;++i) {
@@ -367,11 +370,24 @@ Cloud Morph::evaluate(double s) const {
             const Quat q=(turn*own_q).normalized();out.rotation[4*o]=float(q.x());out.rotation[4*o+1]=float(q.y());out.rotation[4*o+2]=float(q.z());out.rotation[4*o+3]=float(q.w());
             for (int c=0;c<3;++c) {out.scale[3*o+c]=own.scale[3*i+c];out.colour[3*o+c]=float((1-mix)*own.colour[3*i+c]+mix*other.colour[3*p+c]);}
             for (size_t k=0;k<terms;++k) out.sh[terms*o+k]=float((1-mix)*own.sh[terms*i+k]+mix*other.sh[terms*p+k]);
-            out.opacity[o]=own.opacity[i]*fade;
+            out.opacity[o]=isEnd ? endOpacity(s,own.opacity[i]) : startOpacity(s,own.opacity[i]);
         }});
     };
-    if (ends) carry(d.forward,d.end,d.start,d.endPartner,s,s,fadeEnd,0);
-    if (starts) carry(d.backward,d.start,d.end,d.startPartner,1-s,1-s,fadeStart,ne);
+    if (ends) carry(d.forward,d.end,d.start,d.endPartner,s,s,true,0);
+    if (starts) carry(d.backward,d.start,d.end,d.startPartner,1-s,1-s,false,ne);
+    // What does not show is not drawn, nor exported.
+    size_t kept=0;if (source) source->clear();
+    for (size_t i=0;i<n;++i) {
+        if (out.opacity[i]<1.f/512) continue;
+        if (kept!=i) {
+            std::copy_n(out.position.begin()+std::ptrdiff_t(3*i),3,out.position.begin()+std::ptrdiff_t(3*kept));std::copy_n(out.rotation.begin()+std::ptrdiff_t(4*i),4,out.rotation.begin()+std::ptrdiff_t(4*kept));
+            std::copy_n(out.scale.begin()+std::ptrdiff_t(3*i),3,out.scale.begin()+std::ptrdiff_t(3*kept));std::copy_n(out.colour.begin()+std::ptrdiff_t(3*i),3,out.colour.begin()+std::ptrdiff_t(3*kept));
+            out.opacity[kept]=out.opacity[i];if (terms) std::copy_n(out.sh.begin()+std::ptrdiff_t(terms*i),terms,out.sh.begin()+std::ptrdiff_t(terms*kept));
+        }
+        if (source) source->push_back(uint32_t(starts && !ends ? d.end.size()+i : i));
+        ++kept;
+    }
+    out.position.resize(3*kept);out.rotation.resize(4*kept);out.scale.resize(3*kept);out.colour.resize(3*kept);out.opacity.resize(kept);out.sh.resize(terms*kept);
     return out;
 }
 }

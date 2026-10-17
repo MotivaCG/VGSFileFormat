@@ -315,7 +315,7 @@ async def get_project() -> dict[str, Any]:
 
 @mcp.tool(title="Seek source frame", annotations=SET)
 async def seek_frame(frame: NonnegativeInt) -> dict[str, Any]:
-    """Seek a zero-based source frame within inclusive Start/End and wait for decoding. Returns state including chunk. No undo step. Refresh stroke images after seeking; picks do not transfer between source chunks."""
+    """Seek a zero-based source frame within inclusive Start/End, or one of an active Loop morph's frames after End (End+1 to End+its frame count), and wait for decoding. Returns state including chunk. No undo step. Refresh stroke images after seeking; picks do not transfer between source chunks."""
     return await _edit("seek", {"frame": frame})
 
 
@@ -508,6 +508,30 @@ async def erase_lasso(view_id: str, points: LassoPoints, mode: Literal["add", "s
 async def clear_erased(all_chunks: bool = False) -> dict[str, Any]:
     """Undoably clear selected Erase picks: all_chunks=false restores this chunk; true restores all chunks. Other modifiers may still hide the points. Leaves the modifier in place; preview need not be on. Refresh images."""
     return await _edit("clear_erased", {"all_chunks": all_chunks})
+
+
+@mcp.tool(title="Read the Loop morph", annotations=READ)
+async def get_loop_morph() -> dict[str, Any]:
+    """The selected (or active) Loop morph: seconds and frames it adds after End, the frames it occupies, whether it is fitting, and each marker - its Start and End point (placed on the current Start/End frame, placed on another frame and so unused, or missing) and, from four pairs, off_cm: how far its End point is from where the other pairs put it, flagged when far beyond the rest (likely two different points paired). With Start or End shown and three pairs or more, suggestion gives where the next marker probably goes, as a normalised point of the current view (view_id) to pass to place_morph_marker after checking it in a snapshot."""
+    return await _edit("loop_morph", {})
+
+
+@mcp.tool(title="Place a Loop morph marker", annotations=EDIT)
+async def place_morph_marker(view_id: str, point: ImagePoint, number: Annotated[int, Field(strict=True, ge=1, le=1000)] | None = None) -> dict[str, Any]:
+    """Undoably place a Loop morph marker on the splat under a normalised point of the current view, on the frame shown: seek the Start or End frame and take a snapshot first; view_id must be current. number places or replaces that marker; without it, the next marker that has its point on the other frame but not this one, else a new one. Pair the same point of the subject on both frames, in the same order. Returns placed_marker and side."""
+    args: dict[str, Any] = {"view_id": view_id, "point": point}
+    if number is not None:
+        args["number"] = number
+    return await _edit("morph_marker", args)
+
+
+@mcp.tool(title="Remove Loop morph markers", annotations=EDIT)
+async def remove_morph_markers(numbers: list[Annotated[int, Field(strict=True, ge=1, le=1000)]] | None = None, all: bool = False) -> dict[str, Any]:
+    """Undoably remove the selected (or active) Loop morph's markers by number, or every one with all=true."""
+    args: dict[str, Any] = {"all": all}
+    if numbers is not None:
+        args["numbers"] = numbers
+    return await _edit("remove_morph_markers", args)
 
 
 @mcp.tool(title="Undo project edit", annotations=EDIT)

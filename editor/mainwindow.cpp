@@ -1040,6 +1040,7 @@ void MainWindow::buildUi() {
     connect(viewport_,&Viewport::enterPressed,this,[this] {if (morphPlacing_!=MorphSide::None && morphSuggestion_) placeMorphMarker(*morphSuggestion_);});
     connect(viewport_,&Viewport::backspacePressed,this,&MainWindow::removeLastMorphPoint);
     connect(worker_,&CaptureWorker::morphFitting,this,[this](bool fitting) {
+        morphFitting_=fitting;
         viewport_->setBusyText(fitting ? tr("Fitting the loop morph\u2026") : QString());
         if (fitting) statusBar()->showMessage(tr("Fitting the loop morph to the End and Start frames\u2026"));else statusBar()->clearMessage();
     });
@@ -1736,6 +1737,10 @@ void MainWindow::applyStroke(const std::vector<uint32_t> &records,int mode) {
     if (result.empty()) m->erased.erase(screenChunk_);else picks=std::move(result);
     syncUi();dirty();
 }
+int MainWindow::shownFrame() const {
+    const auto frame=viewport_->frame();
+    return frame && frame->chunkIndex!=RenderFrame::MorphChunk ? int(std::lround(frame->seconds*info_.fps)) : -1;
+}
 bool MainWindow::showingMorph() const {const auto frame=viewport_->frame();return frame && frame->chunkIndex==RenderFrame::MorphChunk;}
 int MainWindow::poseFrame() const {return project_.inMorph(project_.time,info_.fps) ? int(std::lround(project_.out*info_.fps)) : currentFrame();}
 // The stack the frame on screen is drawn with follows that frame, not the playhead: stepping
@@ -1787,20 +1792,47 @@ void MainWindow::placeMorphMarker(const QVector3D &world) {
     const MorphSide side=morphPlacing_,other=side==MorphSide::End ? MorphSide::Start : MorphSide::End;const int frame=morphFrameOf(side);
     // The frame shown must be that one: just after a switch it may still be on its way.
     if (currentFrame()!=frame || !viewport_->frame() || int(std::lround(viewport_->frame()->seconds*info_.fps))!=frame) {statusBar()->showMessage(tr("Wait for the frame to show, then click."),2000);return;}
-    bool invertible=false;const QMatrix4x4 toCapture=project_.transformAtFrame(frame).matrix().inverted(&invertible);if (!invertible) return;
-    const int number=morphTarget(side);
-    auto found=std::find_if(m->morphMarkers.begin(),m->morphMarkers.end(),[&](const MorphMarker &k) {return k.number==number;});
-    if (found==m->morphMarkers.end()) {MorphMarker k;k.number=number;m->morphMarkers.append(k);found=m->morphMarkers.end()-1;}
-    if (side==MorphSide::End) {found->hasEnd=true;found->end=toCapture.map(world);found->endFrame=frame;}
-    else {found->hasStart=true;found->start=toCapture.map(world);found->startFrame=frame;}
-    const bool paired=morphPlaced(*found,other);morphHistory_.push_back({number,side});
-    std::sort(m->morphMarkers.begin(),m->morphMarkers.end(),[](const MorphMarker &a,const MorphMarker &b) {return a.number<b.number;});
+    int number=0;if (!placeMorphPoint(*m,side,morphTarget(side),world,&number)) return;
+    bool paired=false;for (const auto &k:m->morphMarkers) if (k.number==number) paired=morphPlaced(k,other);
+    morphHistory_.push_back({number,side});
     morphSelected_=0;morphChosen_.clear();syncUi();dirty();
     // On to its pair on the other frame, or, the pair complete, back for the next one; Ctrl
     // stays on this frame.
     if (QGuiApplication::keyboardModifiers() & Qt::ControlModifier) return;
     if (!paired) switchMorphSide(other,number);
     else if (side!=morphHome_) switchMorphSide(morphHome_,0);
+}
+bool MainWindow::placeMorphPoint(Modifier &m,MorphSide side,int number,const QVector3D &world,int *placed) {
+    const int frame=morphFrameOf(side);
+    bool invertible=false;const QMatrix4x4 toCapture=project_.transformAtFrame(frame).matrix().inverted(&invertible);if (!invertible) return false;
+    if (number<=0) number=morphTarget(side);
+    auto found=std::find_if(m.morphMarkers.begin(),m.morphMarkers.end(),[&](const MorphMarker &k) {return k.number==number;});
+    if (found==m.morphMarkers.end()) {MorphMarker k;k.number=number;m.morphMarkers.append(k);found=m.morphMarkers.end()-1;}
+    if (side==MorphSide::End) {found->hasEnd=true;found->end=toCapture.map(world);found->endFrame=frame;}
+    else {found->hasStart=true;found->start=toCapture.map(world);found->startFrame=frame;}
+    std::sort(m.morphMarkers.begin(),m.morphMarkers.end(),[](const MorphMarker &a,const MorphMarker &b) {return a.number<b.number;});
+    if (placed) *placed=number;
+    return true;
+}
+std::map<int,float> MainWindow::morphOffsets(const Modifier &m,float *flagAbove) const {
+    std::map<int,float> off;*flagAbove=0;
+    const QMatrix4x4 endModel=project_.transformAtFrame(morphFrameOf(MorphSide::End)).matrix(),startModel=project_.transformAtFrame(morphFrameOf(MorphSide::Start)).matrix();
+    const auto current=project_.loopMorph()==&m ? project_.morphPairs(info_.fps) : QVector<Project::MorphPair>{};
+    std::vector<loopmorph::Pair> world;for (const auto &pair:current) world.push_back({endModel.map(pair.end),startModel.map(pair.start)});
+    const auto deviation=loopmorph::deviations(world);for (size_t i=0;i<deviation.size();++i) if (std::isfinite(deviation[i])) off[current[int(i)].number]=deviation[i];
+    std::vector<float> sorted;for (const auto &entry:off) sorted.push_back(entry.second);std::sort(sorted.begin(),sorted.end());
+    if (!sorted.empty()) *flagAbove=std::max(.03f,2.5f*sorted[sorted.size()/2]);
+    return off;
+}
+std::optional<QVector3D> MainWindow::morphGuess(const Modifier &m,MorphSide side,int number) const {
+    const MorphSide other=side==MorphSide::End ? MorphSide::Start : MorphSide::End;const bool end=side==MorphSide::End;
+    const auto marker=std::find_if(m.morphMarkers.begin(),m.morphMarkers.end(),[&](const MorphMarker &k) {return k.number==number;});
+    if (marker==m.morphMarkers.end() || !morphPlaced(*marker,other) || shownFrame()!=morphFrameOf(side)) return std::nullopt;
+    const QMatrix4x4 endModel=project_.transformAtFrame(morphFrameOf(MorphSide::End)).matrix(),startModel=project_.transformAtFrame(morphFrameOf(MorphSide::Start)).matrix();
+    std::vector<loopmorph::Pair> pairs;for (const auto &pair:project_.morphPairs(info_.fps)) if (pair.number!=number) pairs.push_back({endModel.map(pair.end),startModel.map(pair.start)});
+    QVector3D guess;if (!loopmorph::predict(pairs,end ? startModel.map(marker->start) : endModel.map(marker->end),end,&guess)) return std::nullopt;
+    viewport_->nearestVisiblePoint(guess,&guess);
+    return guess;
 }
 // Backspace: the last point placed goes, and placing goes back to it to place it again.
 void MainWindow::removeLastMorphPoint() {
@@ -1832,17 +1864,7 @@ void MainWindow::showMorph(const Modifier &m) {
         if (frame==current) return tr("✓ placed");
         return seconds ? tr("at %1 s, not used").arg(frame/info_.fps,0,'f',3) : tr("at frame %1, not used").arg(frame);
     };
-    // How far each End point is from where the other pairs put it, with four pairs or more; one
-    // far beyond the rest is flagged.
-    std::map<int,float> off;
-    {
-        const QMatrix4x4 endModel=project_.transformAtFrame(endFrame).matrix(),startModel=project_.transformAtFrame(startFrame).matrix();
-        const auto current=project_.loopMorph()==&m ? project_.morphPairs(info_.fps) : QVector<Project::MorphPair>{};
-        std::vector<loopmorph::Pair> world;for (const auto &pair:current) world.push_back({endModel.map(pair.end),startModel.map(pair.start)});
-        const auto deviation=loopmorph::deviations(world);for (size_t i=0;i<deviation.size();++i) if (std::isfinite(deviation[i])) off[current[int(i)].number]=deviation[i];
-    }
-    std::vector<float> sorted;for (const auto &[number,d]:off) sorted.push_back(d);std::sort(sorted.begin(),sorted.end());
-    const float flagAbove=sorted.empty() ? 0.f : std::max(.03f,2.5f*sorted[sorted.size()/2]);
+    float flagAbove=0;const auto off=morphOffsets(m,&flagAbove);
     morphMarkerTable_->setRowCount(int(m.morphMarkers.size()));int pairs=0;QStringList incomplete,stale,flagged;
     for (int row=0;row<m.morphMarkers.size();++row) {
         const auto &k=m.morphMarkers[row];const auto deviation=off.find(k.number);const bool far=deviation!=off.end() && deviation->second>flagAbove;
@@ -1885,8 +1907,10 @@ void MainWindow::syncMorphMarkers() {
     QVector<Viewport::ViewMarker> shown;const auto *m=project_.modifier();morphSuggestion_.reset();
     const bool morph=m && m->type==ModifierType::LoopMorph && loaded_ && !loading_;
     if (morph && !playback_.isActive()) {
-        const int frame=currentFrame(),endFrame=morphFrameOf(MorphSide::End),startFrame=morphFrameOf(MorphSide::Start);
-        const QMatrix4x4 model=project_.transformAtFrame(frame).matrix();
+        // On the frame shown, which after a jump between Start and End is still the old one
+        // for a moment: its markers, not the new frame's drawn over it.
+        const int frame=shownFrame(),endFrame=morphFrameOf(MorphSide::End),startFrame=morphFrameOf(MorphSide::Start);
+        const QMatrix4x4 model=project_.transformAtFrame(std::max(0,frame)).matrix();
         for (const auto &k:m->morphMarkers) {
             const bool paired=morphPlaced(k,MorphSide::End) && morphPlaced(k,MorphSide::Start),selected=k.number==morphSelected_;
             if (frame==endFrame && morphPlaced(k,MorphSide::End)) shown.append({model.map(k.end),k.number,paired,selected});
@@ -1899,16 +1923,8 @@ void MainWindow::syncMorphMarkers() {
         const int number=morphTarget(side);
         // With three pairs or more, where its pair probably is: from where it is on the other
         // frame, by the pairs, onto the nearest of the splats shown.
-        const auto marker=std::find_if(m->morphMarkers.begin(),m->morphMarkers.end(),[&](const MorphMarker &k) {return k.number==number;});
-        if (marker!=m->morphMarkers.end() && morphPlaced(*marker,other) && currentFrame()==morphFrameOf(side)) {
-            const QMatrix4x4 endModel=project_.transformAtFrame(morphFrameOf(MorphSide::End)).matrix(),startModel=project_.transformAtFrame(morphFrameOf(MorphSide::Start)).matrix();
-            std::vector<loopmorph::Pair> pairs;for (const auto &pair:project_.morphPairs(info_.fps)) if (pair.number!=number) pairs.push_back({endModel.map(pair.end),startModel.map(pair.start)});
-            QVector3D guess;
-            if (loopmorph::predict(pairs,end ? startModel.map(marker->start) : endModel.map(marker->end),end,&guess)) {
-                if (viewport_->frame() && int(std::lround(viewport_->frame()->seconds*info_.fps))==morphFrameOf(side)) viewport_->nearestVisiblePoint(guess,&guess);
-                morphSuggestion_=guess;shown.append({guess,number,false,false,true});
-            }
-        }
+        (void)other;
+        if (const auto guess=morphGuess(*m,side,number)) {morphSuggestion_=guess;shown.append({*guess,number,false,false,true});}
         hint=(end ? tr("Click marker %1 on End") : tr("Click marker %1 on Start")).arg(number)
             +(morphSuggestion_ ? tr("   ·   Enter: take the target") : QString())
             +tr("   ·   Ctrl+click: stay here   ·   Backspace: undo the last   ·   Drag: orbit   ·   Esc: stop");
@@ -1919,7 +1935,7 @@ void MainWindow::syncMorphMarkers() {
 void MainWindow::receiveFrame(FramePtr frame) {
     viewport_->setFrame(frame);
     syncViewportPose();
-    if (morphPlacing_!=MorphSide::None) syncMorphMarkers();
+    syncMorphMarkers(); // the markers of the frame now shown
     if (frame && int(frame->chunkIndex)!=screenChunk_) {screenChunk_=int(frame->chunkIndex);if (const auto *m=project_.modifier();m && m->type==ModifierType::Erase) syncUi();}
     pruneStats_=frame->prune;showPruneStatus();
     if (smokeOutput_.isEmpty()) return;

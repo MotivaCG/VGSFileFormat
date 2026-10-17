@@ -20,8 +20,8 @@
 // rigid as possible: pinned by the markers numbered on both frames, then drawn onto the
 // other frame's surface by nearest points. Both then travel with their graph's nodes turning
 // along the shortest arc and their positions solved as rigid as possible at every step, so a
-// limb that turns swings round rather than cutting through. The end frame's splats fade out
-// as the start frame's fade in, each taking on the colour of the other frame's nearest splat.
+// limb that turns swings round rather than cutting through. The End frame fades into the
+// Start frame, each splat taking on the colour of the other frame's most alike one.
 namespace loopmorph {
 
 // Splats in one space: xyz, quaternion xyzw, scale xyz, base colour rgb (0.5 + C0 dc),
@@ -45,9 +45,10 @@ public:
     ~Morph();
     Morph(const Morph &) = delete;
     Morph &operator=(const Morph &) = delete;
-    // `s` in [0,1]: 0 is the end frame as it is, 1 the start frame. Both frames' splats are
-    // in it while either shows; one that has faded out entirely is left out.
-    Cloud evaluate(double s) const;
+    // `s` in [0,1]: 0 is the end frame as it is, 1 the start frame. A splat that does not
+    // show at `s` is left out. `source`, when given, says where each splat came from: i for
+    // the End frame's i-th, the End frame's count plus j for the Start frame's j-th.
+    Cloud evaluate(double s, std::vector<uint32_t> *source = nullptr) const;
     // Where the markers land, on average, from where they were picked on the other frame,
     // in the clouds' units: how well the fit honours them.
     double markerError() const;
@@ -66,8 +67,11 @@ bool predict(const std::vector<Pair> &pairs, const QVector3D &from, bool toEnd, 
 // paired different points stands out. NaN where fewer than three others can say.
 std::vector<float> deviations(const std::vector<Pair> &pairs);
 
-// How much of each frame shows at `s`: the end frame fades out over the second half and
-// more, the start frame in over the first, so the subject never thins in the middle.
-float endOpacity(double s);
-float startOpacity(double s);
+// The opacity a splat of the End or the Start frame has at `s`, from its own `alpha`. Between
+// 0.2 and 0.8 of the way the End frame hands its optical depth over to the Start frame: each
+// keeps 1-(1-alpha)^share, the two shares adding up to one, so where the frames lie on each
+// other they stop as much light together as either alone. Scaling the opacities instead lets
+// light through the middle of the fade, and what is inside shows: the subject reads paler.
+float endOpacity(double s, float alpha);
+float startOpacity(double s, float alpha);
 }

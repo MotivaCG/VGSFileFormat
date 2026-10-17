@@ -121,10 +121,13 @@ public:
     // probably goes.
     struct ViewMarker {QVector3D world;int number=0;bool paired=false,selected=false,suggested=false;};
     void setViewMarkers(const QVector<ViewMarker> &markers);
+    const QVector<ViewMarker> &viewMarkers() const { return viewMarkers_; }
     // Placing markers: a left click that does not drag picks the point under it (pointPicked);
     // dragging still orbits. `hint` says what the click places.
     void setPointPicking(bool picking, const QString &hint = {});
     bool pointPicking() const { return pointPicking_; }
+    // Where a world point is drawn in the view, in widget pixels; false behind the camera.
+    bool projectToView(const QVector3D &world, QPointF *screen) const { return projectPoint(world, screen); }
     // The visible splat or point nearest a world position, in the world; false with none.
     bool nearestVisiblePoint(const QVector3D &world, QVector3D *found) const;
     // A line over the view while something slow is being worked out; empty for none.

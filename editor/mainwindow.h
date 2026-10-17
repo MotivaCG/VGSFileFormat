@@ -263,12 +263,25 @@ private:
     // The number a click on a side places: the selected marker; else the first with its other
     // point and not this one; else the next new number.
     int morphTarget(MorphSide side) const;
+    // How far each marker's End point is from where the other pairs put it (by number), and the
+    // deviation above which one is flagged as a likely mis-pairing.
+    std::map<int,float> morphOffsets(const Modifier &m,float *flagAbove) const;
+    // Where marker `number` probably goes on `side`, from its point on the other side and the
+    // other pairs, onto the nearest splat shown; none with fewer than three pairs.
+    std::optional<QVector3D> morphGuess(const Modifier &m,MorphSide side,int number) const;
+    // Places marker `number` (0: the next one) at a world point on the side shown.
+    bool placeMorphPoint(Modifier &m,MorphSide side,int number,const QVector3D &world,int *placed);
+    // Whether the worker is fitting the Loop morph now.
+    bool morphFitting_ = false;
     void showMorph(const Modifier &m);
     // The markers of the selected Loop morph on the frame shown, for the viewport.
     void syncMorphMarkers();
     // The frame the transform is evaluated at: the playhead's, End's on a Loop morph's frames.
     int poseFrame() const;
     bool showingMorph() const;
+    // The source frame the viewport shows, which can lag the playhead while it decodes; -1 for
+    // none or one of a Loop morph's frames. Markers are drawn on the frame they belong to.
+    int shownFrame() const;
     void syncViewportPose();
     // With a Loop morph selected, Ctrl+Space, Ctrl+Home and Ctrl+End act on its frames.
     bool morphSelected() const;
