@@ -47,6 +47,7 @@ class QComboBox;
 class QGroupBox;
 class QFormLayout;
 class LoadingOverlay;
+class QProgressDialog;
 class AudioPreview;
 class EditorAutomation;
 enum class EditorCloseResult { Ready, Waiting, Cancelled };
@@ -88,6 +89,8 @@ public:
     void rememberMcpEnabled(bool enabled);
     void setMcpCloseHandler(std::function<EditorCloseResult()> handler) { mcpCloseHandler_=std::move(handler); }
     void smokeTest(const QString &path, const QString &output);
+    void precalculateCache();
+    void benchmarkPlayback(const QString &path,const QString &output);
     // Autosave: every two minutes while there are unsaved changes, a copy of the project in a
     // file of this session's own, removed once the project is saved, replaced or closed
     // without saving. A copy still there at start-up is from a session that ended unexpectedly.
@@ -134,6 +137,7 @@ private:
     QString approvedCloseProject_;
     void buildUi();
     void syncUi();
+    void syncPlaybackUi();
     void dirty();
     void title();
     bool canDiscard();
@@ -189,6 +193,13 @@ private:
     bool loaded_ = false, loading_ = false, decoding_ = false, pendingDecode_ = false, syncing_ = false;
     quint64 serial_ = 0, generation_ = 0, openingGeneration_ = 0;
     quint64 requestSerial_ = 0, openingRequest_ = 0, decodeRequest_ = 0;
+    bool cachePreparing_=false;
+    quint64 cacheRequest_=0;
+    QProgressDialog *cacheDialog_=nullptr;
+    QAction *cacheAction_=nullptr;
+    QAction *cacheEnabledAction_=nullptr;
+    void launchPrecalculate();
+    void showCacheInfo();
     bool openingRemote_ = false, decodeRemote_ = false, pendingDecodeRemote_ = false;
     QThread thread_;
     CaptureWorker *worker_;
@@ -260,6 +271,7 @@ private:
     // before End, the morph, and a second after Start.
     enum class MorphPlay { None, Morph, Seam };
     MorphPlay morphPlaying_ = MorphPlay::None;
+    double morphPhase_ = 0, resumeMorphPhase_ = 0;
     void setMorphPlacing(MorphSide side);
     void switchMorphSide(MorphSide side, int number);
     void placeMorphMarker(const QVector3D &world);
@@ -308,6 +320,7 @@ private:
     QSpinBox *isolationNeighbour_;
     QDoubleSpinBox *isolationPercent_, *walkSpeed_;
     QJsonObject processingState_;
+    quint64 previewRevision_ = 0;
     QGroupBox *cropProperties_, *greenProperties_;
     QLabel *parametersHeading_;
     QDoubleSpinBox *greenSaturation_, *greenHue_;

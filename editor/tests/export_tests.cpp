@@ -465,6 +465,12 @@ private slots:
             QVERIFY2(std::abs(angle-expected)<3,qPrintable(QString("frame %1: %2 degrees, not %3").arg(3+k).arg(angle).arg(expected)));QVERIFY(floaterGone(f));
         }
         QVERIFY(std::abs(armAngle(copy(capture.setTime(0,false))))<1);QVERIFY(std::abs(armAngle(copy(capture.setTime(3/25.,false)))-30)<1);
+        // A single-frame PLY must contain this same morph, including crops above it.
+        Project plyProject=project;Modifier colour;colour.type=ModifierType::Colour;colour.colourDespill=Modifier::DespillOnExport;colour.colourRecoverSkin=false;plyProject.modifiers.prepend(colour);
+        const auto single=dir.filePath("morph-frame.ply");exportFramePly(plyProject,6/25.,single);
+        const auto singlePrefix=dir.filePath("morph-sequence.ply");exportPlySequence(plyProject,singlePrefix);
+        QFile singleFile(single),sequenceFile(dir.filePath("morph-sequence0006.ply"));
+        QVERIFY(singleFile.open(QIODevice::ReadOnly));QVERIFY(sequenceFile.open(QIODevice::ReadOnly));QCOMPARE(singleFile.readAll(),sequenceFile.readAll());
         // The preview shows the same frames: halfway, the arm at 15 degrees, its splats in no
         // source chunk, and the floater gone.
         {
@@ -473,8 +479,16 @@ private slots:
             vgs::Frame shown;shown.count=preview->records.size();
             for (const auto &r:preview->records) {shown.position.insert(shown.position.end(),r.position,r.position+3);shown.opacity.push_back(r.color[3]);shown.active.push_back(1);}
             QVERIFY2(std::abs(armAngle(shown)-15)<3,qPrintable(QString::number(armAngle(shown))));QVERIFY(floaterGone(shown));
+            Project cachedProject=project;cachedProject.previewPlaying=true;
+            Modifier purge;purge.type=ModifierType::PurgeIsolated;purge.id=Project::newId();purge.isolation={4,1200};cachedProject.modifiers.append(purge);
+            worker.decode(6/25.,1,true,cachedProject);const size_t evaluations=worker.isolationEvaluations();QVERIFY(evaluations>0);
+            const auto computed=qvariant_cast<FramePtr>(decoded.back()[0]);
+            worker.decode(6/25.,1,true,cachedProject);QCOMPARE(worker.isolationEvaluations(),evaluations);
+            const auto cached=qvariant_cast<FramePtr>(decoded.back()[0]);QVERIFY(cached->visibilityFromCache && cached->morphShapeFromCache);
+            QCOMPARE(cached->points.size(),computed->points.size());
+            for (size_t i=0;i<cached->points.size();++i) QCOMPARE(cached->points[i].modifierVisibility,computed->points[i].modifierVisibility);
             // Moving End re-fits it; frames up to End stay the capture's own.
-            worker.decode(3/25.,1,true,project);QVERIFY(qvariant_cast<FramePtr>(decoded[1][0])->chunkIndex!=RenderFrame::MorphChunk);
+            worker.decode(3/25.,1,true,project);QVERIFY(qvariant_cast<FramePtr>(decoded.back()[0])->chunkIndex!=RenderFrame::MorphChunk);
         }
         // Moving as a whole, the morph's frames carry motion samples as End is placed (turned
         // 45 degrees), and they still end where Start is in the world: the arm sweeps from 75
@@ -554,14 +568,26 @@ private slots:
             for (const auto &r:preview->records) {shown.position.insert(shown.position.end(),r.position,r.position+3);shown.opacity.push_back(r.color[3]);shown.active.push_back(1);}
             const double expected=swing(13)+.5*(swing(3)-swing(15));
             QVERIFY2(std::abs(armAngle(shown)-expected)<1.5,qPrintable(QString("%1 vs %2").arg(armAngle(shown)).arg(expected)));
+            Project cachedProject=project;cachedProject.previewPlaying=true;
+            Modifier purge;purge.type=ModifierType::PurgeIsolated;purge.id=Project::newId();purge.isolation={4,1200};cachedProject.modifiers.prepend(purge);
+            worker.decode(13/25.,1,true,cachedProject);const size_t evaluations=worker.isolationEvaluations();QVERIFY(evaluations>0);
+            worker.decode(13/25.,1,true,cachedProject);QCOMPARE(worker.isolationEvaluations(),evaluations);
+            QVERIFY(qvariant_cast<FramePtr>(decoded.back()[0])->morphShapeFromCache);
             // The tip's marker rides on the arm: at the tip's angle by now.
             for (const auto &[n,p]:preview->morphMarkers) if (n==3) {const double tip=qRadiansToDegrees(std::atan2(-p.z(),p.x()));QVERIFY2(std::abs(tip-expected)<2,qPrintable(QString::number(tip)));}
-            worker.decode(15/25.,1,true,project);QVERIFY(qvariant_cast<FramePtr>(decoded[1][0])->chunkIndex!=RenderFrame::MorphChunk);
+            worker.decode(15/25.,1,true,project);QVERIFY(qvariant_cast<FramePtr>(decoded.back()[0])->chunkIndex!=RenderFrame::MorphChunk);
         }
         // A .ply sequence numbers them as the frames they take the place of: 0003 to 0014.
         exportCaptureFile(project,dir.filePath("overlap.ply"));
         for (int f=3;f<=14;++f) QVERIFY2(QFileInfo::exists(dir.filePath(QString("overlap%1.ply").arg(f,4,10,QChar('0')))),qPrintable(QString::number(f)));
         QVERIFY(!QFileInfo::exists(dir.filePath("overlap0015.ply")));
+        for (bool leadIn:{false,true}) {
+            project.modifiers[0].morphLeadIn=leadIn;
+            const auto single=dir.filePath("overlap-single.ply");exportFramePly(project,13/25.,single);
+            exportPlySequence(project,dir.filePath("compare.ply"));
+            QFile singleFile(single),sequenceFile(dir.filePath("compare0013.ply"));
+            QVERIFY(singleFile.open(QIODevice::ReadOnly));QVERIFY(sequenceFile.open(QIODevice::ReadOnly));QCOMPARE(singleFile.readAll(),sequenceFile.readAll());
+        }
     }
     void visibilityIsKeptAsPlayedAndDroppedOnAnyChange() {
         QTemporaryDir dir;const auto source=dir.filePath("cached.pgs");sourceFile(source,5);
@@ -581,6 +607,59 @@ private slots:
         project.transform.position={0,.1f,0};worker.decode(3/25.,1,true,project);QCOMPARE(worker.visibilityFrames(),size_t(1)); // emptied, then frame 3
         // Nothing that removes splats: nothing kept.
         project.modifiers.clear();worker.decode(3/25.,1,true,project);QCOMPARE(worker.visibilityFrames(),size_t(0));
+    }
+    void precalculationWarmsTheTimelineWithoutPublishingFrames() {
+        using namespace previewmemory;
+        QTemporaryDir dir;const auto path=dir.filePath("precalculate.pgs");sourceFile(path,5);
+        CaptureWorker worker(nullptr,[] {return Snapshot{32*GiB,16*GiB,64*GiB,32*GiB,true,false};});worker.open(path,1,true);
+        QSignalSpy decoded(&worker,&CaptureWorker::decoded),progress(&worker,&CaptureWorker::cacheProgress),finished(&worker,&CaptureWorker::cacheFinished);
+        Project project;project.modifiers.clear();project.in=0;project.out=4/25.;project.previewRevision=42;
+        Modifier purge;purge.type=ModifierType::PurgeIsolated;purge.isolation={4,1200};
+        Modifier colour;colour.type=ModifierType::Colour;colour.colourDespill=Modifier::DespillAlways;colour.colourRecoverSkin=false;project.modifiers={purge,colour};
+        worker.precalculate(project,1,101);QCOMPARE(decoded.size(),0);QCOMPARE(finished.size(),1);
+        QCOMPARE(finished.back()[0].toInt(),5);QCOMPARE(finished.back()[1].toInt(),5);QVERIFY(!finished.back()[2].toBool());QVERIFY(finished.back()[3].toString().isEmpty());
+        QCOMPARE(progress.back()[0].toInt(),5);QCOMPARE(worker.visibilityFrames(),size_t(5));QCOMPARE(worker.colourCacheFrames(),size_t(5));
+        const auto isolation=worker.isolationEvaluations(),despill=worker.despillEvaluations();
+        project.previewPlaying=true;worker.decode(2/25.,1,true,project);QCOMPARE(decoded.size(),1);
+        const auto frame=qvariant_cast<FramePtr>(decoded.back()[0]);QVERIFY(frame->visibilityFromCache && frame->colourFromCache);
+        QVERIFY(frame->cache.visibility && frame->cache.colour);QCOMPARE(frame->cache.revision,quint64(42));
+        QCOMPARE(worker.isolationEvaluations(),isolation);QCOMPARE(worker.despillEvaluations(),despill);
+        worker.setColourCacheBudget(0);worker.precalculate(project,1,102);QVERIFY(finished.back()[2].toBool());
+        // A cancel received before the queued job starts must still stop it.
+        worker.cancelPrecalculate(103);worker.precalculate(project,1,103);QCOMPARE(finished.back()[0].toInt(),0);QVERIFY(finished.back()[3].toString().isEmpty());
+        worker.precalculate(project,2,104);QVERIFY(!finished.back()[3].toString().isEmpty());
+    }
+    void morphEditsPreserveUpstreamVisibilityAndCacheCanBeDisabled() {
+        using namespace previewmemory;
+        QTemporaryDir dir;const auto path=dir.filePath("dependencies.pgs");sourceFile(path,5);
+        CaptureWorker worker(nullptr,[] {return Snapshot{32*GiB,16*GiB,64*GiB,32*GiB,true,false};});worker.open(path,1,true);
+        QSignalSpy decoded(&worker,&CaptureWorker::decoded),fits(&worker,&CaptureWorker::morphFitting),computing(&worker,&CaptureWorker::cacheComputing);
+        Project project;project.modifiers.clear();project.in=0;project.out=4/25.;project.previewPlaying=true;
+        Modifier purge;purge.type=ModifierType::PurgeIsolated;purge.isolation={4,1200};Modifier morph;morph.type=ModifierType::LoopMorph;morph.morphSeconds=.08;
+        project.modifiers={purge,morph};worker.precalculate(project,1,201);QVERIFY(worker.morphCacheBytes()>0);QVERIFY(computing.size()>0);
+        const auto evaluated=worker.isolationEvaluations();project.modifiers[1].morphSeconds=.16;
+        worker.decode(2/25.,1,true,project);QVERIFY(qvariant_cast<FramePtr>(decoded.back()[0])->visibilityFromCache);QCOMPARE(worker.isolationEvaluations(),evaluated);
+        worker.decode(5/25.,1,true,project);QCOMPARE(worker.isolationEvaluations(),evaluated);const auto fitted=fits.size();
+        project.modifiers.append(purge);worker.decode(5/25.,1,true,project);QCOMPARE(fits.size(),fitted);QVERIFY(qvariant_cast<FramePtr>(decoded.back()[0])->morphShapeFromCache);
+        project.previewPlaying=false;worker.decode(5/25.,1,true,project);const auto held=qvariant_cast<FramePtr>(decoded.back()[0]);
+        project.previewCacheEnabled=false;worker.decode(5/25.,1,true,project);const auto uncached=qvariant_cast<FramePtr>(decoded.back()[0]);
+        QVERIFY(!uncached->cache.enabled);QCOMPARE(worker.visibilityBytes(),size_t(0));QCOMPARE(worker.colourCacheBytes(),size_t(0));QCOMPARE(worker.morphCacheBytes(),size_t(0));QCOMPARE(worker.reusableFrameBytes(),size_t(0));
+        QCOMPARE(uncached->records.size(),held->records.size());QVERIFY(uncached->sh==held->sh);
+        worker.decode(5/25.,1,true,project);QCOMPARE(worker.visibilityFrames(),size_t(0));QVERIFY(!qvariant_cast<FramePtr>(decoded.back()[0])->morphShapeFromCache);
+        project.previewCacheEnabled=true;project.previewPlaying=true;worker.decode(5/25.,1,true,project);QVERIFY(worker.morphCacheBytes()>0);
+        worker.decode(5/25.,1,true,project);QVERIFY(qvariant_cast<FramePtr>(decoded.back()[0])->morphShapeFromCache);
+    }
+    void frameBufferReusePreservesPublishedSnapshots() {
+        QTemporaryDir dir;const auto path=dir.filePath("buffers.pgs");sourceFile(path,5);
+        CaptureWorker worker;FramePtr current;
+        connect(&worker,&CaptureWorker::decoded,[&](FramePtr frame,quint64) {current=std::move(frame);});
+        worker.open(path,1,true);worker.decode(0,1,true);QVERIFY(current);
+        const FramePtr held=current;const auto records=held->records;const auto sh=held->sh;const auto active=held->active;
+        for (int i=0;i<15;++i) {worker.decode((i%5)/25.,1,(i%2)==0);QVERIFY(current);}
+        QCOMPARE(held->seconds,0.);QCOMPARE(held->records.size(),records.size());
+        QVERIFY(std::memcmp(held->records.data(),records.data(),records.size()*sizeof(Splat))==0);
+        QVERIFY(held->sh==sh && held->active==active);
+        worker.clear();QVERIFY(held->sh==sh && held->active==active);
     }
     void loopMorphTimingOnARealCapture() {
         // How long the preview waits on a real capture: the fit, on the first of the morph's
@@ -897,11 +976,16 @@ private slots:
             const auto reference=dir.filePath(sampled ? "sampled.vgs" : "native.vgs"),output=dir.filePath(sampled ? "sampled.mint" : "native.mint");
             exportCaptureFile(project,reference);const auto result=exportCaptureFile(project,output);QCOMPARE(result.frames,3);QCOMPARE(result.kept,2ull);
             MintFile mint;QVERIFY2(mint.open(output,&error),qPrintable(error));QCOMPARE(mint.frameRate(),25.);QCOMPARE(mint.frameCount(),3);
+            MintFile mapped;QVERIFY2(mapped.openReadOnly(output,&error),qPrintable(error));
             auto expected=vgsdec::Capture::openFile(reference.toStdString());
             for (int frame=0;frame<3;++frame) {
                 // The MINT runtime converts time to float32. Sample inside each
                 // frame to avoid choosing different sides of a chunk boundary.
                 const double seconds=(frame+.25)/25.;MintFrame actual;QVERIFY2(mint.decode(seconds,&actual,true,&error),qPrintable(error));const auto &before=expected.setTime(seconds,true);
+                MintFrame streamed;std::vector<float> sharedSh;QVERIFY2(mapped.decode(seconds,&streamed,true,&error,&sharedSh),qPrintable(error));
+                QCOMPARE(streamed.position,actual.position);QCOMPARE(streamed.rotation,actual.rotation);QCOMPARE(streamed.scale,actual.scale);
+                QCOMPARE(streamed.opacity,actual.opacity);QCOMPARE(streamed.colorDc,actual.colorDc);QCOMPARE(streamed.active,actual.active);
+                QVERIFY(streamed.shRest.isEmpty());QCOMPARE(sharedSh.size(),size_t(actual.shRest.size()));QVERIFY(std::equal(sharedSh.begin(),sharedSh.end(),actual.shRest.constBegin()));
                 QCOMPARE(actual.count,before.splatCount);for (size_t row=0;row<actual.count;++row) {QCOMPARE(actual.active[int(row)],before.active[row]);
                     for (int c=0;c<3;++c) {QVERIFY(std::abs(actual.position[int(row*3+c)]-before.positions[row*3+c])<1e-5f);QVERIFY(std::abs(actual.scale[int(row*3+c)]-before.scales[row*3+c])<1e-5f);QVERIFY(std::abs(actual.colorDc[int(row*3+c)]-before.colors[row*3+c])<1e-5f);}
                     for (int c=0;c<9;++c) QVERIFY(std::abs(actual.shRest[int(row*45+c)]-before.sphericalHarmonics[row*9+c])<1e-5f);
@@ -911,6 +995,7 @@ private slots:
                 }
             }
             const auto bytes=mint.bytes();vgs::MintLogicalSource logical(reinterpret_cast<const uint8_t *>(bytes.constData()),size_t(bytes.size()));QCOMPARE(logical.header().frameCount,3ull);
+            mapped.close();QVERIFY(!mapped.isOpen());QVERIFY2(mapped.openReadOnly(output,&error),qPrintable(error));
         }
         const auto destination=dir.filePath("cancelled.mint");QFile existing(destination);QVERIFY(existing.open(QIODevice::WriteOnly));existing.write("existing");existing.close();
         QVERIFY_EXCEPTION_THROWN(exportCaptureFile(project,destination,[](int value,const QString &) {return value<95;}),std::runtime_error);
@@ -1347,6 +1432,61 @@ private slots:
         p.modifiers[0].colourRecoverSkin=true;QVERIFY(bakeExportFrame(f,p,3).count>0);
         // The export settings no longer despill: only the modifier does.
         Project settingsOnly;settingsOnly.modifiers.clear();settingsOnly.captureSettings.despill=true;QCOMPARE(bakeExportFrame(f,settingsOnly,3).colorDc,bakeExportFrame(f,Project{},3).colorDc);
+    }
+    void despillAndSkinCachePreservesRgbAndSh() {
+        QTemporaryDir dir;const auto source=dir.filePath("colours.pgs");sourceFile(source,5);
+        for (bool skin:{false,true}) {
+            const auto healthy=[] {using namespace previewmemory;return Snapshot{32*GiB,16*GiB,64*GiB,32*GiB,true,false};};
+            CaptureWorker worker(nullptr,healthy);FramePtr shown;
+            connect(&worker,&CaptureWorker::decoded,[&](FramePtr f,quint64) {shown=std::move(f);});worker.open(source,1,true);
+            Project project;project.modifiers.clear();Modifier colour;colour.type=ModifierType::Colour;
+            colour.colourDespill=Modifier::DespillAlways;colour.colourRecoverSkin=skin;project.modifiers={colour};
+            worker.decode(0,1,true,project);QVERIFY(shown);QCOMPARE(worker.colourCacheFrames(),size_t(0));
+            const auto original=shown;const auto records=shown->records;const auto sh=shown->sh;
+            project.previewPlaying=true;worker.decode(0,1,true,project);QVERIFY(!shown->colourFromCache);
+            QCOMPARE(worker.colourCacheFrames(),size_t(1));const auto evaluations=worker.despillEvaluations();
+            QVERIFY(worker.colourCacheBytes()<records.size()*3*sizeof(float)+1024);
+            worker.decode(0,1,true,project);QVERIFY(shown->colourFromCache);QCOMPARE(worker.despillEvaluations(),evaluations);
+            QVERIFY(std::memcmp(shown->records.data(),records.data(),records.size()*sizeof(Splat))==0);QVERIFY(shown->sh==sh);
+            // Display exposure and the camera do not change the cached despill/skin RGB.
+            project.modifiers[0].colourExposure=1;project.camera.target={1,2,3};worker.decode(0,1,true,project);QVERIFY(shown->colourFromCache);
+            // Skin classification without SH is a separate result, and subframe times
+            // must not accidentally reuse the nearest integer frame's colour.
+            worker.decode(0,1,false,project);QVERIFY(!shown->colourFromCache);QVERIFY(shown->sh.empty());
+            worker.decode(0,1,true,project);QVERIFY(shown->colourFromCache);QVERIFY(shown->sh==sh);
+            worker.decode(.001,1,true,project);QVERIFY(!shown->colourFromCache);
+            project.modifiers[0].colourGreenGain=.8;worker.decode(0,1,true,project);QVERIFY(!shown->colourFromCache);QCOMPARE(worker.colourCacheFrames(),size_t(1));
+            QVERIFY(original->sh==sh && std::memcmp(original->records.data(),records.data(),records.size()*sizeof(Splat))==0);
+            project.modifiers[0].colourDespill=Modifier::DespillOnExport;worker.decode(0,1,true,project);QCOMPARE(worker.colourCacheBytes(),size_t(0));
+        }
+    }
+    void colourCacheEvictsByUseAndShrinksWhenWindowsIsUnderPressure() {
+        using namespace previewmemory;
+        Snapshot memory{32*GiB,16*GiB,64*GiB,32*GiB,true,false};
+        QTemporaryDir dir;const auto source=dir.filePath("memory.pgs");sourceFile(source,5);
+        CaptureWorker worker(nullptr,[&] {return memory;});FramePtr shown;
+        connect(&worker,&CaptureWorker::decoded,[&](FramePtr f,quint64) {shown=std::move(f);});worker.open(source,1,true);
+        Project project;project.modifiers.clear();project.previewPlaying=true;
+        Modifier colour;colour.type=ModifierType::Colour;colour.colourDespill=Modifier::DespillAlways;project.modifiers={colour};
+        worker.decode(0,1,true,project);const auto bytes=worker.colourCacheBytes();QVERIFY(bytes>0);
+        worker.setColourCacheBudget(bytes*2);worker.decode(1/25.,1,true,project);QCOMPARE(worker.colourCacheFrames(),size_t(2));
+        worker.decode(0,1,true,project);QVERIFY(shown->colourFromCache); // Touch frame 0.
+        worker.decode(2/25.,1,true,project);QCOMPARE(worker.colourCacheFrames(),size_t(2));QVERIFY(worker.colourCacheBytes()<=bytes*2);
+        worker.decode(0,1,true,project);QVERIFY(shown->colourFromCache);
+        worker.decode(1/25.,1,true,project);QVERIFY(!shown->colourFromCache); // Frame 1 was oldest.
+        Modifier purge;purge.type=ModifierType::PurgeIsolated;purge.isolation={4,1200};project.modifiers.append(purge);
+        worker.decode(0,1,true,project);QVERIFY(worker.visibilityFrames()>0);const auto held=shown;const auto sh=held->sh;
+        // Polling also evicts while paused; no real memory is exhausted in this test.
+        memory.physicalAvailable=GiB;
+        QTRY_COMPARE_WITH_TIMEOUT(worker.colourCacheBytes(),size_t(0),2000);
+        QCOMPARE(worker.visibilityBytes(),size_t(0));QCOMPARE(worker.reusableFrameBytes(),size_t(0));
+        worker.decode(0,1,true,project);QVERIFY(!shown->colourFromCache);QVERIFY(shown->sh==sh);QVERIFY(held->sh==sh);
+        QCOMPARE(worker.colourCacheBytes(),size_t(0));QCOMPARE(worker.visibilityBytes(),size_t(0));
+        memory.physicalAvailable=4*GiB;worker.decode(0,1,true,project);QVERIFY(worker.colourCacheBytes()>0);
+        worker.decode(0,1,true,project);QVERIFY(shown->colourFromCache);
+        worker.setColourCacheBudget(0);QCOMPARE(worker.colourCacheBytes(),size_t(0));
+        worker.decode(0,1,true,project);QVERIFY(!shown->colourFromCache);QCOMPARE(worker.colourCacheBytes(),size_t(0));
+        worker.clear();QCOMPARE(worker.colourCacheFrames(),size_t(0));
     }
     void despillAlwaysShowsInThePreview() {
         // Always: the preview's frame carries the export's despilled colour. Only on export: it

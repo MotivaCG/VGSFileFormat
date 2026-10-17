@@ -33,7 +33,7 @@ target_include_directories(viewer_decoder PUBLIC ${VGS_ROOT}/decoder/include PRI
 
 # Share the display implementation with the editor without linking editor_support.
 set(VGS_VIEWER_UI_SOURCES editortheme.cpp displayscaling.cpp viewport.cpp viewcube.cpp
-    rangeslider.cpp audiopreview.cpp captureworker.cpp isolation.cpp loopmorph.cpp pruning.cpp project.cpp
+    rangeslider.cpp audiopreview.cpp captureworker.cpp previewmemory.cpp isolation.cpp loopmorph.cpp pruning.cpp project.cpp
     modifiers.cpp capturesettings.cpp dependencies/mint/mintfile.cpp
     dependencies/mint/mintskinrecovery.cpp)
 list(TRANSFORM VGS_VIEWER_UI_SOURCES PREPEND "${VGS_EDITOR_DIR}/")

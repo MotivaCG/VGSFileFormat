@@ -13,6 +13,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <future>
+#include <thread>
 
 namespace {
 
@@ -137,44 +139,18 @@ void unpackQuaternion(quint32 word, float* xyzw)
 
 // Splats are sorted by term count and the boundaries are cumulative, so a splat's
 // terms are found by arithmetic rather than by a stored offset. See 6.5.
-struct RankTable
-{
-    QVector<quint32> rank;    // 1-based number of terms
-    QVector<quint64> offset;  // index of the splat's first term
-    quint64 totalTerms = 0;
-};
-
-RankTable buildRanks(const char* boundaryBytes, int boundaryCount, quint64 splats)
-{
-    QVector<quint64> boundaries(boundaryCount);
-    for (int j = 0; j < boundaryCount; ++j)
-        boundaries[j] = readU32(boundaryBytes + 4 * j);
-
-    QVector<quint64> starts(boundaryCount);
-    starts[0] = 0;
-    for (int j = 1; j < boundaryCount; ++j)
-        starts[j] = boundaries[j - 1];
-
-    QVector<quint64> rankStart(boundaryCount);
-    rankStart[0] = 0;
-    for (int j = 1; j < boundaryCount; ++j)
-        rankStart[j] = rankStart[j - 1] + quint64(j) * (boundaries[j - 1] - starts[j - 1]);
-
-    RankTable table;
-    table.rank.resize(int(splats));
-    table.offset.resize(int(splats));
-    for (quint64 id = 0; id < splats; ++id) {
-        int below = 0;
-        while (below < boundaryCount && boundaries[below] <= id)
-            ++below;
-        const int r = below + 1;
-        const int j = r - 1;
-        table.rank[int(id)] = quint32(r);
-        table.offset[int(id)] = rankStart[j] + quint64(r) * (id - starts[j]);
-        table.totalTerms = std::max(table.totalTerms, table.offset[int(id)] + quint64(r));
+// Rank boundaries describe whole runs; no per-splat rank/offset arrays are needed.
+struct RankLookup {
+    quint64 boundaries[5]={}, starts[5]={}, offsets[5]={};int count;
+    RankLookup(const char *bytes,int entries):count(entries) {
+        for (int j=0;j<count;++j) boundaries[j]=readU32(bytes+4*j);
+        for (int j=1;j<count;++j) {starts[j]=boundaries[j-1];offsets[j]=offsets[j-1]+quint64(j)*(boundaries[j-1]-starts[j-1]);}
     }
-    return table;
-}
+    void find(quint64 id,quint32 &rank,quint64 &offset) const {
+        int j=0;while (j<count-1 && boundaries[j]<=id) ++j;
+        rank=quint32(j+1);offset=offsets[j]+quint64(rank)*(id-starts[j]);
+    }
+};
 
 float clamp01(float v) { return std::clamp(v, 0.0f, 1.0f); }
 
@@ -326,6 +302,7 @@ void MintFile::close()
 {
     m_path.clear();
     m_data.clear();
+    m_mappedFile.reset();
     m_chunks.clear();
     m_payloadStart = 0;
     m_indexOffset = 0;
@@ -339,13 +316,14 @@ bool MintFile::open(const QString& path, QString* error)
 {
     return load(path, false, error);
 }
+bool MintFile::openReadOnly(const QString& path,QString* error) {return load(path,false,error,true);}
 
 bool MintFile::openHeader(const QString& path, QString* error)
 {
     return load(path, true, error);
 }
 
-bool MintFile::load(const QString& path, bool headerOnly, QString* error)
+bool MintFile::load(const QString& path, bool headerOnly, QString* error,bool mapped)
 {
     close();
 
@@ -385,7 +363,14 @@ bool MintFile::load(const QString& path, bool headerOnly, QString* error)
             return false;
         }
     } else {
-        m_data = file.readAll();
+        if (mapped) {
+            auto source=std::make_unique<QFile>(path);
+            if (source->open(QIODevice::ReadOnly)) if (auto *view=source->map(0,source->size())) {
+                m_data=QByteArray::fromRawData(reinterpret_cast<const char *>(view),qsizetype(m_fileSize));
+                m_mappedFile=std::move(source);
+            }
+        }
+        if (!m_mappedFile) m_data = file.readAll();
         if (quint64(m_data.size()) != m_fileSize) {
             if (error) *error = QObject::tr("Could not read all of %1").arg(path);
             m_data.clear();
@@ -750,6 +735,12 @@ void MintFile::buildBasis(const MintBlock& shared, quint64 frame, float alpha, b
 void MintFile::decodeGroupColor(const MintBlock& group, const MintBlock& shared,
                                 const SharedBasis& basis, QVector<float>* colorDc) const
 {
+    colorDc->resize(int(group.splats*3));
+    decodeGroupColorRange(group,shared,basis,colorDc->data(),0,group.splats);
+}
+void MintFile::decodeGroupColorRange(const MintBlock& group,const MintBlock& shared,
+                                    const SharedBasis& basis,float *output,quint64 begin,quint64 end) const
+{
     const quint64 n = group.splats;
     const quint64 stride = shared.sh0Entries / 5;   // 1024 rows per stage
     const char* lutBytes = raw(shared.array("sh0_base_lut").absolute);
@@ -760,9 +751,8 @@ void MintFile::decodeGroupColor(const MintBlock& group, const MintBlock& shared,
     for (int i = 0; i < 256; ++i)
         lut[i] = readHalf(lutBytes + 2 * i);
 
-    colorDc->resize(int(n * 3));
     const float c0 = float(sphericalHarmonicC0());
-    for (quint64 i = 0; i < n; ++i) {
+    for (quint64 i = begin; i < end; ++i) {
         const quint8* idx = reinterpret_cast<const quint8*>(baseIndices + i * 3);
         float sh0[3] = {lut[idx[0]], lut[idx[1]], lut[idx[2]]};
 
@@ -774,11 +764,11 @@ void MintFile::decodeGroupColor(const MintBlock& group, const MintBlock& shared,
                 sh0[c] += row[c];
         }
         for (int c = 0; c < 3; ++c)
-            (*colorDc)[int(i * 3 + quint64(c))] = 0.5f + c0 * sh0[c];
+            output[int(i * 3 + quint64(c))] = 0.5f + c0 * sh0[c];
     }
 }
 
-bool MintFile::decode(double seconds, MintFrame* out, bool includeSh, QString* error) const
+bool MintFile::decode(double seconds, MintFrame* out, bool includeSh, QString* error, std::vector<float>* shOutput) const
 {
     if (!isOpen()) {
         if (error) *error = QObject::tr("No .mint file is open");
@@ -830,8 +820,17 @@ bool MintFile::decode(double seconds, MintFrame* out, bool includeSh, QString* e
     out->colorDc.resize(int(total * 3));
     out->active.resize(int(total));
     out->shRest.clear();
-    if (includeSh)
-        out->shRest.resize(int(total * 45));
+    if (shOutput) shOutput->resize(includeSh ? size_t(total*45) : 0);
+    else if (includeSh) out->shRest.resize(int(total * 45));
+
+    // Detach once: QVector mutable indexing checks sharing on every store.
+    auto *positionOut = out->position.data();
+    auto *rotationOut = out->rotation.data();
+    auto *scaleOut = out->scale.data();
+    auto *opacityOut = out->opacity.data();
+    auto *colorDcOut = out->colorDc.data();
+    auto *activeOut = out->active.data();
+    auto *shRestOut = shOutput ? shOutput->data() : out->shRest.data();
 
     float scaleLut[256];
     {
@@ -844,10 +843,20 @@ bool MintFile::decode(double seconds, MintFrame* out, bool includeSh, QString* e
     for (const MintBlock* group : groups) {
         const quint64 n = group->splats;
 
+        std::vector<float> staticValues,temporalValues;
+        if (includeSh) {
+            const quint64 ns=shared->shStaticEntries,nt=shared->shTemporalEntries;
+            const char *sb=raw(shared->array("sh_static_codebooks").absolute);
+            const char *tb=raw(shared->array("sh_temporal_codebooks").absolute)+frame*45*nt*2;
+            staticValues.resize(size_t(45*ns));temporalValues.resize(size_t(45*nt));
+            for (size_t j=0;j<staticValues.size();++j) staticValues[j]=readHalf(sb+j*2);
+            for (size_t j=0;j<temporalValues.size();++j) temporalValues[j]=readHalf(tb+j*2);
+        }
+        auto evaluateRange=[&](quint64 begin,quint64 end) {
         // --- positions -------------------------------------------------------
         if (group->positionPerSample) {
             const char* base = raw(group->array("position_samples").absolute);
-            for (quint64 i = 0; i < n; ++i) {
+            for (quint64 i = begin; i < end; ++i) {
                 const char* row = base + (i * samples) * 8;
                 float a[3], b[3];
                 unpackPosition(readU64(row + frame * 8), group->positionMin, group->positionMax, a);
@@ -856,18 +865,16 @@ bool MintFile::decode(double seconds, MintFrame* out, bool includeSh, QString* e
                 // chunk time, not with the fraction inside the interval. It looks
                 // like a defect, but it is what the runtime does. See 6.4.
                 for (int c = 0; c < 3; ++c)
-                    out->position[int((written + i) * 3 + quint64(c))] = a[c] + (b[c] - a[c]) * r;
+                    positionOut[int((written + i) * 3 + quint64(c))] = a[c] + (b[c] - a[c]) * r;
             }
         } else {
             const char* baseBytes = raw(group->array("position_base").absolute);
-            const RankTable ranks =
-                buildRanks(raw(group->array("position_rank_boundaries").absolute), 4, n);
+            const RankLookup ranks(raw(group->array("position_rank_boundaries").absolute),4);
             const char* terms = raw(group->array("position_rq_coefficients").absolute);
-            for (quint64 i = 0; i < n; ++i) {
+            for (quint64 i = begin; i < end; ++i) {
                 float p[3];
                 unpackPosition(readU64(baseBytes + i * 8), group->positionMin, group->positionMax, p);
-                const quint32 rank = ranks.rank[int(i)];
-                const quint64 first = ranks.offset[int(i)];
+                quint32 rank;quint64 first;ranks.find(i,rank,first);
                 for (quint32 k = 0; k < rank; ++k) {
                     const quint32 packed = readU32(terms + (first + k) * 4);
                     const quint32 index = packed & 0xFFFFu;
@@ -879,14 +886,14 @@ bool MintFile::decode(double seconds, MintFrame* out, bool includeSh, QString* e
                         p[c] += weight * row[c];
                 }
                 for (int c = 0; c < 3; ++c)
-                    out->position[int((written + i) * 3 + quint64(c))] = p[c];
+                    positionOut[int((written + i) * 3 + quint64(c))] = p[c];
             }
         }
 
         // --- rotations -------------------------------------------------------
         if (group->rotationPerSample) {
             const char* base = raw(group->array("rotation_samples").absolute);
-            for (quint64 i = 0; i < n; ++i) {
+            for (quint64 i = begin; i < end; ++i) {
                 const char* row = base + (i * samples) * 4;
                 float q0[4], q1[4];
                 unpackQuaternion(readU32(row + frame * 4), q0);
@@ -901,20 +908,18 @@ bool MintFile::decode(double seconds, MintFrame* out, bool includeSh, QString* e
                 }
                 norm = std::max(std::sqrt(norm), 1e-20f);
                 for (int c = 0; c < 4; ++c)
-                    out->rotation[int((written + i) * 4 + quint64(c))] = q[c] / norm;
+                    rotationOut[int((written + i) * 4 + quint64(c))] = q[c] / norm;
             }
         } else {
             const char* baseBytes = raw(group->array("rotation_base").absolute);
-            const RankTable ranks =
-                buildRanks(raw(group->array("rotation_rank_boundaries").absolute), 5, n);
+            const RankLookup ranks(raw(group->array("rotation_rank_boundaries").absolute),5);
             const char* terms = raw(group->array("rotation_rq_indices").absolute);
-            for (quint64 i = 0; i < n; ++i) {
+            for (quint64 i = begin; i < end; ++i) {
                 float base[4];
                 unpackQuaternion(readU32(baseBytes + i * 4), base);
 
                 float residual[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-                const quint32 rank = ranks.rank[int(i)];
-                const quint64 first = ranks.offset[int(i)];
+                quint32 rank;quint64 first;ranks.find(i,rank,first);
                 for (quint32 k = 0; k < rank; ++k) {
                     const quint16 index = readU16(terms + (first + k) * 2);
                     const float* row = basis.rotation.constData() + quint64(index) * 4;
@@ -945,7 +950,7 @@ bool MintFile::decode(double seconds, MintFrame* out, bool includeSh, QString* e
                 for (int c = 0; c < 4; ++c) norm += q[c] * q[c];
                 norm = std::max(std::sqrt(norm), 1e-20f);
                 for (int c = 0; c < 4; ++c)
-                    out->rotation[int((written + i) * 4 + quint64(c))] = q[c] / norm;
+                    rotationOut[int((written + i) * 4 + quint64(c))] = q[c] / norm;
             }
         }
 
@@ -958,67 +963,61 @@ bool MintFile::decode(double seconds, MintFrame* out, bool includeSh, QString* e
                 reinterpret_cast<const quint8*>(raw(group->array("lifetimes").absolute));
             const quint64 opacityStride = shared->opacityEntries / 5;
 
-            for (quint64 i = 0; i < n; ++i) {
+            for (quint64 i = begin; i < end; ++i) {
                 for (int c = 0; c < 3; ++c)
-                    out->scale[int((written + i) * 3 + quint64(c))] = scaleLut[scaleIdx[i * 3 + quint64(c)]];
+                    scaleOut[int((written + i) * 3 + quint64(c))] = scaleLut[scaleIdx[i * 3 + quint64(c)]];
 
                 const quint64 word = readU64(opacityWords + i * 8);
                 float opacity = 0.0f;
                 for (int k = 0; k < 5; ++k) {
                     const quint64 stage = (word >> (12 * k)) & 0xFFFull;
-                    opacity += basis.opacity[int(quint64(k) * opacityStride + stage)];
+                    opacity += basis.opacity.constData()[int(quint64(k) * opacityStride + stage)];
                 }
-                out->opacity[int(written + i)] = clamp01(opacity);
+                opacityOut[int(written + i)] = clamp01(opacity);
 
                 const quint8 begin = lifetimes[i * 2];
                 const quint8 end = lifetimes[i * 2 + 1];
-                out->active[int(written + i)] =
+                activeOut[int(written + i)] =
                     (frame >= begin && frame + 1 <= end) ? quint8(1) : quint8(0);
             }
         }
 
-        {
-            QVector<float> color;
-            decodeGroupColor(*group, *shared, basis, &color);
-            std::memcpy(out->colorDc.data() + written * 3, color.constData(), size_t(n * 3) * sizeof(float));
-        }
+        decodeGroupColorRange(*group,*shared,basis,colorDcOut+written*3,begin,end);
 
         // --- higher-order spherical harmonics --------------------------------
         if (includeSh) {
-            const char* staticBytes = raw(shared->array("sh_static_codebooks").absolute);
-            const char* temporalBytes = raw(shared->array("sh_temporal_codebooks").absolute);
             const char* staticIdx = raw(group->array("sh_static_indices").absolute);
             const char* temporalIdx = raw(group->array("sh_temporal_indices").absolute);
             const quint64 ns = shared->shStaticEntries;
             const quint64 nt = shared->shTemporalEntries;
             // The temporal codebook is read at `frame` with no interpolation to the
             // next sample, unlike every other temporal table. See 6.8.
-            const char* temporalFrame = temporalBytes + frame * 5 * 3 * nt * 3 * 2;
             static const int kShift[3] = {20, 10, 0};
 
-            for (quint64 g = 0; g < 5; ++g) {
-                // The index arrays are plane-major: all N words of group 0, then
-                // all N of group 1, and so on.
-                const char* sPlane = staticIdx + g * n * 4;
-                const char* tPlane = temporalIdx + g * n * 4;
-                for (quint64 i = 0; i < n; ++i) {
-                    const quint32 sWord = readU32(sPlane + i * 4);
-                    const quint32 tWord = readU32(tPlane + i * 4);
-                    for (int k = 0; k < 3; ++k) {
-                        const quint32 si = (sWord >> kShift[k]) & 0x3FFu;
-                        const quint32 ti = (tWord >> kShift[k]) & 0x3FFu;
-                        const char* sEntry = staticBytes + (((g * 3 + quint64(k)) * ns) + si) * 3 * 2;
-                        const char* tEntry = temporalFrame + (((g * 3 + quint64(k)) * nt) + ti) * 3 * 2;
-                        const int coefficient = int(g) * 3 + k;
-                        for (int c = 0; c < 3; ++c) {
-                            out->shRest[int((written + i) * 45 + quint64(coefficient) * 3 + quint64(c))] =
-                                readHalf(sEntry + c * 2) + readHalf(tEntry + c * 2);
-                        }
+            // Convert the small dictionaries once, rather than converting two
+            // binary16 values per channel of every splat. Write each output row
+            // contiguously so degree 3 does not sweep a 54 MB buffer five times.
+
+            for (quint64 i = begin; i < end; ++i) {
+                float *dest=shRestOut+(written+i)*45;
+                for (quint64 g = 0; g < 5; ++g) {
+                    const quint32 sWord=readU32(staticIdx+(g*n+i)*4),tWord=readU32(temporalIdx+(g*n+i)*4);
+                    for (int k=0;k<3;++k) {
+                        const quint32 si=(sWord>>kShift[k])&0x3FFu,ti=(tWord>>kShift[k])&0x3FFu;
+                        const float *sv=staticValues.data()+((g*3+quint64(k))*ns+si)*3;
+                        const float *tv=temporalValues.data()+((g*3+quint64(k))*nt+ti)*3;
+                        for (int c=0;c<3;++c) dest[(g*3+quint64(k))*3+c]=sv[c]+tv[c];
                     }
                 }
             }
         }
 
+        };
+        const unsigned pieces=unsigned(std::min<quint64>(std::clamp(std::thread::hardware_concurrency(),1u,4u),std::max<quint64>(1,n/32768)));
+        std::vector<std::future<void>> jobs;
+        for (unsigned j=1;j<pieces;++j) jobs.push_back(std::async(std::launch::async,[&,j] {evaluateRange(n*j/pieces,n*(j+1)/pieces);}));
+        evaluateRange(0,n/pieces);
+        for (auto &job:jobs) job.get();
         written += n;
     }
 

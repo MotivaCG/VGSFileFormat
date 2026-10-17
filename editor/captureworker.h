@@ -13,12 +13,18 @@
 #include "project.h"
 #include "pruning.h"
 #include "loopmorph.h"
+#include "previewmemory.h"
 #include "vgsdecoder/vgsdecoder.h"
 #include <QObject>
+#include <QTimer>
 #include <QVector3D>
 #include <deque>
+#include <array>
 #include <map>
 #include <memory>
+#include <list>
+#include <tuple>
+#include <atomic>
 #include <vector>
 
 struct Splat {
@@ -28,13 +34,27 @@ struct PointVertex {
     float position[3], color[3], id;
     float modifierVisibility=1;
 };
+struct PreviewCacheState {
+    int frame=0;
+    quint64 revision=0;
+    bool morph=false,visibility=false,colour=false,shape=false;
+    bool sourceVisibility=false,sourceColour=false,memoryLimited=false,enabled=true;
+    int morphTotalFrames=0;
+    int timelineFrames=0;
+    size_t visibilityFrames=0,colourFrames=0,morphFrames=0;
+    size_t visibilityBytes=0,colourBytes=0,morphBytes=0;
+    std::array<size_t,3> visibilityStageFrames{},visibilityStageBytes{};
+    size_t reusableBytes=0;
+};
+Q_DECLARE_METATYPE(PreviewCacheState)
 struct RenderFrame {
     // Full decoded records, including inactive/transparent entries. Preview buffers
     // below are a separate view; they never mutate or discard the source attributes.
     std::vector<Splat> records;
     std::vector<uint8_t> active;
     std::vector<PointVertex> points;
-    std::vector<float> sh;
+    std::vector<float> sh; // fully evaluated coefficients, except when shBlend supplies them
+    loopmorph::ShBlend shBlend;
     int coefficients = 0;
     double seconds = 0;
     quint64 total = 0;
@@ -45,6 +65,11 @@ struct RenderFrame {
     // coordinates: the marker's number and its point.
     std::vector<std::pair<int, QVector3D>> morphMarkers;
     double decodeMs = 0;
+    double sourceMs = 0, assemblyMs = 0;
+    bool visibilityFromCache = false;
+    bool morphShapeFromCache = false;
+    bool colourFromCache = false;
+    PreviewCacheState cache;
     // What each active Prune low contribution did to this frame's chunk, in stack order.
     std::vector<PruneStats> prune;
     // Remove green already decided into modifierVisibility, because the colours shown are
@@ -76,19 +101,37 @@ Q_DECLARE_METATYPE(CaptureInfo)
 class CaptureWorker : public QObject {
     Q_OBJECT
 public:
-    explicit CaptureWorker(QObject *parent = nullptr);
+    explicit CaptureWorker(QObject *parent = nullptr,previewmemory::Probe memoryProbe = {});
     ~CaptureWorker() override;
 public slots:
     void clear();
+    // Also checked while paused, on the worker thread.
+    void relieveMemoryPressure();
     void open(const QString &path, quint64 generation, bool sh);
     void decode(double time, quint64 generation, bool sh,Project project = {});
     void openRequest(const QString &path, quint64 generation, bool sh, quint64 request);
     void decodeRequest(double time, quint64 generation, bool sh, Project project, quint64 request);
+    void precalculate(Project project,quint64 generation,quint64 request);
+    void setCachingEnabled(bool enabled);
+    void inspectCache(quint64 generation,quint64 revision);
 public:
+    // Cancellation is safe from the GUI thread, including before the job starts.
+    void cancelPrecalculate(quint64 request) {cancelCacheRequest_.store(request);}
     // The visibility cache: frames held, and the memory they take.
     size_t visibilityFrames() const { return visibility_.size(); }
     size_t visibilityBytes() const { return visibilityBytes_; }
+    size_t isolationEvaluations() const { return isolationEvaluations_; }
+    size_t reusableFrameBytes() const;
+    size_t morphCacheBytes() const {return morph_ ? morph_->cachedBytes() : 0;}
+    size_t colourCacheBytes() const {return colourBytes_;}
+    size_t colourCacheFrames() const {return colours_.size();}
+    size_t despillEvaluations() const {return despillEvaluations_;}
+    void setColourCacheBudget(size_t bytes);
+    // Combined retention limit: visibility + reusable source buffers + morph shapes.
+    static constexpr size_t PreviewBudget = 4ull * 1024 * 1024 * 1024;
+    static constexpr size_t FrameBudget = 256ull * 1024 * 1024;
     static constexpr size_t VisibilityBudget = 256ull * 1024 * 1024;
+    static constexpr size_t ColourBudget = 6ull * 1024 * 1024 * 1024;
 public slots:
 signals:
     void opened(CaptureInfo info, FramePtr frame, quint64 generation);
@@ -99,6 +142,11 @@ signals:
     void failedRequest(QString message, quint64 generation, bool opening, quint64 request);
     // A Loop morph is being fitted (a second or so on a large capture), and when it is done.
     void morphFitting(bool fitting);
+    void cacheProgress(int done,int total,quint64 generation,quint64 request);
+    void cacheFinished(int done,int total,bool limited,QString error,quint64 generation,quint64 request);
+    void cacheReduced(quint64 generation);
+    void cacheComputing(int groups,quint64 generation,quint64 revision);
+    void cacheStateReady(PreviewCacheState state,quint64 generation);
 private:
     class FileSource;
     std::unique_ptr<FileSource> source_;
@@ -107,24 +155,67 @@ private:
     CaptureInfo info_;
     quint64 generation_ = 0;
     quint64 request_ = 0;
+    std::atomic<quint64> cancelCacheRequest_{0};
+    bool cacheLimited_=false;
+    quint64 activeCacheRequest_=0;
+    bool cachingEnabled_=true;
+    PreviewCacheState lastCacheState_;
+    void describeRetention(PreviewCacheState &);
+    quint64 processingRevision_=0,dependencyRevision_=0;
+    std::array<QByteArray,3> dependencyVisibilityKeys_;
+    QByteArray dependencyMorphKey_,dependencyColourKey_;
+    void preparePreview(Project &project);
+    previewmemory::Guard memory_;
+    QTimer *memoryTimer_ = nullptr;
     // Prune low contribution's scores, per source chunk: they depend on the capture alone.
     std::map<size_t, std::vector<float>> pruneScores_;
+    // Reuse only frames no consumer holds (viewport, sorter, queued signal or caller).
+    // At most three retained buffers; extra frames held by inspections remain independent.
+    std::array<FramePtr,3> framePool_;
+    void trimFramePool();
     FramePtr frame(double time, bool sh);
+    FramePtr reusableFrame();
+    FramePtr evaluate(double time,bool sh,const Project &project);
+    void describeCache(RenderFrame &,const Project &,bool sh);
     // `cached`: a frame of the timeline, whose visibility the cache may answer or keep.
-    FramePtr processed(double time, bool sh, const Project &project, const QVector<Modifier> &stack, bool cached = false);
+    FramePtr processed(double time, bool sh, const Project &project, const QVector<Modifier> &stack, bool cached = false, int context = 0);
     // What Crop, Remove green, Purge Isolated, Erase and Prune leave visible on each frame, as
     // played: the points' visibility as alternate runs, visible first. Kept while the
     // project's modifiers, transform and processing stay as they were - any change empties it
     // - and filled only during playback, up to VisibilityBudget, the oldest going first.
     struct Visibility {std::vector<uint32_t> runs;bool greensApplied=false;std::vector<PruneStats> prune;size_t bytes() const;};
-    QByteArray visibilityKey_;
-    std::map<int, Visibility> visibility_;
-    std::deque<int> visibilityOrder_;
+    std::array<QByteArray,3> visibilityKeys_;
+    // Source timeline, source shaped above a morph, and final morph frames have
+    // different masks even at the same time and with the same number of points.
+    using VisibilityId = std::pair<int,int>;
+    std::map<VisibilityId, Visibility> visibility_;
+    std::deque<VisibilityId> visibilityOrder_;
     size_t visibilityBytes_ = 0;
-    void clearVisibility();
+    std::array<size_t,3> visibilityStageFrames_{},visibilityStageBytes_{};
+    size_t isolationEvaluations_ = 0;
+    // Full-precision corrected RGB, including skin recovery. SH is deliberately
+    // not retained per frame. The SH degree is part of the identity because skin
+    // classification inspects the source's view-dependent colour.
+    using ColourId=std::tuple<double,size_t,int>;
+    struct Colour {
+        std::vector<float> rgb;
+        std::list<ColourId>::iterator order;
+        size_t bytes() const {return sizeof(Colour)+sizeof(ColourId)+128+rgb.capacity()*sizeof(float);}
+    };
+    QByteArray colourKey_;
+    std::map<ColourId,Colour> colours_;
+    std::list<ColourId> colourOrder_;
+    size_t colourBytes_=0,despillEvaluations_=0,colourBudget_=ColourBudget;
+    void clearColours();
+    size_t evictColour();
+    void applyDespill(RenderFrame &,const CompiledModifiers &,bool keep);
+    void clearVisibility(int context=-1);
+    bool cachedVisibility(RenderFrame &frame,const Project &project,int context);
+    void keepVisibility(const RenderFrame &frame,const Project &project,int context);
     FramePtr morphFrame(double time, bool sh, const Project &project);
     // The Loop morph fitted last, and what it was fitted for.
     std::unique_ptr<loopmorph::Morph> morph_;
+    loopmorph::Cloud morphScratch_;
     QByteArray morphKey_;
     const std::vector<float> &pruneScores(size_t chunk);
 };

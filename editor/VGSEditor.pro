@@ -19,11 +19,16 @@ CONFIG += c++17
 DEFINES += VGS_AUTHORING
 TARGET = VGSEditor
 SOURCES += $$PWD/displayscaling.cpp
+SOURCES += $$PWD/previewmemory.cpp
+HEADERS += $$PWD/previewmemory.h
 HEADERS += $$PWD/displayscaling.h \
     licensemanagement.h
 SOURCES += $$PWD/editortheme.cpp
 HEADERS += $$PWD/editortheme.h
 VGS_ROOT = $$clean_path($$PWD/..)
+# Resolve local headers when regenerating the incremental build dependencies,
+# including the shared cache information used by inspection and the modifier UI.
+DEPENDPATH += $$PWD
 INCLUDEPATH += $$PWD/dependencies/eigen $$PWD $$PWD/dependencies/mint $$VGS_ROOT/decoder/include \
     $$VGS_ROOT/core/include/vgs $$VGS_ROOT/core/crypto $$VGS_ROOT/core/src
 SOURCES += $$PWD/main.cpp $$PWD/mainwindow.cpp $$PWD/inspection.cpp $$PWD/viewport.cpp $$PWD/viewcube.cpp $$PWD/captureworker.cpp $$PWD/project.cpp $$PWD/filehistory.cpp $$PWD/presetstore.cpp $$PWD/capturesettings.cpp $$PWD/capturesettingsdialog.cpp \

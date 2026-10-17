@@ -6,6 +6,7 @@
 // MCP; the user gets them composed in one image from Export > Inspection image.
 #include "mainwindow.h"
 #include "viewport.h"
+#include "modifierpanel.h"
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QJsonArray>
@@ -14,9 +15,77 @@
 #include <QScopedValueRollback>
 #include <QStatusBar>
 #include <QTimer>
+#include <QApplication>
+#include <QComboBox>
+#include <QJsonDocument>
+#include <QSaveFile>
+#include <QOpenGLContext>
+#include <QOpenGLFunctions>
 #include <QtMath>
 #include <algorithm>
 #include <cmath>
+
+// Diagnostics run in the real executable, with isolated preferences selected by
+// main(). This also exercises qmake's optimization flags and its actual viewport.
+void MainWindow::benchmarkPlayback(const QString &path,const QString &output) {
+    struct Run {QElapsedTimer total,phase;bool precomputed=false,started=false,measuring=false;quint64 serial=0;int frames=0,masks=0,colours=0,shapes=0,reduced=0,intervalFrames=0,intervalHits=0;double worker=0;QJsonArray intervals;int nextInterval=10000;};
+    auto run=std::make_shared<Run>();run->total.start();
+    auto *poll=new QTimer(this);poll->setInterval(20);
+    connect(worker_,&CaptureWorker::cacheReduced,poll,[run] {++run->reduced;});
+    connect(viewport_,&QOpenGLWidget::frameSwapped,poll,[this,run] {
+        const auto frame=viewport_->frame();if (!run->measuring || !frame || run->serial==viewport_->frameRevision()) return;
+        run->serial=viewport_->frameRevision();++run->frames;run->worker+=frame->decodeMs;
+        run->masks+=frame->visibilityFromCache;run->colours+=frame->colourFromCache;run->shapes+=frame->morphShapeFromCache;
+        ++run->intervalFrames;run->intervalHits+=frame->visibilityFromCache;
+    });
+    connect(poll,&QTimer::timeout,this,[this,run,poll,output] {
+        if ((!loaded_ && run->total.elapsed()>30000) || !automationError_.isEmpty()) {poll->stop();qApp->exit(2);return;}
+        if (!loaded_ || loading_ || cachePreparing_) return;
+        if (!run->started && (decoding_ || pendingDecode_)) return;
+        if (!run->started) {
+            if (!run->precomputed && qEnvironmentVariableIsSet("VGS_PLAYBACK_PRECALCULATE")) {run->precomputed=true;precalculateCache();return;}
+            renderStyle_->setCurrentIndex(1);viewport_->setSplatShDegree(-1);
+            const bool morph=qEnvironmentVariable("VGS_PLAYBACK_MODE")=="morph";
+            if (morph) toggleMorphPlay(MorphPlay::Morph);else play(true);
+            run->started=true;run->phase.start();return;
+        }
+        const int warm=qEnvironmentVariableIntValue("VGS_PLAYBACK_WARMUP_MS");
+        if (!run->measuring) {if (run->phase.elapsed()<(warm>0 ? warm : 5000)) return;run->measuring=true;run->phase.restart();run->serial=viewport_->frameRevision();return;}
+        const auto frame=viewport_->frame();
+        if (run->phase.elapsed()>=run->nextInterval && frame) {
+            run->intervals.append(QJsonObject{{"ms",run->phase.elapsed()},{"frames",run->intervalFrames},{"mask_hits",run->intervalHits},
+                {"visibility_entries",double(frame->cache.visibilityFrames)},{"morph_frames",double(frame->cache.morphFrames)},
+                {"revision",double(frame->cache.revision)},{"time",frame->seconds}});
+            run->intervalFrames=run->intervalHits=0;run->nextInterval+=10000;
+        }
+        const int measure=qEnvironmentVariableIntValue("VGS_PLAYBACK_MEASURE_MS");
+        if (run->phase.elapsed()<(measure>0 ? measure : 6000)) return;
+        run->measuring=false;poll->stop();
+        const double elapsed=run->phase.nsecsElapsed()/1e6;
+        viewport_->makeCurrent();const auto *renderer=viewport_->context()->functions()->glGetString(GL_RENDERER);
+        const QString gpu=QString::fromLatin1(reinterpret_cast<const char *>(renderer));viewport_->doneCurrent();
+        QJsonObject report{{"executable",QCoreApplication::applicationFilePath()},{"renderer",gpu},
+#ifdef QT_NO_DEBUG
+            {"release",true},
+#else
+            {"release",false},
+#endif
+            {"mode",qEnvironmentVariable("VGS_PLAYBACK_MODE","timeline")},{"precalculated",run->precomputed},
+            {"frames",run->frames},{"fps",run->frames*1000/elapsed},{"worker_ms",run->worker/std::max(1,run->frames)},
+            {"viewport_pixels",QJsonArray{viewport_->width()*viewport_->devicePixelRatioF(),viewport_->height()*viewport_->devicePixelRatioF()}},
+            {"mask_hits",run->masks},{"colour_hits",run->colours},{"shape_hits",run->shapes},{"cache_reductions",run->reduced},{"intervals",run->intervals}};
+        if (frame) report["retained_MiB"]=QJsonObject{{"visibility",frame->cache.visibilityBytes/1048576.},{"colour",frame->cache.colourBytes/1048576.},{"morph",frame->cache.morphBytes/1048576.}};
+        if (frame) report["cache_entries"]=QJsonObject{{"visibility",double(frame->cache.visibilityFrames)},{"colour",double(frame->cache.colourFrames)},{"morph",double(frame->cache.morphFrames)},{"morph_total",frame->cache.morphTotalFrames}};
+        QJsonArray layers;for (const auto &layer:modifierPanel_->cacheLayers()) layers.append(QJsonObject{{"name",layer.name},{"state",layer.status},{"frames",layer.frames},{"MiB",layer.bytes/1048576.},{"detail",layer.detail}});report["layers"]=layers;
+        QSaveFile file(output);const bool saved=file.open(QIODevice::WriteOnly) && file.write(QJsonDocument(report).toJson())>0 && file.commit();
+        if (qEnvironmentVariableIsSet("VGS_PLAYBACK_IMAGE")) {
+            if (qEnvironmentVariableIsSet("VGS_PLAYBACK_INFO")) {showCacheInfo();if (auto *dialog=findChild<QDialog *>("cacheInfoDialog")) dialog->grab().save(qEnvironmentVariable("VGS_PLAYBACK_IMAGE"));}
+            else grab().save(qEnvironmentVariable("VGS_PLAYBACK_IMAGE"));
+        }
+        play(false);setWindowModified(false);qApp->exit(saved ? 0 : 2);
+    });
+    openPath(path);poll->start();
+}
 
 namespace {
 const double tangent=std::tan(qDegreesToRadians(22.5)); // half the 45 degree field of view

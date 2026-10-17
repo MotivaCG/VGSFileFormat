@@ -35,6 +35,7 @@
 #include <mutex>
 #include <optional>
 #include <thread>
+#include <cstring>
 
 // The point and splat shaders share everything from colour (base + SH) to modifiers and the
 // edit-time colour code; they differ in where a record comes from and what is drawn for it.
@@ -52,6 +53,10 @@ uniform vec3 eyeLocal;
 uniform samplerBuffer shData;
 uniform int shCoefficients; // per record in shData
 uniform int shEvaluated;    // how many of them to use: 0, 3, 8 or 15 for SH0..SH3
+uniform bool blendSh;
+uniform usamplerBuffer blendIndices;
+uniform int blendEndCount;
+uniform float blendFraction;
 uniform mat3 colourMatrix;  // the Colour modifiers', on the colour as seen
 out vec4 rgba;
 // Splats an Erase modifier has picked, while its picks are edited: drawn hot pink.
@@ -73,7 +78,16 @@ vec3 shadedColor() {
     basis[12]=-0.4570457995*x*(4*z*z-x*x-y*y);
     basis[13]=1.4453057213*z*(x*x-y*y);
     basis[14]=-0.5900435899*x*(x*x-3*y*y);
-    for(int k=0;k<min(shCoefficients,shEvaluated);k++) result+=basis[k]*texelFetch(shData,int(sourceId)*shCoefficients+k).rgb;
+    if(blendSh) {
+        uvec2 indices=texelFetch(blendIndices,int(sourceId)).rg;
+        bool fromEnd=int(indices.x)<blendEndCount;
+        int partner=int(indices.y)+(fromEnd ? blendEndCount : 0);
+        float weight=fromEnd ? blendFraction : 1.0-blendFraction;
+        for(int k=0;k<min(shCoefficients,shEvaluated);k++) {
+            vec3 own=texelFetch(shData,int(indices.x)*shCoefficients+k).rgb,other=texelFetch(shData,partner*shCoefficients+k).rgb;
+            result+=basis[k]*((1.0-weight)*own+weight*other);
+        }
+    } else for(int k=0;k<min(shCoefficients,shEvaluated);k++) result+=basis[k]*texelFetch(shData,int(sourceId)*shCoefficients+k).rgb;
     return marked(clamp(colourMatrix*result,0.0,1.0));
 }
 uniform float pointSize;
@@ -146,6 +160,7 @@ uniform bool orthographic;
 uniform bool antialiased;
 uniform float bakeSize; // Bake anti-aliasing, in the capture's own units; 0 for none
 out vec2 uv;
+out vec4 projectedAxes;
 mat3 rotationMatrix(vec4 q) { // xyzw
     q=normalize(q); float x=q.x,y=q.y,z=q.z,w=q.w;
     return mat3(1.0-2.0*(y*y+z*z), 2.0*(x*y+w*z), 2.0*(x*z-w*y),
@@ -153,6 +168,7 @@ mat3 rotationMatrix(vec4 q) { // xyzw
                 2.0*(x*z+w*y), 2.0*(y*z-w*x), 1.0-2.0*(x*x+y*y));
 }
 void main() {
+    projectedAxes=vec4(0);
     int base=int(record)*4;
     vec4 a=texelFetch(splatData,base), q=texelFetch(splatData,base+1), s=texelFetch(splatData,base+2), c=texelFetch(splatData,base+3);
     position=a.xyz; sourceId=s.w; color=c.rgb; modifierVisibility=c.a;
@@ -187,6 +203,9 @@ void main() {
     // with it: the low-pass widens a sub-pixel splat to a pixel, so its opacity falls by the
     // same factor. Such captures hold needle splats that otherwise draw as solid lines.
     float aaFactor=antialiased ? sqrt(max((raw1*raw2-off*off)/(d1*d2-off*off),0.0)) : 1.0;
+    // The fragment's kernel never exceeds one. After AA compensation these
+    // splats cannot reach even its alpha cutoff at their centre.
+    if(opacity*aaFactor<1.0/255.0) {gl_Position=culled;return;}
     float mid=0.5*(d1+d2), radius=length(vec2(0.5*(d1-d2),off));
     float lambda1=mid+radius, lambda2=max(mid-radius,0.1);
     vec2 axis=vec2(off,lambda1-d1);
@@ -197,9 +216,27 @@ void main() {
     vec2 toClip=2.0/viewportPixels*clip.w;
     if(any(greaterThan(abs(clip.xy)-vec2(l1)*toClip,vec2(clip.w)))) {gl_Position=culled;return;}
     vec2 offset=corner.x*l1*axis+corner.y*l2*vec2(axis.y,-axis.x);
+    projectedAxes=vec4(l1*axis*toClip,l2*vec2(axis.y,-axis.x)*toClip);
     gl_Position=clip+vec4(offset*toClip,0,0);
     uv=corner;
     rgba=vec4(displayedColor(removed),opacity*aaFactor);
+}
+)GLSL";
+// Projection and SH evaluation are independent of the quad's corner. Transform
+// feedback prepares them once per splat; the four draw vertices only expand it.
+// OpenGL 3.3 is enough, including on the viewport's existing minimum context.
+static const char *projectedSplatVertex=R"GLSL(
+#version 330 core
+layout(location=0) in vec2 corner;
+layout(location=1) in uint record;
+uniform samplerBuffer projectedData;
+out vec4 rgba;
+out vec2 uv;
+void main() {
+    int base=int(record)*3;
+    vec4 centre=texelFetch(projectedData,base),axes=texelFetch(projectedData,base+1);
+    gl_Position=centre+vec4(corner.x*axes.xy+corner.y*axes.zw,0,0);
+    rgba=texelFetch(projectedData,base+2);uv=corner;
 }
 )GLSL";
 static const char *splatFragment = R"GLSL(
@@ -432,7 +469,9 @@ bool Viewport::event(QEvent *event) {
 void Viewport::cleanup() {
     if (!initialized_) return;
     makeCurrent();
-    pointShader_.reset(); gridShader_.reset(); splatShader_.reset();
+    pointShader_.reset(); gridShader_.reset(); splatShader_.reset();splatPrepareShader_.reset();
+    glDeleteVertexArrays(1,&splatPrepareVao_);glDeleteBuffers(1,&projectedBuffer_);glDeleteTextures(1,&projectedTexture_);
+    glDeleteBuffers(1,&blendSourceBuffer_);glDeleteTextures(1,&blendSourceTexture_);glDeleteBuffers(1,&blendIndexBuffer_);glDeleteTextures(1,&blendIndexTexture_);uploadedBlendSources_.reset();
     glDeleteVertexArrays(1,&splatVao_); glDeleteBuffers(1,&cornerBuffer_); glDeleteBuffers(1,&orderBuffer_);
     glDeleteBuffers(1,&splatBuffer_); glDeleteTextures(1,&splatTexture_);
     ghostFramebuffer_.reset();ghostShader_.reset();ghostCompositeShader_.reset();
@@ -452,18 +491,28 @@ void Viewport::initializeGL() {
     }
     initialized_ = true;
     connect(context(), &QOpenGLContext::aboutToBeDestroyed, this, &Viewport::cleanup, Qt::DirectConnection);
-    auto build = [&](std::unique_ptr<QOpenGLShaderProgram> &program, const char *vertex, const char *fragment) {
+    auto build = [&](std::unique_ptr<QOpenGLShaderProgram> &program, const char *vertex, const char *fragment,bool feedback=false) {
         program = std::make_unique<QOpenGLShaderProgram>();
-        if (!program->addShaderFromSourceCode(QOpenGLShader::Vertex, vertex) ||
-            !program->addShaderFromSourceCode(QOpenGLShader::Fragment, fragment) || !program->link()) {
+        const bool compiled=program->addShaderFromSourceCode(QOpenGLShader::Vertex, vertex) &&
+            (!fragment || program->addShaderFromSourceCode(QOpenGLShader::Fragment, fragment));
+        if (compiled && feedback) {
+            const char *varyings[]={"gl_Position","projectedAxes","rgba"};
+            glTransformFeedbackVaryings(program->programId(),3,varyings,GL_INTERLEAVED_ATTRIBS);
+        }
+        if (!compiled || !program->link()) {
             error_ = program->log(); emit renderFailed(error_); return false;
         }
         return true;
     };
     const QByteArray pointVertex = QByteArray(pointInputs)+recordShading+pointMain;
-    const QByteArray splatVertex = QByteArray(splatInputs)+recordShading+splatMain;
+    QByteArray prepareInputs(splatInputs);
+    prepareInputs.replace("layout(location=0) in vec2 corner;","const vec2 corner=vec2(0);");
+    prepareInputs.replace("layout(location=1) in uint record;","#define record uint(gl_VertexID)");
+    const QByteArray splatVertex = prepareInputs+recordShading+splatMain;
     if (!build(pointShader_, pointVertex.constData(), pointFragment) || !build(gridShader_, gridVertex, gridFragment)) return;
-    if (!build(splatShader_, splatVertex.constData(), splatFragment)) return;
+    if (!build(splatPrepareShader_, splatVertex.constData(), nullptr,true) || !build(splatShader_,projectedSplatVertex,splatFragment)) return;
+    glGenVertexArrays(1,&splatPrepareVao_);glGenBuffers(1,&projectedBuffer_);glGenTextures(1,&projectedTexture_);
+    glGenBuffers(1,&blendSourceBuffer_);glGenTextures(1,&blendSourceTexture_);glGenBuffers(1,&blendIndexBuffer_);glGenTextures(1,&blendIndexTexture_);
     gridShader_->bind(); gridShader_->setUniformValue("greyMap",QVector2D(1,0)); gridShader_->release();
     if (!build(ghostShader_,ghostVertex,pointFragment) || !build(ghostCompositeShader_,ghostCompositeVertex,ghostCompositeFragment)) return;
     glGenVertexArrays(1,&ghostVao_);glGenBuffers(1,&ghostBuffer_);glGenVertexArrays(1,&ghostCompositeVao_);
@@ -583,6 +632,7 @@ QMatrix4x4 Viewport::projectionMatrix() const {
 }
 void Viewport::paintGL() {
     if (!initialized_) return;
+    frameTimings_={};
     QPainter painter(this);
     painter.beginNativePainting();
     // QPainter turns multisampling off unless it antialiases itself; the scene wants it on.
@@ -641,33 +691,55 @@ void Viewport::paintGL() {
     if (frame_ && !frame_->points.empty()) {
         QElapsedTimer timer;
         timer.start();
-        if (frameDirty_) {
+        GLint maxTexels = 0; glGetIntegerv(GL_MAX_TEXTURE_BUFFER_SIZE, &maxTexels);
+        const bool splats = splats_ && frame_->points.size()*4 <= size_t(maxTexels);
+        const auto &blend=frame_->shBlend;const bool blendSh=bool(blend.sources);
+        if (frameDirty_ && !splats) {
             glBindBuffer(GL_ARRAY_BUFFER, buffer_);
             glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(frame_->points.size()*sizeof(PointVertex)), frame_->points.data(), GL_STREAM_DRAW);
         }
         if (frameDirty_) {
             shCoefficients_ = frame_->coefficients;
             GLint maxTexels = 0; glGetIntegerv(GL_MAX_TEXTURE_BUFFER_SIZE, &maxTexels);
-            if (frame_->sh.size()/3 > size_t(maxTexels)) {
+            const auto &sh=blendSh ? blend.sources->values : frame_->sh;
+            if (sh.size()/3 > size_t(maxTexels) || (blendSh && frame_->total>size_t(maxTexels))) {
                 shCoefficients_ = 0;
                 emit renderFailed(tr("This GPU cannot hold all SH coefficients for this capture; showing base color."));
             }
-            glBindBuffer(GL_TEXTURE_BUFFER, shBuffer_);
-            const float dummy[3] = {};
-            glBufferData(GL_TEXTURE_BUFFER, shCoefficients_ ? GLsizeiptr(frame_->sh.size()*sizeof(float)) : GLsizeiptr(sizeof(dummy)), shCoefficients_ ? frame_->sh.data() : dummy, GL_STREAM_DRAW);
-            glBindTexture(GL_TEXTURE_BUFFER, shTexture_); glTexBuffer(GL_TEXTURE_BUFFER, GL_RGB32F, shBuffer_);
+            if (!blendSh || uploadedBlendSources_.lock()!=blend.sources) {
+                glBindBuffer(GL_TEXTURE_BUFFER, blendSh ? blendSourceBuffer_ : shBuffer_);
+                const float dummy[3] = {};
+                const auto shBytes=shCoefficients_ ? GLsizeiptr(sh.size()*sizeof(float)) : GLsizeiptr(sizeof(dummy));
+                const auto *shData=shCoefficients_ ? sh.data() : dummy;
+                // Orphan first so the previous draw keeps its own storage. Mapping the
+                // replacement avoids a second driver-side copy of the large SH array.
+                glBufferData(GL_TEXTURE_BUFFER,shBytes,nullptr,GL_STREAM_DRAW);
+                bool uploaded=false;
+                if (auto *mapped=glMapBufferRange(GL_TEXTURE_BUFFER,0,shBytes,GL_MAP_WRITE_BIT|GL_MAP_UNSYNCHRONIZED_BIT)) {
+                    std::memcpy(mapped,shData,size_t(shBytes));uploaded=glUnmapBuffer(GL_TEXTURE_BUFFER);
+                }
+                if (!uploaded) glBufferData(GL_TEXTURE_BUFFER,shBytes,shData,GL_STREAM_DRAW);
+                glBindTexture(GL_TEXTURE_BUFFER,blendSh ? blendSourceTexture_ : shTexture_);glTexBuffer(GL_TEXTURE_BUFFER,GL_RGB32F,blendSh ? blendSourceBuffer_ : shBuffer_);
+                if (blendSh) uploadedBlendSources_=blend.sources;
+            }
+            if (blendSh && shCoefficients_) {
+                blendIndexUpload_.resize(size_t(frame_->total)*2);
+                for (size_t i=0;i<size_t(frame_->total);++i) {blendIndexUpload_[i*2]=(*blend.source)[i];blendIndexUpload_[i*2+1]=(*blend.partner)[i];}
+                glBindBuffer(GL_TEXTURE_BUFFER,blendIndexBuffer_);glBufferData(GL_TEXTURE_BUFFER,GLsizeiptr(blendIndexUpload_.size()*sizeof(uint32_t)),blendIndexUpload_.data(),GL_STREAM_DRAW);
+                glActiveTexture(GL_TEXTURE3);glBindTexture(GL_TEXTURE_BUFFER,blendIndexTexture_);glTexBuffer(GL_TEXTURE_BUFFER,GL_RG32UI,blendIndexBuffer_);glActiveTexture(GL_TEXTURE0);
+            }
             frameDirty_ = false;
             uploadMs_ = timer.nsecsElapsed()/1e6;
+            frameTimings_.upload=uploadMs_;
         }
-        GLint maxTexels = 0; glGetIntegerv(GL_MAX_TEXTURE_BUFFER_SIZE, &maxTexels);
-        const bool splats = splats_ && frame_->points.size()*4 <= size_t(maxTexels);
         if (splats_ && !splats && !splatLimitReported_) {
             splatLimitReported_ = true;
             emit renderFailed(tr("This GPU cannot hold this many splats; showing points."));
         }
         if (splats && splatsDirty_) {
+            timer.restart();
             // Four texels per record: position+opacity, rotation, scale+source, colour+visibility.
-            std::vector<float> data(frame_->points.size()*16);
+            auto &data=splatUpload_;data.resize(frame_->points.size()*16);
             for (size_t i=0; i<frame_->points.size(); ++i) {
                 // A point without its record (never from a capture) shows as a small opaque sphere.
                 static const Splat fallback{{0,0,0},{0,0,0,1},{0.005f,0.005f,0.005f},{0,0,0,1},0};
@@ -680,20 +752,23 @@ void Viewport::paintGL() {
                 d[12]=p.color[0]; d[13]=p.color[1]; d[14]=p.color[2]; d[15]=p.modifierVisibility;
             }
             glBindBuffer(GL_TEXTURE_BUFFER, splatBuffer_);
+            frameTimings_.pack=timer.nsecsElapsed()/1e6;timer.restart();
             glBufferData(GL_TEXTURE_BUFFER, GLsizeiptr(data.size()*sizeof(float)), data.data(), GL_STREAM_DRAW);
             glBindTexture(GL_TEXTURE_BUFFER, splatTexture_); glTexBuffer(GL_TEXTURE_BUFFER, GL_RGBA32F, splatBuffer_);
             splatsDirty_ = false;
+            frameTimings_.upload+=timer.nsecsElapsed()/1e6;
         }
         glEnable(GL_DEPTH_TEST); glDepthMask(GL_TRUE);
         glDisable(GL_BLEND); glEnable(GL_PROGRAM_POINT_SIZE);
-        auto *shader = splats ? splatShader_.get() : pointShader_.get();
+        auto *shader = splats ? splatPrepareShader_.get() : pointShader_.get();
         shader->bind();
         shader->setUniformValue("model", model); shader->setUniformValue("view", view);
         shader->setUniformValue("projection", projection);
         shader->setUniformValue("pointSize", pointSize_*dpr);
         auto activeModifiers=modifiers_;
         if (!modifierStack_) {Modifier modifier;modifier.crop=crop_;activeModifiers={modifier};}
-        CompiledModifiers modifiers(activeModifiers);std::vector<QVector4D> values;
+        if (!compiledModifiers_ || !modifierStack_) compiledModifiers_=std::make_unique<CompiledModifiers>(activeModifiers);
+        const auto &modifiers=*compiledModifiers_;std::vector<QVector4D> values;
         shader->setUniformValue("usePurgeMask",frame_->greensApplied || !modifiers.isolations.isEmpty() || !modifiers.prunes.isEmpty() || !modifiers.erased.empty());
         shader->setUniformValue("colourMatrix",QMatrix3x3(modifiers.colour.data()));
         if (splats) shader->setUniformValue("opacityScale",modifiers.opacity);
@@ -703,8 +778,7 @@ void Viewport::paintGL() {
             values.push_back({crop.volume.width*.5f,crop.volume.depth*.5f,crop.volume.radiusZ,0});
         }
         // The worker has already decided Remove green when the colours shown are despilled.
-        if (frame_->greensApplied) modifiers.greens.clear();
-        for (const auto &green:modifiers.greens) values.push_back({green.minimumSaturation,green.hueTolerance,green.afterColour ? 1.f : 0.f,green.linearRgb ? 1.f : 0.f});
+        if (!frame_->greensApplied) for (const auto &green:modifiers.greens) values.push_back({green.minimumSaturation,green.hueTolerance,green.afterColour ? 1.f : 0.f,green.linearRgb ? 1.f : 0.f});
         GLint maximum=0;glGetIntegerv(GL_MAX_TEXTURE_BUFFER_SIZE,&maximum);size_t drawCount=frame_->points.size();
         const bool cpuFiltering=values.size()>size_t(maximum);
         std::vector<uint8_t> cpuKeep;
@@ -723,15 +797,19 @@ void Viewport::paintGL() {
         if (values.empty()) values.push_back({0,0,0,0});
         glBindBuffer(GL_TEXTURE_BUFFER,modifierBuffer_);glBufferData(GL_TEXTURE_BUFFER,GLsizeiptr(values.size()*sizeof(QVector4D)),values.data(),GL_STREAM_DRAW);
         glActiveTexture(GL_TEXTURE1);glBindTexture(GL_TEXTURE_BUFFER,modifierTexture_);glTexBuffer(GL_TEXTURE_BUFFER,GL_RGBA32F,modifierBuffer_);
-        shader->setUniformValue("modifierData",1);shader->setUniformValue("cropCount",cpuFiltering ? 0 : int(modifiers.crops.size()));shader->setUniformValue("greenCount",cpuFiltering ? 0 : int(modifiers.greens.size()));shader->setUniformValue("editingCrop",cropEditing_ && !cleanCapture_ && !sheetCapture_);shader->setUniformValue("editShowsRed",crop_.showRemovedInRed);
+        shader->setUniformValue("modifierData",1);shader->setUniformValue("cropCount",cpuFiltering ? 0 : int(modifiers.crops.size()));shader->setUniformValue("greenCount",cpuFiltering || frame_->greensApplied ? 0 : int(modifiers.greens.size()));shader->setUniformValue("editingCrop",cropEditing_ && !cleanCapture_ && !sheetCapture_);shader->setUniformValue("editShowsRed",crop_.showRemovedInRed);
         shader->setUniformValue("showRemoved",sheetCapture_ && sheetShowRemoved_);
         const auto eye = view.inverted().map(QVector3D(0,0,0));
         shader->setUniformValue("eyeLocal", model.inverted().map(eye));
         shader->setUniformValue("shCoefficients", shCoefficients_);
         shader->setUniformValue("shEvaluated", splats && splatShDegree_>=0 ? splatShDegree_*(splatShDegree_+2) : 15);
         shader->setUniformValue("shData", 0);
-        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_BUFFER, shTexture_);
+        shader->setUniformValue("blendSh",blendSh);shader->setUniformValue("blendIndices",3);
+        shader->setUniformValue("blendEndCount",blendSh ? int(blend.sources->endCount) : 0);shader->setUniformValue("blendFraction",blend.fraction);
+        glActiveTexture(GL_TEXTURE3);glBindTexture(GL_TEXTURE_BUFFER,blendIndexTexture_);
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_BUFFER,blendSh ? blendSourceTexture_ : shTexture_);
         if (splats) {
+            timer.restart();
             const auto modelView = view*model;
             auto depthAxisMoved = [&](const QMatrix4x4 &from) {
                 for (int c=0; c<4; ++c) if (std::abs(modelView(2,c)-from(2,c))>1e-5f*(c==3 ? std::max(1.f,std::abs(modelView(2,3))) : 1.f)) return true;
@@ -762,6 +840,7 @@ void Viewport::paintGL() {
                     requestedSerial_ = frameSerial_; requestedView_ = modelView;
                 }
             }
+            frameTimings_.sort=timer.nsecsElapsed()/1e6;
             glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_BUFFER, splatTexture_);
             shader->setUniformValue("splatData", 2);
             shader->setUniformValue("viewportPixels", size);
@@ -771,10 +850,28 @@ void Viewport::paintGL() {
             const float modelScale=float(std::cbrt(std::abs(double(model.determinant())))); // affine: the 3x3 block's
             shader->setUniformValue("antialiased", splatAntialiasing_ && bake<=0);
             shader->setUniformValue("bakeSize", float(bake)/std::max(modelScale,1e-6f));
+            const bool measureGpu=qEnvironmentVariableIsSet("PLAYBACK_GPU_TIMING");GLuint queries[2]={};
+            if (measureGpu) {glGenQueries(2,queries);glBeginQuery(GL_TIME_ELAPSED,queries[0]);}
+            glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER,projectedBuffer_);
+            glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER,GLsizeiptr(frame_->points.size()*12*sizeof(float)),nullptr,GL_STREAM_DRAW);
+            glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER,0,projectedBuffer_);
+            glBindVertexArray(splatPrepareVao_);glEnable(GL_RASTERIZER_DISCARD);
+            glBeginTransformFeedback(GL_POINTS);glDrawArrays(GL_POINTS,0,GLsizei(frame_->points.size()));glEndTransformFeedback();
+            glDisable(GL_RASTERIZER_DISCARD);glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER,0,0);
+            if (measureGpu) glEndQuery(GL_TIME_ELAPSED);
+            shader->release();splatShader_->bind();
+            glBindTexture(GL_TEXTURE_BUFFER,projectedTexture_);glTexBuffer(GL_TEXTURE_BUFFER,GL_RGBA32F,projectedBuffer_);
+            splatShader_->setUniformValue("projectedData",2);
             // Premultiplied, back to front; tested against the floor but leaving no depth behind.
             glEnable(GL_BLEND); glBlendFuncSeparate(GL_ONE, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
             glDepthMask(GL_FALSE);
+            if (measureGpu) glBeginQuery(GL_TIME_ELAPSED,queries[1]);
             glBindVertexArray(splatVao_); glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, GLsizei(splatOrder_.size()));
+            if (measureGpu) {
+                glEndQuery(GL_TIME_ELAPSED);GLuint64 ns=0;glGetQueryObjectui64v(queries[0],GL_QUERY_RESULT,&ns);frameTimings_.gpuPrepare=double(ns)/1e6;
+                glGetQueryObjectui64v(queries[1],GL_QUERY_RESULT,&ns);frameTimings_.gpuDraw=double(ns)/1e6;glDeleteQueries(2,queries);
+            }
+            splatShader_->release();
             glActiveTexture(GL_TEXTURE0);
         } else {
             glBindVertexArray(vao_); glDrawArrays(GL_POINTS, 0, GLsizei(drawCount));
@@ -890,9 +987,15 @@ void Viewport::updateStatistics() {
     if (statistics_->text()!=text) {statistics_->setText(text);statistics_->adjustSize();}
 }
 void Viewport::setPlaybackTime(double seconds,double duration) {
-    playbackTimeText_=tr("%1 s / %2 s").arg(seconds,0,'f',3).arg(duration,0,'f',3);update();
+    // The statistics timer refreshes this label during playback. Repainting the
+    // Gaussian scene here would draw the old frame while the worker decodes the new one.
+    playbackTimeText_=tr("%1 s / %2 s").arg(seconds,0,'f',3).arg(duration,0,'f',3);
+    if (!playbackPlaying_) updateStatistics();
 }
-void Viewport::setTransform(const Transform &transform) { transform_ = transform; update(); }
+void Viewport::setTransform(const Transform &transform) {
+    if (transform_.position==transform.position && transform_.rotation==transform.rotation && transform_.scale==transform.scale && transform_.shear==transform.shear) return;
+    transform_=transform;update();
+}
 void Viewport::setCamera(const Camera &camera) {
     focusTimer_.stop();orbitInertiaTimer_.stop();orbitDragging_=false;camera_ = camera;
     if (camera_.preset==ViewPreset::Free) { camera_.orthographic = false; camera_.pitch = std::clamp(camera_.pitch,-89.0f,89.0f); }
@@ -901,7 +1004,7 @@ void Viewport::setCamera(const Camera &camera) {
 void Viewport::setPointSize(float size) { if (pointSize_ != size) { pointSize_ = size; update(); } }
 void Viewport::setSplatShDegree(int degree) { degree = std::clamp(degree,-1,3); if (splatShDegree_ != degree) { splatShDegree_ = degree; update(); } }
 void Viewport::setSplatAntialiasing(bool antialiased) { if (splatAntialiasing_ != antialiased) { splatAntialiasing_ = antialiased; update(); } }
-void Viewport::setSplatRendering(bool splats) { if (splats_ != splats) { splats_ = splats; splatsDirty_ = true; update(); } }
+void Viewport::setSplatRendering(bool splats) { if (splats_ != splats) { splats_ = splats; splatsDirty_ = frameDirty_ = true; update(); } }
 void Viewport::setDisplayControls(QWidget *controls) {
     displayControls_=controls;viewCube_->setDisplayControls(controls);
 }
@@ -1306,7 +1409,10 @@ void Viewport::applyEditableTransform(const Transform &transform) {
     update();
 }
 void Viewport::setCrop(const CropVolume &crop) { crop_ = crop; if (cpuFiltered_) frameDirty_=true; update(); }
-void Viewport::setModifiers(const QVector<Modifier> &modifiers) {modifiers_=modifiers;modifierStack_=true;if (cpuFiltered_) frameDirty_=true;update();}
+void Viewport::setModifiers(const QVector<Modifier> &modifiers) {
+    if (modifierStack_ && modifiers_.size()==modifiers.size() && modifiers_.constData()==modifiers.constData()) return;
+    modifiers_=modifiers;modifierStack_=true;compiledModifiers_.reset();if (cpuFiltered_) frameDirty_=true;update();
+}
 void Viewport::setCropEditing(bool enabled) {
     if (cropEditing_==enabled) return;
     cancelManipulation(); cropEditing_ = enabled; hoverHandle_ = -1; update();
@@ -1651,11 +1757,11 @@ QJsonObject Viewport::samplePoints(int limit, bool includeRemoved) const {
 
 QImage Viewport::sheetImage(const Camera &camera, bool splats, bool showRemoved, bool cropOutline) {
     const Camera shown=camera_;const bool shownSplats=splats_;
-    camera_=camera;if (splats_!=splats) {splats_=splats;splatsDirty_=true;}
+    camera_=camera;if (splats_!=splats) {splats_=splats;splatsDirty_=frameDirty_=true;}
     sheetCapture_=true;sheetShowRemoved_=showRemoved;sheetCrop_=cropOutline;
     const QImage image=grabFramebuffer();
     sheetCapture_=sheetShowRemoved_=sheetCrop_=false;
-    camera_=shown;if (splats_!=shownSplats) {splats_=shownSplats;splatsDirty_=true;}
+    camera_=shown;if (splats_!=shownSplats) {splats_=shownSplats;splatsDirty_=frameDirty_=true;}
     sortedSerial_=0; // the next paint sorts for the user's own camera again
     update();return image;
 }

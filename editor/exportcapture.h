@@ -69,6 +69,8 @@ QString plySequenceFile(const QString &destination, int frame, int digits = 4);
 // The export's despill on one frame's colour (DC and SH), in place: also what the viewport
 // shows when a Colour modifier despills always.
 void despillFrame(vgs::Frame &, const CaptureSettings &);
+// The linear SH part alone, when preview reuses cached DC/skin colours.
+void despillSh(std::vector<float> &, const CaptureSettings &);
 
 // Assemble standard encoding-0 attributes from an already baked native frame.
 vgs::DecodedChunk packExportFrame(const vgs::Frame &, int degree);

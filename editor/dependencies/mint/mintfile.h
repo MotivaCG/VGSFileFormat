@@ -11,6 +11,8 @@
 #include <functional>
 #include <string>
 #include <vector>
+#include <memory>
+class QFile;
 
 // Reader, editor and writer for Gracia .mint volumetric captures.
 //
@@ -155,6 +157,9 @@ public:
     // parse; if that ever stops being acceptable, the edits are confined to a few
     // byte ranges and could be streamed instead.
     bool open(const QString& path, QString* error);
+    // Playback uses a read-only mapping so untouched chunks do not occupy private
+    // RAM. bytes() is a view valid until close(); writable QByteArray access detaches.
+    bool openReadOnly(const QString& path, QString* error);
 
     // Reads only the metadata region, a few kilobytes, and stops. Enough for
     // summary(), chunks() and frameCount(); decoding, editing and saving all
@@ -181,7 +186,10 @@ public:
 
     // Reconstructs every splat at this instant. Times outside the animation wrap,
     // matching the runtime. includeSh fills shRest, which costs noticeably more.
-    bool decode(double seconds, MintFrame* out, bool includeSh, QString* error) const;
+    // shOutput, given, receives the SH directly in reusable caller-owned storage;
+    // out->shRest is then empty. Other attributes and reconstruction are identical.
+    bool decode(double seconds, MintFrame* out, bool includeSh, QString* error,
+                std::vector<float>* shOutput = nullptr) const;
 
     // The capture's own frame rate, from its first chunk: intervals over duration.
     // 30 for the captures seen so far, 25 for some; 30 when there is nothing to go by.
@@ -222,14 +230,17 @@ private:
     // slice of the reconstruction, so it does not pay for positions or rotations.
     void decodeGroupColor(const MintBlock& group, const MintBlock& shared,
                           const SharedBasis& basis, QVector<float>* colorDc) const;
+    void decodeGroupColorRange(const MintBlock& group, const MintBlock& shared,
+                              const SharedBasis& basis, float* output, quint64 begin, quint64 end) const;
 
     const char* raw(quint64 absolute) const { return m_data.constData() + absolute; }
     char* mutableRaw(quint64 absolute) { return m_data.data() + absolute; }
 
-    bool load(const QString& path, bool headerOnly, QString* error);
+    bool load(const QString& path, bool headerOnly, QString* error,bool mapped = false);
 
     QString m_path;
     QByteArray m_data;
+    std::unique_ptr<QFile> m_mappedFile;
     quint64 m_fileSize = 0;
     bool m_headerOnly = false;
     quint64 m_payloadStart = 0;

@@ -10,16 +10,26 @@
 
 #pragma once
 #include "project.h"
+#include "captureworker.h"
 #include <QWidget>
 class QTreeWidget;
 class QToolButton;
 class QComboBox;
+class QTimer;
 class ModifierPanel : public QWidget {
     Q_OBJECT
 public:
     explicit ModifierPanel(QWidget *parent=nullptr);
     void setProject(const Project &project);
     void setTimeline(int frame,int maximum);
+    void setCacheState(const PreviewCacheState &state);
+    void clearCacheState();
+    void setCacheWorking(int groups=7);
+    void setCacheEnabled(bool enabled);
+    void invalidateCacheState(bool visibility,bool sourceVisibility,bool morph,bool colour);
+    struct CacheLayerInfo {QString name,status,frames,detail;size_t bytes=0,retained=0,expected=0;bool cacheable=false,shared=false;};
+    QVector<CacheLayerInfo> cacheLayers() const;
+    const PreviewCacheState &cacheState() const {return cacheState_;}
     // The capture's chunk boundaries, in frames: an Erase bar marks the chunks it has picks in.
     void setChunks(const QVector<double> &boundaries);
     const Project &project() const {return project_;}
@@ -63,6 +73,11 @@ private:
     void moveSelection(int direction);
     Project project_;
     QTreeWidget *tree_;
+    QTimer *cachePulse_=nullptr;
+    PreviewCacheState cacheState_;
+    std::array<qint64,3> cacheWorkingUntil_{};
+    void showCacheState();
+    bool cacheEnabled_=true,cacheShowsMorph_=false;
     QComboBox *type_;
     QToolButton *addModifier_,*remove_,*duplicate_,*up_,*down_;
     bool updating_=false;

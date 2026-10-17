@@ -9,7 +9,10 @@
 // Other uses require prior written authorisation, subject to mandatory law.
 
 #include "project.h"
+#include <utility>
 #include <QJsonArray>
+#include <QJsonDocument>
+#include <QCryptographicHash>
 #include <QUuid>
 #include <algorithm>
 #include <iterator>
@@ -63,12 +66,19 @@ CropVolume Modifier::staticCrop() const {
 }
 QVector<Modifier> Project::modifiersAtFrame(double frame) const {
     auto result=modifiers;
-    for (auto &m:result) if (m.type==ModifierType::Crop && m.cropAnimation.active()) m.crop=m.cropAnimation.evaluate(m.crop,frame);
+    // A mutable range-for detaches the whole stack, including every Erase pick,
+    // even when no crop is animated.
+    for (qsizetype i=0;i<modifiers.size();++i) if (modifiers[i].type==ModifierType::Crop && modifiers[i].cropAnimation.active()) {
+        auto &m=result[i];m.crop=m.cropAnimation.evaluate(m.crop,frame);
+    }
     return result;
 }
 bool Project::hasAnimatedCrop() const {for (const auto &m:modifiers) if (m.active() && m.type==ModifierType::Crop && m.cropAnimation.active()) return true;return false;}
 void Project::showCropsAtFrame(double frame) {
-    for (auto &m:modifiers) if (m.type==ModifierType::Crop && m.cropAnimation.active()) m.crop=m.cropAnimation.evaluate(m.crop,frame);
+    const auto &stack=std::as_const(modifiers);
+    for (qsizetype i=0;i<stack.size();++i) if (stack[i].type==ModifierType::Crop && stack[i].cropAnimation.active()) {
+        auto &m=modifiers[i];m.crop=m.cropAnimation.evaluate(m.crop,frame);
+    }
 }
 void TransformAnimation::setKey(int frame,const Transform &offset) {
     auto key=std::lower_bound(keys.begin(),keys.end(),frame,[](const TransformKeyframe &key,int f) {return key.frame<f;});
@@ -169,6 +179,41 @@ static QVector<Modifier> splitAtMorph(const QVector<Modifier> &stack,bool above)
 }
 QVector<Modifier> Project::modifiersAboveMorph(double frame) const {return splitAtMorph(modifiersAtFrame(frame),true);}
 QVector<Modifier> Project::modifiersBelowMorph(double frame) const {return splitAtMorph(modifiersAtFrame(frame),false);}
+void Project::updatePreviewCacheKeys() {
+    const auto digest=[](const QJsonObject &value) {return QCryptographicHash::hash(QJsonDocument(value).toJson(QJsonDocument::Compact),QCryptographicHash::Sha256);};
+    const auto v=[](const QVector3D &x) {return QJsonArray{x.x(),x.y(),x.z()};};
+    const QJsonObject model{{"position",v(transform.position)},{"rotation",v(transform.rotation)},{"scale",v(transform.scale)},{"shear",v(transform.shear)}};
+    QJsonArray all,above,below;QVector<Modifier> allColour,aboveColour,belowColour;QJsonObject morph;bool before=true;
+    const auto serialized=modifierJson();
+    for (int i=0;i<modifiers.size();++i) {
+        const auto &m=modifiers[i];if (!m.active()) continue;
+        auto item=serialized[i].toObject();item.remove("id");item.remove("name");
+        if (m.type==ModifierType::LoopMorph) {if (morph.isEmpty()) {morph=item;before=false;}continue;}
+        if (!removesSplats(m.type) && m.type!=ModifierType::Colour && m.type!=ModifierType::AnimateTransform) continue;
+        if (m.type==ModifierType::Colour || m.type==ModifierType::RemoveGreen) {
+            allColour.append(m);if (before || !removesSplats(m.type)) aboveColour.append(m);if (!before || !removesSplats(m.type)) belowColour.append(m);
+        }
+        if (m.type!=ModifierType::Colour) {
+            all.append(item);
+            if (before || !removesSplats(m.type)) above.append(item);
+            if (!before || !removesSplats(m.type)) below.append(item);
+        }
+    }
+    const auto rgb=[](const CompiledModifiers &c) {
+        return c.despillPreview ? QJsonObject{{"enabled",true},{"strength",c.despillStrength},{"gain",c.greenGain},{"chroma",c.viewChroma},{"skin",c.recoverSkin}} : QJsonObject{{"enabled",false}};
+    };
+    const auto colourVisibility=[&](const CompiledModifiers &c) {
+        if (!c.greensAfterColour()) return QJsonObject{};
+        QJsonArray matrix;for (float value:c.colour) matrix.append(value);
+        return QJsonObject{{"matrix",matrix},{"rgb",rgb(c)}};
+    };
+    const CompiledModifiers cAll(allColour),cAbove(aboveColour),cBelow(belowColour);
+    previewVisibilityKeys[0]=digest({{"stack",all},{"model",model},{"colour",colourVisibility(cAll)}});
+    previewVisibilityKeys[1]=digest({{"stack",above},{"model",model},{"colour",colourVisibility(cAbove)}});
+    previewMorphKey=digest({{"source",QString::fromLatin1(previewVisibilityKeys[1].toHex())},{"rgb",rgb(cAbove)},{"morph",morph},{"in",in},{"out",out}});
+    previewVisibilityKeys[2]=digest({{"morph",QString::fromLatin1(previewMorphKey.toHex())},{"stack",below},{"model",model},{"colour",colourVisibility(cBelow)}});
+    previewColourKey=digest(rgb(cAll));
+}
 QVector<Project::MorphPair> Project::morphPairs(double fps) const {
     QVector<MorphPair> pairs;const auto *m=loopMorph();if (!m) return pairs;
     const int first=int(std::lround(in*fps)),last=int(std::lround(out*fps));
@@ -201,11 +246,12 @@ Project::Project() {
     Modifier m;m.id=newId();m.name="Crop";modifiers.append(m);selectedModifier=m.id;
 }
 Modifier *Project::modifier() {
-    for (auto &m:modifiers) if (m.id==selectedModifier) return &m;return nullptr;
+    const auto &stack=std::as_const(modifiers);
+    for (qsizetype i=0;i<stack.size();++i) if (stack[i].id==selectedModifier) return &modifiers[i];return nullptr;
 }
-const Modifier *Project::modifier() const {return const_cast<Project *>(this)->modifier();}
+const Modifier *Project::modifier() const {for (const auto &m:modifiers) if (m.id==selectedModifier) return &m;return nullptr;}
 CropVolume &Project::crop() {auto *m=modifier();return m && m->type==ModifierType::Crop ? m->crop : inactiveCrop_;}
-const CropVolume &Project::crop() const {return const_cast<Project *>(this)->crop();}
+const CropVolume &Project::crop() const {const auto *m=modifier();return m && m->type==ModifierType::Crop ? m->crop : inactiveCrop_;}
 bool GreenFilter::matches(const QVector3D &rgb) const {
     auto channel=[&](float v) {v=std::clamp(v,0.f,1.f);return linearRgb ? (v<=.04045f ? v/12.92f : std::pow((v+.055f)/1.055f,2.4f)) : v;};
     const float r=channel(rgb.x()),g=channel(rgb.y()),b=channel(rgb.z());

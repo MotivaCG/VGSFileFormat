@@ -47,12 +47,13 @@ int main(int argc, char *argv[])
     QCommandLineParser parser; parser.addHelpOption();
     parser.addPositionalArgument("capture", "A .vgs, .pgs, .mint or .vgsproj file.");
     QCommandLineOption smoke("smoke-test", "Open, seek, verify a project and save a PNG preview.", "output");
+    QCommandLineOption playbackReport("playback-report", "Measure actual editor playback and write a JSON report.", "output");
     QCommandLineOption smokeScreen("smoke-screen", "Maximize an automated preview on the specified screen index.", "index");
     QCommandLineOption exportOption("export-capture", "Export a .vgsproj to VGS/PGS/MINT without opening the editor window.", "output");
     QCommandLineOption tasksOption("process-tasks", "Export the .vgstask files given, one after another, without opening the editor window.");
     QCommandLineOption noMcp("no-mcp", "Start with MCP disabled, overriding the saved preference.");
     QCommandLineOption mcpDirectory("mcp-session-dir", "Directory for local MCP session discovery.", "directory");
-    parser.addOption(smoke);parser.addOption(smokeScreen); parser.addOption(exportOption); parser.addOption(tasksOption);
+    parser.addOption(smoke);parser.addOption(playbackReport);parser.addOption(smokeScreen); parser.addOption(exportOption); parser.addOption(tasksOption);
     parser.addOption(noMcp);parser.addOption(mcpDirectory);parser.process(a);
     if (parser.isSet(tasksOption)) {
         const auto paths=parser.positionalArguments();
@@ -90,7 +91,7 @@ int main(int argc, char *argv[])
     }
     // Automated previews must not overwrite the user's registry history/preferences.
     std::unique_ptr<QTemporaryDir> smokeSettings;
-    if (parser.isSet(smoke)) {
+    if (parser.isSet(smoke) || parser.isSet(playbackReport)) {
         smokeSettings = std::make_unique<QTemporaryDir>();
         if (!smokeSettings->isValid()) return 2;
         QSettings::setDefaultFormat(QSettings::IniFormat);
@@ -107,6 +108,7 @@ int main(int argc, char *argv[])
         if (!parser.isSet(noMcp) && w.mcpPreferredEnabled() && automation->adapterInstalled() && !automation->start(&error)) qWarning("MCP connection: %s",qPrintable(error));
     }
     w.show();
+    if (parser.isSet(playbackReport)) {w.resize(1400,900);if (qEnvironmentVariableIsSet("VGS_PLAYBACK_MAXIMIZE")) w.showMaximized();}
     if (parser.isSet(smoke) && parser.isSet(smokeScreen)) {
         bool valid=false;const int index=parser.value(smokeScreen).toInt(&valid);const auto screens=QGuiApplication::screens();
         if (!valid || index<0 || index>=screens.size()) {std::fprintf(stderr,"Invalid smoke screen index.\n");return 2;}
@@ -114,7 +116,10 @@ int main(int argc, char *argv[])
         qInfo("Preview screen: %s, logical %dx%d, DPR %.2f",qPrintable(screen->name()),screen->size().width(),screen->size().height(),screen->devicePixelRatio());
     }
     const auto paths = parser.positionalArguments();
-    if (parser.isSet(smoke)) {
+    if (parser.isSet(playbackReport)) {
+        if (paths.size()!=1) parser.showHelp(1);
+        QTimer::singleShot(0,&w,[&] {w.benchmarkPlayback(paths.first(),parser.value(playbackReport));});
+    } else if (parser.isSet(smoke)) {
         if (paths.size() != 1) parser.showHelp(1);
         QTimer::singleShot(0,&w,[&] { w.smokeTest(paths.first(),parser.value(smoke)); });
     } else if (!paths.isEmpty()) QTimer::singleShot(0,&w,[&] { w.openPath(paths.first()); });

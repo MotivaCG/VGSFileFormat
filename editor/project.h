@@ -256,6 +256,14 @@ struct Project {
     // Not saved: the editor is playing as this snapshot is decoded, so what the removing
     // modifiers leave on the frame is kept for the next time round.
     bool previewPlaying = false;
+    // Identifies an editor snapshot's processing state; zero for standalone callers,
+    // which continue to invalidate caches by content. Never saved in a project.
+    quint64 previewRevision = 0;
+    bool previewCacheEnabled = true;
+    // Dependency identities, computed once per edit; copies share their bytes.
+    std::array<QByteArray,3> previewVisibilityKeys;
+    QByteArray previewMorphKey,previewColourKey;
+    void updatePreviewCacheKeys();
     CoordinateSpace spaces[3] = {CoordinateSpace::Global,CoordinateSpace::Global,CoordinateSpace::Global};
     QJsonObject json(const QString &projectPath) const;
     static bool read(const QString &path, Project *project, QString *error);

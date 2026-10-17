@@ -90,6 +90,16 @@ ShMatrix angularBake(const Matrix &a) {
     }
     return result;
 }
+void processSh(std::vector<float> &sh,const CaptureSettings &settings) {
+    const float strength=float(settings.despillStrength);
+    for (size_t i=0;i+2<sh.size();i+=3) {
+        float *v=sh.data()+i;
+        const float excess=v[1]-.5f*(v[0]+v[2]),removed=strength*excess;
+        v[0]+=.7152f*removed;v[1]-=.2848f*removed;v[2]+=.7152f*removed;
+        const float luminance=.2126f*v[0]+.7152f*v[1]+.0722f*v[2];
+        for (int j=0;j<3;++j) v[j]=luminance+float(settings.viewChromaScale)*(v[j]-luminance);
+    }
+}
 void processColour(vgs::Frame &frame,const CaptureSettings &settings,const ExportProgress &progress) {
     if (!settings.despill) return;
     MintFrame original,corrected;
@@ -113,15 +123,9 @@ void processColour(vgs::Frame &frame,const CaptureSettings &settings,const Expor
         const float raw[3]={std::clamp(c[0],0.f,1.f),std::clamp(c[1],0.f,1.f),std::clamp(c[2],0.f,1.f)};
         for (int j=0;j<3;++j) c[j]+=(in[j]-raw[j])+strength*(out[j]-in[j]);
         if (strength>=1) c[1]=std::min(c[1],.5f*(c[0]+c[2]));
-        for (int k=0;k<frame.shCoefficients;++k) {
-            float *v=frame.shRest.data()+(i*frame.shCoefficients+k)*3;
-            const float excess=v[1]-.5f*(v[0]+v[2]),removed=strength*excess;
-            v[0]+=.7152f*removed;v[1]-=.2848f*removed;v[2]+=.7152f*removed;
-            const float luminance=.2126f*v[0]+.7152f*v[1]+.0722f*v[2];
-            for (int j=0;j<3;++j) v[j]=luminance+float(settings.viewChromaScale)*(v[j]-luminance);
-        }
         if ((i%8192)==0) report(progress,0,QStringLiteral("Processing colors"));
     }
+    processSh(frame.shRest,settings);
     if (original.count) {
         corrected.colorDc=QVector<float>(frame.colorDc.begin(),frame.colorDc.end()); QVector<float> delta;
         if (!mintSkinRecovery(original,corrected,&delta,progress)) throw std::runtime_error("Export canceled.");
@@ -421,6 +425,7 @@ QString pruningNote(const ExportResult &result) {
         .arg(removed,0,'f',1).arg(asked,0,'f',1).arg(result.pruneLimited).arg(result.pruneChunks);
 }
 void despillFrame(vgs::Frame &frame,const CaptureSettings &settings) {CaptureSettings s=settings;s.despill=true;processColour(frame,s,{});}
+void despillSh(std::vector<float> &sh,const CaptureSettings &settings) {processSh(sh,settings);}
 // What the rig's cameras saw, in the export's notes. Cameras that see little of it describe
 // another frame: the sides are then guessed.
 static void normalsNote(const gaussiannormals::Result &seen,const CaptureSettings &s,ExportResult *result) {
@@ -1071,13 +1076,24 @@ private:
 };
 }
 
-ExportResult exportFramePly(const Project &project,double seconds,const QString &destination,const ExportProgress &progress) {
+ExportResult exportFramePly(const Project &projectAsGiven,double seconds,const QString &destination,const ExportProgress &progress) {
+    const Project project=withModifierDespill(projectAsGiven);
     QString error;if (!project.captureSettings.validate(&error)) throw std::runtime_error(error.toStdString());
     report(progress,0,QStringLiteral("Decoding the frame"));
     PlySource source(project,progress);ExportResult result;std::vector<uint8_t> keep;
-    const auto frame=source.frame(seconds,&keep,result);
     const int degree=project.captureSettings.shDegree<0 ? source.sourceDegree : project.captureSettings.shDegree;
-    const auto baked=bakeExportFrame(frame,project,degree,progress,source.rate,keep.empty() ? nullptr : &keep);
+    vgs::Frame frame,baked;double fraction=0;
+    if (project.inMorph(seconds,source.rate,&fraction)) {
+        const int first=int(std::lround(project.in*source.rate)),last=int(std::lround(project.out*source.rate));
+        const ExportMorph morph(project,first,last,source.rate,degree,source.antialiased(),
+            [&](double time,int *chunk,double *start,double *end) {return source.raw(time,chunk,start,end);},progress);
+        frame=morph.frame(int(std::lround(fraction*(morph.frames+1))),seconds,progress);
+        Project pose=project;pose.transform=project.transformAtFrame(last);pose.modifiers=project.modifiersBelowMorph(last);
+        baked=Baker(pose,degree).bake(frame,progress);
+    } else {
+        frame=source.frame(seconds,&keep,result);
+        baked=bakeExportFrame(frame,project,degree,progress,source.rate,keep.empty() ? nullptr : &keep);
+    }
     if (!baked.count) throw std::runtime_error("No Gaussian records remain at this frame after applying active modifiers.");
     auto written=baked;
     if (project.captureSettings.normals) {report(progress,80,QStringLiteral("Computing normals"));normalsNote(bakeFrameNormals(written,project,source.rate),project.captureSettings,&result);}

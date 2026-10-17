@@ -27,6 +27,7 @@
 #include <cstring>
 #include <limits>
 #include <thread>
+#include <utility>
 
 class CaptureWorker::FileSource : public vgsdec::Source {
 public:
@@ -40,13 +41,155 @@ public:
     }
     uint64_t size() const override { return uint64_t(file.size()); }
 };
-CaptureWorker::CaptureWorker(QObject *parent) : QObject(parent) {}
-CaptureWorker::~CaptureWorker() = default;
-void CaptureWorker::clear() {
-    vgs_.reset(); source_.reset(); mint_.reset(); info_ = {}; generation_ = 0; pruneScores_.clear(); morph_.reset(); morphKey_.clear(); clearVisibility();
+CaptureWorker::CaptureWorker(QObject *parent,previewmemory::Probe memoryProbe) : QObject(parent),memory_(std::move(memoryProbe)) {
+    memoryTimer_=new QTimer(this);memoryTimer_->setInterval(500);
+    connect(memoryTimer_,&QTimer::timeout,this,&CaptureWorker::relieveMemoryPressure);
 }
-void CaptureWorker::clearVisibility() {visibilityKey_.clear();visibility_.clear();visibilityOrder_.clear();visibilityBytes_=0;}
-size_t CaptureWorker::Visibility::bytes() const {return sizeof(Visibility)+runs.size()*sizeof(uint32_t)+prune.size()*sizeof(PruneStats)+64;}
+CaptureWorker::~CaptureWorker() = default;
+namespace {
+size_t frameBufferBytes(const RenderFrame &f) {
+    return sizeof(RenderFrame)+f.records.capacity()*sizeof(Splat)+f.active.capacity()+f.points.capacity()*sizeof(PointVertex)+f.sh.capacity()*sizeof(float);
+}
+}
+size_t CaptureWorker::reusableFrameBytes() const {
+    size_t bytes=(morphScratch_.position.capacity()+morphScratch_.rotation.capacity()+morphScratch_.scale.capacity()+morphScratch_.colour.capacity()+morphScratch_.opacity.capacity()+morphScratch_.sh.capacity())*sizeof(float);for (const auto &f:framePool_) if (f) bytes+=frameBufferBytes(*f);return bytes;}
+void CaptureWorker::trimFramePool() {
+    if (!cachingEnabled_ || !memory_.canRetain(0)) {framePool_={};morphScratch_={};return;}
+    size_t bytes=reusableFrameBytes();
+    // This is only the spare SH block left by a swap. Prefer releasing it to
+    // evicting either in-flight frame's reusable storage during the crossfade.
+    if (bytes>FrameBudget && morphScratch_.sh.capacity()) {
+        bytes-=morphScratch_.sh.capacity()*sizeof(float);std::vector<float>().swap(morphScratch_.sh);
+    }
+    for (auto &slot:framePool_) if (slot && bytes>FrameBudget) {bytes-=frameBufferBytes(*slot);slot.reset();}
+    if (bytes>FrameBudget) morphScratch_={};
+}
+void CaptureWorker::clear() {
+    memoryTimer_->stop();clearColours();
+    vgs_.reset(); source_.reset(); mint_.reset(); info_ = {}; generation_ = 0; pruneScores_.clear(); morph_.reset();morphScratch_={}; morphKey_.clear(); clearVisibility();framePool_={};
+    dependencyRevision_=0;dependencyVisibilityKeys_={};dependencyMorphKey_.clear();dependencyColourKey_.clear();
+}
+void CaptureWorker::setCachingEnabled(bool enabled) {
+    if (cachingEnabled_==enabled) return;cachingEnabled_=enabled;
+    clearVisibility();clearColours();framePool_={};morphScratch_={};pruneScores_.clear();
+    if (morph_) morph_->setCaching(enabled,PreviewBudget-VisibilityBudget-FrameBudget);
+    if (vgs_) {vgs_->setCachePolicy(enabled ? vgsdec::CachePolicy{1,1,512ull*1024*1024} : vgsdec::CachePolicy{0,0,1});if (!enabled) vgs_->releaseCache();}
+    emit cacheReduced(generation_);
+}
+void CaptureWorker::preparePreview(Project &project) {
+    setCachingEnabled(project.previewCacheEnabled);processingRevision_=project.previewRevision;
+    if (project.previewMorphKey.isEmpty()) {
+        if (!project.previewRevision || dependencyRevision_!=project.previewRevision || dependencyMorphKey_.isEmpty()) {
+            project.updatePreviewCacheKeys();dependencyRevision_=project.previewRevision;
+            dependencyVisibilityKeys_=project.previewVisibilityKeys;dependencyMorphKey_=project.previewMorphKey;dependencyColourKey_=project.previewColourKey;
+        } else {project.previewVisibilityKeys=dependencyVisibilityKeys_;project.previewMorphKey=dependencyMorphKey_;project.previewColourKey=dependencyColourKey_;}
+    }
+    for (int context=0;context<3;++context) if (visibilityKeys_[context]!=project.previewVisibilityKeys[context]) {
+        clearVisibility(context);visibilityKeys_[context]=project.previewVisibilityKeys[context];
+    }
+    // An invalidated morph is fitted lazily, but its old optional shapes need
+    // not occupy RAM until the playhead reaches the morph again.
+    if (morph_ && !morphKey_.startsWith(project.previewMorphKey+":")) morph_->trimCache(0);
+}
+void CaptureWorker::clearColours() {colours_.clear();colourOrder_.clear();colourBytes_=0;colourKey_.clear();}
+void CaptureWorker::setColourCacheBudget(size_t bytes) {
+    colourBudget_=std::min(bytes,ColourBudget);
+    while (colourBytes_>colourBudget_ && !colourOrder_.empty()) evictColour();
+}
+size_t CaptureWorker::evictColour() {
+    if (colourOrder_.empty()) return 0;
+    const auto it=colours_.find(colourOrder_.front());const size_t bytes=it->second.bytes();
+    colourBytes_-=bytes;colours_.erase(it);colourOrder_.pop_front();return bytes;
+}
+void CaptureWorker::relieveMemoryPressure() {
+    const auto allowed=memory_.inspect();if (!allowed.reclaim) return;
+    cacheLimited_=true;emit cacheReduced(generation_);
+    uint64_t remaining=allowed.reclaim;
+    auto released=[&](uint64_t bytes) {remaining=bytes>=remaining ? 0 : remaining-bytes;};
+    while (remaining && !colourOrder_.empty()) released(evictColour());
+    // Retain small visibility masks and costly shapes when old colour alone is
+    // enough. Published frames and aliased shapes stay alive for their consumers.
+    if (remaining && morph_) {const auto bytes=morph_->cachedBytes();morph_->trimCache(bytes>remaining ? size_t(bytes-remaining) : 0);released(bytes-morph_->cachedBytes());}
+    while (remaining && !visibilityOrder_.empty()) {
+        const auto it=visibility_.find(visibilityOrder_.front());visibilityOrder_.pop_front();
+        if (it!=visibility_.end()) {const auto bytes=it->second.bytes();visibilityBytes_-=bytes;--visibilityStageFrames_[it->first.second];visibilityStageBytes_[it->first.second]-=bytes;visibility_.erase(it);released(bytes);}
+    }
+    if (remaining) {const auto bytes=reusableFrameBytes();framePool_={};morphScratch_={};released(bytes);}
+    if (remaining) {pruneScores_.clear();if (vgs_) vgs_->releaseCache();}
+}
+void CaptureWorker::applyDespill(RenderFrame &out,const CompiledModifiers &modifiers,bool keep) {
+#ifndef VGS_VIEWER
+    CaptureSettings settings;settings.despillStrength=modifiers.despillStrength;settings.greenGain=modifiers.greenGain;
+    settings.viewChromaScale=modifiers.viewChroma;settings.recoverSkin=modifiers.recoverSkin;
+    const auto key=QJsonDocument(QJsonObject{{"strength",settings.despillStrength},{"gain",settings.greenGain},
+        {"chroma",settings.viewChromaScale},{"skin",settings.recoverSkin}}).toJson(QJsonDocument::Compact);
+    if (key!=colourKey_) {clearColours();colourKey_=key;}
+    const ColourId id{out.seconds,out.chunkIndex,out.coefficients};
+    const auto hit=colours_.find(id);
+    if (hit!=colours_.end() && hit->second.rgb.size()==out.records.size()*3) {
+        const auto &rgb=hit->second.rgb;
+        for (size_t i=0;i<out.records.size();++i) std::copy_n(rgb.data()+3*i,3,out.records[i].color);
+        for (auto &p:out.points) std::copy_n(rgb.data()+size_t(p.id)*3,3,p.color);
+        despillSh(out.sh,settings);out.colourFromCache=true;
+        colourOrder_.splice(colourOrder_.end(),colourOrder_,hit->second.order);
+        return;
+    }
+    if (hit!=colours_.end()) {colourBytes_-=hit->second.bytes();colourOrder_.erase(hit->second.order);colours_.erase(hit);}
+    if (keep && cachingEnabled_) emit cacheComputing(2,generation_,processingRevision_);
+    ++despillEvaluations_;
+    vgs::Frame f;f.count=out.records.size();f.active=out.active;f.shCoefficients=out.coefficients;f.shRest.swap(out.sh);
+    f.position.reserve(size_t(f.count)*3);f.colorDc.reserve(size_t(f.count)*3);f.opacity.reserve(size_t(f.count));
+    for (const auto &r:out.records) {f.position.insert(f.position.end(),r.position,r.position+3);f.colorDc.insert(f.colorDc.end(),r.color,r.color+3);f.opacity.push_back(r.color[3]);}
+    despillFrame(f,settings);
+    for (size_t i=0;i<out.records.size();++i) std::copy_n(f.colorDc.data()+i*3,3,out.records[i].color);
+    for (auto &p:out.points) std::copy_n(f.colorDc.data()+size_t(p.id)*3,3,p.color);
+    out.sh.swap(f.shRest);
+    // Move the computed RGB into retention: no extra full-frame copy. SH stays
+    // in the reusable render frame and is transformed afresh on a colour hit.
+    Colour colour;colour.rgb=std::move(f.colorDc);const size_t bytes=colour.bytes();
+    if (!keep || !cachingEnabled_) return;
+    if (bytes>colourBudget_ || !memory_.canRetain(bytes)) {cacheLimited_=true;return;}
+    while (colourBytes_>colourBudget_-bytes && !colourOrder_.empty()) {cacheLimited_=true;evictColour();}
+    colourOrder_.push_back(id);colour.order=std::prev(colourOrder_.end());
+    colourBytes_+=bytes;colours_.emplace(id,std::move(colour));
+#else
+    Q_UNUSED(out);Q_UNUSED(modifiers);Q_UNUSED(keep);
+#endif
+}
+void CaptureWorker::clearVisibility(int context) {
+    if (context<0) {visibilityKeys_={};visibility_.clear();visibilityOrder_.clear();visibilityBytes_=0;visibilityStageFrames_={};visibilityStageBytes_={};return;}
+    for (auto it=visibility_.begin();it!=visibility_.end();) if (it->first.second==context) {visibilityBytes_-=it->second.bytes();it=visibility_.erase(it);} else ++it;
+    visibilityOrder_.erase(std::remove_if(visibilityOrder_.begin(),visibilityOrder_.end(),[context](const auto &id) {return id.second==context;}),visibilityOrder_.end());
+    visibilityKeys_[context].clear();
+    visibilityStageFrames_[context]=visibilityStageBytes_[context]=0;
+}
+bool CaptureWorker::cachedVisibility(RenderFrame &out,const Project &project,int context) {
+    Q_UNUSED(project);if (!cachingEnabled_) return false;
+    const auto hit=visibility_.find({int(std::lround(out.seconds*info_.fps)),context});
+    if (hit==visibility_.end()) return false;
+    size_t count=0;for (uint32_t run:hit->second.runs) count+=run;
+    if (count!=out.points.size()) return false;
+    size_t at=0;bool visible=true;
+    for (uint32_t run:hit->second.runs) {for (uint32_t k=0;k<run;++k) out.points[at++].modifierVisibility=visible ? 1.f : 0.f;visible=!visible;}
+    out.greensApplied=hit->second.greensApplied;out.prune=hit->second.prune;out.visibilityFromCache=true;return true;
+}
+void CaptureWorker::keepVisibility(const RenderFrame &out,const Project &project,int context) {
+    if (!project.previewPlaying || !cachingEnabled_) return;
+    if (!memory_.canRetain((out.points.size()+1)*sizeof(uint32_t)+sizeof(Visibility)+128)) {cacheLimited_=true;return;}
+    Visibility kept;kept.greensApplied=out.greensApplied;kept.prune=out.prune;bool visible=true;uint32_t run=0;
+    for (const auto &p:out.points) {if ((p.modifierVisibility>=.5f)!=visible) {kept.runs.push_back(run);run=0;visible=!visible;}++run;}
+    kept.runs.push_back(run);kept.runs.shrink_to_fit();
+    const VisibilityId id{int(std::lround(out.seconds*info_.fps)),context};
+    auto &slot=visibility_[id];const auto replaced=slot.runs.empty() ? 0 : slot.bytes();visibilityBytes_-=replaced;visibilityStageBytes_[context]-=replaced;
+    if (slot.runs.empty()) {visibilityOrder_.push_back(id);++visibilityStageFrames_[context];}
+    slot=std::move(kept);visibilityBytes_+=slot.bytes();visibilityStageBytes_[context]+=slot.bytes();
+    while (visibilityBytes_>VisibilityBudget && !visibilityOrder_.empty()) {
+        cacheLimited_=true;
+        const auto oldest=visibility_.find(visibilityOrder_.front());visibilityOrder_.pop_front();
+        if (oldest!=visibility_.end()) {visibilityBytes_-=oldest->second.bytes();--visibilityStageFrames_[oldest->first.second];visibilityStageBytes_[oldest->first.second]-=oldest->second.bytes();visibility_.erase(oldest);}
+    }
+}
+size_t CaptureWorker::Visibility::bytes() const {return sizeof(Visibility)+runs.size()*sizeof(uint32_t)+prune.size()*sizeof(PruneStats)+96;}
 const std::vector<float> &CaptureWorker::pruneScores(size_t chunk) {
     if (auto it = pruneScores_.find(chunk); it != pruneScores_.end()) return it->second;
     double start, end;
@@ -66,20 +209,34 @@ const std::vector<float> &CaptureWorker::pruneScores(size_t chunk) {
     return pruneScores_[chunk] = contributionScores(samples, info_.antialiased);
 }
 
+FramePtr CaptureWorker::reusableFrame() {
+    FramePtr out;
+    for (auto &slot:framePool_) {
+        if (!cachingEnabled_) break;
+        if (!slot) {if (!memory_.canRetain(sizeof(RenderFrame))) break;slot=std::make_shared<RenderFrame>();}
+        if (slot.use_count()==1) {out=slot;break;}
+    }
+    if (!out) out=std::make_shared<RenderFrame>();
+    out->records.clear();out->active.clear();out->points.clear();out->morphMarkers.clear();out->prune.clear();out->greensApplied=false;out->visibilityFromCache=false;
+    out->sourceMs=out->assemblyMs=0;out->morphShapeFromCache=false;out->colourFromCache=false;out->shBlend={};
+    out->cache={};
+    return out;
+}
 FramePtr CaptureWorker::frame(double time, bool includeSh) {
     QElapsedTimer timer; timer.start();
     time = std::clamp(time, 0.0, std::max(0.0, info_.duration - 1e-7));
     const float *p, *r, *s, *c, *o, *sh = nullptr;
     const uint8_t *a; uint64_t count; int coefficients = 0; size_t chunkIndex = 0;
+    auto out=reusableFrame();
     MintFrame mintFrame;
     if (mint_) {
         QString error;
-        if (!mint_->decode(time, &mintFrame, includeSh, &error)) throw std::runtime_error(error.toStdString());
+        if (!mint_->decode(time, &mintFrame, includeSh, &error, &out->sh)) throw std::runtime_error(error.toStdString());
         p = mintFrame.position.constData(); r = mintFrame.rotation.constData();
         s = mintFrame.scale.constData(); c = mintFrame.colorDc.constData();
         o = mintFrame.opacity.constData(); a = mintFrame.active.constData(); count = mintFrame.count;
         chunkIndex = size_t(mintFrame.chunkIndex);
-        if (includeSh) { sh = mintFrame.shRest.constData(); coefficients = 15; }
+        if (includeSh) { sh = out->sh.data(); coefficients = 15; }
     } else {
         const auto &f = vgs_->setTime(time, includeSh);
         p = f.positions; r = f.rotations; s = f.scales; c = f.colors;
@@ -88,12 +245,12 @@ FramePtr CaptureWorker::frame(double time, bool includeSh) {
         chunkIndex = f.chunkIndex;
     }
     if (count > 10000000) throw std::runtime_error("The capture exceeds the limit of 10 million Gaussian records per frame.");
-    auto out = std::make_shared<RenderFrame>();
+    out->sourceMs=timer.nsecsElapsed()/1e6;
     out->seconds = time; out->total = count; out->coefficients = coefficients;
     out->chunkIndex = chunkIndex;
     out->records.reserve(size_t(count)); out->active.reserve(size_t(count));
     out->points.reserve(size_t(count));
-    if (coefficients) out->sh.assign(sh, sh + size_t(count) * size_t(coefficients) * 3);
+    if (!mint_) {if (coefficients) out->sh.assign(sh, sh + size_t(count) * size_t(coefficients) * 3);else out->sh.clear();}
     for (uint64_t i = 0; i < count; ++i) {
         Splat v{}; bool valid = true;
         for (int j = 0; j < 3; ++j) {
@@ -110,6 +267,8 @@ FramePtr CaptureWorker::frame(double time, bool includeSh) {
         }
     }
     out->decodeMs = timer.nsecsElapsed()/1e6;
+    out->assemblyMs=out->decodeMs-out->sourceMs;
+    trimFramePool();
     return out;
 }
 void CaptureWorker::openRequest(const QString &path, quint64 generation, bool sh, quint64 request) {
@@ -121,6 +280,7 @@ void CaptureWorker::decodeRequest(double time, quint64 generation, bool sh, Proj
 void CaptureWorker::open(const QString &path, quint64 generation, bool sh) {
     // Build a candidate first: a failed open leaves the existing capture usable.
     CaptureWorker candidate;
+        candidate.cachingEnabled_=cachingEnabled_;
     try {
         const QString ext = QFileInfo(path).suffix().toLower();
         const double *bounds;
@@ -129,7 +289,7 @@ void CaptureWorker::open(const QString &path, quint64 generation, bool sh) {
         candidate.info_.format = ext.toUpper();
         if (ext == "mint") {
             candidate.mint_ = std::make_unique<MintFile>(); QString error;
-            if (!candidate.mint_->open(path, &error)) throw std::runtime_error(error.toStdString());
+            if (!candidate.mint_->openReadOnly(path, &error)) throw std::runtime_error(error.toStdString());
             candidate.info_.duration = candidate.mint_->duration(); candidate.info_.fps = candidate.mint_->frameRate();
             candidate.info_.shDegree = 3;
             bounds = candidate.mint_->boundingBox();
@@ -137,7 +297,7 @@ void CaptureWorker::open(const QString &path, quint64 generation, bool sh) {
         } else if (ext == "vgs" || ext == "pgs") {
             candidate.source_ = std::make_unique<FileSource>(path);
             candidate.vgs_ = std::make_unique<vgsdec::Capture>(vgsdec::Capture::openStream(*candidate.source_));
-            candidate.vgs_->setCachePolicy({1, 1, 512ull * 1024 * 1024});
+            candidate.vgs_->setCachePolicy(cachingEnabled_ ? vgsdec::CachePolicy{1,1,512ull*1024*1024} : vgsdec::CachePolicy{0,0,1});
             candidate.vgs_->setThreadCount(std::clamp(std::thread::hardware_concurrency(), 1u, 4u));
             candidate.info_.duration = candidate.vgs_->duration(); candidate.info_.fps = candidate.vgs_->frameRate();
             candidate.info_.shDegree = int(candidate.vgs_->shDegree());
@@ -176,7 +336,8 @@ void CaptureWorker::open(const QString &path, quint64 generation, bool sh) {
         auto first = candidate.frame(0, sh);
         vgs_.reset(); source_.reset(); mint_.reset();
         source_ = std::move(candidate.source_); vgs_ = std::move(candidate.vgs_); mint_ = std::move(candidate.mint_);
-        info_ = candidate.info_; generation_ = generation; pruneScores_.clear(); morph_.reset(); morphKey_.clear(); clearVisibility();
+        framePool_={};clearColours();dependencyRevision_=0;dependencyMorphKey_.clear();info_ = candidate.info_; generation_ = generation; pruneScores_.clear(); morph_.reset();morphScratch_={}; morphKey_.clear(); clearVisibility();
+        memoryTimer_->start();relieveMemoryPressure();
         emit opened(info_, first, generation);
         emit openedRequest(info_, first, generation, request_);
     } catch (const std::exception &e) {
@@ -187,59 +348,98 @@ void CaptureWorker::open(const QString &path, quint64 generation, bool sh) {
 void CaptureWorker::decode(double time, quint64 generation, bool sh,Project project) {
     if (generation != generation_) { emit failed("Capture replaced.", generation, false);emit failedRequest("Capture replaced.",generation,false,request_);return; }
     try {
-        const auto out=project.inMorph(time,info_.fps) ? morphFrame(time,sh,project) : processed(time,sh,project,project.modifiersAtFrame(std::round(time*info_.fps)),true);
+        preparePreview(project);
+        relieveMemoryPressure();
+        const auto out=evaluate(time,sh,project);
         emit decoded(out,generation);emit decodedRequest(out,generation,request_);
         // Decode the next VGS chunk in small pieces while this one is on screen.
         // Both the viewer and editor use this worker; doing it here keeps a chunk
         // boundary from forcing the next frame to decompress the entire chunk.
-        if (vgs_ && out->chunkIndex + 1 < vgs_->chunkCount()) {
-            try { vgs_->prepare(out->chunkIndex + 1, 3.0, vgsdec::Detail::Full); }
+        if (cachingEnabled_ && vgs_ && memory_.canRetain(8*previewmemory::MiB)) {
+            size_t next=out->chunkIndex==RenderFrame::MorphChunk ? vgs_->chunkAt(project.in) : out->chunkIndex+1;
+            if (project.previewPlaying && project.loop && (next>=vgs_->chunkCount() ||
+                (project.out>project.in && vgs_->chunk(next).startSeconds>project.out))) next=vgs_->chunkAt(project.in);
+            const double budget=std::clamp(1000/info_.fps-out->decodeMs-4.0,3.0,8.0);
+            try { if (next<vgs_->chunkCount() && next!=out->chunkIndex) vgs_->prepare(next,budget,sh ? vgsdec::Detail::Full : vgsdec::Detail::Base); }
             catch (const std::exception &) { /* The normal frame request reports bad data. */ }
         }
+        relieveMemoryPressure();
     }
     catch (const std::exception &e) { emit failed(QString::fromUtf8(e.what()), generation, false);emit failedRequest(QString::fromUtf8(e.what()),generation,false,request_); }
+}
+FramePtr CaptureWorker::evaluate(double time,bool sh,const Project &project) {
+    auto out=project.inMorph(time,info_.fps) ? morphFrame(time,sh,project) : processed(time,sh,project,project.modifiersAtFrame(std::round(time*info_.fps)),true);
+    describeCache(*out,project,sh);if (!cachingEnabled_) {pruneScores_.clear();morphScratch_={};}return out;
+}
+void CaptureWorker::describeCache(RenderFrame &out,const Project &project,bool sh) {
+    auto &cache=out.cache;cache.frame=int(std::lround(out.seconds*info_.fps));cache.revision=project.previewRevision;
+    cache.enabled=cachingEnabled_;cache.morphTotalFrames=project.morphFrames(info_.fps);
+    cache.timelineFrames=std::max(0,int(std::lround((project.playbackEnd(info_.fps)-project.in)*info_.fps))+1);
+    cache.morph=out.chunkIndex==RenderFrame::MorphChunk;
+    cache.visibility=visibility_.count({cache.frame,cache.morph ? 2 : 0})!=0;
+    cache.colour=colours_.count({out.seconds,out.chunkIndex,out.coefficients})!=0;
+    const bool validMorph=morph_ && morphKey_==project.previewMorphKey+":"+QByteArray::number(sh);
+    if (validMorph) {cache.morphFrames=morph_->cachedFrames();cache.morphBytes=morph_->cachedBytes();}
+    if (cache.morph && morph_) {
+        double fraction=0;int source=0;project.inMorph(out.seconds,info_.fps,&fraction,&source);
+        cache.shape=morph_->hasCachedShape(fraction,size_t(int(std::lround(project.out*info_.fps))-source));
+        if (!cache.shape) cacheLimited_=true;
+    }
+    describeRetention(cache);lastCacheState_=cache;
+}
+void CaptureWorker::describeRetention(PreviewCacheState &cache) {
+    cache.enabled=cachingEnabled_;cache.visibilityFrames=visibility_.size();cache.visibilityBytes=visibilityBytes_;
+    cache.visibilityStageFrames=visibilityStageFrames_;cache.visibilityStageBytes=visibilityStageBytes_;
+    cache.reusableBytes=reusableFrameBytes();cache.colourFrames=colours_.size();cache.colourBytes=colourBytes_;
+    cache.morphFrames=morph_ ? morph_->cachedFrames() : 0;cache.morphBytes=morph_ ? morph_->cachedBytes() : 0;
+    cache.memoryLimited=memory_.inspect().paused;
+    cache.visibility=visibility_.count({cache.frame,cache.morph ? 2 : 0})!=0;
+}
+void CaptureWorker::inspectCache(quint64 generation,quint64 revision) {
+    if (generation!=generation_ || revision!=lastCacheState_.revision) return;
+    auto state=lastCacheState_;describeRetention(state);emit cacheStateReady(state,generation);
+}
+void CaptureWorker::precalculate(Project project,quint64 generation,quint64 request) {
+    int done=0,total=0;QString error;cacheLimited_=false;
+    QScopedValueRollback<quint64> running(activeCacheRequest_,request);
+    try {
+        if (generation!=generation_) throw std::runtime_error("Capture replaced.");
+        preparePreview(project);
+        if (!cachingEnabled_) throw std::runtime_error("Enable cache before baking it.");
+        project.previewPlaying=true;
+        for (qsizetype i=0;i<std::as_const(project.modifiers).size();++i) if (std::as_const(project.modifiers)[i].showErased) project.modifiers[i].showErased=false;
+        const int first=int(std::lround(project.in*info_.fps)),last=int(std::lround(project.playbackEnd(info_.fps)*info_.fps));
+        total=std::max(0,last-first+1);emit cacheProgress(0,total,generation,request);
+        QElapsedTimer progress;progress.start();
+        for (int f=first;f<=last && cancelCacheRequest_.load()!=request;++f) {
+            relieveMemoryPressure();
+            {const auto frame=evaluate(f/info_.fps,true,project);}
+            ++done;
+            if (progress.elapsed()>=80 || done==total) {emit cacheProgress(done,total,generation,request);progress.restart();}
+        }
+        relieveMemoryPressure();
+    } catch (const std::exception &e) {if (cancelCacheRequest_.load()!=request) error=QString::fromUtf8(e.what());}
+    emit cacheFinished(done,total,cacheLimited_,error,generation,request);
 }
 // A source frame with the modifiers of `stack` decided on it, as the viewport needs them:
 // despilled when a Colour modifier despills always, and the splats that pruning, Erase,
 // Purge Isolated (and Remove green, when the colours shown are despilled) remove marked.
-FramePtr CaptureWorker::processed(double time,bool sh,const Project &project,const QVector<Modifier> &stack,bool cached) {
+FramePtr CaptureWorker::processed(double time,bool sh,const Project &project,const QVector<Modifier> &stack,bool cached,int context) {
     {
         QElapsedTimer processingTimer;processingTimer.start();auto out=frame(time,sh);CompiledModifiers modifiers(stack);
         // Answered by the cache when nothing has changed since the frame was played. While
         // Erase marks its picks rather than removing them, the frame is not one played.
         const bool masks=!modifiers.prunes.isEmpty() || !modifiers.erased.empty() || !modifiers.isolations.isEmpty() || (modifiers.despillPreview && !modifiers.greens.isEmpty());
-        const bool cacheable=cached && masks && !modifiers.showErased;const int frameIndex=int(std::lround(out->seconds*info_.fps));
-        if (cacheable) {
-            const auto v=[](const QVector3D &x) {return QJsonArray{x.x(),x.y(),x.z()};};
-            const QByteArray key=QJsonDocument(QJsonObject{{"modifiers",project.modifierJson()},{"processing",project.captureSettings.json()},
-                {"transform",QJsonArray{v(project.transform.position),v(project.transform.rotation),v(project.transform.scale)}}}).toJson(QJsonDocument::Compact);
-            if (key!=visibilityKey_) {clearVisibility();visibilityKey_=key;}
-        } else if (cached && !masks) clearVisibility();
-        const auto hit=cacheable ? visibility_.find(frameIndex) : visibility_.end();
-        bool answered=false;
-        if (hit!=visibility_.end()) {
-            size_t total=0;for (const uint32_t run:hit->second.runs) total+=run;
-            if (total==out->points.size()) {
-                size_t at=0;bool visible=true;
-                for (const uint32_t run:hit->second.runs) {for (uint32_t k=0;k<run;++k) out->points[at++].modifierVisibility=visible ? 1.f : 0.f;visible=!visible;}
-                out->greensApplied=hit->second.greensApplied;out->prune=hit->second.prune;answered=true;
-            }
-        }
+        const bool cacheable=cached && masks && !modifiers.showErased;
+        const bool answered=cacheable && cachedVisibility(*out,project,context);
+        if (cached && !masks && context==0) clearVisibility(0);
+        if (cacheable && !answered && cachingEnabled_ && project.previewPlaying) emit cacheComputing(1,generation_,processingRevision_);
         // A Colour modifier that despills always: the export's despill on what is shown. The
         // source's colours are kept for Remove green above it, which tests them, not these.
         std::vector<std::array<float,3>> sourceColours;
         if (modifiers.despillPreview && !modifiers.greens.isEmpty()) {sourceColours.resize(out->points.size());for (size_t i=0;i<out->points.size();++i) std::copy_n(out->points[i].color,3,sourceColours[i].data());}
-        if (modifiers.despillPreview) {
-            vgs::Frame f;f.count=out->records.size();f.active=out->active;f.shCoefficients=out->coefficients;f.shRest=out->sh;
-            for (const auto &r:out->records) {f.position.insert(f.position.end(),r.position,r.position+3);f.colorDc.insert(f.colorDc.end(),r.color,r.color+3);f.opacity.push_back(r.color[3]);}
-            CaptureSettings settings;settings.despillStrength=modifiers.despillStrength;settings.greenGain=modifiers.greenGain;settings.viewChromaScale=modifiers.viewChroma;settings.recoverSkin=modifiers.recoverSkin;
-#ifndef VGS_VIEWER
-            despillFrame(f,settings);
-#endif
-            for (size_t i=0;i<out->records.size();++i) std::copy_n(f.colorDc.data()+i*3,3,out->records[i].color);
-            for (auto &p:out->points) std::copy_n(f.colorDc.data()+size_t(p.id)*3,3,p.color);
-            out->sh=f.shRest;
-        }
+        if (modifiers.despillPreview) applyDespill(*out,modifiers,project.previewPlaying);
+        else if (context==0) clearColours();
         if (answered) {out->decodeMs=processingTimer.nsecsElapsed()/1e6;return out;}
         // Pruning is decided for the whole chunk; Purge Isolated then sees only what it keeps.
         std::vector<uint8_t> pruned;
@@ -255,20 +455,10 @@ FramePtr CaptureWorker::processed(double time,bool sh,const Project &project,con
         if (!modifiers.isolations.isEmpty()) {
             const auto model=project.transformAtFrame(std::round(out->seconds*info_.fps)).matrix();std::vector<QVector3D> positions(out->points.size());std::vector<uint8_t> keep(out->points.size());
             for (size_t i=0;i<positions.size();++i) {const auto &p=out->points[i];positions[i]=model.map({p.position[0],p.position[1],p.position[2]});keep[i]=unpruned(p) && modifiers.keeps(positions[i],sourceRgb(i),{p.color[0],p.color[1],p.color[2]});}
-            applyIsolation(positions,keep,modifiers.isolations);for (size_t i=0;i<keep.size();++i) out->points[i].modifierVisibility=keep[i] ? 1.f : 0.f;
+            ++isolationEvaluations_;applyIsolation(positions,keep,modifiers.isolations);for (size_t i=0;i<keep.size();++i) out->points[i].modifierVisibility=keep[i] ? 1.f : 0.f;
         } else if (!pruned.empty() || erasing || greensHere) for (size_t i=0;i<out->points.size();++i) out->points[i].modifierVisibility=unpruned(out->points[i]) && !greenGone(i) ? 1.f : 0.f;
         if (erasing && modifiers.showErased) for (auto &p:out->points) if (p.modifierVisibility>=.5f && erasedHere(p)) p.modifierVisibility=.75f;
-        if (cacheable && project.previewPlaying) {
-            Visibility kept;kept.greensApplied=out->greensApplied;kept.prune=out->prune;bool visible=true;uint32_t run=0;
-            for (const auto &p:out->points) {if ((p.modifierVisibility>=.5f)!=visible) {kept.runs.push_back(run);run=0;visible=!visible;}++run;}
-            kept.runs.push_back(run);kept.runs.shrink_to_fit();
-            auto &slot=visibility_[frameIndex];visibilityBytes_-=slot.runs.empty() ? 0 : slot.bytes();if (slot.runs.empty()) visibilityOrder_.push_back(frameIndex);
-            slot=std::move(kept);visibilityBytes_+=slot.bytes();
-            while (visibilityBytes_>VisibilityBudget && !visibilityOrder_.empty()) {
-                const auto oldest=visibility_.find(visibilityOrder_.front());visibilityOrder_.pop_front();
-                if (oldest!=visibility_.end()) {visibilityBytes_-=oldest->second.bytes();visibility_.erase(oldest);}
-            }
-        }
+        if (cacheable) keepVisibility(*out,project,context);
         out->decodeMs=processingTimer.nsecsElapsed()/1e6;
         return out;
     }
@@ -290,23 +480,18 @@ FramePtr CaptureWorker::morphFrame(double time,bool sh,const Project &project) {
     auto intoEnd=[&](int frame) {return unEnd*project.transformAtFrame(frame).matrix();};
     auto above=[&](int frame) {
         auto stack=project.modifiersAboveMorph(frame);
-        for (auto &m:stack) m.showErased=false; // what Erase removes, even while its picks are edited
+        for (qsizetype i=0;i<std::as_const(stack).size();++i) if (std::as_const(stack)[i].showErased) stack[i].showErased=false;
         return stack;
     };
-    auto matrixJson=[](const QMatrix4x4 &m) {QJsonArray a;for (int i=0;i<16;++i) a.append(double(m.constData()[i]));return a;};
-    auto stackJson=[](const QVector<Modifier> &stack) {Project p;p.modifiers=stack;return p.modifierJson();};
-    Project own;own.modifiers={*project.loopMorph()};
-    // The frames an overlapping morph shows, and those before Start it leads into: how each is
-    // placed and what shapes it, since the morph's frames are kept once worked out.
-    QJsonArray followedFrames;
-    if (overlaps) for (int k=1;k<=frames;++k) for (const int frame:{endFrame-k,leadIn ? startFrame-k : -1}) if (frame>=0)
-        followedFrames.append(QJsonObject{{"frame",frame},{"model",matrixJson(project.transformAtFrame(frame).matrix())},{"stack",stackJson(above(frame))}});
-    const QByteArray key=QJsonDocument(QJsonObject{{"end",stackJson(above(endFrame))},{"start",stackJson(above(startFrame))},{"morph",own.modifierJson()},
-        {"endFrame",endFrame},{"startFrame",startFrame},{"endModel",matrixJson(endModel)},{"startModel",matrixJson(startModel)},{"sh",sh},
-        {"frames",frames},{"leadIn",leadIn},{"followed",followedFrames}}).toJson(QJsonDocument::Compact);
+    const QByteArray key=project.previewMorphKey+":"+QByteArray::number(sh);
+    bool collectSources=false,sourceVisibility=true,sourceColour=true;
     auto cloud=[&](int frame,const QMatrix4x4 &into) {
         const auto stack=above(frame);
-        const auto f=processed(frame/fps,sh,project,stack);const CompiledModifiers compiled(stack);const QMatrix4x4 model=project.transformAtFrame(frame).matrix();
+        const auto f=processed(frame/fps,sh,project,stack,true,1);const CompiledModifiers compiled(stack);const QMatrix4x4 model=project.transformAtFrame(frame).matrix();
+        if (collectSources) {
+            sourceVisibility &= visibility_.count({frame,1})!=0;
+            sourceColour &= colours_.count({f->seconds,f->chunkIndex,f->coefficients})!=0;
+        }
         // The rotation and uniform scale `into` carries a splat's orientation and size by.
         Eigen::Matrix3d a;for (int r=0;r<3;++r) for (int c=0;c<3;++c) a(r,c)=into(r,c);
         Eigen::JacobiSVD<Eigen::Matrix3d> svd(a,Eigen::ComputeFullU|Eigen::ComputeFullV);Eigen::Matrix3d rotation=svd.matrixU()*svd.matrixV().transpose();
@@ -324,13 +509,15 @@ FramePtr CaptureWorker::morphFrame(double time,bool sh,const Project &project) {
         return c;
     };
     if (!morph_ || key!=morphKey_) {
+        if (cachingEnabled_ && project.previewPlaying) emit cacheComputing(4,generation_,processingRevision_);
         morph_.reset();morphKey_.clear();emit morphFitting(true);
         struct Done {CaptureWorker *worker;~Done() {emit worker->morphFitting(false);}} done{this};
         // Both frames in the End frame's capture coordinates: its transform draws the morph.
         const QMatrix4x4 toEnd=intoEnd(startFrame);
         auto endCloud=cloud(endFrame,QMatrix4x4()),startCloud=cloud(startFrame,toEnd);
         std::vector<loopmorph::Pair> pairs;for (const auto &pair:project.morphPairs(fps)) pairs.push_back({pair.end,toEnd.map(pair.start)});
-        auto morph=std::make_unique<loopmorph::Morph>(std::move(endCloud),std::move(startCloud),pairs);
+        const auto cancelled=[this] {return activeCacheRequest_ && cancelCacheRequest_.load()==activeCacheRequest_;};
+        auto morph=std::make_unique<loopmorph::Morph>(std::move(endCloud),std::move(startCloud),pairs,cancelled);
         // Followed on every splat the source shows there, whatever the modifiers keep.
         auto followBack=[&](bool start,int from) {
             std::vector<loopmorph::Track> track;
@@ -342,21 +529,32 @@ FramePtr CaptureWorker::morphFrame(double time,bool sh,const Project &project) {
                 }
                 track.push_back(std::move(t));
             }
-            morph->follow(start,track);
+            morph->follow(start,track,cancelled);
         };
         if (overlaps) {followBack(false,endFrame);if (leadIn) followBack(true,startFrame);}
         morph_=std::move(morph);morphKey_=key;
-        morph_->setCaching(true); // played again, its frames are not deformed again
+        morph_->setCaching(cachingEnabled_,PreviewBudget-VisibilityBudget-FrameBudget);
+        morph_->setCacheAdmission([this](size_t bytes) {return memory_.canRetain(bytes);});
     }
     loopmorph::Cloud liveEnd,liveStart;loopmorph::Morph::Live live;
+    collectSources=true;
     if (overlaps) {
         live.back=back;liveEnd=cloud(sourceFrame,intoEnd(sourceFrame));live.end=&liveEnd;
         if (leadIn) {liveStart=cloud(startFrame-int(back),intoEnd(startFrame-int(back)));live.start=&liveStart;}
     }
-    const auto c=morph_->evaluate(fraction,live);
-    auto out=std::make_shared<RenderFrame>();
-    out->seconds=time;out->total=c.size();out->coefficients=c.shCoefficients;out->chunkIndex=RenderFrame::MorphChunk;out->sh=c.sh;
-    for (const auto &pair:project.morphPairs(fps)) out->morphMarkers.push_back({pair.number,morph_->carry(pair.end,fraction,overlaps ? back : 0,leadIn)});
+    auto out=reusableFrame();const size_t shapeHits=morph_->cacheHits();
+    if (cachingEnabled_ && project.previewPlaying && !morph_->hasCachedShape(fraction,overlaps ? back : 0)) emit cacheComputing(4,generation_,processingRevision_);
+    out->cache.sourceVisibility=!overlaps || sourceVisibility;out->cache.sourceColour=!overlaps || sourceColour;
+    const bool gpuSh=project.previewPlaying && !overlaps && sh && morph_->evaluatePreviewInto(fraction,&morphScratch_,&out->shBlend);
+    if (gpuSh) {std::vector<float>().swap(out->sh);std::vector<float>().swap(morphScratch_.sh);}
+    else {morphScratch_.sh.swap(out->sh);morph_->evaluateInto(fraction,live,&morphScratch_);morphScratch_.sh.swap(out->sh);}
+    const auto &c=morphScratch_;
+    out->seconds=time;out->total=c.size();out->coefficients=c.shCoefficients;out->chunkIndex=RenderFrame::MorphChunk;
+    out->morphShapeFromCache=morph_->cacheHits()!=shapeHits;
+    const auto pairs=project.previewPlaying ? QVector<Project::MorphPair>{} : project.morphPairs(fps);std::vector<QVector3D> markerPoints;markerPoints.reserve(size_t(pairs.size()));
+    for (const auto &pair:pairs) markerPoints.push_back(pair.end);
+    const auto carried=morph_->carry(markerPoints,fraction,overlaps ? back : 0,leadIn);
+    for (qsizetype i=0;i<pairs.size();++i) out->morphMarkers.push_back({pairs[i].number,carried[size_t(i)]});
     out->records.resize(c.size());out->active.assign(c.size(),1);out->points.resize(c.size());
     for (size_t i=0;i<c.size();++i) {
         auto &r=out->records[i];std::copy_n(c.position.data()+3*i,3,r.position);std::copy_n(c.rotation.data()+4*i,4,r.rotation);std::copy_n(c.scale.data()+3*i,3,r.scale);
@@ -366,11 +564,12 @@ FramePtr CaptureWorker::morphFrame(double time,bool sh,const Project &project) {
     // Below the morph, Purge Isolated applies to its frames as to any other. Pruning and Erase
     // pick splats of source chunks, and these splats are in none.
     const CompiledModifiers below(project.modifiersBelowMorph(endFrame));
-    if (!below.isolations.isEmpty()) {
+    if (!below.isolations.isEmpty() && !cachedVisibility(*out,project,2)) {
         std::vector<QVector3D> positions(out->points.size());std::vector<uint8_t> keep(out->points.size(),1);
         for (size_t i=0;i<positions.size();++i) {const auto &p=out->points[i];positions[i]=endModel.map({p.position[0],p.position[1],p.position[2]});keep[i]=below.keepsPosition(positions[i]);}
-        applyIsolation(positions,keep,below.isolations);for (size_t i=0;i<keep.size();++i) out->points[i].modifierVisibility=keep[i] ? 1.f : 0.f;
+        ++isolationEvaluations_;applyIsolation(positions,keep,below.isolations);for (size_t i=0;i<keep.size();++i) out->points[i].modifierVisibility=keep[i] ? 1.f : 0.f;
     }
-    out->decodeMs=timer.nsecsElapsed()/1e6;
+    if (!below.isolations.isEmpty() && !out->visibilityFromCache) keepVisibility(*out,project,2);
+    trimFramePool();out->decodeMs=timer.nsecsElapsed()/1e6;
     return out;
 }

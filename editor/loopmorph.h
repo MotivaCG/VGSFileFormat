@@ -47,6 +47,19 @@ struct Track {
     long long chunk = -1;
     size_t size() const { return record.size(); }
 };
+// A non-overlapping morph can blend its fixed endpoint SH on the GPU. The
+// dictionaries are shared by every frame; the index arrays alias cached shapes.
+struct ShSources {
+    std::vector<float> values;
+    uint32_t endCount=0;
+    int coefficients=0;
+    size_t bytes() const {return sizeof(ShSources)+32+values.capacity()*sizeof(float);}
+};
+struct ShBlend {
+    std::shared_ptr<const ShSources> sources;
+    std::shared_ptr<const std::vector<uint32_t>> source,partner;
+    float fraction=0;
+};
 
 class Morph {
 public:
@@ -80,15 +93,31 @@ public:
         const Cloud *end = nullptr, *start = nullptr;
     };
     Cloud evaluate(double s, const Live &live, std::vector<uint32_t> *source = nullptr) const;
+    // Reuses the caller's output allocations. Output must not alias either live input.
+    void evaluateInto(double s,const Live &live,Cloud *out,std::vector<uint32_t> *source = nullptr) const;
+    // False if the shared SH dictionaries would exceed the cache budget. The
+    // caller then uses evaluateInto; overlapping morphs also use that CPU path.
+    bool evaluatePreviewInto(double s,Cloud *out,ShBlend *sh) const;
     // Where a point of the End frame, in the clouds' space, is carried to at `s`, `back`
     // frames before End (0 for a morph that follows End) - the marker on the morph's frame.
     QVector3D carry(const QVector3D &onEnd, double s, size_t back = 0, bool leadIn = false) const;
-    // Keeps each frame's shape - which splats show, where, turned how and how opaque, some 36
+    std::vector<QVector3D> carry(const std::vector<QVector3D> &onEnd, double s, size_t back = 0, bool leadIn = false) const;
+    // Keeps each frame's shape - which splats show, where, turned how and how opaque, some 40
     // bytes a splat - once worked out, so the morph plays again without deforming anything:
-    // about 11 MB a frame for 300 000 splats. Colour and SH are mixed afresh each time. The
+    // about 12 MB a frame for 300 000 splats. Colour is mixed afresh; preview may share SH
+    // dictionaries instead of materializing the coefficients of every frame. The
     // cache goes with this object, which is fitted again whenever anything it depends on
-    // changes. Off by default (an export evaluates each frame once).
-    void setCaching(bool caching);
+    // changes. Bounded to 2 GiB by default, oldest frames evicted first; a shape
+    // larger than the budget is used without retaining it. Off by default (export).
+    static constexpr size_t CacheBudget = 2ull*1024*1024*1024;
+    void setCaching(bool caching, size_t budget = CacheBudget);
+    // Admission runs on the evaluating thread and must not call back into Morph.
+    void setCacheAdmission(std::function<bool(size_t)>);
+    void trimCache(size_t maxBytes);
+    size_t cachedBytes() const;
+    size_t cachedFrames() const;
+    size_t cacheHits() const;
+    bool hasCachedShape(double fraction,size_t back=0) const;
     // Where the markers land, on average, from where they were picked on the other frame,
     // in the clouds' units: how well the fit honours them.
     double markerError() const;
@@ -97,7 +126,7 @@ private:
     struct Data;
     struct Shape;
     std::shared_ptr<const Shape> shape(double s, const Live &live) const;
-    Cloud mix(double s, const Shape &shape, const Live &live, std::vector<uint32_t> *source) const;
+    void mixInto(double s, const Shape &shape, const Live &live,Cloud &out,std::vector<uint32_t> *source,bool includeSh=true) const;
     std::unique_ptr<Data> d_;
 };
 

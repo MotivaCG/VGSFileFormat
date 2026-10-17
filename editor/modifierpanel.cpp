@@ -9,6 +9,7 @@
 // Other uses require prior written authorisation, subject to mandatory law.
 
 #include "modifierpanel.h"
+#include "captureworker.h"
 #include <QShortcut>
 #include "editortheme.h"
 #include <QTreeWidget>
@@ -32,10 +33,20 @@
 #include <QHelpEvent>
 #include <functional>
 #include <QIcon>
+#include <QDateTime>
 #include <algorithm>
 
 namespace {
 constexpr int ModifierRole=Qt::UserRole+1;
+constexpr int CacheRole=Qt::UserRole+20;
+constexpr int CacheProgressRole=Qt::UserRole+21;
+// 0: disabled; 1: empty; 2: complete; 3: working; 4: partial;
+// 5: direct processing; 6: included in another layer's cache.
+int previewDespill(const Project &project) {
+    int index=-1;
+    for (int i=0;i<project.modifiers.size();++i) {const auto &m=project.modifiers[i];if (m.active() && m.type==ModifierType::Colour && m.colourDespill!=Modifier::DespillNone) index=i;}
+    return index;
+}
 // The keys drawn on a modifier's timeline: its transform keys, or an animated crop's.
 QVariantList keyFrames(const Modifier &m) {
     QVariantList frames;
@@ -199,7 +210,29 @@ public:
             const int offset=textRect(option,index).left()-option.rect.left();
             if (offset!=textOffset) {textOffset=offset;if (textMoved) textMoved();}
         }
-        if (index.column()!=2) {QStyledItemDelegate::paint(painter,option,index);return;}
+        if (index.column()!=2) {
+            auto copy=option;
+            if (index.column()==0) {
+                // Reserve room for the dot's content, while selection/hover
+                // still paints the background across the entire cell.
+                auto background=option;initStyleOption(&background,index);background.text.clear();background.icon={};
+                background.features &= ~(QStyleOptionViewItem::HasCheckIndicator | QStyleOptionViewItem::HasDecoration);
+                const auto *style=option.widget ? option.widget->style() : QApplication::style();
+                style->drawControl(QStyle::CE_ItemViewItem,&background,painter,option.widget);
+                copy.rect.adjust(0,0,-18,0);
+            }
+            QStyledItemDelegate::paint(painter,copy,index);
+            const int state=index.data(CacheRole).toInt();
+            if (index.column()==0 && state) {
+                const QPointF centre(option.rect.right()-8,option.rect.center().y());
+                QColor colour=state==2 || state==4 ? QColor("#41b018") : state==3 ? QColor("#e8b04a") : state==5 || state==6 ? QColor("#0e0f10") : QColor("#737b83");
+                if (state==3) colour.setAlphaF(.75+.25*(.5+.5*std::sin(QDateTime::currentMSecsSinceEpoch()/400.)));
+                painter->save();painter->setRenderHint(QPainter::Antialiasing);painter->setPen(QPen(colour,1.2));
+                painter->setBrush(state==1 || state==4 ? Qt::NoBrush : QBrush(colour));painter->drawEllipse(centre,3.5,3.5);
+                if (state==4) {painter->setBrush(colour);painter->drawPie(QRectF(centre.x()-3.5,centre.y()-3.5,7,7),90*16,-180*16);}painter->restore();
+            }
+            return;
+        }
         QStyleOptionViewItem copy(option);initStyleOption(&copy,index);copy.text.clear();
         const QWidget *widget=option.widget;(widget ? widget->style() : QApplication::style())->drawControl(QStyle::CE_ItemViewItem,&copy,painter,widget);
         const bool active=index.data(Qt::UserRole+2).toBool() && (option.state & QStyle::State_Enabled);const auto type=ModifierType(index.data(Qt::UserRole+3).toInt());
@@ -334,6 +367,144 @@ ModifierPanel::ModifierPanel(QWidget *parent):QWidget(parent) {
         menu.exec(tree_->viewport()->mapToGlobal(position));
     });
     rebuild();
+    cachePulse_=new QTimer(this);cachePulse_->setInterval(100);
+    connect(cachePulse_,&QTimer::timeout,this,[this] {
+        showCacheState();tree_->viewport()->update();
+    });
+}
+void ModifierPanel::clearCacheState() {
+    if (cachePulse_) cachePulse_->stop();
+    cacheWorkingUntil_={};cacheState_={};cacheState_.enabled=cacheEnabled_;
+    const QSignalBlocker blocker(tree_);
+    const int despill=previewDespill(project_);
+    const auto layers=cacheLayers();
+    for (int i=0;i<tree_->topLevelItemCount();++i) {
+        auto *item=tree_->topLevelItem(i);const auto &m=std::as_const(project_.modifiers)[i];
+        const bool eligible=m.active() && (m.type==ModifierType::PurgeIsolated || m.type==ModifierType::PruneLowContribution ||
+            m.type==ModifierType::LoopMorph || (m.type==ModifierType::Erase && !m.erased.empty()) ||
+            (m.type==ModifierType::Colour && m.colourDespill==Modifier::DespillAlways && i==despill));
+        const bool direct=m.active() && (m.type==ModifierType::Crop || m.type==ModifierType::RemoveGreen || m.type==ModifierType::Colour);
+        item->setData(0,CacheRole,!cacheEnabled_ ? 5 : layers[i].shared ? 6 : eligible ? 1 : direct ? 5 : 0);
+        item->setToolTip(0,typeName(m)+"\n"+typeDescription(m.type)+(layers[i].shared ? "\n"+layers[i].detail : eligible ? cacheEnabled_ ? tr("\nCache: no frames retained yet.") : tr("\nCache disabled.") : direct ? tr("\nApplied directly on the GPU; no frame cache is needed.") : QString()));
+    }
+}
+void ModifierPanel::setCacheEnabled(bool enabled) {cacheEnabled_=enabled;clearCacheState();}
+void ModifierPanel::invalidateCacheState(bool visibility,bool sourceVisibility,bool morph,bool colour) {
+    if (!cacheEnabled_) {clearCacheState();return;}
+    const QSignalBlocker blocker(tree_);bool above=true;
+    for (int i=0;i<tree_->topLevelItemCount();++i) {
+        const auto &m=std::as_const(project_.modifiers)[i];auto *item=tree_->topLevelItem(i);
+        if (!m.active()) {item->setData(0,CacheRole,0);continue;}
+        if (item->data(0,CacheRole).toInt()==6) continue;
+        if (m.active() && m.type==ModifierType::LoopMorph) {above=false;if (morph) item->setData(0,CacheRole,1);}
+        else if (m.type==ModifierType::Colour && m.colourDespill==Modifier::DespillAlways) {if (colour) item->setData(0,CacheRole,1);}
+        else if (m.type==ModifierType::PurgeIsolated || m.type==ModifierType::PruneLowContribution || m.type==ModifierType::Erase) {
+            if (cacheShowsMorph_ && above ? sourceVisibility : visibility) item->setData(0,CacheRole,1);
+        }
+    }
+}
+void ModifierPanel::setCacheWorking(int groups) {
+    if (!cacheEnabled_) return;
+    const auto until=QDateTime::currentMSecsSinceEpoch()+650;
+    for (int i=0;i<3;++i) if (groups & (1<<i)) cacheWorkingUntil_[i]=until;
+    if (cachePulse_) cachePulse_->start();
+    const QSignalBlocker blocker(tree_);
+    for (int i=0;i<tree_->topLevelItemCount();++i) {
+        auto *item=tree_->topLevelItem(i);const auto type=std::as_const(project_.modifiers)[i].type;
+        const int group=type==ModifierType::LoopMorph ? 4 : type==ModifierType::Colour ? 2 : 1;
+        const int old=item->data(0,CacheRole).toInt();if ((groups & group) && old>=1 && old<=4) item->setData(0,CacheRole,3);
+    }
+}
+void ModifierPanel::setCacheState(const PreviewCacheState &state) {
+    cacheState_=state;showCacheState();
+}
+void ModifierPanel::showCacheState() {
+    const auto &state=cacheState_;
+    cacheShowsMorph_=state.morph;
+    if (!state.enabled || !cacheEnabled_) {clearCacheState();return;}
+    const auto now=QDateTime::currentMSecsSinceEpoch();
+    if (cachePulse_ && std::all_of(cacheWorkingUntil_.begin(),cacheWorkingUntil_.end(),[now](qint64 until) {return until<=now;})) cachePulse_->stop();
+    const QSignalBlocker blocker(tree_);
+    const auto layers=cacheLayers();
+    for (int i=0;i<tree_->topLevelItemCount();++i) {
+        auto *item=tree_->topLevelItem(i);const auto &m=std::as_const(project_.modifiers)[i];const auto &layer=layers[i];
+        int status=0;QString detail=layer.detail;
+        if (layer.shared) status=6;
+        else if (layer.cacheable) {
+            status=layer.expected && layer.retained>=layer.expected ? 2 : layer.retained ? 4 : 1;
+            item->setData(0,CacheProgressRole,layer.expected ? std::clamp(double(layer.retained)/layer.expected,0.,1.) : 0.);
+            detail=tr("Cache: %1\n%2 frames / entries, %3 MiB\n%4").arg(layer.status,layer.frames).arg(layer.bytes/1048576.,0,'f',1).arg(layer.detail);
+            if (m.type==ModifierType::LoopMorph && state.morph) detail+=state.shape ? tr("\nDisplayed morph frame is cached.") : tr("\nDisplayed morph frame is not cached.");
+        } else if (m.active() && (m.type==ModifierType::Crop || m.type==ModifierType::RemoveGreen || m.type==ModifierType::Colour)) status=5;
+        const int group=m.type==ModifierType::LoopMorph ? 2 : m.type==ModifierType::Colour ? 1 : 0;
+        if (status>=1 && status<=4 && cacheWorkingUntil_[group]>now) status=3;
+        item->setData(0,CacheRole,status);
+        item->setToolTip(0,typeName(m)+"\n"+typeDescription(m.type)+(detail.isEmpty() ? QString() : "\n\n"+detail));
+    }
+}
+QVector<ModifierPanel::CacheLayerInfo> ModifierPanel::cacheLayers() const {
+    const auto &s=cacheState_;QVector<CacheLayerInfo> result;
+    int morph=-1,despill=previewDespill(project_);std::array<int,3> owner{-1,-1,-1};std::array<bool,3> purge{};
+    for (int i=0;i<project_.modifiers.size();++i) if (project_.modifiers[i].active() && project_.modifiers[i].type==ModifierType::LoopMorph) {morph=i;break;}
+    auto mask=[](const Modifier &m) {return m.type==ModifierType::PurgeIsolated || m.type==ModifierType::PruneLowContribution || (m.type==ModifierType::Erase && !m.erased.empty());};
+    for (int i=0;i<project_.modifiers.size();++i) {
+        const auto &m=project_.modifiers[i];if (!m.active()) continue;
+        if (mask(m)) {owner[0]=i;if (morph>=0 && i<morph) owner[1]=i;if (morph>=0 && i>morph && m.type==ModifierType::PurgeIsolated) owner[2]=i;}
+        if (m.type==ModifierType::PurgeIsolated) {purge[0]=true;if (morph>=0) purge[i<morph ? 1 : 2]=true;}
+        // With preview despill, green removal must test the source colour on
+        // the CPU, even in the absence of a Purge/Erase/Prune layer.
+        if (m.type==ModifierType::RemoveGreen && despill>=0 && project_.modifiers[despill].colourDespill==Modifier::DespillAlways) {
+            if (owner[0]<0 || !mask(project_.modifiers[owner[0]])) owner[0]=i;
+            if (morph>=0 && i<morph && (owner[1]<0 || !mask(project_.modifiers[owner[1]]))) owner[1]=i;
+        }
+    }
+    auto name=[&](int i) {return project_.modifiers[i].name;};
+    for (int i=0;i<project_.modifiers.size();++i) {
+        const auto &m=project_.modifiers[i];CacheLayerInfo row;row.name=m.name;row.frames=QStringLiteral("\u2014");
+        const int stage=morph>=0 && i>morph ? 2 : 1;
+        int shared=-1;
+        if (!m.active()) {row.status=tr("Disabled");row.detail=tr("This layer is disabled.");}
+        else if (!cacheEnabled_) {row.status=tr("Cache disabled");row.detail=tr("Enable cache in the Cache menu to retain results.");}
+        else if (m.type==ModifierType::LoopMorph) {
+            row.cacheable=true;row.retained=s.morphFrames;row.expected=size_t(std::max(0,s.morphTotalFrames));
+            row.bytes=s.morphBytes;row.frames=tr("%1 / %2").arg(qulonglong(s.morphFrames)).arg(s.morphTotalFrames);
+            row.status=s.morphTotalFrames>0 && s.morphFrames>=size_t(s.morphTotalFrames) ? tr("Cached") : s.morphFrames ? tr("Partially cached") : tr("Not cached");
+            row.detail=tr("Deformed shapes and shared SH endpoints. Only frames actually evaluated are retained; skipped playback frames may still be missing.");
+        } else if (m.type==ModifierType::Colour && i==despill && m.colourDespill==Modifier::DespillAlways) {
+            row.cacheable=true;row.retained=s.colourFrames;row.expected=size_t(std::max(0,s.timelineFrames-s.morphTotalFrames));
+            row.bytes=s.colourBytes;row.frames=row.expected ? tr("%1 / %2").arg(qulonglong(row.retained)).arg(qulonglong(row.expected)) : QString::number(qulonglong(s.colourFrames));
+            row.status=row.expected && row.retained>=row.expected ? tr("Cached") : row.retained ? tr("Partially cached") : tr("Not cached");
+            row.detail=tr("Full precision despill RGB%1. Other color adjustments run on the GPU. SH is corrected on demand, without a full SH copy in each cache entry.").arg(m.colourRecoverSkin ? tr(" and skin recovery") : QString());
+        } else if (mask(m) || (m.type==ModifierType::RemoveGreen && (owner[0]==i || owner[1]==i))) {
+            size_t frames=0;
+            size_t expected=0;
+            for (int context=0;context<3;++context) if (owner[context]==i) {row.bytes+=s.visibilityStageBytes[context];frames+=s.visibilityStageFrames[context];}
+            if (owner[0]==i) expected+=size_t(std::max(0,s.timelineFrames-s.morphTotalFrames));
+            if (owner[2]==i) expected+=size_t(s.morphTotalFrames);
+            if (row.bytes || owner[0]==i || owner[stage]==i) {
+                const size_t timelineFrames=(owner[0]==i ? s.visibilityStageFrames[0] : 0)+(owner[2]==i ? s.visibilityStageFrames[2] : 0);
+                row.cacheable=true;row.retained=expected ? timelineFrames : frames;row.expected=expected;
+                row.frames=expected ? tr("%1 / %2").arg(qulonglong(timelineFrames)).arg(qulonglong(expected)) : QString::number(qulonglong(frames));
+                row.status=expected && timelineFrames>=expected ? tr("Cached") : frames ? tr("Partially cached") : tr("Not cached");
+                row.detail=tr("Shared visibility masks for Crop, Remove green, Eraser, Prune and Purge Isolated. Source, morph input and final morph masks are stored separately. Memory is charged once, to the last mask layer at each stage.");
+                if (owner[1]==i) row.detail+=tr(" Also retains %1 morph input frame(s).").arg(qulonglong(s.visibilityStageFrames[1]));
+            } else shared=owner[0];
+        } else if (m.type==ModifierType::Crop || m.type==ModifierType::RemoveGreen) {
+            if (purge[0]) shared=owner[stage]>=0 ? owner[stage] : owner[0];
+            if (shared<0) {row.status=tr("Direct / GPU");row.detail=tr("Applied directly; no additional per-frame cache is needed.");}
+        } else if (m.type==ModifierType::Colour) {
+            row.status=tr("Direct / GPU");row.detail=tr("Opacity, exposure, white balance and saturation run on the GPU and need no frame cache.");
+            if (m.colourDespill==Modifier::DespillOnExport) row.detail+=tr(" Despill and skin recovery are set to export only; they are not calculated or cached during Play.");
+            else if (m.colourDespill==Modifier::DespillAlways && despill>=0) {
+                row.detail+=tr(" Despill settings are superseded by %1.").arg(name(despill));
+                if (project_.modifiers[despill].colourDespill==Modifier::DespillAlways) {row.shared=true;row.status=tr("Included in %1").arg(name(despill));}
+            }
+        } else {row.status=tr("No frame cache");row.detail=tr("This layer does not produce a per-frame preview cache.");}
+        if (shared>=0) {row.shared=true;row.status=tr("Included in %1").arg(name(shared));row.detail=tr("Uses the visibility result retained by %1. No duplicate cache or additional memory is required.").arg(name(shared));}
+        if (s.memoryLimited && m.active() && cacheEnabled_) row.detail+=tr(" Cache growth is paused to leave RAM available to the system.");
+        result.append(row);
+    }
+    return result;
 }
 void ModifierPanel::setProject(const Project &project) {
     const bool changed=renderedModifiers_!=visualState(project);const bool selected=project_.selectedModifier!=project.selectedModifier;
@@ -371,12 +542,12 @@ void ModifierPanel::rebuild() {
     }
     if (selected) tree_->setCurrentItem(selected);addModifier_->setEnabled(true);duplicate_->setEnabled(selected);remove_->setEnabled(selected);up_->setEnabled(selected);down_->setEnabled(selected);
     tree_->setFixedHeight(std::min(250,30*std::max(4,int(project_.modifiers.size()))+tree_->header()->height()+4));
-    renderedModifiers_=visualState(project_);updating_=false;fitNames();
+    renderedModifiers_=visualState(project_);updating_=false;clearCacheState();fitNames();
 }
 // As wide as the longest name, and never narrower than the minimum asked for.
 void ModifierPanel::fitNames() {
     const int offset=textOffset();
-    const int width=std::max(static_cast<QAbstractItemView *>(tree_)->sizeHintForColumn(0),offset+minimumNameWidth_+16);
+    const int width=std::max(static_cast<QAbstractItemView *>(tree_)->sizeHintForColumn(0)+18,offset+minimumNameWidth_+34);
     if (tree_->columnWidth(0)!=width) tree_->setColumnWidth(0,width);
 }
 void ModifierPanel::setMinimumNameWidth(int pixels) {if (minimumNameWidth_!=pixels) {minimumNameWidth_=pixels;fitNames();}}

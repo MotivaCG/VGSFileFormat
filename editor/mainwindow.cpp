@@ -22,6 +22,7 @@
 #include "audiopreview.h"
 #include "loopmorph.h"
 #include <QProgressDialog>
+#include <QDialogButtonBox>
 #include <atomic>
 #include <QAction>
 #include <QApplication>
@@ -72,6 +73,7 @@
 #include <QPushButton>
 #include <QPixmap>
 #include <QPainter>
+#include <QPainterPath>
 #include <QHash>
 #include <QSettings>
 #include <QScrollArea>
@@ -81,6 +83,7 @@
 #include "rangeslider.h"
 #include <QSpinBox>
 #include <functional>
+#include <utility>
 #include <QSlider>
 #include <QStatusBar>
 #include <QStyle>
@@ -113,6 +116,35 @@ static QIcon frameStepIcon(bool forward) {
         painter.setPen(Qt::NoPen);painter.setBrush(colour);painter.drawRect(QRectF(5.5,6,2,12));
         painter.setPen(QPen(colour,1.6,Qt::SolidLine,Qt::RoundCap,Qt::RoundJoin));painter.setBrush(Qt::NoBrush);
         painter.drawPolygon(QPolygonF{{18.5,6.5},{18.5,17.5},{9.5,12}});
+        painter.end();icon.addPixmap(pixmap,mode);
+    }
+    return icon;
+}
+static QIcon bakeCacheIcon() {
+    QIcon icon;
+    for (auto mode:{QIcon::Normal,QIcon::Disabled}) {
+        QPixmap pixmap(48,48);pixmap.setDevicePixelRatio(2);pixmap.fill(Qt::transparent);
+        QPainter painter(&pixmap);painter.setRenderHint(QPainter::Antialiasing);
+        const QColor colour=mode==QIcon::Disabled ? QColor("#777777") : QColor("#eeeeee");
+        painter.setPen(QPen(colour,1.4,Qt::SolidLine,Qt::RoundCap,Qt::RoundJoin));painter.setBrush(Qt::NoBrush);
+        painter.drawEllipse(QRectF(3,4,13,4.5));painter.drawLine(QPointF(3,6.25),QPointF(3,18));painter.drawLine(QPointF(16,6.25),QPointF(16,18));
+        painter.drawArc(QRectF(3,9.25,13,4.5),180*16,180*16);painter.drawArc(QRectF(3,15.5,13,5),180*16,180*16);
+        QPainterPath bolt;bolt.addPolygon(QPolygonF{{17,9},{13,16},{16.5,16},{15,22},{21,13},{17.5,13},{20,9}});bolt.closeSubpath();
+        // A transparent gap keeps the bolt distinct from the cylinder on hover too.
+        painter.setCompositionMode(QPainter::CompositionMode_Clear);painter.setPen(QPen(colour,3,Qt::SolidLine,Qt::RoundCap,Qt::RoundJoin));painter.setBrush(colour);painter.drawPath(bolt);
+        painter.setCompositionMode(QPainter::CompositionMode_SourceOver);painter.setPen(Qt::NoPen);painter.drawPath(bolt);
+        painter.end();icon.addPixmap(pixmap,mode);
+    }
+    return icon;
+}
+static QIcon cacheInfoIcon() {
+    QIcon icon;
+    for (auto mode:{QIcon::Normal,QIcon::Disabled}) {
+        QPixmap pixmap(40,40);pixmap.setDevicePixelRatio(2);pixmap.fill(Qt::transparent);
+        QPainter painter(&pixmap);painter.setRenderHint(QPainter::Antialiasing);
+        const QColor colour=mode==QIcon::Disabled ? QColor("#777777") : QColor("#eeeeee");
+        painter.setPen(QPen(colour,1.5,Qt::SolidLine,Qt::RoundCap));painter.setBrush(Qt::NoBrush);
+        painter.drawEllipse(QRectF(3,3,14,14));painter.drawPoint(QPointF(10,6.5));painter.drawLine(QPointF(10,9.5),QPointF(10,14));
         painter.end();icon.addPixmap(pixmap,mode);
     }
     return icon;
@@ -193,7 +225,12 @@ public:
     bool eventFilter(QObject *watched,QEvent *event) override {
         if (event->type()==QEvent::ShortcutOverride) {
             const auto *key=static_cast<QKeyEvent *>(event);
-            if ((key->modifiers() & Qt::KeypadModifier) && key->key()>=Qt::Key_0 && key->key()<=Qt::Key_9) {event->accept();return true;}
+            const auto *widget=qobject_cast<QWidget *>(watched);
+            const bool numberField=widget && (qobject_cast<const QAbstractSpinBox *>(widget) || qobject_cast<const QAbstractSpinBox *>(widget->parentWidget()));
+            // 1/2 switch render style elsewhere. A number field owns its digits,
+            // including keys delivered to the spin box rather than its line edit.
+            if (key->key()>=Qt::Key_0 && key->key()<=Qt::Key_9 &&
+                ((key->modifiers() & Qt::KeypadModifier) || (numberField && !(key->modifiers() & (Qt::ControlModifier|Qt::AltModifier|Qt::MetaModifier))))) {event->accept();return true;}
         }
         return QObject::eventFilter(watched,event);
     }
@@ -356,7 +393,7 @@ public:
 };
 
 MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory,const QString &systemPresetDirectory) : QMainWindow(parent), presetStore_(presetDirectory,systemPresetDirectory), worker_(new CaptureWorker) {
-    qRegisterMetaType<FramePtr>(); qRegisterMetaType<CaptureInfo>();
+    qRegisterMetaType<FramePtr>(); qRegisterMetaType<CaptureInfo>();qRegisterMetaType<PreviewCacheState>();
     qRegisterMetaType<Project>();
     project_ = defaultProject();
     buildUi();
@@ -422,6 +459,31 @@ MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory,const QStr
             pendingDecode_ = false;const QScopedValueRollback<bool> origin(remoteCommand_,pendingDecodeRemote_);requestFrame();
         }
     });
+    connect(worker_,&CaptureWorker::cacheReduced,this,[this](quint64 gen) {if (gen==generation_) modifierPanel_->clearCacheState();});
+    connect(worker_,&CaptureWorker::cacheComputing,this,[this](int groups,quint64 gen,quint64 revision) {
+        if (gen==generation_ && revision==previewRevision_) modifierPanel_->setCacheWorking(groups);
+    });
+    connect(worker_,&CaptureWorker::cacheStateReady,this,[this](PreviewCacheState state,quint64 gen) {
+        if (gen==generation_ && state.revision==previewRevision_) modifierPanel_->setCacheState(state);
+    });
+    connect(worker_,&CaptureWorker::cacheProgress,this,[this](int done,int total,quint64 gen,quint64 request) {
+        if (!cachePreparing_ || gen!=generation_ || request!=cacheRequest_) return;
+        QPointer<QProgressDialog> dialog(cacheDialog_);
+        dialog->setLabelText(tr("Baking cache\u2026\nFrame %1 of %2").arg(done).arg(total));
+        dialog->setRange(0,total);
+        // A modal QProgressDialog processes events in setValue(). Completion
+        // can run reentrantly and dispose of the dialog, so this must be last.
+        if (dialog && cachePreparing_ && cacheDialog_==dialog) dialog->setValue(done);
+    });
+    connect(worker_,&CaptureWorker::cacheFinished,this,[this](int done,int total,bool limited,const QString &error,quint64 gen,quint64 request) {
+        if (!cachePreparing_ || gen!=generation_ || request!=cacheRequest_) return;
+        cachePreparing_=false;cacheDialog_->close();cacheDialog_->deleteLater();cacheDialog_=nullptr;
+        viewport_->setBusyText({});viewport_->setUpdatesEnabled(true);modifierPanel_->clearCacheState();
+        cacheAction_->setEnabled(cacheEnabledAction_->isChecked() && loaded_ && !loading_);pendingDecode_=false;requestFrame();
+        if (!error.isEmpty()) reportOperationError(error,false);
+        else statusBar()->showMessage((done==total ? tr("Cache baked: %1 frames.") : tr("Cache bake stopped: %1 frames.")).arg(done)+
+            (limited ? tr(" Some entries could not be retained within the memory limits.") : QString()),15000);
+    });
     connect(worker_, &CaptureWorker::failedRequest, this, [this](QString message, quint64 gen, bool opening, quint64 request) {
         const bool remote=opening ? openingRemote_ : decodeRemote_;
         if (opening) {
@@ -461,7 +523,7 @@ MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory,const QStr
         if (morphPlaying_!=MorphPlay::None) {
             // The morph's frames alone; or a second before End, through the morph, then a
             // second after Start.
-            const double frame=1.0/info_.fps,u=double(clock_.elapsed())/1000.0*project_.speed;
+            const double frame=1.0/info_.fps,u=morphPhase_+double(clock_.elapsed())/1000.0*project_.speed;
             if (morphPlaying_==MorphPlay::Morph) {const double first=project_.morphStart(info_.fps);setTime(first+std::fmod(u,end-first+frame),false);return;}
             const double before=std::max(project_.in,project_.morphStart(info_.fps)-frame-1.0),after=std::min(project_.out,project_.in+1.0);
             const double first=end-before+frame,second=after-project_.in+frame,v=std::fmod(u,first+second);
@@ -482,7 +544,10 @@ MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory,const QStr
     installCompactControls(this,settings_.value("Interface/CompactDensity",true).toBool());
 }
 MainWindow::~MainWindow() {
-    playback_.stop(); thread_.quit(); thread_.wait();
+    // Focus-out can emit valueChanged. Finish it while project/UI members still
+    // exist, before QWidget's base destructor starts destroying the child widgets.
+    syncing_=true;if (auto *focus=QApplication::focusWidget();focus && isAncestorOf(focus)) focus->clearFocus();
+    worker_->cancelPrecalculate(cacheRequest_);playback_.stop(); thread_.quit(); thread_.wait();
 }
 
 void MainWindow::setMcpAvailable(bool available, const QString &reason) {
@@ -530,6 +595,26 @@ void MainWindow::buildUi() {
     connect(mcpAction_,&QAction::toggled,this,&MainWindow::mcpEnabledRequested);
     qApp->installEventFilter(new UndoInput(this));
     // Everything that writes something other than the project.
+    auto *cacheMenu=menuBar()->addMenu(tr("Cache"));cacheMenu->setObjectName("cacheMenu");cacheMenu->setToolTipsVisible(true);
+    cacheEnabledAction_=cacheMenu->addAction(tr("Enable cache"));cacheEnabledAction_->setObjectName("enableCache");cacheEnabledAction_->setCheckable(true);
+    cacheEnabledAction_->setShortcut(QKeySequence("Ctrl+Alt+B"));cacheEnabledAction_->setAutoRepeat(false);
+    cacheEnabledAction_->setToolTip(tr("Enable or disable preview cache (Ctrl+Alt+B)."));
+    cacheEnabledAction_->setChecked(settings_.value("Cache/Enabled",true).toBool());
+    cacheAction_=cacheMenu->addAction(bakeCacheIcon(),tr("Bake cache"),this,&MainWindow::precalculateCache);cacheAction_->setObjectName("precalculateCache");cacheAction_->setEnabled(false);
+    cacheAction_->setShortcut(QKeySequence("Ctrl+B"));cacheAction_->setAutoRepeat(false);
+    connect(cacheEnabledAction_,&QAction::toggled,this,[this](bool enabled) {
+        settings_.setValue("Cache/Enabled",enabled);modifierPanel_->setCacheEnabled(enabled);
+        cacheAction_->setEnabled(enabled && loaded_ && !loading_ && !cachePreparing_);
+        QMetaObject::invokeMethod(worker_,[worker=worker_,enabled] {worker->setCachingEnabled(enabled);},Qt::QueuedConnection);
+        requestFrame();
+    });
+    {const bool enabled=cacheEnabledAction_->isChecked();QMetaObject::invokeMethod(worker_,[worker=worker_,enabled] {worker->setCachingEnabled(enabled);},Qt::QueuedConnection);}
+    cacheAction_->setToolTip(tr("Bake cache (Ctrl+B)\nCalculate preview caches over Start/End and the morph frames without drawing each frame."));
+    auto *cacheInfo=cacheMenu->addAction(cacheInfoIcon(),tr("Info\u2026"),this,&MainWindow::showCacheInfo);cacheInfo->setObjectName("cacheInfo");
+    cacheInfo->setShortcut(QKeySequence("Ctrl+Shift+B"));cacheInfo->setAutoRepeat(false);
+    cacheInfo->setToolTip(tr("Show per-layer cache status and memory use (Ctrl+Shift+B)."));
+    cacheInfo->setEnabled(cacheAction_->isEnabled());
+    connect(cacheAction_,&QAction::changed,cacheInfo,[this,cacheInfo] {cacheInfo->setEnabled(cacheAction_->isEnabled());});
     auto *exportMenu = menuBar()->addMenu(tr("Export")); exportMenu->setToolTipsVisible(true);
     exportAction_ = exportMenu->addAction(tr("Export capture\u2026"), QKeySequence("Ctrl+E"), this, &MainWindow::exportCapture);
     exportAction_->setToolTip(tr("Export the selected Start/End range to VGS, PGS or MINT, baking capture transforms and active modifiers (Ctrl+E). MINT omits capture metadata."));
@@ -598,6 +683,9 @@ void MainWindow::buildUi() {
     playButton_ = button(QStyle::SP_MediaPlay, tr("Play / pause (Space)"), [this] { play(!playback_.isActive()); });
     button(QStyle::SP_MediaSeekForward, tr("Pause and step forward one frame (Right Arrow)."), [this] { play(false); setTime(project_.time+1.0/info_.fps, true); })->setIcon(frameStepIcon(true));
     button(QStyle::SP_MediaSkipForward, tr("Go to the playback range end (End)."), [this] { play(false); setTime(project_.out, true); });
+    transport->addSpacing(15); // 20 px including the group's normal 5 px gap.
+    auto *bake=new QToolButton;bake->setObjectName("bakeCacheButton");bake->setDefaultAction(cacheAction_);bake->setFixedSize(34,30);bake->setIconSize({20,20});
+    bake->setAccessibleName(tr("Bake cache"));transport->addWidget(bake);
     controls->addWidget(playbackControls);controls->addStretch();
     auto *speedControls=new QWidget;speedControls->setObjectName("timelineSpeedControls");speedControls->setSizePolicy(QSizePolicy::Maximum,QSizePolicy::Fixed);
     auto *speedLayout=new QHBoxLayout(speedControls);speedLayout->setContentsMargins(0,0,0,0);speedLayout->setSpacing(5);
@@ -605,7 +693,7 @@ void MainWindow::buildUi() {
     speed_ = new QDoubleSpinBox; speed_->setRange(0.1,4); speed_->setSingleStep(0.25); speed_->setSuffix(" ×"); speedLayout->addWidget(speed_);
     controls->addWidget(speedControls);tl->addLayout(controls);tl->addWidget(slider_);
     loop_->setToolTip(tr("Toggle looping within the playback range (L)."));
-    modifierPanel_=new ModifierPanel;tl->addWidget(modifierPanel_);
+    modifierPanel_=new ModifierPanel;modifierPanel_->setCacheEnabled(cacheEnabledAction_->isChecked());tl->addWidget(modifierPanel_);
     // The timeline's track runs exactly over the modifier bars, so a frame sits at the same x
     // in both; the space to its left heads the names column below. Queued: both settle first.
     connect(modifierPanel_,&ModifierPanel::trackMoved,this,&MainWindow::alignTimeline,Qt::QueuedConnection);
@@ -791,7 +879,7 @@ void MainWindow::buildUi() {
         m->cropAnimation.removeKey(row>=0 && row<keys.size() ? keys[row].frame : currentFrame());syncUi();dirty();
     });
     connect(cropKeyTable_,&QTableWidget::cellClicked,this,[this](int row,int) {
-        const auto *m=project_.modifier();if (syncing_ || !m || m->type!=ModifierType::Crop || row>=m->cropAnimation.keys.size()) return;
+        const auto *m=std::as_const(project_).modifier();if (syncing_ || !m || m->type!=ModifierType::Crop || row>=m->cropAnimation.keys.size()) return;
         play(false);setTime(m->cropAnimation.keys[row].frame/info_.fps,true);
     });
     connect(cropKeyTable_,&QTableWidget::itemChanged,this,[this](QTableWidgetItem *item) {
@@ -1064,22 +1152,25 @@ void MainWindow::buildUi() {
     });
     connect(worker_,&CaptureWorker::morphFitting,this,[this](bool fitting) {
         morphFitting_=fitting;
+        if (cachePreparing_) return;
         // The fit takes a while: playing on would only skip through it. Playback waits for it,
         // and goes on as it was - the timeline's, or the morph's own - once the fit is done.
-        if (fitting && playback_.isActive()) {const auto mode=morphPlaying_;play(false);resumeAfterFit_=mode;}
-        else if (!fitting && resumeAfterFit_) {morphPlaying_=*resumeAfterFit_;play(true);}
+        if (fitting && playback_.isActive()) {
+            const auto mode=morphPlaying_;const double phase=morphPhase_+clock_.elapsed()*.001*project_.speed;
+            play(false);resumeAfterFit_=mode;resumeMorphPhase_=phase;
+        } else if (!fitting && resumeAfterFit_) {morphPlaying_=*resumeAfterFit_;morphPhase_=resumeMorphPhase_;play(true);}
         viewport_->setBusyText(fitting ? tr("Fitting the loop morph\u2026") : QString());
         if (fitting) statusBar()->showMessage(tr("Fitting the loop morph to the End and Start frames\u2026"));else statusBar()->clearMessage();
     });
     // One row or several (Ctrl or Shift+click): one is the marker the next click places too.
     connect(morphMarkerTable_,&QTableWidget::itemSelectionChanged,this,[this] {
-        const auto *m=project_.modifier();if (syncing_ || !m || m->type!=ModifierType::LoopMorph) return;
+        const auto *m=std::as_const(project_).modifier();if (syncing_ || !m || m->type!=ModifierType::LoopMorph) return;
         morphChosen_.clear();for (const auto &index:morphMarkerTable_->selectionModel()->selectedRows()) if (index.row()<m->morphMarkers.size()) morphChosen_.insert(m->morphMarkers[index.row()].number);
         morphSelected_=morphChosen_.size()==1 ? *morphChosen_.begin() : 0;
         morphRemoveMarker_->setEnabled(!morphChosen_.empty());syncMorphMarkers();
     });
     connect(morphMarkerTable_,&QTableWidget::cellClicked,this,[this](int row,int column) {
-        const auto *m=project_.modifier();if (syncing_ || !m || m->type!=ModifierType::LoopMorph || row>=m->morphMarkers.size()) return;
+        const auto *m=std::as_const(project_).modifier();if (syncing_ || !m || m->type!=ModifierType::LoopMorph || row>=m->morphMarkers.size()) return;
         if (QGuiApplication::keyboardModifiers() & (Qt::ControlModifier|Qt::ShiftModifier)) return; // choosing rows, not going anywhere
         const auto &marker=m->morphMarkers[row];
         if (column==1 && marker.hasStart) {play(false);setTime(marker.startFrame/info_.fps,true);}
@@ -1275,7 +1366,7 @@ void MainWindow::buildUi() {
     shortcut("Alt+Home",[this] { resetTransform(); });
     // Tab toggles editing what is selected: an Eraser's picks, or a crop's volume.
     shortcut("Tab",[this] {
-        if (const auto *m=project_.modifier();m && m->type==ModifierType::Erase) setEraseEditing(!eraseEditing_);
+        if (const auto *m=std::as_const(project_).modifier();m && m->type==ModifierType::Erase) setEraseEditing(!eraseEditing_);
         else if (m && m->type==ModifierType::LoopMorph) setMorphPlacing(morphPlacing_==MorphSide::None ? MorphSide::Start : MorphSide::None);
         else editCrop(!viewport_->cropEditing());
         viewport_->setFocus();
@@ -1301,8 +1392,14 @@ void MainWindow::syncModifiers() {
     // are decided in the worker.
     syncViewportPose();modifierPanel_->setProject(project_);syncAudio();
     const CompiledModifiers compiled(project_);const bool purge=!compiled.isolations.isEmpty() || !compiled.prunes.isEmpty() || !compiled.erased.empty() || compiled.despillPreview || project_.loopMorph();
-    QJsonObject state;if (purge) state={{"modifiers",project_.modifierJson()},{"transform",project_.json({})["transform"]},{"cropEditing",viewport_->cropEditing()},{"selected",project_.selectedModifier},{"eraseEditing",eraseEditing_}};
-    if (state!=processingState_) {processingState_=state;requestFrame();}
+    QJsonObject state;if (purge) state={{"modifiers",project_.modifierJson()},{"transform",project_.json({})["transform"]},{"processing",project_.captureSettings.json()},{"cropEditing",viewport_->cropEditing()},{"selected",eraseEditing_ ? project_.selectedModifier : QString()},{"eraseEditing",eraseEditing_}};
+    if (state!=processingState_ || project_.previewMorphKey.isEmpty()) {
+        const auto oldVisibility=project_.previewVisibilityKeys;const auto oldMorph=project_.previewMorphKey,oldColour=project_.previewColourKey;
+        processingState_=state;project_.updatePreviewCacheKeys();++previewRevision_;
+        modifierPanel_->invalidateCacheState(oldVisibility[showingMorph() ? 2 : 0]!=project_.previewVisibilityKeys[showingMorph() ? 2 : 0],
+            oldVisibility[1]!=project_.previewVisibilityKeys[1],oldMorph!=project_.previewMorphKey,oldColour!=project_.previewColourKey);
+        requestFrame();
+    }
 }
 // The Walk speed in the unit its modifier shows: range, suffix and value, without
 // writing anything back.
@@ -1314,7 +1411,7 @@ void MainWindow::showWalkSpeed(const Modifier &m) {
 }
 void MainWindow::revealModifierProperties() {
     QTimer::singleShot(0,this,[this] {
-        const auto *m=project_.modifier();auto *scroll=findChild<QScrollArea *>("toolsScrollArea");if (!m || !scroll) return;
+        const auto *m=std::as_const(project_).modifier();auto *scroll=findChild<QScrollArea *>("toolsScrollArea");if (!m || !scroll) return;
         QWidget *panel=m->type==ModifierType::AnimateTransform ? static_cast<QWidget *>(animationProperties_) : m->type==ModifierType::PurgeIsolated ? isolationProperties_ : m->type==ModifierType::Walk ? walkProperties_ : m->type==ModifierType::BakeAntialiasing ? bakeProperties_ : m->type==ModifierType::PruneLowContribution ? pruneProperties_ : m->type==ModifierType::Audio ? audioProperties_ : m->type==ModifierType::Colour ? colourProperties_ : m->type==ModifierType::Erase ? eraseProperties_ : m->type==ModifierType::LoopMorph ? morphProperties_ : m->type==ModifierType::Crop ? cropProperties_ : greenProperties_;
         scroll->ensureWidgetVisible(panel,0,12);
     });
@@ -1389,7 +1486,7 @@ void MainWindow::syncUi() {
     project_.showCropsAtFrame(currentFrame());
     if (project_.modifier() && project_.modifier()->type==ModifierType::Crop && project_.modifier()->cropAnimation.active()) viewport_->setCrop(project_.crop());
     syncModifiers();
-    const auto *selected=project_.modifier();const bool selectedCrop=selected && selected->type==ModifierType::Crop;
+    const auto *selected=std::as_const(project_).modifier();const bool selectedCrop=selected && selected->type==ModifierType::Crop;
     parametersHeading_->setVisible(selected!=nullptr);
     cropProperties_->setVisible(selectedCrop);greenProperties_->setVisible(selected && selected->type==ModifierType::RemoveGreen);
     const bool animation=selected && selected->type==ModifierType::AnimateTransform,isolation=selected && selected->type==ModifierType::PurgeIsolated;
@@ -1499,7 +1596,7 @@ void MainWindow::syncUi() {
     cropShapeCombo_->setCurrentIndex(cropShapeCombo_->findData(int(project_.crop().shape)));
     cropModeCombo_->setCurrentIndex(cropModeCombo_->findData(project_.crop().remove ? 1 : 0));
     {
-        const auto *m=project_.modifier();const bool animatedCrop=m && m->type==ModifierType::Crop && m->cropAnimation.animated;
+        const auto *m=std::as_const(project_).modifier();const bool animatedCrop=m && m->type==ModifierType::Crop && m->cropAnimation.animated;
         cropAnimationCombo_->setCurrentIndex(animatedCrop ? 1 : 0);cropForm_->setRowVisible(cropKeys_,animatedCrop);
         if (animatedCrop) showCropKeys(*m);
     }
@@ -1681,7 +1778,19 @@ void MainWindow::setTime(double seconds, bool edited) {
     if (!loaded_ || loading_) return;
     seconds = std::clamp(std::round(seconds*info_.fps)/info_.fps, project_.in, project_.timelineEnd(info_.fps));
     if (std::abs(project_.time-seconds) < 1e-8) return;
-    project_.time = seconds; syncUi(); if (edited) dirty(); requestFrame();
+    project_.time = seconds;if (playback_.isActive()) syncPlaybackUi();else syncUi();if (edited) dirty(); requestFrame();
+}
+void MainWindow::syncPlaybackUi() {
+    const QScopedValueRollback<bool> guard(syncing_,true);
+    project_.showCropsAtFrame(currentFrame());syncViewportPose();
+    const auto target=viewport_->displayedTransform();const QVector3D vectors[]={target.position,target.rotation,target.scale};
+    for (int g=0;g<3;++g) for (int a=0;a<3;++a) transform_[g][a]->setValue(vectors[g][a]);
+    const int frame=currentFrame();slider_->setPlayheadValue(frame);
+    frameSpin_->setValue(timelineSecondsButton_->isChecked() ? frame/info_.fps : frame);
+    modifierPanel_->setTimeline(frame,std::max(0,info_.frames-1)+project_.morphTail(info_.fps));
+    viewport_->setPlaybackTime(project_.time,info_.duration);
+    viewport_->setFloorScroll(project_.walkSpeed()>0,project_.walkDistance(project_.time));
+    syncAudio();
 }
 // Each active Audio modifier's track at the timeline's time: a file sits `offset` seconds into
 // the capture's timeline; the capture's own track starts where the capture starts on its
@@ -1704,22 +1813,84 @@ void MainWindow::syncAudio() {
 }
 void MainWindow::requestFrame() {
     if (!loaded_ || loading_) return;
+    if (cachePreparing_) {pendingDecode_=true;return;}
     if (decoding_) { pendingDecode_ = true;pendingDecodeRemote_=remoteCommand_;return; }
     Project snapshot=project_;if (viewport_->cropEditing()) for (auto &m:snapshot.modifiers) if (m.type==ModifierType::Crop) m.enabled=false;
-    for (auto &m:snapshot.modifiers) if (m.type==ModifierType::Erase) m.showErased=m.id==project_.selectedModifier && eraseEditing_;
+    for (qsizetype i=0;i<std::as_const(snapshot.modifiers).size();++i) {
+        const auto &m=std::as_const(snapshot.modifiers)[i];
+        if (m.type==ModifierType::Erase && m.showErased!=(m.id==project_.selectedModifier && eraseEditing_))
+            snapshot.modifiers[i].showErased=m.id==project_.selectedModifier && eraseEditing_;
+    }
     snapshot.previewPlaying=playback_.isActive();
+    snapshot.previewRevision=previewRevision_;
+    snapshot.previewCacheEnabled=cacheEnabledAction_->isChecked();
     decoding_ = true;decodeRemote_=remoteCommand_;decodeRequest_=++requestSerial_;
     emit decodeRequested(project_.time, generation_, true,snapshot,decodeRequest_);
 }
+void MainWindow::precalculateCache() {
+    if (!loaded_ || loading_ || cachePreparing_ || !cacheEnabledAction_->isChecked()) return;
+    play(false);if (viewport_->cropEditing()) editCrop(false);if (eraseEditing_) setEraseEditing(false);
+    cachePreparing_=true;cacheRequest_=++requestSerial_;cacheAction_->setEnabled(false);
+    modifierPanel_->clearCacheState();modifierPanel_->setCacheWorking();
+    viewport_->setBusyText(tr("Baking cache\u2026"));viewport_->repaint();viewport_->setUpdatesEnabled(false);
+    cacheDialog_=new QProgressDialog(tr("Preparing cache bake\u2026"),tr("Cancel"),0,0,this);
+    cacheDialog_->setObjectName("precalculateCacheProgress");cacheDialog_->setWindowTitle(tr("Bake cache"));
+    cacheDialog_->setWindowModality(Qt::ApplicationModal);cacheDialog_->setAutoClose(false);cacheDialog_->setAutoReset(false);cacheDialog_->setMinimumDuration(0);
+    connect(cacheDialog_,&QProgressDialog::canceled,this,[this] {
+        if (!cachePreparing_) return;worker_->cancelPrecalculate(cacheRequest_);
+        QTimer::singleShot(0,this,[this] {if (cachePreparing_ && cacheDialog_) {cacheDialog_->setLabelText(tr("Stopping cache bake\u2026"));cacheDialog_->show();}});
+    });cacheDialog_->show();
+    QTimer::singleShot(0,this,&MainWindow::launchPrecalculate);
+}
+void MainWindow::showCacheInfo() {
+    if (auto *existing=findChild<QDialog *>("cacheInfoDialog")) {existing->show();existing->raise();return;}
+    auto *dialog=new QDialog(this);dialog->setObjectName("cacheInfoDialog");dialog->setWindowTitle(tr("Cache info"));dialog->setAttribute(Qt::WA_DeleteOnClose);
+    auto *layout=new QVBoxLayout(dialog);auto *summary=new QLabel;summary->setObjectName("cacheInfoSummary");summary->setWordWrap(true);layout->addWidget(summary);
+    auto *table=new QTableWidget;table->setObjectName("cacheInfoLayers");table->setColumnCount(5);
+    table->setHorizontalHeaderLabels({tr("Layer"),tr("State"),tr("Frames / entries"),tr("MiB"),tr("Details")});table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    table->verticalHeader()->hide();table->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);table->horizontalHeader()->setSectionResizeMode(4,QHeaderView::Stretch);
+    table->setWordWrap(true);layout->addWidget(table,1);
+    auto *legend=new QLabel(tr("Green: complete cache. Half-filled green: some frames cached. Amber: calculating (held briefly for readability). Dark gray: no separate frame cache (direct processing or included in another layer).\nShared cache memory is shown once. Bake cache also visits frames skipped during Play."));legend->setWordWrap(true);layout->addWidget(legend);
+    auto *buttons=new QDialogButtonBox(QDialogButtonBox::Close);connect(buttons,&QDialogButtonBox::rejected,dialog,&QDialog::close);layout->addWidget(buttons);
+    auto refresh=[this,summary,table] {
+        if (loaded_ && !loading_ && !cachePreparing_) {
+            const auto gen=generation_,revision=previewRevision_;auto *worker=worker_;
+            QMetaObject::invokeMethod(worker,[worker,gen,revision] {worker->inspectCache(gen,revision);},Qt::QueuedConnection);
+        }
+        const auto &s=modifierPanel_->cacheState();const auto memory=previewmemory::systemSnapshot();
+        summary->setText(tr("Preview cache: %1 MiB / 4096 MiB (morph %2, visibility %3, reusable buffers %4).\nDespill / skin: %5 MiB / 6144 MiB. System RAM available: %6 GiB; reserve: %7 GiB. %8")
+            .arg((s.morphBytes+s.visibilityBytes+s.reusableBytes)/1048576.,0,'f',1).arg(s.morphBytes/1048576.,0,'f',1).arg(s.visibilityBytes/1048576.,0,'f',1).arg(s.reusableBytes/1048576.,0,'f',1)
+            .arg(s.colourBytes/1048576.,0,'f',1).arg(memory.physicalAvailable/double(previewmemory::GiB),0,'f',1).arg(std::max(2*previewmemory::GiB,memory.physicalTotal/10)/double(previewmemory::GiB),0,'f',1)
+            .arg(!cacheEnabledAction_->isChecked() ? tr("Cache disabled.") : s.memoryLimited ? tr("Retention paused by memory pressure.") : QString()));
+        const auto rows=modifierPanel_->cacheLayers();table->setRowCount(rows.size());
+        for (int i=0;i<rows.size();++i) {
+            const auto &r=rows[i];const QStringList values{r.name,r.status,r.frames,QString::number(r.bytes/1048576.,'f',2),r.detail};
+            for (int col=0;col<values.size();++col) {auto *item=table->item(i,col);if (!item) {item=new QTableWidgetItem;table->setItem(i,col,item);}item->setText(values[col]);item->setToolTip(values[col]);}
+        }
+        table->resizeRowsToContents();
+    };
+    auto *timer=new QTimer(dialog);timer->setInterval(500);connect(timer,&QTimer::timeout,dialog,refresh);refresh();timer->start();dialog->resize(1020,480);dialog->show();table->resizeRowsToContents();
+}
+void MainWindow::launchPrecalculate() {
+    if (!cachePreparing_) return;
+    if (decoding_) {QTimer::singleShot(20,this,&MainWindow::launchPrecalculate);return;}
+    Project snapshot=project_;snapshot.previewRevision=previewRevision_;
+    snapshot.previewCacheEnabled=cacheEnabledAction_->isChecked();
+    const auto gen=generation_,request=cacheRequest_;auto *worker=worker_;
+    QMetaObject::invokeMethod(worker,[worker,snapshot,gen,request] {worker->precalculate(snapshot,gen,request);},Qt::QueuedConnection);
+}
 void MainWindow::play(bool playing) {
+    if (playing && cachePreparing_) return;
+    const bool wasPlaying=playback_.isActive();
     resumeAfterFit_.reset(); // playing or stopping by hand while a morph is fitted overrides going on after it
     if (playing && (!loaded_ || loading_)) return;
     if (playing) {
-        if (project_.time >= project_.playbackEnd(info_.fps)) setTime(project_.in,false);
+        if (morphPlaying_==MorphPlay::None && project_.time >= project_.playbackEnd(info_.fps)) setTime(project_.in,false);
         playStart_ = project_.time; clock_.restart(); playback_.start();
     } else {
         playback_.stop();
         morphPlaying_=MorphPlay::None;
+        morphPhase_=0;
     }
     viewport_->setPlaybackRate(playing,info_.fps*project_.speed);
     syncAudio();
@@ -1727,15 +1898,19 @@ void MainWindow::play(bool playing) {
     morphPlay_->setIcon(transportIcon(style(),playing && morphPlaying_==MorphPlay::Morph ? QStyle::SP_MediaPause : QStyle::SP_MediaPlay));
     morphSeamPlay_->setIcon(transportIcon(style(),playing && morphPlaying_==MorphPlay::Seam ? QStyle::SP_MediaPause : QStyle::SP_MediaSeekForward));
     syncMorphMarkers(); // hidden while playing
+    if (!playing && wasPlaying) {
+        syncUi(); // refresh properties evaluated during playback
+        if (project_.inMorph(project_.time,info_.fps)) requestFrame(); // markers are evaluated only while paused
+    }
 }
 // The selected Prune low contribution's effect on the chunk on screen: the share removed, and
 // whether the protection kept it below what was asked.
 void MainWindow::showPruneStatus() {
-    const auto *m=project_.modifier();if (!m || m->type!=ModifierType::PruneLowContribution) return;
+    const auto *m=std::as_const(project_).modifier();if (!m || m->type!=ModifierType::PruneLowContribution) return;
     QString text,style;
     if (!m->active()) text=tr("Disabled: nothing is removed.");
     else {
-        int index=0;for (const auto &other:project_.modifiers) {if (&other==m) break;if (other.active() && other.type==ModifierType::PruneLowContribution) ++index;}
+        int index=0;for (const auto &other:std::as_const(project_.modifiers)) {if (&other==m) break;if (other.active() && other.type==ModifierType::PruneLowContribution) ++index;}
         if (index>=int(pruneStats_.size()) || !pruneStats_[size_t(index)].records) text=tr("Scoring the chunk on screen\u2026");
         else {
             const auto &s=pruneStats_[size_t(index)];const double removed=100.0*double(s.removed)/double(s.records),asked=100.0*double(s.asked)/double(s.records);
@@ -1747,7 +1922,7 @@ void MainWindow::showPruneStatus() {
 }
 // The pick tools are on while an enabled Erase modifier is selected and a capture is open.
 void MainWindow::syncEraseTool() {
-    const auto *m=project_.modifier();const bool on=loaded_ && !loading_ && m && m->type==ModifierType::Erase && m->enabled && eraseEditing_;
+    const auto *m=std::as_const(project_).modifier();const bool on=loaded_ && !loading_ && m && m->type==ModifierType::Erase && m->enabled && eraseEditing_;
     for (QWidget *w:std::initializer_list<QWidget *>{eraseBrush_,eraseLasso_,eraseBrushSize_}) w->setEnabled(eraseEditing_);
     if (auto *label=static_cast<QFormLayout *>(eraseProperties_->layout())->labelForField(eraseBrushSize_)) label->setEnabled(eraseEditing_);
     viewport_->setSelectTool(on ? (eraseLasso_->isChecked() ? Viewport::SelectTool::Lasso : Viewport::SelectTool::Brush) : Viewport::SelectTool::None,float(eraseBrushSize_->value()));
@@ -1780,7 +1955,7 @@ void MainWindow::syncViewportPose() {
     viewport_->setModifiers(showingMorph() ? project_.modifiersBelowMorph(int(std::lround(project_.out*info_.fps))) : project_.modifiersAtFrame(currentFrame()));
     viewport_->setTransform(project_.transformAtFrame(poseFrame()));
 }
-bool MainWindow::morphSelected() const {const auto *m=project_.modifier();return m && m->type==ModifierType::LoopMorph && m->enabled;}
+bool MainWindow::morphSelected() const {const auto *m=std::as_const(project_).modifier();return m && m->type==ModifierType::LoopMorph && m->enabled;}
 // Starts that playback, or stops it when it is the one playing.
 void MainWindow::toggleMorphPlay(MorphPlay mode) {
     const bool start=morphPlaying_!=mode;play(false);
@@ -1792,7 +1967,7 @@ bool MainWindow::morphPlaced(const MorphMarker &k,MorphSide side) const {
     return side==MorphSide::End ? k.hasEnd && k.endFrame==morphFrameOf(side) : side==MorphSide::Start && k.hasStart && k.startFrame==morphFrameOf(side);
 }
 int MainWindow::morphTarget(MorphSide side) const {
-    const auto *m=project_.modifier();if (!m || m->type!=ModifierType::LoopMorph) return 0;
+    const auto *m=std::as_const(project_).modifier();if (!m || m->type!=ModifierType::LoopMorph) return 0;
     for (const auto &k:m->morphMarkers) if (k.number==morphSelected_) return k.number;
     const MorphSide other=side==MorphSide::End ? MorphSide::Start : MorphSide::End;
     for (const auto &k:m->morphMarkers) if (morphPlaced(k,other) && !morphPlaced(k,side)) return k.number;
@@ -1802,7 +1977,7 @@ int MainWindow::morphTarget(MorphSide side) const {
 // Placing a Loop morph's markers, begun on Start (Tab) or End: the playhead goes there, and each
 // click places a marker and goes to the other frame for its pair, then back for the next one.
 void MainWindow::setMorphPlacing(MorphSide side) {
-    const auto *m=project_.modifier();
+    const auto *m=std::as_const(project_).modifier();
     if (!m || m->type!=ModifierType::LoopMorph || !m->enabled || !loaded_ || loading_) side=MorphSide::None;
     if (side!=MorphSide::None && side!=morphPlacing_) {morphHome_=side;morphSelected_=0;morphChosen_.clear();morphHistory_.clear();}
     morphPlacing_=side;
@@ -1943,7 +2118,7 @@ void MainWindow::showMorph(const Modifier &m) {
     morphStatus_->setText(text);
 }
 void MainWindow::syncMorphMarkers() {
-    QVector<Viewport::ViewMarker> shown;const auto *m=project_.modifier();morphSuggestion_.reset();
+    QVector<Viewport::ViewMarker> shown;const auto *m=std::as_const(project_).modifier();morphSuggestion_.reset();
     const bool morph=m && m->type==ModifierType::LoopMorph && loaded_ && !loading_;
     if (morph && !playback_.isActive()) {
         // On the frame shown, which after a jump between Start and End is still the old one
@@ -1981,8 +2156,10 @@ void MainWindow::receiveFrame(FramePtr frame) {
     viewport_->setFrame(frame);
     syncViewportPose();
     syncMorphMarkers(); // the markers of the frame now shown
-    if (frame && int(frame->chunkIndex)!=screenChunk_) {screenChunk_=int(frame->chunkIndex);if (const auto *m=project_.modifier();m && m->type==ModifierType::Erase) syncUi();}
+    if (frame && int(frame->chunkIndex)!=screenChunk_) {screenChunk_=int(frame->chunkIndex);if (const auto *m=std::as_const(project_).modifier();m && m->type==ModifierType::Erase) syncUi();}
     pruneStats_=frame->prune;showPruneStatus();
+    cacheAction_->setEnabled(cacheEnabledAction_->isChecked() && loaded_ && !loading_ && !cachePreparing_);
+    if (frame->cache.revision==previewRevision_) modifierPanel_->setCacheState(frame->cache);
     if (smokeOutput_.isEmpty()) return;
     qInfo("%s: %llu points / %llu records, t=%.3f, decode %.2f ms, SH=%d",
           qPrintable(info_.format), qulonglong(frame->points.size()), qulonglong(frame->records.size()), frame->seconds, frame->decodeMs, frame->coefficients);
@@ -2267,6 +2444,7 @@ void MainWindow::smokeTest(const QString &path, const QString &output) {
     QTimer::singleShot(60000,this,[] { qCritical("Smoke test timed out"); qApp->exit(3); });
 }
 void MainWindow::closeEvent(QCloseEvent *event) {
+    if (cachePreparing_) {worker_->cancelPrecalculate(cacheRequest_);event->ignore();QTimer::singleShot(100,this,[this] {close();});return;}
     const auto pendingEdits=QJsonDocument(project_.json(projectPath_)).toJson(QJsonDocument::Compact);
     if (!closePending_ || approvedCloseEdits_!=pendingEdits || approvedCloseProject_!=projectPath_) {
         if (!canDiscard()) {closePending_=false;emit closeAborted();event->ignore();return;}

@@ -22,6 +22,7 @@
 #include <thread>
 #include <limits>
 #include <unordered_map>
+#include <deque>
 
 namespace loopmorph {
 namespace {
@@ -325,7 +326,10 @@ float startOpacity(double s,float alpha) {return float(1-std::pow(1-std::min(.99
 // A frame's shape: the splats that show - by their index, the End frame's first, then the
 // Start frame's - where they are, turned how and how opaque, and the splat of the other frame
 // whose colour each takes on.
-struct Morph::Shape {std::vector<uint32_t> source,partner;std::vector<float> position,rotation,opacity;};
+struct Morph::Shape {
+    std::vector<uint32_t> source,partner;std::vector<float> position,rotation,opacity;
+    size_t bytes() const {return sizeof(Shape)+96+(source.capacity()+partner.capacity())*sizeof(uint32_t)+(position.capacity()+rotation.capacity()+opacity.capacity())*sizeof(float);}
+};
 // Where a graph's nodes have been followed to, some frames before its own: each node's turn
 // and place, its own frame's points near it going as y -> turn (y - rest) + place.
 struct Motion {std::vector<Quat> turn;std::vector<Vec> place;};
@@ -339,6 +343,12 @@ struct Morph::Data {
     bool caching=false;
     mutable std::mutex mutex;
     mutable std::map<std::pair<double,size_t>,std::shared_ptr<const Shape>> shapes;
+    mutable std::deque<std::pair<double,size_t>> shapeOrder;
+    mutable size_t shapeBytes=0;
+    mutable size_t shapeHits=0;
+    size_t shapeBudget=Morph::CacheBudget;
+    mutable std::shared_ptr<const ShSources> shSources;
+    std::function<bool(size_t)> admission;
 };
 namespace {
 // A graph's motion `back` frames before its own: none when it was not followed that far.
@@ -389,9 +399,25 @@ Morph::Morph(Cloud end,Cloud start,const std::vector<Pair> &pairs,const std::fun
 Morph::~Morph()=default;
 double Morph::markerError() const {return d_->error;}
 size_t Morph::nodes() const {return d_->forward.rest.size()+d_->backward.rest.size();}
-void Morph::setCaching(bool caching) {
-    std::lock_guard<std::mutex> lock(d_->mutex);d_->caching=caching;if (!caching) d_->shapes.clear();
+void Morph::setCaching(bool caching,size_t budget) {
+    std::lock_guard<std::mutex> lock(d_->mutex);d_->caching=caching;d_->shapeBudget=budget;
+    d_->shapes.clear();d_->shapeOrder.clear();d_->shapeBytes=0;d_->shapeHits=0;d_->shSources.reset();
 }
+void Morph::setCacheAdmission(std::function<bool(size_t)> admission) {
+    std::lock_guard<std::mutex> lock(d_->mutex);d_->admission=std::move(admission);
+}
+void Morph::trimCache(size_t maxBytes) {
+    std::lock_guard<std::mutex> lock(d_->mutex);
+    while (d_->shapeBytes+(d_->shSources ? d_->shSources->bytes() : 0)>maxBytes && !d_->shapeOrder.empty()) {
+        const auto oldest=d_->shapes.find(d_->shapeOrder.front());d_->shapeOrder.pop_front();
+        if (oldest!=d_->shapes.end()) {d_->shapeBytes-=oldest->second->bytes();d_->shapes.erase(oldest);}
+    }
+    if (d_->shSources && d_->shSources->bytes()>maxBytes) d_->shSources.reset();
+}
+size_t Morph::cachedBytes() const {std::lock_guard<std::mutex> lock(d_->mutex);return d_->shapeBytes+(d_->shSources ? d_->shSources->bytes() : 0);}
+size_t Morph::cachedFrames() const {std::lock_guard<std::mutex> lock(d_->mutex);return d_->shapes.size();}
+size_t Morph::cacheHits() const {std::lock_guard<std::mutex> lock(d_->mutex);return d_->shapeHits;}
+bool Morph::hasCachedShape(double fraction,size_t back) const {std::lock_guard<std::mutex> lock(d_->mutex);return d_->shapes.count({std::clamp(fraction,0.,1.),back})!=0;}
 size_t Morph::followed(bool start) const {const auto &t=start ? d_->startTrack : d_->endTrack;return t.empty() ? 0 : t.size()-1;}
 
 // Each frame back, every node takes the motion that carries its frame's splats to the earlier
@@ -403,7 +429,7 @@ size_t Morph::followed(bool start) const {const auto &t=start ? d_->startTrack :
 // surface could slide along itself unnoticed, but held to the whole limb it cannot.
 void Morph::follow(bool start,const std::vector<Track> &back,const std::function<bool()> &cancelled) {
     auto &d=*d_;const Graph &g=start ? d.backward : d.forward;auto &out=start ? d.startTrack : d.endTrack;
-    {std::lock_guard<std::mutex> lock(d.mutex);d.shapes.clear();}
+    {std::lock_guard<std::mutex> lock(d.mutex);d.shapes.clear();d.shapeOrder.clear();d.shapeBytes=0;}
     out.clear();if (back.empty()) return;
     const size_t count=g.rest.size();Motion now=motionAt(g,{},0);out.push_back(now);
     std::vector<std::vector<int>> neighbours(count);for (const auto &[j,k]:g.edges) neighbours[size_t(j)].push_back(k);
@@ -470,7 +496,7 @@ void Morph::follow(bool start,const std::vector<Track> &back,const std::function
 
 std::shared_ptr<const Morph::Shape> Morph::shape(double s,const Live &live) const {
     const auto &d=*d_;const auto key=std::make_pair(s,live.back);
-    {std::lock_guard<std::mutex> lock(d.mutex);if (const auto it=d.shapes.find(key);it!=d.shapes.end()) return it->second;}
+    {std::lock_guard<std::mutex> lock(d.mutex);if (const auto it=d.shapes.find(key);it!=d.shapes.end()) {++d.shapeHits;return it->second;}}
     const bool leadIn=live.start!=nullptr;
     const Cloud &endOwn=live.end ? *live.end : d.end,&startOwn=live.start ? *live.start : d.start;
     const bool ends=s<1,starts=s>0;const size_t ne=ends ? endOwn.size() : 0,ns=starts ? startOwn.size() : 0,n=ne+ns;
@@ -537,16 +563,26 @@ std::shared_ptr<const Morph::Shape> Morph::shape(double s,const Live &live) cons
         shape->rotation.insert(shape->rotation.end(),rotation.begin()+std::ptrdiff_t(4*i),rotation.begin()+std::ptrdiff_t(4*i+4));
         shape->opacity.push_back(opacity[i]);
     }
-    std::lock_guard<std::mutex> lock(d.mutex);if (d.caching) d.shapes[key]=shape;
+    std::lock_guard<std::mutex> lock(d.mutex);
+    const size_t bytes=shape->bytes();
+    const size_t budget=d.shapeBudget-(d.shSources ? d.shSources->bytes() : 0);
+    if (d.caching && bytes<=budget && !d.shapes.count(key) && (!d.admission || d.admission(bytes))) {
+        while (d.shapeBytes>budget-bytes && !d.shapeOrder.empty()) {
+            const auto oldest=d.shapes.find(d.shapeOrder.front());d.shapeOrder.pop_front();
+            if (oldest!=d.shapes.end()) {d.shapeBytes-=oldest->second->bytes();d.shapes.erase(oldest);}
+        }
+        d.shapes.emplace(key,shape);d.shapeOrder.push_back(key);d.shapeBytes+=bytes;
+    }
     return shape;
 }
-Cloud Morph::mix(double s,const Shape &shape,const Live &live,std::vector<uint32_t> *source) const {
+void Morph::mixInto(double s,const Shape &shape,const Live &live,Cloud &out,std::vector<uint32_t> *source,bool includeSh) const {
     const auto &d=*d_;const Cloud &endOwn=live.end ? *live.end : d.end,&startOwn=live.start ? *live.start : d.start;
     const size_t n=shape.source.size(),ne=endOwn.size();const int sh=d.end.shCoefficients;const size_t terms=size_t(sh)*3;
-    Cloud out;out.shCoefficients=sh;out.position=shape.position;out.rotation=shape.rotation;out.opacity=shape.opacity;
-    out.scale.resize(3*n);out.colour.resize(3*n);out.sh.resize(terms*n);
+    out.shCoefficients=sh;out.position=shape.position;out.rotation=shape.rotation;out.opacity=shape.opacity;
+    out.scale.resize(3*n);out.colour.resize(3*n);out.sh.resize(includeSh ? terms*n : 0);
     // A followed frame from the same capture has the same SH terms; if not, base colour only.
-    const bool shOk=terms && endOwn.shCoefficients==sh && startOwn.shCoefficients==sh;
+    const bool shOk=includeSh && terms && endOwn.shCoefficients==sh && startOwn.shCoefficients==sh;
+    if (!shOk) std::fill(out.sh.begin(),out.sh.end(),0.f);
     // Size as its own; colour and SH as far toward its partner's as it has come.
     parallel(n,[&](size_t first,size_t last) {for (size_t o=first;o<last;++o) {
         const size_t from=shape.source[o];const bool isEnd=from<ne;const size_t i=isEnd ? from : from-ne;
@@ -556,19 +592,51 @@ Cloud Morph::mix(double s,const Shape &shape,const Live &live,std::vector<uint32
         if (shOk) for (size_t k=0;k<terms;++k) out.sh[terms*o+k]=float((1-mix)*own.sh[terms*i+k]+mix*other.sh[terms*p+k]);
     }});
     if (source) *source=shape.source;
-    return out;
 }
 Cloud Morph::evaluate(double s,std::vector<uint32_t> *source) const {return evaluate(s,Live{},source);}
 Cloud Morph::evaluate(double s,const Live &live,std::vector<uint32_t> *source) const {
+    Cloud out;evaluateInto(s,live,&out,source);return out;
+}
+void Morph::evaluateInto(double s,const Live &live,Cloud *out,std::vector<uint32_t> *source) const {
     s=std::clamp(s,0.,1.);
     if (live.end && live.back>followed(false)) throw std::runtime_error("The loop morph was not followed that far back from End.");
     if (live.start && live.back>followed(true)) throw std::runtime_error("The loop morph was not followed that far back from Start.");
-    return mix(s,*shape(s,live),live,source);
+    mixInto(s,*shape(s,live),live,*out,source);
+}
+bool Morph::evaluatePreviewInto(double s,Cloud *out,ShBlend *sh) const {
+    const auto &d=*d_;s=std::clamp(s,0.,1.);
+    if (!d.end.shCoefficients) return false;
+    std::shared_ptr<const ShSources> sources;
+    {
+        std::lock_guard<std::mutex> lock(d.mutex);
+        if (!d.shSources) {
+            const size_t bytes=sizeof(ShSources)+32+(d.end.sh.size()+d.start.sh.size())*sizeof(float);
+            if (!d.caching || bytes>d.shapeBudget || (d.admission && !d.admission(bytes))) return false;
+            while (d.shapeBytes>d.shapeBudget-bytes && !d.shapeOrder.empty()) {
+                const auto old=d.shapes.find(d.shapeOrder.front());d.shapeOrder.pop_front();
+                if (old!=d.shapes.end()) {d.shapeBytes-=old->second->bytes();d.shapes.erase(old);}
+            }
+            auto data=std::make_shared<ShSources>();data->endCount=uint32_t(d.end.size());data->coefficients=d.end.shCoefficients;
+            data->values.reserve(d.end.sh.size()+d.start.sh.size());
+            data->values.insert(data->values.end(),d.end.sh.begin(),d.end.sh.end());data->values.insert(data->values.end(),d.start.sh.begin(),d.start.sh.end());
+            d.shSources=std::move(data);
+        }
+        sources=d.shSources;
+    }
+    const auto prepared=shape(s,{});mixInto(s,*prepared,{},*out,nullptr,false);
+    sh->sources=std::move(sources);sh->source=std::shared_ptr<const std::vector<uint32_t>>(prepared,&prepared->source);
+    sh->partner=std::shared_ptr<const std::vector<uint32_t>>(prepared,&prepared->partner);sh->fraction=float(s);return true;
 }
 QVector3D Morph::carry(const QVector3D &onEnd,double s,size_t back,bool leadIn) const {
-    const auto &d=*d_;s=std::clamp(s,0.,1.);const Vec e=vec(onEnd);
+    return carry(std::vector<QVector3D>{onEnd},s,back,leadIn).front();
+}
+std::vector<QVector3D> Morph::carry(const std::vector<QVector3D> &onEnd,double s,size_t back,bool leadIn) const {
+    if (onEnd.empty()) return {};
+    const auto &d=*d_;s=std::clamp(s,0.,1.);
     const Motion endMotion=motionAt(d.forward,d.endTrack,back),startMotion=motionAt(d.backward,d.startTrack,leadIn ? back : 0);
-    const auto pose=d.forward.pose(s);const Skin skin=d.forward.skin(e);Vec out=Vec::Zero();
+    const auto pose=d.forward.pose(s);std::vector<QVector3D> result;result.reserve(onEnd.size());
+    for (const auto &point:onEnd) {
+    const Vec e=vec(point);const Skin skin=d.forward.skin(e);Vec out=Vec::Zero();
     for (int k=0;k<4;++k) if (skin.weight[k]>0) {
         const size_t j=size_t(skin.node[k]);const Mat endTurn=endMotion.turn[j].toRotationMatrix();
         // As the End side's maps take it: its motion to the frame shown, then the correction.
@@ -579,6 +647,8 @@ QVector3D Morph::carry(const QVector3D &onEnd,double s,size_t back,bool leadIn) 
         }
         out+=double(skin.weight[k])*(carried*pose.second[j]*(e-d.forward.rest[j])+target);
     }
-    return {float(out.x()),float(out.y()),float(out.z())};
+    result.emplace_back(float(out.x()),float(out.y()),float(out.z()));
+    }
+    return result;
 }
 }

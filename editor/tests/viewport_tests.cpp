@@ -20,6 +20,7 @@
 #include <QtTest>
 #include <cmath>
 #include <memory>
+#include <algorithm>
 
 class ViewportTests : public QObject {
     Q_OBJECT
@@ -46,6 +47,34 @@ class ViewportTests : public QObject {
         return point;
     }
 private slots:
+    void morphShBlendMatchesMaterializedCoefficients() {
+        Viewport viewport;viewport.resize(400,300);viewport.setGrid(false);viewport.setFrontMarker(false);viewport.setPointSize(9);
+        Camera camera;camera.yaw=camera.pitch=0;camera.distance=3;viewport.setCamera(camera);
+        viewport.show();QVERIFY(QTest::qWaitForWindowExposed(&viewport));
+        for (int coefficients:{3,8,15}) {
+            auto sources=std::make_shared<loopmorph::ShSources>();sources->endCount=1;sources->coefficients=coefficients;sources->values.resize(size_t(coefficients)*6);
+            const size_t terms=size_t(coefficients)*3;
+            for (size_t k=0;k<terms;++k) {sources->values[k]=.1f*std::sin(float(k)*.7f);sources->values[terms+k]=.15f*std::cos(float(k)*.3f);}
+            for (bool splats:{false,true}) for (float fraction:{.2f,.7f}) {
+                viewport.setSplatRendering(splats);auto cpu=std::make_shared<RenderFrame>();cpu->total=2;cpu->coefficients=coefficients;cpu->active={1,1};
+                cpu->records={{{-.3f,0,0},{0,0,0,1},{.15f,.12f,.08f},{.4f,.4f,.4f,.8f},0},{{.3f,0,0},{0,0,0,1},{.15f,.12f,.08f},{.4f,.4f,.4f,.8f},1}};
+                cpu->points={{{-.3f,0,0},{.4f,.4f,.4f},0},{{.3f,0,0},{.4f,.4f,.4f},1}};
+                cpu->sh.resize(terms*2);
+                for (size_t k=0;k<terms;++k) cpu->sh[k]=cpu->sh[terms+k]=(1-fraction)*sources->values[k]+fraction*sources->values[terms+k];
+                viewport.setFrame(cpu);const auto reference=viewport.grabFramebuffer();
+                auto gpu=std::make_shared<RenderFrame>(*cpu);gpu->sh.clear();gpu->shBlend.sources=sources;gpu->shBlend.fraction=fraction;
+                gpu->shBlend.source=std::make_shared<const std::vector<uint32_t>>(std::initializer_list<uint32_t>{0,1});
+                gpu->shBlend.partner=std::make_shared<const std::vector<uint32_t>>(std::initializer_list<uint32_t>{0,0});
+                viewport.setFrame(gpu);const auto actual=viewport.grabFramebuffer();QCOMPARE(actual.size(),reference.size());int difference=0,ink=0;
+                for (int y=0;y<actual.height();++y) for (int x=0;x<actual.width();++x) {
+                    const auto a=actual.pixelColor(x,y),b=reference.pixelColor(x,y);
+                    difference=std::max({difference,std::abs(a.red()-b.red()),std::abs(a.green()-b.green()),std::abs(a.blue()-b.blue())});
+                    if (y<actual.height()*.8 && b.red()+b.green()+b.blue()>150) ++ink;
+                }
+                QVERIFY(ink>20);QVERIFY2(difference<=2,qPrintable(QString("RGB difference %1, SH=%2, splats=%3").arg(difference).arg(coefficients).arg(splats)));
+            }
+        }
+    }
     void cropEditingPicksAndFocusFollowShowRemovedPreview() {
         Viewport viewport;viewport.resize(600,400);auto frame=std::make_shared<RenderFrame>();
         frame->points={{{0,1,0},{1,0,0},0},{{2,1,0},{0,1,0},1}};viewport.setFrame(frame);
@@ -152,7 +181,7 @@ private slots:
         QTest::keyClick(&viewport,Qt::Key_Delete,Qt::KeypadModifier);QCOMPARE(requested.size(),1);QTest::keyClick(&viewport,Qt::Key_Period,Qt::KeypadModifier);QCOMPARE(requested.size(),2);QTest::keyClick(&viewport,Qt::Key_Delete);QCOMPARE(requested.size(),2);
     }
     void ghostFreezesWorldPoseAndBlendsOncePerPixel() {
-        Viewport viewport;viewport.resize(600,450);viewport.setGrid(false);viewport.setPointSize(9);Camera camera;camera.yaw=camera.pitch=0;camera.distance=4;viewport.setCamera(camera);
+        Viewport viewport;viewport.resize(600,450);viewport.setGrid(false);viewport.setFrontMarker(false);viewport.setPointSize(9);Camera camera;camera.yaw=camera.pitch=0;camera.distance=4;viewport.setCamera(camera);
         auto first=std::make_shared<RenderFrame>();first->seconds=.25;first->points={{{-.7f,0,0},{1,0,0},0},{{-.7f,0,0},{1,0,0},1},{{-.7f,0,0},{1,0,0},2}};viewport.setFrame(first);viewport.show();QVERIFY(QTest::qWaitForWindowExposed(&viewport));
         QVERIFY(!viewport.ghostEnabled());QCOMPARE(viewport.ghostPointCount(),size_t(0));QVERIFY(viewport.setGhost(true));QCOMPARE(viewport.ghostPointCount(),size_t(3));QCOMPARE(viewport.ghostTime(),.25);
         auto second=std::make_shared<RenderFrame>();second->seconds=.75;second->points={{{.7f,0,0},{0,0,1},0}};viewport.setFrame(second);Transform moved;moved.position={.1f,0,0};viewport.setTransform(moved);

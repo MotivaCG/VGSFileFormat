@@ -70,14 +70,14 @@ QString MainWindow::automationViewId(const QString &connectionId) const {
 }
 void MainWindow::requireAutomationReady() const {
     if (!loaded_) fail("Import a capture or open a project first.");
-    if (loading_ || decoding_ || pendingDecode_) fail("Editor is busy. Wait for ready=true.");
+    if (loading_ || decoding_ || pendingDecode_ || cachePreparing_) fail("Editor is busy. Wait for ready=true.");
     if (playback_.isActive()) fail("Pause playback before editing or taking a snapshot.");
 }
 QJsonObject MainWindow::automationState(const QString &connectionId) const {
     const auto &w=*this;const auto frame_=viewport_->frame();const auto camera=w.viewport_->camera();QJsonArray boundaries;
     for (double s:w.info_.chunkBoundaries) boundaries.append(QJsonObject{{"seconds",s},{"frame",s*w.info_.fps}});
-    QJsonObject result{{"session_id",connectionId.section(':',0,0)},{"loaded",w.loaded_},{"loading",w.loading_},{"processing",w.decoding_ || w.pendingDecode_},
-        {"ready",w.loaded_ && !w.loading_ && !w.decoding_ && !w.pendingDecode_ && !w.playback_.isActive()},
+    QJsonObject result{{"session_id",connectionId.section(':',0,0)},{"loaded",w.loaded_},{"loading",w.loading_},{"processing",w.decoding_ || w.pendingDecode_ || w.cachePreparing_},
+        {"ready",w.loaded_ && !w.loading_ && !w.decoding_ && !w.pendingDecode_ && !w.cachePreparing_ && !w.playback_.isActive()},
         {"playing",w.playback_.isActive()},{"error",w.automationError_},{"modified",w.isWindowModified()},
         {"asset",w.project_.asset},{"project_path",w.projectPath_},{"frame",w.currentFrame()},{"seconds",w.project_.time},
         {"start_frame",int(std::round(w.project_.in*w.info_.fps))},{"end_frame",int(std::round(w.project_.out*w.info_.fps))},

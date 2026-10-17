@@ -31,6 +31,8 @@ public:
     ~Viewport() override;
     void setFrame(FramePtr frame);
     FramePtr frame() const { return frame_; }
+    struct FrameTimings {double upload=0,pack=0,sort=0,gpuPrepare=0,gpuDraw=0;};
+    FrameTimings frameTimings() const {return frameTimings_;}
     quint64 frameRevision() const { return frameRevision_; }
     QJsonObject samplePoints(int limit, bool includeRemoved) const;
     void setTransform(const Transform &transform);
@@ -253,13 +255,19 @@ private:
     GLuint gridVao_ = 0, gridBuffer_ = 0, fineVao_ = 0, fineBuffer_ = 0;
     int fineVertices_ = 0;
     int gridVertices_ = 0, shCoefficients_ = 0;
-    std::unique_ptr<QOpenGLShaderProgram> pointShader_, gridShader_, splatShader_;
+    std::unique_ptr<QOpenGLShaderProgram> pointShader_, gridShader_, splatShader_, splatPrepareShader_;
+    GLuint splatPrepareVao_ = 0, projectedBuffer_ = 0, projectedTexture_ = 0;
+    GLuint blendSourceBuffer_=0,blendSourceTexture_=0,blendIndexBuffer_=0,blendIndexTexture_=0;
+    std::weak_ptr<const loopmorph::ShSources> uploadedBlendSources_;
+    std::vector<uint32_t> blendIndexUpload_;
     bool splats_ = false, splatsDirty_ = true, splatLimitReported_ = false;
     int splatShDegree_ = -1;
     bool splatAntialiasing_ = false;
     GLuint splatVao_ = 0, cornerBuffer_ = 0, orderBuffer_ = 0, splatBuffer_ = 0, splatTexture_ = 0;
     std::vector<uint32_t> splatOrder_;
     std::vector<float> splatDepths_;
+    std::vector<float> splatUpload_;
+    std::unique_ptr<CompiledModifiers> compiledModifiers_;
     // The order drawn and what it was sorted for; frames are told apart by serial, not pointer.
     QMatrix4x4 sortedView_, requestedView_;
     quint64 frameSerial_ = 0, sortedSerial_ = 0, requestedSerial_ = 0;
@@ -267,6 +275,7 @@ private:
     std::unique_ptr<SplatSorter> sorter_;
     QString error_;
     double uploadMs_ = 0;
+    FrameTimings frameTimings_;
     float pointSize_ = 5;
     struct GhostPoint {float position[3];};
     std::vector<GhostPoint> ghostPoints_;

@@ -40,6 +40,7 @@
 #include <QTableWidget>
 #include <QLabel>
 #include <QMessageBox>
+#include <QProgressDialog>
 #include <QFormLayout>
 #include <QSlider>
 #include <QWheelEvent>
@@ -49,6 +50,119 @@
 class MainWindowTests : public QObject {
     Q_OBJECT
 private slots:
+    void cacheMenuPrecalculatesAndShowsPerLayerIndicators() {
+        QTemporaryDir dir;QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());
+        const auto source=dir.filePath("cache.pgs");vgs::Frame f;
+        for (int i=0;i<16;++i) {f.position.insert(f.position.end(),{.05f*(i%4),1+.05f*(i/4),0});f.rotation.insert(f.rotation.end(),{0,0,0,1});f.scale.insert(f.scale.end(),{.02f,.02f,.02f});f.colorDc.insert(f.colorDc.end(),{.7f,.8f,.3f});f.opacity.push_back(.8f);f.active.push_back(1);}
+        f.count=16;vgs::Header h;h.shDegree=0;h.frameCount=h.durationTicks=6;h.timeDenominator=25;h.chunks.resize(6);for (int i=0;i<6;++i) {h.chunks[i].startTick=i;h.chunks[i].intervals=1;}
+        vgs::EncodeOptions options;options.signer=vgs::authoringSigner();options.shDegree=0;options.compression=vgs::Compression::None;
+        QFile file(source);QVERIFY(file.open(QIODevice::WriteOnly));vgs::encodeSequence(h,[&](size_t) {return packExportFrame(f,0);},[&](uint64_t offset,const uint8_t *bytes,size_t count) {if (!file.seek(qint64(offset)) || file.write(reinterpret_cast<const char *>(bytes),qint64(count))!=qint64(count)) throw std::runtime_error("Cannot create fixture.");},options);file.close();
+        Project project;project.asset=source;project.in=0;project.out=5/25.;project.modifiers.clear();
+        Modifier purge;purge.id=Project::newId();purge.name="Purge";purge.type=ModifierType::PurgeIsolated;purge.isolation={4,1200};
+        Modifier colour;colour.id=Project::newId();colour.name="Color";colour.type=ModifierType::Colour;colour.colourDespill=Modifier::DespillAlways;colour.colourRecoverSkin=false;
+        Modifier morph;morph.id=Project::newId();morph.name="Morph";morph.type=ModifierType::LoopMorph;morph.morphSeconds=.08;
+        project.modifiers={purge,colour,morph};project.selectedModifier=purge.id;QString error;const auto path=dir.filePath("cache.vgsproj");QVERIFY(project.write(path,&error));
+        MainWindow window(nullptr,dir.filePath("presets"));window.show();QVERIFY(QTest::qWaitForWindowExposed(&window));window.openPath(path);
+        auto *viewport=window.findChild<Viewport *>();auto *tree=window.findChild<QTreeWidget *>("modifierTree");auto *action=window.findChild<QAction *>("precalculateCache");QVERIFY(viewport && tree && action);
+        auto *info=window.findChild<QAction *>("cacheInfo");QVERIFY(info);QVERIFY(!info->isEnabled());
+        auto *bake=window.findChild<QToolButton *>("bakeCacheButton");QVERIFY(bake);QCOMPARE(bake->defaultAction(),action);QCOMPARE(action->text(),QString("Bake cache"));QVERIFY(!bake->icon().isNull());
+        QTRY_VERIFY_WITH_TIMEOUT(viewport->frame() && viewport->frame()->cache.revision>0,10000);QVERIFY(action->isEnabled());QVERIFY(info->isEnabled());
+        const auto menus=window.menuBar()->actions();QCOMPARE(menus[1]->text(),QString("Edit"));QCOMPARE(menus[2]->text(),QString("Cache"));QCOMPARE(menus[2]->menu()->actions().size(),3);
+        auto *enable=window.findChild<QAction *>("enableCache");QVERIFY(enable && enable->isCheckable() && enable->isChecked());QCOMPARE(menus[2]->menu()->actions().first(),enable);
+        QCOMPARE(action->shortcut(),QKeySequence("Ctrl+B"));QCOMPARE(enable->shortcut(),QKeySequence("Ctrl+Alt+B"));
+        auto cacheKey=[&](Qt::KeyboardModifiers modifiers) {window.activateWindow();QApplication::setActiveWindow(&window);viewport->setFocus();QTest::keyClick(viewport,Qt::Key_B,modifiers);};
+        const auto serial=viewport->frameRevision();const double seconds=viewport->frame()->seconds;const bool modified=window.isWindowModified();
+        auto *transport=window.findChild<QWidget *>("timelinePlaybackControls");QVERIFY(transport);auto *lastPlaybackButton=transport->layout()->itemAt(4)->widget();
+        QTRY_VERIFY(bake->geometry().left()-lastPlaybackButton->geometry().right()-1>=10);QVERIFY(bake->isEnabled());
+        QTest::mouseClick(bake,Qt::LeftButton);QVERIFY(!viewport->updatesEnabled());QVERIFY(!action->isEnabled());QVERIFY(!bake->isEnabled());QVERIFY(!info->isEnabled());
+        auto *progress=window.findChild<QProgressDialog *>("precalculateCacheProgress");QVERIFY(progress);QCOMPARE(progress->windowTitle(),QString("Bake cache"));
+        QTRY_VERIFY_WITH_TIMEOUT(viewport->updatesEnabled() && action->isEnabled(),15000);
+        QTRY_VERIFY(viewport->frame()->visibilityFromCache && viewport->frame()->colourFromCache);
+        QCOMPARE(viewport->frame()->seconds,seconds);QVERIFY(viewport->frameRevision()<=serial+2);QCOMPARE(window.isWindowModified(),modified);
+        QTRY_COMPARE(tree->topLevelItem(0)->data(0,Qt::UserRole+20).toInt(),2);QCOMPARE(tree->topLevelItem(1)->data(0,Qt::UserRole+20).toInt(),2);
+        QVERIFY(tree->topLevelItem(0)->toolTip(0).contains("cached",Qt::CaseInsensitive));QVERIFY(viewport->frame()->cache.visibility && viewport->frame()->cache.colour);
+        QCOMPARE(tree->topLevelItem(2)->data(0,Qt::UserRole+20).toInt(),2); // Morph stays red outside its interval when fully cached.
+        QVERIFY(info->isEnabled());QVERIFY(!info->icon().isNull());QCOMPARE(info->shortcut(),QKeySequence("Ctrl+Shift+B"));
+        cacheKey(Qt::ControlModifier|Qt::ShiftModifier);
+        auto *dialog=window.findChild<QDialog *>("cacheInfoDialog");QVERIFY(dialog);
+        auto *cacheTable=dialog->findChild<QTableWidget *>("cacheInfoLayers");QVERIFY(cacheTable);QCOMPARE(cacheTable->rowCount(),3);
+        QCOMPARE(cacheTable->item(0,1)->text(),QString("Cached"));QCOMPARE(cacheTable->item(0,2)->text(),QString("6 / 6"));
+        QCOMPARE(cacheTable->item(2,2)->text(),QString("2 / 2"));QVERIFY(cacheTable->item(1,4)->text().contains("despill RGB"));dialog->close();
+        QTRY_VERIFY(!window.findChild<QDialog *>("cacheInfoDialog"));
+        QSignalSpy keyBake(action,&QAction::triggered);const auto keyBakeRevision=viewport->frameRevision();
+        cacheKey(Qt::ControlModifier);QCOMPARE(keyBake.count(),1);
+        QTRY_VERIFY(viewport->updatesEnabled() && action->isEnabled() && viewport->frameRevision()>keyBakeRevision);
+        const auto cachedRevision=viewport->frame()->cache.revision;tree->setCurrentItem(tree->topLevelItem(1));
+        QTest::qWait(50);QCOMPARE(viewport->frame()->cache.revision,cachedRevision);
+        cacheKey(Qt::ControlModifier|Qt::AltModifier);QVERIFY(!enable->isChecked());QVERIFY(!action->isEnabled());QVERIFY(!bake->isEnabled());QVERIFY(!info->isEnabled());
+        QTRY_VERIFY(!viewport->frame()->cache.enabled);QCOMPARE(viewport->frame()->cache.visibilityBytes,size_t(0));QCOMPARE(viewport->frame()->cache.colourBytes,size_t(0));QCOMPARE(viewport->frame()->cache.morphBytes,size_t(0));
+        for (int i=0;i<tree->topLevelItemCount();++i) QCOMPARE(tree->topLevelItem(i)->data(0,Qt::UserRole+20).toInt(),5);
+        cacheKey(Qt::ControlModifier);QCOMPARE(keyBake.count(),1); // Disabled Bake has no active shortcut.
+        cacheKey(Qt::ControlModifier|Qt::ShiftModifier);QVERIFY(!window.findChild<QDialog *>("cacheInfoDialog"));
+        cacheKey(Qt::ControlModifier|Qt::AltModifier);QVERIFY(enable->isChecked());QTRY_VERIFY(viewport->frame()->cache.enabled);QVERIFY(action->isEnabled());QVERIFY(bake->isEnabled());QVERIFY(info->isEnabled());
+        // Normal Play must fill the cache too, without using the menu again.
+        viewport->setFocus();QTest::keyClick(viewport,Qt::Key_Space);
+        QTRY_VERIFY_WITH_TIMEOUT(viewport->frame()->cache.visibilityStageFrames[0]==6 && viewport->frame()->cache.colourFrames>=6 && viewport->frame()->cache.morphFrames==2,5000);
+        int maskHits=0,colourHits=0,shapeHits=0;quint64 playedRevision=viewport->frameRevision();
+        connect(viewport,&QOpenGLWidget::frameSwapped,&window,[&] {
+            if (viewport->frameRevision()==playedRevision) return;playedRevision=viewport->frameRevision();
+            maskHits+=viewport->frame()->visibilityFromCache;colourHits+=viewport->frame()->colourFromCache;shapeHits+=viewport->frame()->morphShapeFromCache;
+        });
+        QTest::qWait(1000);QVERIFY(maskHits>=6);QVERIFY(colourHits>=6);QVERIFY(shapeHits>=2);
+        QTest::keyClick(viewport,Qt::Key_Space);
+        window.setWindowModified(false);
+    }
+    void cacheIndicatorsDistinguishGpuWorkAndPartialMorphCoverage() {
+        ModifierPanel panel;Project project;project.modifiers.clear();
+        for (auto type:{ModifierType::Crop,ModifierType::RemoveGreen,ModifierType::PurgeIsolated,ModifierType::Colour,ModifierType::LoopMorph}) {Modifier m;m.type=type;m.id=Project::newId();m.crop.enabled=true;project.modifiers.append(m);}
+        panel.setProject(project);auto *tree=panel.findChild<QTreeWidget *>("modifierTree");QVERIFY(tree);
+        PreviewCacheState state;state.visibility=true;state.timelineFrames=20;state.visibilityStageFrames[0]=5;state.morphTotalFrames=10;state.morphFrames=4;panel.setCacheState(state);
+        for (int i:{0,1}) {QCOMPARE(tree->topLevelItem(i)->data(0,Qt::UserRole+20).toInt(),6);QVERIFY(tree->topLevelItem(i)->toolTip(0).contains("No duplicate cache"));}
+        QCOMPARE(tree->topLevelItem(3)->data(0,Qt::UserRole+20).toInt(),5);QVERIFY(tree->topLevelItem(3)->toolTip(0).contains("GPU"));
+        // A cached displayed frame does not imply complete timeline coverage.
+        QCOMPARE(tree->topLevelItem(2)->data(0,Qt::UserRole+20).toInt(),4);QCOMPARE(tree->topLevelItem(4)->data(0,Qt::UserRole+20).toInt(),4);
+        state.visibility=false;panel.setCacheState(state);QCOMPARE(tree->topLevelItem(2)->data(0,Qt::UserRole+20).toInt(),4);
+        panel.setCacheWorking(1);QCOMPARE(tree->topLevelItem(2)->data(0,Qt::UserRole+20).toInt(),3);QCOMPARE(tree->topLevelItem(0)->data(0,Qt::UserRole+20).toInt(),6);
+        state.morphFrames=10;panel.setCacheState(state);QCOMPARE(tree->topLevelItem(4)->data(0,Qt::UserRole+20).toInt(),2);
+        state.visibilityStageFrames[0]=10;
+        // Consecutive misses remain readable instead of alternating amber/green
+        // for every newly retained frame. The pulse settles after the burst.
+        panel.setCacheWorking(1);panel.setCacheState(state);QCOMPARE(tree->topLevelItem(2)->data(0,Qt::UserRole+20).toInt(),3);
+        QTest::qWait(200);panel.setCacheWorking(1);panel.setCacheState(state);QCOMPARE(tree->topLevelItem(2)->data(0,Qt::UserRole+20).toInt(),3);
+        QTRY_COMPARE(tree->topLevelItem(2)->data(0,Qt::UserRole+20).toInt(),2);
+        state.timelineFrames=20;state.visibilityStageFrames={10,2,0};state.visibilityStageBytes={1000,200,0};panel.setCacheState(state);
+        auto layers=panel.cacheLayers();QCOMPARE(layers[0].status,QString("Included in ")+project.modifiers[2].name);QCOMPARE(layers[0].bytes,size_t(0));
+        QCOMPARE(layers[2].bytes,size_t(1200));QCOMPARE(layers[2].frames,QString("10 / 10"));QCOMPARE(layers[3].bytes,size_t(0));
+        project.modifiers[3].colourDespill=Modifier::DespillAlways;
+        Modifier later;later.type=ModifierType::Colour;later.id=Project::newId();later.colourDespill=Modifier::DespillOnExport;project.modifiers.append(later);
+        panel.setProject(project);state.colour=true;panel.setCacheState(state);QCOMPARE(tree->topLevelItem(3)->data(0,Qt::UserRole+20).toInt(),5);
+        project.modifiers.back().colourDespill=Modifier::DespillAlways;panel.setProject(project);state.colourFrames=4;panel.setCacheState(state);
+        QCOMPARE(tree->topLevelItem(3)->data(0,Qt::UserRole+20).toInt(),6);QCOMPARE(tree->topLevelItem(5)->data(0,Qt::UserRole+20).toInt(),4);
+        state.colourFrames=10;panel.setCacheState(state);QCOMPARE(tree->topLevelItem(5)->data(0,Qt::UserRole+20).toInt(),2);
+    }
+    void playbackTimingOnARealCapture() {
+        const QString capture=qEnvironmentVariable("EDITOR_PLAYBACK_CAPTURE");
+        if (capture.isEmpty()) QSKIP("Set EDITOR_PLAYBACK_CAPTURE to measure presented playback frames.");
+        QTemporaryDir dir;QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());
+        MainWindow window(nullptr,dir.filePath("presets"));window.resize(1400,900);window.show();QVERIFY(QTest::qWaitForWindowExposed(&window));
+        auto *viewport=window.findChild<Viewport *>();auto *tree=window.findChild<QTreeWidget *>("modifierTree");
+        auto *remove=window.findChild<QToolButton *>("removeModifier");QVERIFY(viewport && tree && remove);
+        window.openPath(capture);QTRY_VERIFY_WITH_TIMEOUT(viewport->frame()!=nullptr,30000);
+        const bool keepModifiers=qEnvironmentVariableIsSet("EDITOR_PLAYBACK_KEEP_MODIFIERS");
+        if (!keepModifiers) while (tree->topLevelItemCount()) {tree->setCurrentItem(tree->topLevelItem(0));remove->click();}
+        auto *style=window.findChild<QComboBox *>("displayRenderStyle");QVERIFY(style);style->setCurrentIndex(1);
+        viewport->setSplatShDegree(-1);viewport->setFocus();
+        quint64 serial=viewport->frameRevision();int presented=0;double workerMs=0;
+        connect(viewport,&QOpenGLWidget::frameSwapped,&window,[&] {
+            if (viewport->frame() && serial!=viewport->frameRevision()) {serial=viewport->frameRevision();++presented;workerMs+=viewport->frame()->decodeMs;}
+        });
+        QTest::keyClick(viewport,Qt::Key_Space,keepModifiers ? Qt::ControlModifier : Qt::NoModifier);
+        QTest::qWait(5000);presented=0;workerMs=0; // measure warm playback separately from fitting/cache fill
+        QElapsedTimer clock;clock.start();QTest::qWait(6000);QTest::keyClick(viewport,Qt::Key_Space);
+        const double elapsed=clock.nsecsElapsed()/1e6;
+        qInfo("playback: %d presented frames, %.2f fps, worker %.2f ms, viewport %dx%d, full SH, modifiers=%d",presented,presented*1000/elapsed,workerMs/std::max(1,presented),viewport->width(),viewport->height(),keepModifiers);
+        QVERIFY(presented>0);window.setWindowModified(false);
+    }
     void cropSwitchesBetweenStaticAndAnimatedKeepingKeys() {
         QTemporaryDir dir;QVERIFY(dir.isValid());
         QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());
@@ -167,7 +281,9 @@ private slots:
         // Typing in one field without pausing is one step, and Ctrl+Z there undoes the edit, not the text.
         undo->trigger();QCOMPARE(radius->value(),start+1);
         QCoreApplication::processEvents();radius->setFocus();QTRY_VERIFY(radius->hasFocus());radius->selectAll();
-        QTest::keyClicks(radius,"2");QCOMPARE(radius->value(),2.);QCoreApplication::processEvents();QTest::keyClick(radius,Qt::Key_Up);QCOMPARE(radius->value(),2.05);
+        auto *radiusText=radius->findChild<QLineEdit *>();QVERIFY(radiusText);
+        QTest::keyClicks(radiusText,"2");QCOMPARE(radius->value(),start+1); // typing is committed by Enter, Tab or focus-out
+        QTest::keyClick(radiusText,Qt::Key_Return);QCOMPARE(radius->value(),2.);QCoreApplication::processEvents();QTest::keyClick(radius,Qt::Key_Up);QCOMPARE(radius->value(),2.05);
         QTest::keyClick(radius,Qt::Key_Z,Qt::ControlModifier);QCOMPARE(radius->value(),start+1);
         QTest::keyClick(radius,Qt::Key_Z,Qt::ControlModifier|Qt::ShiftModifier);QCOMPARE(radius->value(),2.05);
         // Erase: strokes replace, add to or subtract from the picks of the chunk on screen.
@@ -181,7 +297,8 @@ private slots:
         // Prune low contribution says what it did to the chunk on screen.
         auto *type=window.findChild<QComboBox *>("newModifierType");auto *status=window.findChild<QLabel *>("pruneStatus");QVERIFY(type && status);
         type->setCurrentIndex(type->findData(7));add->click();QCOMPARE(tree->topLevelItemCount(),3);
-        QTRY_VERIFY_WITH_TIMEOUT(status->text().startsWith("This chunk:"),10000);
+        QTRY_VERIFY2_WITH_TIMEOUT(status->text().startsWith("This chunk:"),
+            qPrintable(status->text()+QString("; selected=%1, frame prune stats=%2").arg(tree->currentItem()->text(1)).arg(window.findChild<Viewport *>()->frame()->prune.size())),10000);
         // F4 adds an Eraser, selected, its tools on.
         {const int before=tree->topLevelItemCount();QTest::keyClick(&window,Qt::Key_F4);QCOMPARE(tree->topLevelItemCount(),before+1);
          QCOMPARE(window.findChild<Viewport *>()->selectTool(),Viewport::SelectTool::Brush);}

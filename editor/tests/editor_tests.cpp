@@ -48,6 +48,83 @@ size_t nearestSplat(const loopmorph::Cloud &c,size_t count,QVector3D to) {
 class EditorTests : public QObject {
     Q_OBJECT
 private slots:
+    void previewCacheDependenciesFollowTheProcessingStages() {
+        Project project;project.modifiers.clear();project.in=0;project.out=1;
+        Modifier crop;crop.type=ModifierType::Crop;crop.crop.enabled=true;
+        Modifier purge;purge.type=ModifierType::PurgeIsolated;
+        Modifier morph;morph.type=ModifierType::LoopMorph;morph.morphSeconds=.2;
+        Modifier colour;colour.type=ModifierType::Colour;colour.colourDespill=Modifier::DespillAlways;
+        project.modifiers={crop,purge,morph,purge,colour};project.updatePreviewCacheKeys();
+        const auto first=project.previewVisibilityKeys;const auto firstMorph=project.previewMorphKey,firstColour=project.previewColourKey;
+        project.modifiers[2].morphSeconds=.4;project.updatePreviewCacheKeys();
+        QCOMPARE(project.previewVisibilityKeys[0],first[0]);QCOMPARE(project.previewVisibilityKeys[1],first[1]);
+        QVERIFY(project.previewMorphKey!=firstMorph);QVERIFY(project.previewVisibilityKeys[2]!=first[2]);QCOMPARE(project.previewColourKey,firstColour);
+        const auto second=project.previewVisibilityKeys;const auto secondMorph=project.previewMorphKey;
+        project.modifiers[3].isolation.medianPercent+=50;project.updatePreviewCacheKeys();
+        QVERIFY(project.previewVisibilityKeys[0]!=second[0]);QCOMPARE(project.previewVisibilityKeys[1],second[1]);QCOMPARE(project.previewMorphKey,secondMorph);QVERIFY(project.previewVisibilityKeys[2]!=second[2]);
+        const auto third=project.previewVisibilityKeys;project.modifiers[4].colourDespillStrength=.5;project.updatePreviewCacheKeys();
+        // Without a Remove green below Color, despill does not affect visibility.
+        QCOMPARE(project.previewVisibilityKeys[0],third[0]);QCOMPARE(project.previewVisibilityKeys[1],third[1]);QVERIFY(project.previewColourKey!=firstColour);
+        const auto colourMorph=project.previewMorphKey;project.modifiers[0].crop.radius+=.1;project.updatePreviewCacheKeys();
+        QVERIFY(project.previewVisibilityKeys[0]!=third[0]);QVERIFY(project.previewVisibilityKeys[1]!=third[1]);QVERIFY(project.previewMorphKey!=colourMorph);
+        const auto clean=project.previewVisibilityKeys;const auto cleanMorph=project.previewMorphKey;
+        project.modifiers[0].name="Renamed";project.selectedModifier=project.modifiers[4].id;project.previewCacheEnabled=false;project.updatePreviewCacheKeys();
+        QVERIFY(project.previewVisibilityKeys==clean);QCOMPARE(project.previewMorphKey,cleanMorph);
+    }
+    void previewMemoryReservesPhysicalAndCommitHeadroom() {
+        using namespace previewmemory;
+        Snapshot memory{32*GiB,12*GiB,64*GiB,20*GiB,true,false};
+        Guard guard([&] {return memory;});
+        QCOMPARE(guard.inspect().growth,12*GiB-32*GiB/10);
+        QVERIFY(guard.canRetain(GiB));
+        memory.physicalAvailable=3*GiB;
+        auto pressure=guard.inspect();QVERIFY(pressure.paused);QVERIFY(pressure.reclaim>0);
+        QVERIFY(!guard.canRetain(1));
+        memory.physicalAvailable=32*GiB/10+100*MiB; // Still inside hysteresis.
+        QVERIFY(guard.inspect().paused);
+        memory.physicalAvailable=5*GiB;QVERIFY(!guard.inspect().paused);
+        memory.commitAvailable=GiB;QVERIFY(guard.inspect().paused);
+        memory.commitAvailable=8*GiB;QVERIFY(!guard.inspect().paused);
+        memory.lowMemory=true;QVERIFY(guard.inspect().reclaim>=256*MiB);QVERIFY(!guard.canRetain(0));
+        memory.lowMemory=false;QVERIFY(guard.canRetain(MiB));
+        memory.valid=false;QVERIFY(!guard.canRetain(1));QCOMPARE(guard.inspect().reclaim,uint64_t(0));
+        // Small machines still leave at least 2 GiB physically available.
+        memory={8*GiB,3*GiB,16*GiB,4*GiB,true,false};
+        Guard small([&] {return memory;});QCOMPARE(small.inspect().growth,GiB);
+        memory.physicalAvailable=GiB;QVERIFY(small.inspect().paused);
+    }
+    void loopMorphGpuShMatchesCpuAndRespectsTheBudget() {
+        for (int terms:{3,8,15}) {
+            std::mt19937 random(17);loopmorph::Cloud end,start;
+            addRod(end,{0,0,0},{0,1,0},1,.1f,256,random);addRod(start,{.02f,0,0},{0,1,0},1,.1f,256,random);
+            end.shCoefficients=start.shCoefficients=terms;end.sh.resize(end.size()*size_t(terms)*3);start.sh.resize(start.size()*size_t(terms)*3);
+            for (size_t i=0;i<end.sh.size();++i) {end.sh[i]=.1f*std::sin(float(i));start.sh[i]=.12f*std::cos(float(i));}
+            loopmorph::Morph morph(end,start,{});morph.setCaching(true,1024*1024);
+            const auto cpu=morph.evaluate(.37);loopmorph::Cloud gpu;loopmorph::ShBlend blend;
+            QVERIFY(morph.evaluatePreviewInto(.37,&gpu,&blend));QVERIFY(gpu.sh.empty());
+            QVERIFY(gpu.position==cpu.position && gpu.rotation==cpu.rotation && gpu.opacity==cpu.opacity && gpu.colour==cpu.colour);
+            QCOMPARE(blend.source->size(),cpu.size());QCOMPARE(blend.partner->size(),cpu.size());
+            for (size_t i=0;i<cpu.size();++i) {
+                const size_t own=(*blend.source)[i];const bool fromEnd=own<blend.sources->endCount;
+                const size_t other=(*blend.partner)[i]+(fromEnd ? blend.sources->endCount : 0);
+                const float weight=fromEnd ? blend.fraction : 1-blend.fraction;
+                for (int k=0;k<terms*3;++k) {
+                    const float value=(1-weight)*blend.sources->values[own*size_t(terms)*3+size_t(k)]+weight*blend.sources->values[other*size_t(terms)*3+size_t(k)];
+                    QVERIFY(std::abs(value-cpu.sh[i*size_t(terms)*3+size_t(k)])<1e-6f);
+                }
+            }
+            loopmorph::ShBlend next;QVERIFY(morph.evaluatePreviewInto(.61,&gpu,&next));QCOMPARE(next.sources,blend.sources);QVERIFY(morph.cachedBytes()<=1024*1024);
+            morph.trimCache(0);QCOMPARE(morph.cachedBytes(),size_t(0));
+            morph.setCacheAdmission([](size_t) {return false;});
+            QVERIFY(!morph.evaluatePreviewInto(.37,&gpu,&next));
+            const auto uncached=morph.evaluate(.37);QVERIFY(uncached.sh==cpu.sh && uncached.position==cpu.position);
+            QCOMPARE(morph.cachedBytes(),size_t(0));
+            morph.setCacheAdmission({});QVERIFY(morph.evaluatePreviewInto(.37,&gpu,&next));
+            morph.setCaching(true,1);QVERIFY(!morph.evaluatePreviewInto(.37,&gpu,&next));QCOMPARE(morph.cachedBytes(),size_t(0));
+            // Published frames keep their immutable source/shape arrays across invalidation.
+            QCOMPARE(blend.sources->values.front(),end.sh.front());QCOMPARE(blend.source->size(),cpu.size());
+        }
+    }
     void loopMorphSplitsTheStackAndPersists() {
         Project project;project.modifiers.clear();project.in=0;project.out=2;
         auto add=[&](ModifierType type,const QString &name) {Modifier m;m.id=Project::newId();m.name=name;m.type=type;m.crop.enabled=true;project.modifiers.append(m);return m.id;};
@@ -107,7 +184,7 @@ private slots:
         QMatrix4x4 motion;motion.translate(.5f,0,.2f);motion.rotate(40,0,1,0);
         addRod(start,motion.map({0,0,0}),motion.mapVector({0,1,0}),1.6f,.15f,6000,random);addRod(start,motion.map({-.4f,1.3f,0}),motion.mapVector({1,0,0}),.8f,.05f,2000,random);
         std::vector<loopmorph::Pair> pairs;for (QVector3D p:{QVector3D(0,0,.15f),QVector3D(0,1.6f,.15f),QVector3D(-.4f,1.3f,.05f),QVector3D(.4f,1.3f,.05f)}) pairs.push_back({p,motion.map(p)});
-        const loopmorph::Morph morph(end,start,pairs);
+        loopmorph::Morph morph(end,start,pairs);
         QVERIFY2(morph.markerError()<.02,qPrintable(QString::number(morph.markerError())));
         // At the ends each frame is itself, the other faded out entirely.
         const auto first=morph.evaluate(0),last=morph.evaluate(1);
@@ -117,6 +194,20 @@ private slots:
         // Halfway the end frame's splats are the subject, rigid: the arm's tips as far apart.
         std::vector<uint32_t> from;const auto middle=morph.evaluate(.5,&from);QCOMPARE(from.size(),middle.size());
         QCOMPARE(middle.size(),end.size()+start.size()); // halfway both frames show, each in part
+        morph.setCaching(true);const auto cached=morph.evaluate(.5);const size_t bytes=morph.cachedBytes();
+        QVERIFY(bytes>0);QCOMPARE(morph.cachedFrames(),size_t(1));QVERIFY(cached.position==middle.position && cached.sh==middle.sh);
+        morph.setCaching(true,bytes);morph.evaluate(.5);morph.evaluate(.6);
+        QVERIFY(morph.cachedBytes()<=bytes);QVERIFY(morph.cachedFrames()<=1);
+        const auto again=morph.evaluate(.5);QVERIFY(again.position==middle.position && again.rotation==middle.rotation && again.opacity==middle.opacity);
+        morph.setCaching(true,1);morph.evaluate(.5);QCOMPARE(morph.cachedBytes(),size_t(0));QCOMPARE(morph.cachedFrames(),size_t(0));
+        morph.setCaching(false);
+        loopmorph::Cloud reused;morph.evaluateInto(.5,{},&reused);
+        QVERIFY(reused.position==middle.position && reused.sh==middle.sh && reused.colour==middle.colour);
+        morph.evaluateInto(.6,{},&reused);morph.evaluateInto(.5,{},&reused);
+        QVERIFY(reused.position==middle.position && reused.rotation==middle.rotation && reused.opacity==middle.opacity);
+        std::vector<QVector3D> markers;for (const auto &pair:pairs) markers.push_back(pair.end);
+        const auto carried=morph.carry(markers,.5);
+        for (size_t i=0;i<markers.size();++i) QCOMPARE(carried[i],morph.carry(markers[i],.5));
         // Where splat `i` of the End frame is in the morph's frame; the arm's tips show halfway.
         auto in=[&](const std::vector<uint32_t> &f,size_t i) {return size_t(std::find(f.begin(),f.end(),uint32_t(i))-f.begin());};
         const size_t left=nearestSplat(end,end.size(),{-.4f,1.3f,.05f}),right=nearestSplat(end,end.size(),{.4f,1.3f,.05f});

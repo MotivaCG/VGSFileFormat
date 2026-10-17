@@ -17,12 +17,12 @@ INCLUDEPATH += $$PWD $$EDITOR $$EDITOR/dependencies/mint $$EDITOR/dependencies/e
 SOURCES += $$PWD/viewermain.cpp $$PWD/viewerwindow.cpp \
     $$EDITOR/editortheme.cpp $$EDITOR/displayscaling.cpp $$EDITOR/viewport.cpp $$EDITOR/viewcube.cpp \
     $$EDITOR/rangeslider.cpp $$EDITOR/audiopreview.cpp $$EDITOR/captureworker.cpp $$EDITOR/isolation.cpp $$EDITOR/loopmorph.cpp \
-    $$EDITOR/pruning.cpp $$EDITOR/project.cpp $$EDITOR/modifiers.cpp $$EDITOR/capturesettings.cpp \
+    $$EDITOR/pruning.cpp $$EDITOR/project.cpp $$EDITOR/modifiers.cpp $$EDITOR/capturesettings.cpp $$EDITOR/previewmemory.cpp \
     $$EDITOR/dependencies/mint/mintfile.cpp $$EDITOR/dependencies/mint/mintskinrecovery.cpp \
     $$VGS_ROOT/decoder/src/vgsdecoder.cpp $$VGS_ROOT/core/src/vgscontainer.cpp $$VGS_ROOT/core/src/vgsframe.cpp \
     $$VGS_ROOT/core/src/mgscodec.cpp $$VGS_ROOT/core/crypto/vgscrypto.cpp $$VGS_ROOT/core/crypto/tweetnacl.c
 HEADERS += $$PWD/viewerwindow.h $$PWD/viewerversion.h \
-    $$EDITOR/viewport.h $$EDITOR/viewcube.h $$EDITOR/rangeslider.h $$EDITOR/audiopreview.h $$EDITOR/captureworker.h
+    $$EDITOR/viewport.h $$EDITOR/viewcube.h $$EDITOR/rangeslider.h $$EDITOR/audiopreview.h $$EDITOR/captureworker.h $$EDITOR/previewmemory.h
 RESOURCES += $$EDITOR/resources.qrc
 msvc: QMAKE_CXXFLAGS += /utf-8 /bigobj
 win32: LIBS += -lopengl32 -luser32
