@@ -1409,6 +1409,8 @@ void Viewport::applyEditableTransform(const Transform &transform) {
     update();
 }
 void Viewport::setCrop(const CropVolume &crop) { crop_ = crop; if (cpuFiltered_) frameDirty_=true; update(); }
+// The same QVector data is the same stack: the viewport holds a reference to it, so any
+// edit of the caller's copy detaches that copy and arrives here as different data.
 void Viewport::setModifiers(const QVector<Modifier> &modifiers) {
     if (modifierStack_ && modifiers_.size()==modifiers.size() && modifiers_.constData()==modifiers.constData()) return;
     modifiers_=modifiers;modifierStack_=true;compiledModifiers_.reset();if (cpuFiltered_) frameDirty_=true;update();

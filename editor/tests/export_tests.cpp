@@ -589,6 +589,29 @@ private slots:
             QVERIFY(singleFile.open(QIODevice::ReadOnly));QVERIFY(sequenceFile.open(QIODevice::ReadOnly));QCOMPARE(singleFile.readAll(),sequenceFile.readAll());
         }
     }
+    void mintPlaybackReaderIsReadOnlyAndChecksRankTables() {
+        QTemporaryDir dir;const auto source=dir.filePath("clip.pgs");sourceFile(source,3);
+        Project project;project.asset=source;project.out=2./25;project.modifiers.clear();const auto path=dir.filePath("clip.mint");exportCaptureFile(project,path);
+        // The playback reader maps the file: it decodes, and refuses to be edited in place.
+        MintFile reader;QString error;QVERIFY2(reader.openReadOnly(path,&error),qPrintable(error));
+        MintFrame frame;QVERIFY2(reader.decode(0,&frame,true,&error),qPrintable(error));QVERIFY(frame.count>0);
+        QVERIFY(!reader.despill(MintDespillOptions{},{},&error));QVERIFY2(error.contains("read-only"),qPrintable(error));
+        // A rank boundary beyond its group's splats would index past the term array: refused.
+        // The editor's own MINT samples every frame and has no rank tables, so this half needs a
+        // Gracia capture (EDITOR_MINT_CAPTURE), copied here before it is broken.
+        const QString gracia=qEnvironmentVariable("EDITOR_MINT_CAPTURE");const QString original=gracia.isEmpty() ? path : gracia;
+        MintFile layout;QVERIFY2(layout.open(original,&error),qPrintable(error));quint64 at=0;
+        for (const auto &chunk:layout.chunks()) for (const auto *group:chunk.splatGroups()) if (!at) {
+            if (!group->positionPerSample) at=group->array("position_rank_boundaries").absolute;
+            else if (!group->rotationPerSample) at=group->array("rotation_rank_boundaries").absolute;
+        }
+        if (!at) QSKIP("This MINT holds no rank tables to corrupt: set EDITOR_MINT_CAPTURE to a Gracia .mint.");
+        layout.close();QFile broken(dir.filePath("broken.mint"));QVERIFY(QFile::copy(original,broken.fileName()));QVERIFY(broken.open(QIODevice::ReadWrite));
+        QVERIFY(broken.seek(qint64(at)));const char huge[4]={'\xff','\xff','\xff','\x7f'};broken.write(huge,4);broken.close();
+        MintFile corrupt;QVERIFY2(corrupt.openReadOnly(broken.fileName(),&error),qPrintable(error));
+        bool refused=false;for (int f=0;f<3 && !refused;++f) refused=!corrupt.decode(f/25.,&frame,true,&error);
+        QVERIFY(refused);QVERIFY2(error.contains("malformed rank table"),qPrintable(error));
+    }
     void visibilityIsKeptAsPlayedAndDroppedOnAnyChange() {
         QTemporaryDir dir;const auto source=dir.filePath("cached.pgs");sourceFile(source,5);
         Project project;project.asset=source;project.in=0;project.out=4./25;project.modifiers.clear();

@@ -158,7 +158,8 @@ public:
     // byte ranges and could be streamed instead.
     bool open(const QString& path, QString* error);
     // Playback uses a read-only mapping so untouched chunks do not occupy private
-    // RAM. bytes() is a view valid until close(); writable QByteArray access detaches.
+    // RAM. bytes() is a view valid until close(). Such a reader cannot be edited:
+    // despill() refuses it, since any write would copy the whole file first.
     bool openReadOnly(const QString& path, QString* error);
 
     // Reads only the metadata region, a few kilobytes, and stops. Enough for
@@ -234,7 +235,8 @@ private:
                               const SharedBasis& basis, float* output, quint64 begin, quint64 end) const;
 
     const char* raw(quint64 absolute) const { return m_data.constData() + absolute; }
-    char* mutableRaw(quint64 absolute) { return m_data.data() + absolute; }
+    // Never on a read-only mapping: the write would detach, copying the whole file.
+    char* mutableRaw(quint64 absolute) { Q_ASSERT(!m_mappedFile); return m_data.data() + absolute; }
 
     bool load(const QString& path, bool headerOnly, QString* error,bool mapped = false);
 

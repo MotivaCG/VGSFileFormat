@@ -218,6 +218,11 @@ private slots:
         QVERIFY(count(0)>0);QCOMPARE(count(1),0);QVERIFY(count(2)>0);
         first.enabled=false;viewport.setModifiers({first,second,green});QCOMPARE(count(0),0);QVERIFY(count(2)>0);
         second.enabled=false;green.enabled=false;viewport.setModifiers({first,second,green});QVERIFY(count(0)>0);QVERIFY(count(1)>0);
+        // A stack shared with its caller, as the editor's project shares it: the viewport keeps
+        // the same data, and editing the caller's copy detaches it, so the edit is drawn.
+        QVector<Modifier> stack{first,second,green};for (auto &m:stack) m.enabled=true;viewport.setModifiers(stack);QCOMPARE(count(1),0);
+        viewport.setModifiers(stack);QCOMPARE(count(1),0);
+        stack[2].enabled=false;viewport.setModifiers(stack);QVERIFY(count(1)>0);
         QCOMPARE(frame->points.size(),size_t(3));
     }
     void orthographicBackgroundHasNoColouredAxes() {

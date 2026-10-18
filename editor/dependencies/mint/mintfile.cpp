@@ -141,14 +141,23 @@ void unpackQuaternion(quint32 word, float* xyzw)
 // terms are found by arithmetic rather than by a stored offset. See 6.5.
 // Rank boundaries describe whole runs; no per-splat rank/offset arrays are needed.
 struct RankLookup {
-    quint64 boundaries[5]={}, starts[5]={}, offsets[5]={};int count;
-    RankLookup(const char *bytes,int entries):count(entries) {
+    static constexpr int kMaxEntries=5;
+    quint64 boundaries[kMaxEntries]={}, starts[kMaxEntries]={}, offsets[kMaxEntries]={};int count;
+    RankLookup(const char *bytes,int entries):count(std::clamp(entries,1,kMaxEntries)) {
         for (int j=0;j<count;++j) boundaries[j]=readU32(bytes+4*j);
         for (int j=1;j<count;++j) {starts[j]=boundaries[j-1];offsets[j]=offsets[j-1]+quint64(j)*(boundaries[j-1]-starts[j-1]);}
     }
     void find(quint64 id,quint32 &rank,quint64 &offset) const {
         int j=0;while (j<count-1 && boundaries[j]<=id) ++j;
         rank=quint32(j+1);offset=offsets[j]+quint64(rank)*(id-starts[j]);
+    }
+    // The boundaries come from the file: they must rise, stay within the group's
+    // `splats`, and leave every splat's terms inside the `terms` the array holds.
+    bool valid(quint64 splats,quint64 terms) const {
+        for (int j=0;j<count;++j) if (boundaries[j]>splats || (j && boundaries[j]<boundaries[j-1])) return false;
+        if (!splats) return true;
+        quint32 rank;quint64 first;find(splats-1,rank,first);
+        return first+rank<=terms;
     }
 };
 
@@ -1013,6 +1022,13 @@ bool MintFile::decode(double seconds, MintFrame* out, bool includeSh, QString* e
         }
 
         };
+        // Rank tables index the term arrays directly: a malformed one is refused here,
+        // before any of the reading threads start.
+        if ((!group->positionPerSample && !RankLookup(raw(group->array("position_rank_boundaries").absolute),4).valid(n,group->array("position_rq_coefficients").size/4)) ||
+            (!group->rotationPerSample && !RankLookup(raw(group->array("rotation_rank_boundaries").absolute),5).valid(n,group->array("rotation_rq_indices").size/2))) {
+            if (error) *error = QObject::tr("%1 has a malformed rank table").arg(m_path);
+            return false;
+        }
         const unsigned pieces=unsigned(std::min<quint64>(std::clamp(std::thread::hardware_concurrency(),1u,4u),std::max<quint64>(1,n/32768)));
         std::vector<std::future<void>> jobs;
         for (unsigned j=1;j<pieces;++j) jobs.push_back(std::async(std::launch::async,[&,j] {evaluateRange(n*j/pieces,n*(j+1)/pieces);}));
@@ -1033,6 +1049,12 @@ bool MintFile::despill(const MintDespillOptions& options, const MintProgressFn& 
     }
     if (m_headerOnly) {
         if (error) *error = QObject::tr("%1 was opened for its header only").arg(m_path);
+        return false;
+    }
+    // Writing into a mapped file's view would copy the whole file into private memory
+    // first; a reader opened for playback is not one to edit.
+    if (m_mappedFile) {
+        if (error) *error = QObject::tr("%1 was opened read-only, for playback").arg(m_path);
         return false;
     }
 
