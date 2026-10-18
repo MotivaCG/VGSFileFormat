@@ -252,8 +252,11 @@ disabled, labels included, with None. Despill lives only here now: Metadata and 
 longer has it, and a project, preset or task that despilled there reads with a Color modifier
 named Despill, only on export, with its settings.
 
-**Audio** plays a sound track with the timeline: the capture's own (a .vgs can carry one)
-or a file (MP3, AAC .m4a, Opus or WAV), with an **Offset** that slides it along the capture's
+**Audio** plays a sound track with the timeline. Importing a MINT or VGS/PGS with embedded
+audio automatically adds a **Capture audio** layer. Its **Source** dropdown selects
+**Included in capture** or **External file** (MP3, AAC .m4a, Opus or WAV). Opening a saved
+project preserves its Audio layers, including disabled or removed ones.
+An **Offset** slides the track along the capture's
 timeline to line it up, a **Volume** (100% as recorded) and **Loop**, which repeats the track
 from its start whenever it ends. Every enabled Audio modifier plays, mixed, so a voice, music
 and effects can each have their own level. The editor plays them at the timeline's speed,
@@ -261,12 +264,19 @@ keeps them in step through seeks and loops, and a track is silent before it star
 looped, after it ends; disabling a modifier mutes it.
 
 Exports to VGS/PGS make the soundtrack with ffmpeg (`tools/ffmpeg.exe` beside the program, or
-`VGS_FFMPEG`): every enabled Audio modifier's track - or, with none, the source's own - placed
+`VGS_FFMPEG`): every enabled Audio modifier's track - or, with no Audio layers, the source's own - placed
 where it plays, at its volume, mixed and cut to exactly the exported range as AAC (.m4a,
 160 kb/s, which every browser and iOS play), so nothing outside the range is stored and the
 track starts with it (`startTick` 0). Without ffmpeg the last Audio modifier's file travels as
 delivered, or a .vgs source's own track whole, with `startTick` saying where the range starts
-on it, and a note says so. MINT cannot hold audio. The build copies ffmpeg beside the editor
+on it, and a note says so. MINT exports embed a mixed MP3 track (320 kb/s), cut and aligned
+with the same audio settings. Without ffmpeg they can only retain an unchanged MP3 starting
+with the capture; conversion, mixing or an offset requires ffmpeg. Embedded MINT audio is
+also available to the editor's Audio modifiers and is retained when converting to VGS/PGS.
+MINT export also writes an MP3 with the same basename beside the capture: GraciaStudio's
+desktop interface loads that companion file when opening the MINT.
+Disabling all Audio layers also mutes the exported capture.
+The build copies ffmpeg beside the editor
 from the CMake cache path `VGS_FFMPEG`; it is not part of the repository.
 
 Exports to VGS/PGS take the viewport, as it is when the export starts (or when an export task
@@ -727,9 +737,19 @@ metadata and processing. Files are verified and atomically saved as in the UI.
 Export also supports **MINT format 6** through the native save dialog or a `.mint`
 batch-export destination. It rebuilds the raw padded arrays from the same edited
 temporal blocks, including crops, colour filters, despill and baked transforms.
-Capture metadata, audio, thumbnails and playback hints are omitted. Lower SH
-degrees are zero-padded to MINT's fifteen-coefficient layout. MINT is uncompressed;
+Capture metadata, thumbnails and playback hints are omitted. Audio is embedded as MP3
+and written beside the capture for GraciaStudio. Degree 0 omits higher SH dictionaries
+and indices entirely; degrees 1 and 2 are padded to the fifteen-coefficient layout. MINT is uncompressed;
 VGS usually stays smaller. Every frame is decoded again before atomic saving.
+
+Export can reuse baked preview visibility for Purge Isolated when the source file,
+modifier dependencies, transform and frame match. The entries are shared through weak
+references, remain subject to the preview memory limit, and fall back to computation when
+disabled, changed or evicted. Export-only colour processing that changes a downstream
+Remove green decision uses its own calculation. Colour dictionaries, morph fitting,
+encoding and verification are still export work, so playback speed is not an export FPS
+target. MINT prepares each chunk once and spools its raw payload to a temporary file,
+avoiding a second modifier pass without holding a complete capture in RAM.
 
 In orthographic views the background's coloured axes are hidden. Perspective axes
 share the exact Y=0 grid origin. The coincident grey X/Z segments are omitted in

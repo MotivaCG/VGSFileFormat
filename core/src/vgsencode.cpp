@@ -278,6 +278,7 @@ struct Source {
   Header header;
   std::vector<SourceChunk> chunks;
   std::function<SourceChunk(size_t)> provider;
+  uint64_t audioOffset = 0, audioSize = 0;
 };
 // A bounded pipeline: providers (including the editor's Qt reader and modifier
 // caches) and consumers stay serial. Futures are collected in source order, so
@@ -394,6 +395,7 @@ Source importMint(const uint8_t *data, size_t size, uint32_t shDegree = 3) {
   uint64_t cursor = 24, index = 0, base = u64(16), records = u64(8);
   if (records > size / 24)
     throw Error("invalid source record count");
+  Source src;
   for (uint64_t i = 0; i < records; ++i) {
     auto type = u64(cursor);
     if (type == 1) {
@@ -402,15 +404,21 @@ Source importMint(const uint8_t *data, size_t size, uint32_t shDegree = 3) {
       index = u64(cursor + 16);
       cursor += 24;
     } else if (type == 2) {
-      if (u64(cursor + 24))
-        throw Error("VGS cannot import nonempty auxiliary .mint records");
+      if (cursor > base || base-cursor < 32)
+        throw Error("source audio record outside metadata");
+      const auto length = u64(cursor + 24);
+      if (length) {
+        if (src.audioSize) throw Error("duplicate source audio record");
+        const auto offset = add(base, u64(cursor + 16));
+        span(offset, length);
+        src.audioOffset = offset; src.audioSize = length;
+      }
       cursor += 32;
     } else
       throw Error("unknown source record type");
   }
   if (!index)
     throw Error("source index missing");
-  Source src;
   src.header.shDegree = shDegree;
   // The source's frame interval, taken from its first chunk: duration / intervals.
   double sourceInterval = 0;
@@ -600,7 +608,8 @@ Source importMint(const uint8_t *data, size_t size, uint32_t shDegree = 3) {
       throw Error(what);
     }
     c.groups[0].intervals = c.entry.intervals;
-    // Current import profile is degree 3 and requires both higher-order layers.
+    const bool chunkSh=c.groups[0].counts[0] || c.groups[0].counts[1];
+    if (!shDegree) c.groups[0].counts[0]=c.groups[0].counts[1]=0;
     for (uint32_t gi = 0; gi < c.groups.size(); ++gi) {
       auto has = [&](uint32_t id) {
         return std::any_of(c.arrays.begin(), c.arrays.end(),
@@ -608,7 +617,7 @@ Source importMint(const uint8_t *data, size_t size, uint32_t shDegree = 3) {
                              return a.group == gi && a.attribute == id;
                            });
       };
-      const bool wantsSh = shPlanes(shDegree) != 0;
+      const bool wantsSh = shPlanes(shDegree) != 0 && chunkSh;
       if (c.groups[gi].type == 0) {
         if (wantsSh && (!has(ShStaticBook) || !has(ShTemporalBook)))
           throw Error("source SH profile unsupported");
@@ -633,6 +642,9 @@ Source importMint(const uint8_t *data, size_t size, uint32_t shDegree = 3) {
     src.chunks.push_back(std::move(c));
   }
   src.header.frameCount = src.header.durationTicks;
+  if (std::none_of(src.chunks.begin(),src.chunks.end(),[](const SourceChunk &c) {
+        return c.groups[0].counts[0] || c.groups[0].counts[1];
+      })) src.header.shDegree=0;
   setTimebase(src.header, sourceInterval);
   return src;
 }
@@ -1306,7 +1318,14 @@ static Bytes encodeSource(Source src, const uint8_t *mint, const EncodeOptions &
 
 Bytes encodeMint(const uint8_t *mint, size_t size, const EncodeOptions &options,
                  const Progress &progress) {
-  return encodeSource(importMint(mint, size, options.shDegree), mint, options, progress);
+  auto source = importMint(mint, size, options.shDegree);
+  if (!source.audioSize || std::any_of(options.extras.begin(), options.extras.end(),
+      [](const ExtraInput &e) {return e.type == AudioExtra;}))
+    return encodeSource(std::move(source), mint, options, progress);
+  auto withAudio = options;
+  withAudio.extras.push_back({AudioExtra, Mp3, Bytes(mint+source.audioOffset,
+                                                  mint+source.audioOffset+source.audioSize)});
+  return encodeSource(std::move(source), mint, withAudio, progress);
 }
 
 struct MintLogicalSource::State {

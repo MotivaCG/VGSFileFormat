@@ -219,7 +219,7 @@ private:
     // timeline together.
     QGroupBox *audioProperties_;
     QLabel *audioSource_;
-    QPushButton *audioCaptureTrack_;
+    QComboBox *audioSourceType_;
     QDoubleSpinBox *audioOffset_, *audioVolume_;
     QCheckBox *audioLoop_;
     std::map<QString,AudioPreview *> audio_;

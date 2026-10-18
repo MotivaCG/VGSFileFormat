@@ -18,6 +18,7 @@
 #include "mintfile.h"
 #include "mintskinrecovery.h"
 #include "audiomix.h"
+#include "mintwriter.h"
 #include "nativeexport.h"
 #include "captureworker.h"
 #include <Eigen/Geometry>
@@ -393,11 +394,146 @@ private slots:
         project.modifiers[0].audioOffset=5./25;result=exportCaptureFile(project,dir.filePath("late.vgs"));
         QVERIFY2(result.notes.contains("The audio starts 0.12 s after the exported range begins; players start it with the range."),qPrintable(result.notes.join('\n')));
         QCOMPARE(vgsdec::Capture::openFile(dir.filePath("late.vgs").toStdString()).startSeconds(),0.);
-        // MINT cannot hold it.
-        project.modifiers[0].audioOffset=0;result=exportCaptureFile(project,dir.filePath("song.mint"));QVERIFY(result.notes.contains("MINT cannot hold audio: the sound track is not exported."));
+        // Without ffmpeg, MINT can keep an unchanged MP3 but cannot align a trimmed track.
+        project.modifiers[0].audioOffset=0;
+        QVERIFY_EXCEPTION_THROWN(exportCaptureFile(project,dir.filePath("trimmed.mint")),std::runtime_error);
+        project.in=0;result=exportCaptureFile(project,dir.filePath("song.mint"));
+        MintFile mint;QString error;QVERIFY2(mint.openReadOnly(dir.filePath("song.mint"),&error),qPrintable(error));QCOMPARE(mint.audio(),QByteArray("ID3 song"));
+        QFile companion(dir.filePath("song.mp3"));QVERIFY(companion.open(QIODevice::ReadOnly));QCOMPARE(companion.readAll(),mint.audio());
+        // A silent replacement cannot leave an old companion playing in Studio.
+        const auto withTrack=project.modifiers;project.modifiers.clear();
+        QVERIFY_EXCEPTION_THROWN(exportCaptureFile(project,dir.filePath("song.mint")),std::runtime_error);
+        project.modifiers=withTrack;
         // Not a sound file the container knows.
         QFile other(dir.filePath("song.flac"));QVERIFY(other.open(QIODevice::WriteOnly));other.write("fLaC");other.close();project.modifiers[0].audioFile=other.fileName();
         QVERIFY_EXCEPTION_THROWN(exportCaptureFile(project,dir.filePath("flac.vgs")),std::runtime_error);
+    }
+    void mintAudioUsesPayloadOffsetsAndSurvivesConversion() {
+        NoFfmpeg noFfmpeg;QTemporaryDir dir;const auto path=dir.filePath("audio.mint");
+        const vgs::Bytes track={'I','D','3',4,0,0,0,0,0,0};
+        vgs::Header h;h.frameCount=h.durationTicks=1;h.timeDenominator=25;h.chunks.resize(1);h.chunks[0].intervals=1;
+        {QFile file(path);QVERIFY(file.open(QIODevice::WriteOnly));
+         writeMintSequence(h,[&](size_t) {return packExportFrame(sample(),3);},[&](uint64_t off,const uint8_t *data,size_t size) {QVERIFY(file.seek(qint64(off)));QCOMPARE(file.write(reinterpret_cast<const char *>(data),qint64(size)),qint64(size));},{},track);}
+        const QByteArray expected(reinterpret_cast<const char *>(track.data()),qsizetype(track.size()));
+        QFile file(path);QVERIFY(file.open(QIODevice::ReadOnly));const auto bytes=file.readAll();file.close();
+        auto u64=[&](qsizetype off) {quint64 v=0;for (int j=0;j<8;++j) v|=quint64(quint8(bytes[off+j]))<<(j*8);return v;};
+        QCOMPARE(u64(8),quint64(2));QCOMPARE(u64(48),quint64(2));QCOMPARE(u64(56),quint64(0));
+        QCOMPARE(u64(72),quint64(track.size()));QCOMPARE(u64(16)+u64(64)+u64(72),quint64(bytes.size()));
+        QCOMPARE(bytes.mid(qsizetype(u64(16)+u64(64)),qsizetype(u64(72))),expected);
+        QString error;MintFile header;QVERIFY2(header.openHeader(path,&error),qPrintable(error));QVERIFY(header.hasAudio());QVERIFY(header.audio().isEmpty());
+        MintFile mint;QVERIFY2(mint.openReadOnly(path,&error),qPrintable(error));QCOMPARE(mint.audio(),expected);
+        MintFile owned;QVERIFY2(owned.open(path,&error),qPrintable(error));QCOMPARE(owned.audio(),expected);owned.close();QVERIFY(!owned.hasAudio());
+        CaptureWorker worker;QSignalSpy opened(&worker,&CaptureWorker::opened);worker.open(path,1,false);QCOMPARE(opened.size(),1);
+        const auto info=qvariant_cast<CaptureInfo>(opened[0][0]);QCOMPARE(info.audio,expected);QCOMPARE(info.audioSuffix,QString("mp3"));
+        Project project;project.asset=path;project.in=project.out=0;project.modifiers.clear();
+        const auto output=dir.filePath("converted.vgs");
+        try {exportCaptureFile(project,output);} catch (const std::exception &e) {QFAIL(e.what());}
+        auto converted=vgsdec::Capture::openFile(output.toStdString());
+        QVERIFY(converted.hasAudio());QCOMPARE(converted.audioFormat(),vgsdec::Capture::AudioFormat::Mp3);QCOMPARE(converted.audio(),track);
+        // Direct SDK import retains the embedded track too, without the editor's reader.
+        vgs::EncodeOptions options;options.signer=vgs::authoringSigner();options.compression=vgs::Compression::None;
+        const auto encoded=vgs::encodeMint(reinterpret_cast<const uint8_t *>(bytes.constData()),size_t(bytes.size()),options);
+        const auto sdkPath=dir.filePath("sdk.vgs");QFile sdk(sdkPath);QVERIFY(sdk.open(QIODevice::WriteOnly));sdk.write(reinterpret_cast<const char *>(encoded.data()),qint64(encoded.size()));sdk.close();
+        QCOMPARE(vgsdec::Capture::openFile(sdkPath.toStdString()).audio(),track);
+        // Muting the embedded layer must not fall back to the source track, even
+        // without ffmpeg, in either container.
+        Modifier muted;muted.id=Project::newId();muted.type=ModifierType::Audio;muted.enabled=false;project.modifiers={muted};
+        for (const auto &asset:{path,output}) for (const auto &suffix:{QString("vgs"),QString("mint")}) {
+            project.asset=asset;const auto silent=dir.filePath(QFileInfo(asset).baseName()+"-muted."+suffix);exportCaptureFile(project,silent);
+            if (suffix=="vgs") QVERIFY(!vgsdec::Capture::openFile(silent.toStdString()).hasAudio());
+            else {MintFile silentMint;QVERIFY(silentMint.openReadOnly(silent,&error));QVERIFY(!silentMint.hasAudio());}
+        }
+        // Invalid payload-relative offsets and sizes must fail even in a metadata-only open.
+        for (int field:{64,72}) {
+            auto invalid=bytes;for (int j=0;j<8;++j) invalid[field+j]=char(0xff);
+            const auto bad=dir.filePath(QString("bad%1.mint").arg(field));QFile broken(bad);QVERIFY(broken.open(QIODevice::WriteOnly));broken.write(invalid);broken.close();
+            MintFile rejected;QVERIFY(!rejected.openReadOnly(bad,&error));QVERIFY(!rejected.openHeader(bad,&error));
+        }
+    }
+    void mintSoundtrackIsMixedAsMp3() {
+        if (ffmpegPath().isEmpty()) QSKIP("No ffmpeg beside the tests (tools/ffmpeg.exe).");
+        QTemporaryDir dir;const auto source=dir.filePath("source.pgs");sourceFile(source,5);writeTone(dir.filePath("tone.wav"),1,440);
+        Project project;project.asset=source;project.in=1./25;project.out=4./25;project.modifiers.clear();
+        Modifier song;song.id=Project::newId();song.type=ModifierType::Audio;song.audioFile=dir.filePath("tone.wav");song.audioOffset=.08;song.audioVolume=.4;
+        Modifier loop=song;loop.id=Project::newId();loop.audioLoop=true;loop.audioOffset=-.04;project.modifiers={song,loop};
+        const auto path=dir.filePath("mixed.mint");const auto result=exportCaptureFile(project,path);
+        QVERIFY2(result.notes.contains("The soundtrack mixes 2 tracks, cut to the exported range (0.16 s), as MP3."),qPrintable(result.notes.join('\n')));
+        QString error;MintFile mint;QVERIFY2(mint.openReadOnly(path,&error),qPrintable(error));QVERIFY(mint.hasAudio());
+        const auto track=mint.audio();QVERIFY(track.size()>4);QCOMPARE(quint8(track[0]),quint8(0xff));QVERIFY((quint8(track[1])&0xe0)==0xe0);
+        // A subsequent conversion takes the MINT's own track through the existing AAC mixer.
+        project.asset=path;project.in=0;project.out=3./25;project.modifiers.clear();const auto converted=dir.filePath("mixed.vgs");
+        try {exportCaptureFile(project,converted);} catch (const std::exception &e) {QFAIL(e.what());}
+        auto capture=vgsdec::Capture::openFile(converted.toStdString());QVERIFY(capture.hasAudio());QCOMPARE(capture.audioFormat(),vgsdec::Capture::AudioFormat::Aac);
+        const auto audio=capture.audio();QVERIFY(std::abs(m4aSeconds(QByteArray(reinterpret_cast<const char *>(audio.data()),qsizetype(audio.size())))-.16)<.03);
+        Modifier muted;muted.id=Project::newId();muted.type=ModifierType::Audio;muted.enabled=false;project.modifiers={muted};
+        for (const auto &asset:{path,converted}) for (const auto &suffix:{QString("vgs"),QString("mint")}) {
+            project.asset=asset;const auto silent=dir.filePath(QFileInfo(asset).fileName()+"-muted."+suffix);exportCaptureFile(project,silent);
+            if (suffix=="vgs") QVERIFY(!vgsdec::Capture::openFile(silent.toStdString()).hasAudio());
+            else {MintFile silentMint;QVERIFY(silentMint.openReadOnly(silent,&error));QVERIFY(!silentMint.hasAudio());}
+        }
+    }
+    void mintAudioGraciaReference() {
+        const auto path=qEnvironmentVariable("MINT_AUDIO_REFERENCE");if (path.isEmpty()) QSKIP("Set MINT_AUDIO_REFERENCE to a Gracia MINT with embedded MP3.");
+        NoFfmpeg noFfmpeg;QString error;MintFile source;QVERIFY2(source.openReadOnly(path,&error),qPrintable(error));QVERIFY(source.hasAudio());
+        const auto expected=source.audio();QVERIFY(!expected.isEmpty());
+        CaptureWorker worker;QSignalSpy opened(&worker,&CaptureWorker::opened);worker.open(path,1,false);QCOMPARE(opened.size(),1);QCOMPARE(qvariant_cast<CaptureInfo>(opened[0][0]).audio,expected);
+        QTemporaryDir dir;const auto requested=qEnvironmentVariable("MINT_AUDIO_ROUNDTRIP");const auto output=requested.isEmpty() ? dir.filePath("roundtrip.mint") : requested;
+        Project project;project.asset=path;project.in=0;project.out=(source.frameCount()-1)/source.frameRate();project.modifiers.clear();
+        try {exportCaptureFile(project,output);} catch (const std::exception &e) {QFAIL(e.what());}
+        MintFile roundtrip;QVERIFY2(roundtrip.openReadOnly(output,&error),qPrintable(error));QCOMPARE(roundtrip.audio(),expected);QCOMPARE(roundtrip.frameCount(),source.frameCount());
+        QFile companion(QFileInfo(output).dir().filePath(QFileInfo(output).completeBaseName()+".mp3"));QVERIFY(companion.open(QIODevice::ReadOnly));QCOMPARE(companion.readAll(),expected);
+    }
+    void mintOmitsHigherShAtDegreeZero() {
+        QTemporaryDir dir;const auto source=dir.filePath("source.pgs");sourceFile(source);QString error;
+        Project project;project.asset=source;project.out=.08;project.modifiers.clear();project.captureSettings.shDegree=0;
+        const auto path=dir.filePath("base.mint");exportCaptureFile(project,path);
+        MintFile mint;QVERIFY2(mint.openReadOnly(path,&error),qPrintable(error));QCOMPARE(mint.shDegree(),0);
+        for (const auto &c:mint.chunks()) {
+            QCOMPARE(c.sharedBlock()->shStaticEntries,quint64(0));QCOMPARE(c.sharedBlock()->shTemporalEntries,quint64(0));
+            QVERIFY(c.sharedBlock()->array("sh_static_codebooks").isEmpty());QVERIFY(c.sharedBlock()->array("sh_temporal_codebooks").isEmpty());
+            for (const auto *g:c.splatGroups()) {QVERIFY(g->array("sh_static_indices").isEmpty());QVERIFY(g->array("sh_temporal_indices").isEmpty());}
+        }
+        MintFrame frame;std::vector<float> sh{1};QVERIFY2(mint.decode(.01,&frame,true,&error,&sh),qPrintable(error));QVERIFY(sh.empty());QVERIFY(frame.shRest.isEmpty());
+        CaptureWorker worker;QSignalSpy opened(&worker,&CaptureWorker::opened);worker.open(path,1,true);QCOMPARE(opened.size(),1);QCOMPARE(qvariant_cast<CaptureInfo>(opened[0][0]).shDegree,0);QCOMPARE(qvariant_cast<FramePtr>(opened[0][1])->coefficients,0);
+        // Automatic degree preserves a MINT with no higher SH, including SDK import.
+        project.asset=path;project.captureSettings.shDegree=-1;const auto converted=dir.filePath("base.vgs");exportCaptureFile(project,converted);QCOMPARE(vgsdec::Capture::openFile(converted.toStdString()).shDegree(),0u);
+        const auto again=dir.filePath("again.mint");exportCaptureFile(project,again);MintFile output;QVERIFY(output.openReadOnly(again,&error));QCOMPARE(output.shDegree(),0);
+        vgs::MintLogicalSource logical(reinterpret_cast<const uint8_t *>(mint.bytes().constData()),size_t(mint.bytes().size()));QCOMPARE(logical.header().shDegree,0u);
+    }
+    void mintWithoutShGraciaReference() {
+        const auto path=qEnvironmentVariable("MINT_NO_SH_REFERENCE");if (path.isEmpty()) QSKIP("Set MINT_NO_SH_REFERENCE to a MINT without higher SH.");
+        NoFfmpeg noFfmpeg;MintFile source;QString error;QVERIFY2(source.openReadOnly(path,&error),qPrintable(error));QCOMPARE(source.shDegree(),0);
+        MintFrame frame;QVERIFY2(source.decode(.5,&frame,true,&error),qPrintable(error));QVERIFY(frame.shRest.isEmpty());
+        QTemporaryDir dir;const auto requested=qEnvironmentVariable("MINT_NO_SH_ROUNDTRIP");const auto output=requested.isEmpty() ? dir.filePath("no-sh.mint") : requested;
+        Project project;project.asset=path;project.out=(source.frameCount()-1)/source.frameRate();project.modifiers.clear();
+        try {exportCaptureFile(project,output);} catch (const std::exception &e) {QFAIL(e.what());}
+        MintFile roundtrip;QVERIFY2(roundtrip.openReadOnly(output,&error),qPrintable(error));QCOMPARE(roundtrip.shDegree(),0);QCOMPARE(roundtrip.audio(),source.audio());QCOMPARE(roundtrip.frameCount(),source.frameCount());
+    }
+    void exportReusesOnlyMatchingPreviewVisibility() {
+        QTemporaryDir dir;const auto source=dir.filePath("source.pgs");ballFile(source,2000);
+        Project project;project.asset=source;project.in=0;project.out=1./25;project.modifiers.clear();
+        Modifier purge;purge.id=Project::newId();purge.type=ModifierType::PurgeIsolated;purge.isolation={4,300};project.modifiers={purge};
+        CaptureWorker worker;worker.open(source,1,true);QSignalSpy finished(&worker,&CaptureWorker::cacheFinished);worker.precalculate(project,1,701);QCOMPARE(finished.size(),1);QVERIFY(finished[0][3].toString().isEmpty());
+        QVERIFY(CaptureWorker::exportVisibilityLookup(project));const auto before=worker.exportVisibilityHits();
+        const auto cached=dir.filePath("cached.vgs");exportCaptureFile(project,cached);QVERIFY(worker.exportVisibilityHits()>before);
+        Project changed=project;changed.modifiers[0].isolation.neighbour=6;QVERIFY(!CaptureWorker::exportVisibilityLookup(changed));
+        changed=project;changed.transform.position={.1f,0,0};QVERIFY(!CaptureWorker::exportVisibilityLookup(changed));
+        worker.setCachingEnabled(false);QVERIFY(!CaptureWorker::exportVisibilityLookup(project));
+        const auto cold=dir.filePath("cold.vgs");exportCaptureFile(project,cold);auto a=vgsdec::Capture::openFile(cached.toStdString()),b=vgsdec::Capture::openFile(cold.toStdString());
+        for (double t:{.01,.05}) {const auto x=copy(a.setTime(t,true)),y=copy(b.setTime(t,true));QCOMPARE(x.position,y.position);QCOMPARE(x.rotation,y.rotation);QCOMPARE(x.opacity,y.opacity);QCOMPARE(x.shRest,y.shRest);}
+    }
+    void realCaptureExportCacheTiming() {
+        const auto source=qEnvironmentVariable("VGS_EXPORT_PERF_CAPTURE");if (source.isEmpty()) QSKIP("Set VGS_EXPORT_PERF_CAPTURE to time export against a baked preview.");
+        NoFfmpeg noFfmpeg;QTemporaryDir dir;MintFile mint;QString error;QVERIFY2(mint.openReadOnly(source,&error),qPrintable(error));
+        Project project;project.asset=source;project.in=0;project.out=std::min(1.,(mint.frameCount()-1)/mint.frameRate());project.modifiers.clear();
+        Modifier purge;purge.id=Project::newId();purge.type=ModifierType::PurgeIsolated;purge.isolation={4,300};project.modifiers={purge};
+        QElapsedTimer timer;timer.start();const auto cold=dir.filePath("cold.pgs");exportCaptureFile(project,cold);const double coldMs=timer.nsecsElapsed()/1e6;
+        CaptureWorker worker;worker.open(source,1,true);QSignalSpy finished(&worker,&CaptureWorker::cacheFinished);timer.restart();worker.precalculate(project,1,801);const double bakeMs=timer.nsecsElapsed()/1e6;
+        QCOMPARE(finished.size(),1);QVERIFY2(finished[0][3].toString().isEmpty(),qPrintable(finished[0][3].toString()));
+        timer.restart();const auto warm=dir.filePath("warm.pgs");exportCaptureFile(project,warm);const double warmMs=timer.nsecsElapsed()/1e6;
+        QVERIFY(worker.exportVisibilityHits()>0);qInfo("EXPORT_CACHE cold_ms=%.1f bake_ms=%.1f warm_ms=%.1f hits=%zu visibility_bytes=%zu",coldMs,bakeMs,warmMs,worker.exportVisibilityHits(),worker.visibilityBytes());
+        auto a=vgsdec::Capture::openFile(cold.toStdString()),b=vgsdec::Capture::openFile(warm.toStdString());
+        for (double t:{.01,.5,.99}) {const auto x=copy(a.setTime(t,true)),y=copy(b.setTime(t,true));QCOMPARE(x.position,y.position);QCOMPARE(x.colorDc,y.colorDc);QCOMPARE(x.opacity,y.opacity);QCOMPARE(x.shRest,y.shRest);}
     }
     void estimateMatchesTheExport() {
         // A short range is exported whole: the estimate is the file. A long one is sampled.

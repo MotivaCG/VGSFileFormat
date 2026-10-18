@@ -35,12 +35,12 @@ QString ffmpegPath() {
     return QFileInfo(beside).isFile() ? beside : QString();
 }
 
-QByteArray mixAudioAac(const QVector<AudioInput> &inputs,double length,const std::function<bool()> &cancelled) {
+static QByteArray mixAudio(const QVector<AudioInput> &inputs,double length,const std::function<bool()> &cancelled,bool mp3) {
     const QString ffmpeg=ffmpegPath();
     if (ffmpeg.isEmpty()) throw std::runtime_error("ffmpeg was not found beside the editor (tools/ffmpeg.exe).");
     if (inputs.isEmpty() || !(length>0)) throw std::runtime_error("There is no audio to mix.");
     QTemporaryDir dir;if (!dir.isValid()) throw std::runtime_error("Cannot create a temporary folder for the audio.");
-    const QString output=dir.filePath(QStringLiteral("soundtrack.m4a"));
+    const QString output=dir.filePath(mp3 ? QStringLiteral("soundtrack.mp3") : QStringLiteral("soundtrack.m4a"));
     QStringList args{"-hide_banner","-nostdin","-loglevel","error","-y"};
     QStringList chains,labels;
     for (int i=0;i<inputs.size();++i) {
@@ -53,7 +53,7 @@ QByteArray mixAudioAac(const QVector<AudioInput> &inputs,double length,const std
         args << "-i" << QDir::toNativeSeparators(input.path);
         QString chain=QStringLiteral("[%1:a]").arg(i);
         if (input.loop && input.start>0) chain+=QStringLiteral("atrim=start=%1,asetpts=PTS-STARTPTS,").arg(seconds(input.start));
-        chain+=QStringLiteral("aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=%1").arg(seconds(std::clamp(input.volume,0.,1.)));
+        chain+=QStringLiteral("aresample=%1,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=%2").arg(mp3 ? 44100 : 48000).arg(seconds(std::clamp(input.volume,0.,1.)));
         if (input.start<0) {const qint64 delay=qint64(std::llround(-input.start*1000));chain+=QStringLiteral(",adelay=%1:all=1").arg(delay);}
         chains << chain+QStringLiteral("[a%1]").arg(i);labels << QStringLiteral("[a%1]").arg(i);
     }
@@ -62,8 +62,10 @@ QByteArray mixAudioAac(const QVector<AudioInput> &inputs,double length,const std
     QString graph=chains.join(';')+';';
     graph+=inputs.size()>1 ? labels.join("")+QStringLiteral("amix=inputs=%1:duration=longest:normalize=0,apad[out]").arg(inputs.size())
                            : labels.first()+QStringLiteral("apad[out]");
-    args << "-filter_complex" << graph << "-map" << "[out]" << "-t" << seconds(length)
-         << "-vn" << "-c:a" << "aac" << "-b:a" << "160k" << "-movflags" << "+faststart" << QDir::toNativeSeparators(output);
+    args << "-filter_complex" << graph << "-map" << "[out]" << "-t" << seconds(length) << "-vn";
+    if (mp3) args << "-c:a" << "libmp3lame" << "-b:a" << "320k" << "-write_xing" << "0" << "-id3v2_version" << "0";
+    else args << "-c:a" << "aac" << "-b:a" << "160k" << "-movflags" << "+faststart";
+    args << QDir::toNativeSeparators(output);
     QProcess process;process.setProcessChannelMode(QProcess::SeparateChannels);
     process.start(ffmpeg,args);
     if (!process.waitForStarted(10000)) throw std::runtime_error("Cannot start ffmpeg.");
@@ -79,3 +81,6 @@ QByteArray mixAudioAac(const QVector<AudioInput> &inputs,double length,const std
     const QByteArray bytes=file.readAll();if (bytes.isEmpty()) throw std::runtime_error("ffmpeg wrote an empty soundtrack.");
     return bytes;
 }
+
+QByteArray mixAudioAac(const QVector<AudioInput> &inputs,double length,const std::function<bool()> &cancelled) {return mixAudio(inputs,length,cancelled,false);}
+QByteArray mixAudioMp3(const QVector<AudioInput> &inputs,double length,const std::function<bool()> &cancelled) {return mixAudio(inputs,length,cancelled,true);}

@@ -58,6 +58,11 @@ Use tool discovery for each tool's purpose, schema, defaults and effects. Read
 particular, brush/lasso select projected point centres through depth, so inspect from
 another view before selecting a region overlapping the subject.
 
+An imported MINT or VGS/PGS with embedded audio already has a Capture audio layer.
+Preserve it during cleanup; inspect `get_project` before adding another Audio layer.
+`vgs-editor://tools` documents the capture/external source selector, audio patches,
+muting, and how `save_project` preserves the settings and file references in `.vgsproj`.
+
 ## Inspecting and removing noise
 
 Work from global to local: crop and filters act on the whole timeline at once, while

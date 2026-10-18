@@ -41,4 +41,4 @@ inline float bakedOpacityFactor(const float ratios[3]) {
 vgs::DecodedChunk editNativeChunk(vgs::DecodedChunk, const NativeChunkPlan &, const Project &,
                                  ExportResult *, const ExportProgress &, const vgs::DecodedChunk *classificationSource=nullptr,
                                  const std::vector<QMatrix4x4> *sampleModels=nullptr,int sourceStartFrame=0,
-                                 const std::vector<uint8_t> *pruned=nullptr);
+                                 const std::vector<uint8_t> *pruned=nullptr,const ExportVisibilityLookup &cachedVisibility = {});

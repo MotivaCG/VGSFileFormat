@@ -25,6 +25,8 @@ struct ExportResult {
     quint64 bytes = 0; // what was written, every file of a .ply sequence together
 };
 using ExportProgress = std::function<bool(int, const QString &)>;
+// Reuses only an exact preview visibility decision; a miss takes the ordinary export path.
+using ExportVisibilityLookup = std::function<bool(int,const std::vector<uint8_t> &,std::vector<uint8_t> &)>;
 
 // Source attributes are immutable. Crop tests transformed means in world space.
 // `pruned`, when given, says which records Prune low contribution keeps (pruning.h).
@@ -33,9 +35,10 @@ vgs::Frame bakeExportFrame(const vgs::Frame &, const Project &, int degree,
                           const std::vector<uint8_t> *pruned = nullptr);
 // `thumbnailJpeg`, when given, becomes the capture's thumbnail (VGS/PGS); without it a .vgs
 // source keeps its own. The soundtrack - every active Audio modifier's track mixed at its
-// volume, or with none the source's own - is cut to the range as AAC with ffmpeg (audiomix.h),
+// volume, or with none the source's own - is cut to the range as AAC (VGS/PGS) or MP3 (MINT)
+// with ffmpeg (audiomix.h),
 // starting with it. Without ffmpeg one track travels as delivered, and startTick says where
-// the range starts on it.
+// the range starts on it. MINT without ffmpeg can only keep an unchanged MP3 at offset zero.
 ExportResult exportCaptureFile(const Project &, const QString &destination,
                                const ExportProgress & = {}, const QByteArray &thumbnailJpeg = {});
 

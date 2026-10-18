@@ -634,11 +634,11 @@ vgs::DecodedChunk assembleNativeChunk(vgs::DecodedChunk input) {
     normalizeSchemas(result);return result;
 }
 void setNativeShDegree(vgs::DecodedChunk &c,int sourceDegree,int targetDegree) {
-    if (sourceDegree==targetDegree) return;
     if (!targetDegree) {
         c.pages.erase(std::remove_if(c.pages.begin(),c.pages.end(),[](const auto &p) {return p.descriptor.attribute==vgs::ShStaticBook || p.descriptor.attribute==vgs::ShTemporalBook || p.descriptor.attribute==vgs::ShStaticIndices || p.descriptor.attribute==vgs::ShTemporalIndices;}),c.pages.end());
         c.groups[0].counts[0]=c.groups[0].counts[1]=0;return;
     }
+    if (sourceDegree==targetDegree) return;
     const size_t old=planes(sourceDegree),next=planes(targetDegree),S=c.groups[0].intervals+1;
     if (!old) {
         c.groups[0].counts[0]=c.groups[0].counts[1]=1;
@@ -663,7 +663,7 @@ void setNativeShDegree(vgs::DecodedChunk &c,int sourceDegree,int targetDegree) {
     }
     normalizeSchemas(c);
 }
-vgs::DecodedChunk editNativeChunk(vgs::DecodedChunk chunk,const NativeChunkPlan &plan,const Project &project,ExportResult *statistics,const ExportProgress &progress,const vgs::DecodedChunk *classificationSource,const std::vector<QMatrix4x4> *sampleModels,int sourceStartFrame,const std::vector<uint8_t> *pruned) {
+vgs::DecodedChunk editNativeChunk(vgs::DecodedChunk chunk,const NativeChunkPlan &plan,const Project &project,ExportResult *statistics,const ExportProgress &progress,const vgs::DecodedChunk *classificationSource,const std::vector<QMatrix4x4> *sampleModels,int sourceStartFrame,const std::vector<uint8_t> *pruned,const ExportVisibilityLookup &cachedVisibility) {
     if (sampleModels && sampleModels->size()!=size_t(plan.intervals)+1) throw std::runtime_error("Motion export needs one world model per sample.");
     report(progress,QStringLiteral("Filtering native Gaussian lifetimes"));
     normalizeSchemas(chunk);const size_t T=chunk.groups[0].intervals;
@@ -680,7 +680,16 @@ vgs::DecodedChunk editNativeChunk(vgs::DecodedChunk chunk,const NativeChunkPlan 
     if (pruned && pruned->size()!=offsets.back()) throw std::runtime_error("The pruning does not match the chunk's records.");
     for (int sample=0;sample<=plan.intervals;++sample) {
         const bool closing=sample==plan.intervals;
-        if (!closing) {
+        bool cached=false;
+        if (!closing && cachedVisibility) {
+            std::vector<uint8_t> active(offsets.back());
+            for (size_t group=1;group<chunk.groups.size();++group) {
+                const auto &life=get(chunk,vgs::Lifetimes,uint32_t(group)).bytes;
+                for (size_t row=0;row<chunk.groups[group].splats;++row) active[offsets[group]+row]=plan.first+sample>=life[2*row] && plan.first+sample+1<=life[2*row+1];
+            }
+            cached=cachedVisibility(sourceStartFrame+sample,active,visibility);
+        }
+        if (!closing && !cached) {
             const double normalized=std::min((plan.first+sample)/double(T),1.-1e-9);
             decoder.evaluatePositions(normalized,&positions);
             const QMatrix4x4 &world=sampleModels ? (*sampleModels)[size_t(sample)] : model;

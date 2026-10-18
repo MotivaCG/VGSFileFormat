@@ -86,7 +86,7 @@ struct CaptureInfo {
     // Trained with anti-aliasing: Gracia .mint captures always, a .vgs when its header says
     // so. Splats are then drawn with the matching opacity compensation.
     bool antialiased = false;
-    // A .vgs's own sound track, as delivered, and the suffix its format goes by ("mp3", "m4a",
+    // The capture's own sound track, as delivered, and its suffix ("mp3", "m4a",
     // "opus", "wav"); and where the capture starts on its source's timeline, which is where
     // that track starts playing.
     QByteArray audio;
@@ -97,6 +97,12 @@ struct CaptureInfo {
     QVector3D minimum, maximum;
 };
 Q_DECLARE_METATYPE(CaptureInfo)
+
+struct ExportVisibilityMask {
+    std::vector<uint32_t> runs;
+    size_t records=0,points=0;
+};
+struct PreviewExportStore;
 
 class CaptureWorker : public QObject {
     Q_OBJECT
@@ -127,6 +133,9 @@ public:
     size_t colourCacheFrames() const {return colours_.size();}
     size_t despillEvaluations() const {return despillEvaluations_;}
     void setColourCacheBudget(size_t bytes);
+    // Weak references to existing masks: no cache snapshot or full-frame copy is retained.
+    static std::function<bool(int,const std::vector<uint8_t> &,std::vector<uint8_t> &)> exportVisibilityLookup(const Project &);
+    size_t exportVisibilityHits() const;
     // Combined retention limit: visibility + reusable source buffers + morph shapes.
     static constexpr size_t PreviewBudget = 4ull * 1024 * 1024 * 1024;
     static constexpr size_t FrameBudget = 256ull * 1024 * 1024;
@@ -183,7 +192,9 @@ private:
     // played: the points' visibility as alternate runs, visible first. Kept while the
     // project's modifiers, transform and processing stay as they were - any change empties it
     // - and filled only during playback, up to VisibilityBudget, the oldest going first.
-    struct Visibility {std::vector<uint32_t> runs;bool greensApplied=false;std::vector<PruneStats> prune;size_t bytes() const;};
+    struct Visibility {std::shared_ptr<const ExportVisibilityMask> mask;bool greensApplied=false;std::vector<PruneStats> prune;size_t bytes() const;};
+    std::shared_ptr<PreviewExportStore> exportStore_;
+    void forgetExportVisibility(int frame=-1);
     std::array<QByteArray,3> visibilityKeys_;
     // Source timeline, source shaped above a morph, and final morph frames have
     // different masks even at the same time and with the same number of points.

@@ -22,6 +22,7 @@
 #include "pruning.h"
 #include "audiomix.h"
 #include "mintfile.h"
+#include "captureworker.h"
 #include "mintskinrecovery.h"
 #include "despillcolor.h"
 #include "vgsdecoder/vgsdecoder.h"
@@ -140,8 +141,10 @@ class Baker {
     const Project &project;
     int coefficients;
     float bakeSize; // Bake anti-aliasing, world units; 0 for none
+    ExportVisibilityLookup cachedVisibility;
+    double frameRate;
 public:
-    Baker(const Project &p,int degree) : model(p.transform.matrix()),modifiers(p),a(linear(model)),project(p),coefficients((degree+1)*(degree+1)-1),bakeSize(float(p.antialiasingBake())) {
+    Baker(const Project &p,int degree,ExportVisibilityLookup cached={},double rate=30) : model(p.transform.matrix()),modifiers(p),a(linear(model)),project(p),coefficients((degree+1)*(degree+1)-1),bakeSize(float(p.antialiasingBake())),cachedVisibility(std::move(cached)),frameRate(rate) {
         if (!a.allFinite() || std::abs(a.determinant())<1e-15) throw std::runtime_error("Cannot export a singular capture transform.");
         sh=angularBake(a);
     }
@@ -151,6 +154,7 @@ public:
         if (pruned && pruned->size()!=source.count) throw std::runtime_error("The pruning does not match the frame's records.");
         // The colour processing first: a Remove green below a Color modifier tests its result.
         input=source; processColour(input,project.captureSettings,progress);
+        if (cachedVisibility && cachedVisibility(int(std::lround(source.seconds*frameRate)),source.active,keep)) return keep;
         auto sourceRgb=[&](size_t i) {return QVector3D(source.colorDc[3*i],source.colorDc[3*i+1],source.colorDc[3*i+2]);};
         auto processedRgb=[&](size_t i) {return QVector3D(input.colorDc[3*i],input.colorDc[3*i+1],input.colorDc[3*i+2]);};
         for (size_t i=0;i<source.count;++i) {worldPositions[i]=model.map({source.position[3*i],source.position[3*i+1],source.position[3*i+2]});keep[i]=source.active[i] && (!pruned || (*pruned)[i]) && modifiers.keeps(worldPositions[i],sourceRgb(i),processedRgb(i));}
@@ -580,13 +584,15 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
     if (QFileInfo(destination).suffix().compare("ply",Qt::CaseInsensitive)==0) return exportPlySequence(projectAsGiven,destination,progress);
     const Project inputProject=withModifierDespill(projectAsGiven);
     const auto audioModifiers=inputProject.audioModifiers();
+    const bool hasAudioLayers=std::any_of(inputProject.modifiers.begin(),inputProject.modifiers.end(),[](const Modifier &m) {return m.type==ModifierType::Audio;});
+    const bool mutedAudio=hasAudioLayers && audioModifiers.isEmpty();
     // Without ffmpeg the soundtrack cannot be mixed or cut: the last Audio modifier's file
     // travels as delivered, or the source's track whole, as before ffmpeg was used.
     const bool mixing=!ffmpegPath().isEmpty();
     const Modifier *audioModifier=audioModifiers.isEmpty() ? nullptr : audioModifiers.back();
     const bool audioFile=audioModifier && !audioModifier->audioFile.isEmpty();
     const double audioOffset=audioModifier ? audioModifier->audioOffset : 0;
-    vgs::Bytes sourceAudio;uint32_t sourceAudioFormat=0;
+    vgs::Bytes sourceAudio,mintAudio;uint32_t sourceAudioFormat=0;
     Project project=inputProject;const bool animated=project.hasAnimatedMotion();if (!animated) project.transform=inputProject.transformAtFrame(0);
     const bool mintOutput=QFileInfo(destination).suffix().compare("mint",Qt::CaseInsensitive)==0;
     // .pgs is the plain container and .vgs the compressed one: the extension decides.
@@ -604,9 +610,13 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
     // modifier needs the despilled ones, which only the sampled path has.
     if (native && project.captureSettings.despill && CompiledModifiers(project).greensAfterColour()) {native=false;result.notes << QStringLiteral("A Remove green below a despilling Color modifier tests despilled colours, so the export is sampled.");}
     if (QFileInfo(project.asset).suffix().compare("mint",Qt::CaseInsensitive)==0) {
-        mint=std::make_unique<MintFile>();if (!mint->open(project.asset,&error)) throw std::runtime_error(error.toStdString());
+        mint=std::make_unique<MintFile>();if (!mint->openReadOnly(project.asset,&error)) throw std::runtime_error(error.toStdString());
+        if (mint->hasAudio()) {
+            const auto track=mint->audio();sourceAudio.assign(track.begin(),track.end());sourceAudioFormat=vgs::Mp3;
+            if (!mixing && !audioFile && !mutedAudio) options.extras.push_back({vgs::AudioExtra,vgs::Mp3,sourceAudio});
+        }
         if (!mint->frameRateProblem().isEmpty()) {native=false;result.notes << QStringLiteral("The source uses varying sample rates and is resampled at the timeline frame rate.");}
-        rate=mint->frameRate();duration=mint->duration();
+        rate=mint->frameRate();duration=mint->duration();sourceDegree=mint->shDegree();
         header.timeNumerator=1000000;header.timeDenominator=uint32_t(std::round(rate*header.timeNumerator));
     } else {
         source=std::make_unique<FileSource>(project.asset);capture=std::make_unique<vgsdec::Capture>(vgsdec::Capture::openStream(*source));capture->setCachePolicy({0,0,128ull*1024*1024});
@@ -621,6 +631,7 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
             // A new thumbnail replaces the source's; the audio is kept whole (startTick places it)
             // unless an Audio modifier brings a file instead.
             if (extra.type==vgs::ThumbnailExtra && !thumbnailJpeg.isEmpty()) continue;
+            if (extra.type==vgs::AudioExtra && mutedAudio) continue;
             if (extra.type==vgs::AudioExtra && audioFile && !mixing) continue;
             vgs::Bytes bytes(size_t(extra.size));
             if (!source->read(extra.offset,bytes.size(),bytes.data()) || vgs::digest(bytes.data(),bytes.size())!=extra.digest) throw std::runtime_error(vgs::InvalidCapture);
@@ -647,7 +658,7 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
     // with none, the source's own) placed where it plays, at its volume, mixed and cut to the
     // range's length as AAC, so it starts with the range and nothing outside it is stored.
     QTemporaryDir audioDir;
-    if (mixing && !mintOutput) {
+    if (mixing) {
         const double rangeStart=first/rate,length=totalFrames/rate,sourceStart=mint ? 0. : sourceHeader.startTick/rate;
         QString ownTrack;
         auto own=[&]() -> QString {
@@ -662,7 +673,7 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
             return ownTrack;
         };
         QVector<AudioInput> inputs;int silent=0;
-        if (audioModifiers.isEmpty()) {if (const auto path=own();!path.isEmpty()) inputs.append({path,rangeStart+sourceStart,1,false});}
+        if (!hasAudioLayers) {if (const auto path=own();!path.isEmpty()) inputs.append({path,rangeStart+sourceStart,1,false});}
         else for (const auto *m:audioModifiers) {
             if (!m->audioFile.isEmpty()) inputs.append({m->audioFile,rangeStart-m->audioOffset,m->audioVolume,m->audioLoop});
             else if (const auto path=own();!path.isEmpty()) inputs.append({path,rangeStart+sourceStart-m->audioOffset,m->audioVolume,m->audioLoop});
@@ -671,26 +682,38 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
         if (silent) result.notes << QStringLiteral("%1 Audio modifier(s) use the capture's own track, and it has none.").arg(silent);
         if (!inputs.isEmpty()) {
             report(progress,0,QStringLiteral("Mixing the soundtrack"));
-            const QByteArray bytes=mixAudioAac(inputs,length,[&] {return progress && !progress(0,QStringLiteral("Mixing the soundtrack"));});
-            options.extras.push_back({vgs::AudioExtra,vgs::Aac,vgs::Bytes(bytes.begin(),bytes.end())});options.startTick=0;
-            result.notes << (inputs.size()>1 ? QStringLiteral("The soundtrack mixes %1 tracks, cut to the exported range (%2 s), as AAC.").arg(inputs.size()).arg(length,0,'f',2)
-                                             : QStringLiteral("The soundtrack is cut to the exported range (%1 s), as AAC.").arg(length,0,'f',2));
+            const auto cancelled=[&] {return progress && !progress(0,QStringLiteral("Mixing the soundtrack"));};
+            const QByteArray bytes=mintOutput ? mixAudioMp3(inputs,length,cancelled) : mixAudioAac(inputs,length,cancelled);
+            if (mintOutput) mintAudio.assign(bytes.begin(),bytes.end());
+            else options.extras.push_back({vgs::AudioExtra,vgs::Aac,vgs::Bytes(bytes.begin(),bytes.end())});
+            options.startTick=0;const QString format=mintOutput ? QStringLiteral("MP3") : QStringLiteral("AAC");
+            result.notes << (inputs.size()>1 ? QStringLiteral("The soundtrack mixes %1 tracks, cut to the exported range (%2 s), as %3.").arg(inputs.size()).arg(length,0,'f',2).arg(format)
+                                             : QStringLiteral("The soundtrack is cut to the exported range (%1 s), as %2.").arg(length,0,'f',2).arg(format));
         }
     } else {
         const qint64 shift=qint64(std::llround(audioOffset*rate)),start=qint64(audioFile ? 0 : (mint ? 0 : sourceHeader.startTick))+first-shift;
         options.startTick=uint64_t(std::max<qint64>(0,start));
-        if (start<0 && (audioFile || (capture && capture->hasAudio())) && !mintOutput)
+        if (!mutedAudio && start<0 && (audioFile || (capture && capture->hasAudio())) && !mintOutput)
             result.notes << QStringLiteral("The audio starts %1 s after the exported range begins; players start it with the range.").arg(-start/rate,0,'f',2);
-        if (!mintOutput && (audioFile || (capture && capture->hasAudio())))
+        if (!mutedAudio && !mintOutput && (audioFile || (capture && capture->hasAudio())))
             result.notes << QStringLiteral("ffmpeg was not found beside the editor (tools/ffmpeg.exe): the audio is not cut to the range, and only one track is kept.");
     }
-    if (audioFile && !mintOutput && !mixing) {
+    if (audioFile && !mixing) {
         QFile track(audioModifier->audioFile);if (!track.open(QIODevice::ReadOnly)) throw std::runtime_error(QStringLiteral("Cannot read the audio file %1.").arg(audioModifier->audioFile).toStdString());
         const QByteArray bytes=track.readAll();const QString suffix=QFileInfo(audioModifier->audioFile).suffix().toLower();
         const uint32_t format=suffix=="mp3" ? vgs::Mp3 : suffix=="m4a" || suffix=="aac" ? vgs::Aac : suffix=="opus" || suffix=="ogg" ? vgs::Opus : suffix=="wav" ? vgs::Wav : 0;
         if (!format || bytes.isEmpty()) throw std::runtime_error("The audio file is not MP3, AAC (.m4a), Opus or WAV.");
         options.extras.push_back({vgs::AudioExtra,format,vgs::Bytes(bytes.begin(),bytes.end())});
         result.notes << QStringLiteral("The audio is %1, as delivered.").arg(QFileInfo(audioModifier->audioFile).fileName());
+    }
+    if (mintOutput && !mixing) for (auto &extra:options.extras) if (extra.type==vgs::AudioExtra && !extra.bytes.empty()) {
+        // MINT has no startTick for its track. Without a mixer only an unchanged MP3
+        // starting at the capture's beginning can be carried without losing sync.
+        if (extra.format!=vgs::Mp3 || options.startTick || audioOffset!=0 || audioModifiers.size()>1 ||
+            (audioModifier && (audioModifier->audioVolume!=1 || audioModifier->audioLoop)))
+            throw std::runtime_error("MINT audio needs ffmpeg (tools/ffmpeg.exe) to convert, mix or align the soundtrack. Without it, only an MP3 starting with the capture can be kept unchanged.");
+        mintAudio=std::move(extra.bytes);
+        result.notes << QStringLiteral("The source MP3 is embedded in MINT unchanged.");
     }
     if (!thumbnailJpeg.isEmpty()) options.extras.push_back({vgs::ThumbnailExtra,vgs::Jpeg,vgs::Bytes(thumbnailJpeg.begin(),thumbnailJpeg.end())});
     // A capture that moves - animated here, or already moving in a .vgs source - keeps its
@@ -748,7 +771,8 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
     options.extras.erase(std::remove_if(options.extras.begin(),options.extras.end(),[](const auto &e) {return e.type==vgs::MetadataExtra2;}),options.extras.end());
     const auto json=QJsonDocument(provenance).toJson(QJsonDocument::Compact);options.extras.push_back({vgs::MetadataExtra2,vgs::JsonUtf8,vgs::Bytes(json.begin(),json.end())});
     QTemporaryFile temporary(QFileInfo(destination).absolutePath()+"/.vgs-export-XXXXXX");if (!temporary.open()) throw std::runtime_error(temporary.errorString().toStdString());
-    const Baker baker(project,degree);std::atomic<int> currentPercent{0};std::atomic<bool> writing{false};const bool animatedCrops=project.hasAnimatedCrop();
+    const auto cachedVisibility=CaptureWorker::exportVisibilityLookup(inputProject);
+    const Baker baker(project,degree,cachedVisibility,rate);std::atomic<int> currentPercent{0};std::atomic<bool> writing{false};const bool animatedCrops=project.hasAnimatedCrop();
     // Native chunks are prepared on the encoder's chunk workers (EncodeOptions::
     // threadSafeProvider): answering costs seconds of decoding, despilling and refitting,
     // and doing it one chunk at a time starved those workers. What the provider shares is
@@ -835,6 +859,7 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
                 chunk=assembleNativeChunk(vgs::decodeChunk(sourceHeader,plan.sourceIndex,bytes.data(),bytes.size()));
                 setNativeShDegree(chunk,sourceDegree,degree);
             }
+            if (nativeMint && !sourceDegree && degree) setNativeShDegree(chunk,0,degree);
             // The world at every sample: the editor's transform over whatever motion the
             // source already had. What is baked is taken back out, and the rest is stored.
             const auto sourceMotion=takeMotionSamples(chunk);
@@ -882,7 +907,7 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
             // below, so the report does not depend on which worker finished first.
             ExportResult chunkResult;
             auto edited=editNativeChunk(std::move(chunk),plan,project,writing ? nullptr : &chunkResult,innerProgress,classification ? &*classification : nullptr,moving ? &models : nullptr,
-                                        int(sourceHeader.chunks[plan.sourceIndex].startTick)+plan.first,pruned);
+                                        int(sourceHeader.chunks[plan.sourceIndex].startTick)+plan.first,pruned,cachedVisibility);
             if (!writing) {std::lock_guard<std::mutex> guard(stateMutex);chunkStatistics[index]=std::move(chunkResult);}
             edited=withNormals(std::move(edited));
             if (moving) edited.pages.push_back(motionPage(samples));
@@ -905,7 +930,7 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
         auto baked=[&] {
             if (!animated && !animatedCrops) return baker.bake(frame,innerProgress,pruned);
             Project pose=project;if (animated) pose.transform=inputProject.transformAtFrame(first+int(index));
-            pose.modifiers=inputProject.modifiersAtFrame(first+int(index));return Baker(pose,degree).bake(frame,innerProgress,pruned);}();
+            pose.modifiers=inputProject.modifiersAtFrame(first+int(index));return Baker(pose,degree,cachedVisibility,rate).bake(frame,innerProgress,pruned);}();
         if (!writing) {result.kept+=baked.count;result.removed+=std::count(frame.active.begin(),frame.active.end(),uint8_t(1))-baked.count;}
         return withNormals(packFrame(std::move(baked),degree));
     };
@@ -913,7 +938,7 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
         if (!temporary.seek(qint64(offset)) || temporary.write(reinterpret_cast<const char *>(data),qint64(count))!=qint64(count)) throw std::runtime_error(temporary.errorString().toStdString());
     };
     auto encodingProgress=[&](int done,int total) {writing=done>=int(header.chunks.size());currentPercent=total ? 85*done/total : 0;report(progress,currentPercent,QStringLiteral("Encoding capture"));return true;};
-    if (mintOutput) writeMintSequence(header,provider,sink,encodingProgress);
+    if (mintOutput) writeMintSequence(header,provider,sink,encodingProgress,mintAudio);
     else vgs::encodeSequence(header,provider,sink,options,encodingProgress);
     for (const auto &entry : chunkStatistics) {
         result.kept+=entry.second.kept;result.removed+=entry.second.removed;result.notes << entry.second.notes;
@@ -922,20 +947,52 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
     if (!result.kept) throw std::runtime_error("The selected range contains no Gaussian records after applying active modifiers.");
     if (!temporary.flush()) throw std::runtime_error(temporary.errorString().toStdString());
     if (mintOutput) {
-        MintFile verified;if (!verified.open(temporary.fileName(),&error)) throw std::runtime_error(error.toStdString());
+        MintFile verified;if (!verified.openReadOnly(temporary.fileName(),&error)) throw std::runtime_error(error.toStdString());
         for (int i=0;i<totalFrames;++i) {report(progress,85+10*i/totalFrames,QStringLiteral("Verifying MINT frame %1 / %2").arg(i+1).arg(totalFrames));MintFrame frame;if (!verified.decode(i/rate,&frame,true,&error)) throw std::runtime_error(error.toStdString());}
         if (project.walkSpeed()>0) result.notes << QStringLiteral("MINT has no walking flag: the Walk modifier is not stored.");
-        result.notes << QStringLiteral("MINT format 6: capture metadata, audio, thumbnail and playback hints are omitted. Lower SH degrees are zero-padded to the MINT degree-3 layout.");
+        if (verified.audio()!=QByteArray(reinterpret_cast<const char *>(mintAudio.data()),qsizetype(mintAudio.size()))) throw std::runtime_error("MINT audio verification failed.");
+        result.notes << QStringLiteral("This editor's MINT export omits capture metadata, thumbnail and playback hints. Degree 0 omits higher SH; degrees 1 and 2 use the degree-3 layout with zero padding.");
     } else {
         FileSource verifySource(temporary.fileName());auto verified=vgsdec::Capture::openStream(verifySource);verified.setCachePolicy({0,0,64ull*1024*1024});
         for (int i=0;i<totalFrames;++i) {report(progress,85+10*i/totalFrames,QStringLiteral("Verifying frame %1 / %2").arg(i+1).arg(totalFrames));verified.setTime(i/rate,true);}
+    }
+    if (mintOutput && mintAudio.empty()) {
+        const QFileInfo file(destination);const auto companion=file.dir().filePath(file.completeBaseName()+QStringLiteral(".mp3"));
+        if (QFileInfo::exists(companion)) throw std::runtime_error(QStringLiteral("This export has no audio, but %1 already exists and GraciaStudio would load it. Choose another output name or remove that companion MP3.").arg(companion).toStdString());
     }
     QSaveFile output(destination);output.setDirectWriteFallback(false);if (!output.open(QIODevice::WriteOnly)) throw std::runtime_error(output.errorString().toStdString());
     temporary.seek(0);while (!temporary.atEnd()) {
         report(progress,95,QStringLiteral("Saving verified capture"));auto bytes=temporary.read(4*1024*1024);
         if (bytes.isEmpty() || output.write(bytes)!=bytes.size()) throw std::runtime_error("Cannot save the exported capture.");
     }
+    // Studio opens the companion MP3 by basename, independently of the embedded track.
+    // Stage it before committing either output; never replace the capture's source audio.
+    std::unique_ptr<QSaveFile> companion;
+    if (mintOutput && !mintAudio.empty()) {
+        const auto destinationInfo=QFileInfo(destination);
+        const QString audioPath=destinationInfo.dir().filePath(destinationInfo.completeBaseName()+QStringLiteral(".mp3"));
+        const auto sourceInfo=QFileInfo(project.asset);
+        const QString sourceCompanion=sourceInfo.dir().filePath(sourceInfo.completeBaseName()+QStringLiteral(".mp3"));
+        bool unchanged=false;
+        if (QFileInfo::exists(audioPath)) {
+            QFile existing(audioPath);if (!existing.open(QIODevice::ReadOnly)) throw std::runtime_error(existing.errorString().toStdString());
+            const auto expected=QByteArray::fromRawData(reinterpret_cast<const char *>(mintAudio.data()),qsizetype(mintAudio.size()));
+            unchanged=existing.size()==qint64(mintAudio.size());qsizetype compared=0;
+            while (unchanged && compared<expected.size()) {const auto bytes=existing.read(std::min<qsizetype>(1024*1024,expected.size()-compared));unchanged=!bytes.isEmpty() && std::memcmp(bytes.constData(),expected.constData()+compared,size_t(bytes.size()))==0;compared+=bytes.size();}
+            const auto samePath=[&](const QString &path) {return QFileInfo(audioPath).absoluteFilePath().compare(QFileInfo(path).absoluteFilePath(),Qt::CaseInsensitive)==0;};
+            bool sourceTrack=samePath(sourceCompanion);for (const auto *m:audioModifiers) if (!m->audioFile.isEmpty() && samePath(m->audioFile)) sourceTrack=true;
+            if (!unchanged && sourceTrack)
+                throw std::runtime_error("The companion MP3 would overwrite the source soundtrack. Choose a different output name or folder.");
+        }
+        if (!unchanged) {
+            companion=std::make_unique<QSaveFile>(audioPath);companion->setDirectWriteFallback(false);
+            if (!companion->open(QIODevice::WriteOnly) || companion->write(reinterpret_cast<const char *>(mintAudio.data()),qint64(mintAudio.size()))!=qint64(mintAudio.size()))
+                throw std::runtime_error(companion->errorString().toStdString());
+        }
+        result.notes << QStringLiteral("The companion MP3 is saved beside the MINT for GraciaStudio: %1.").arg(QFileInfo(audioPath).fileName());
+    }
     report(progress,99,QStringLiteral("Finishing export"));if (!output.commit()) throw std::runtime_error(output.errorString().toStdString());
+    if (companion && !companion->commit()) throw std::runtime_error(companion->errorString().toStdString());
     if (const auto note=pruningNote(result);!note.isEmpty()) result.notes << note;
     result.notes << (native ? QStringLiteral("Native temporal blocks are retained; unused Gaussian records and dictionary entries are removed.")
                           : QStringLiteral("Native-frame sampling; frames are held between samples. Attributes are requantized to the existing VGS dictionaries."));
@@ -943,8 +1000,7 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
     if (moving) result.notes << QStringLiteral("The capture moves as a whole: its motion is stored as samples beside the native blocks, so the file stays the size of a static export. Readers built before motion samples refuse it rather than play it in place; MINT cannot store it.");
     const Matrix a=linear(project.transform.matrix()),metric=a.transpose()*a;
     if (!metric.isApprox(Matrix::Identity()*metric.trace()/3,1e-5)) result.notes << QStringLiteral("SH under nonuniform scale or shear is projected to the selected SH degree.");
-    if (capture && capture->hasAudio() && !mintOutput && !audioFile && !mixing) result.notes << QStringLiteral("The source audio is kept whole; players start it where the exported range begins.");
-    if (mintOutput && (audioFile || (capture && capture->hasAudio()))) result.notes << QStringLiteral("MINT cannot hold audio: the sound track is not exported.");
+    if ((sourceAudioFormat || (capture && capture->hasAudio())) && !mutedAudio && !mintOutput && !audioFile && !mixing) result.notes << QStringLiteral("The source audio is kept whole; players start it where the exported range begins.");
     if (!thumbnailJpeg.isEmpty() && !mintOutput) result.notes << QStringLiteral("The thumbnail is the viewport as it was when the export started.");
     return result;
 }
@@ -1018,8 +1074,8 @@ public:
     PlySource(const Project &project,const ExportProgress &progress) : project_(project),progress_(progress),prunes_(CompiledModifiers(project).prunes) {
         QString error;
         if (QFileInfo(project.asset).suffix().compare("mint",Qt::CaseInsensitive)==0) {
-            mint_=std::make_unique<MintFile>();if (!mint_->open(project.asset,&error)) throw std::runtime_error(error.toStdString());
-            rate=mint_->frameRate();duration=mint_->duration();antialiased_=true;
+            mint_=std::make_unique<MintFile>();if (!mint_->openReadOnly(project.asset,&error)) throw std::runtime_error(error.toStdString());
+            rate=mint_->frameRate();duration=mint_->duration();sourceDegree=mint_->shDegree();antialiased_=true;
         } else {
             source_=std::make_unique<FileSource>(project.asset);capture_=std::make_unique<vgsdec::Capture>(vgsdec::Capture::openStream(*source_));
             rate=capture_->frameRate();duration=capture_->duration();sourceDegree=capture_->shDegree();antialiased_=capture_->antialiased();

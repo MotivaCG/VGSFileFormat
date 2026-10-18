@@ -30,3 +30,5 @@ QString ffmpegPath();
 // The tracks mixed, each at its volume, into exactly `seconds` of AAC in an .m4a (silence
 // where none plays). Throws std::runtime_error on failure or when `cancelled` says so.
 QByteArray mixAudioAac(const QVector<AudioInput> &inputs, double seconds, const std::function<bool()> &cancelled = {});
+// MINT's embedded track uses MP3, with the same placement, levels and duration.
+QByteArray mixAudioMp3(const QVector<AudioInput> &inputs, double seconds, const std::function<bool()> &cancelled = {});

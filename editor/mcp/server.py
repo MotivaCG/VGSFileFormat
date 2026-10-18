@@ -291,7 +291,7 @@ async def pause_playback() -> dict[str, Any]:
 
 @mcp.tool(title="Import capture", annotations=WRITE)
 async def import_capture(path: str, discard_unsaved: bool = False) -> dict[str, Any]:
-    """Import a local .vgs/.pgs/.mint capture on the editor PC into a new project (File > Import capture) and wait for decoding. Replaces the current project and resets undo history. Unsaved work blocks it unless discard_unsaved=true explicitly abandons it. Does not overwrite the source. For a .vgsproj use open_project."""
+    """Import a local .vgs/.pgs/.mint capture on the editor PC into a new project (File > Import capture) and wait for decoding. Embedded audio automatically gets a Capture audio layer. Replaces the current project and resets undo history. Unsaved work blocks it unless discard_unsaved=true explicitly abandons it. Does not overwrite the source. For a .vgsproj use open_project."""
     if Path(path).suffix.lower() not in (".vgs", ".pgs", ".mint"):
         raise ToolError("import_capture takes a .vgs, .pgs or .mint capture; open a .vgsproj with open_project.")
     await _request("open", {"path": path, "discard_unsaved": discard_unsaved})
@@ -306,7 +306,7 @@ async def new_project(discard_unsaved: bool = False) -> dict[str, Any]:
 
 @mcp.tool(title="Open project", annotations=WRITE)
 async def open_project(path: str, discard_unsaved: bool = False) -> dict[str, Any]:
-    """Open a saved .vgsproj project on the editor PC (File > Open project) and wait for its capture to decode. Replaces the current project and resets undo history. Unsaved work blocks it unless discard_unsaved=true explicitly abandons it. For a capture use import_capture."""
+    """Open a saved .vgsproj project on the editor PC (File > Open project) and wait for its capture to decode. Restores Audio sources, offsets, volume, looping and muted layers without adding duplicates. Replaces the current project and resets undo history. Unsaved work blocks it unless discard_unsaved=true explicitly abandons it. For a capture use import_capture."""
     if Path(path).suffix.lower() != ".vgsproj":
         raise ToolError("open_project takes a .vgsproj project; import a .vgs, .pgs or .mint with import_capture.")
     await _request("open", {"path": path, "discard_unsaved": discard_unsaved})
@@ -411,7 +411,7 @@ async def add_modifier(type: Literal["crop", "remove-green", "purge-isolated", "
 
 @mcp.tool(title="Edit modifier settings", annotations=EDIT)
 async def edit_modifier(modifier_id: str, patch: dict[str, Any]) -> dict[str, Any]:
-    """Undoably patch an existing modifier_id using native fields from get_project; nested merges preserve omissions, arrays replace. Cannot patch id/type/timeline/erase; use dedicated Erase tools for picks. Refresh images. Modifier behavior and examples: vgs-editor://tools."""
+    """Undoably patch an existing modifier_id using native fields from get_project; nested merges preserve omissions, arrays replace. Audio uses audio.source='capture' or 'file' (with audio.file on the editor PC), offset in seconds, volume 0..1 and loop; enabled=false mutes it. Cannot patch id/type/timeline/erase; use dedicated Erase tools for picks. Refresh images. Modifier behavior and examples: vgs-editor://tools."""
     return await _edit("edit_modifier", {"modifier_id": modifier_id, "patch": patch})
 
 
@@ -649,7 +649,7 @@ async def set_capture_transform(patch: TransformPatch) -> dict[str, Any]:
 
 @mcp.tool(title="Save reversible project", annotations=WRITE)
 async def save_project(path: str, overwrite: bool = False) -> dict[str, Any]:
-    """Save reversible edits to local .vgsproj path and mark project saved. References, rather than embeds, the source. Updating current project is allowed; a different existing destination needs overwrite=true. Disk write is not undoable. Use start_export for a baked cleaned capture."""
+    """Save reversible edits to local .vgsproj path and mark project saved, including Audio source, file, offset, volume, loop and enabled state. References the capture and external audio files rather than embedding them; external paths are stored relative to the project. Updating current project is allowed; a different existing destination needs overwrite=true. Disk write is not undoable. Use start_export for a baked cleaned capture."""
     return await _edit("save", {"path": path, "overwrite": overwrite})
 
 

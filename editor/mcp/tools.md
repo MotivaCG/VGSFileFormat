@@ -22,8 +22,54 @@ several poses to evaluate them. Animation varies a modifier over time where supp
 | `bake-antialiasing` | Prepare an antialias-trained capture, such as Gracia MINT, for renderers without the matching compensation. | `bake.distance`, `screenHeight` at 45-degree vertical FOV. Widens thin splats and compensates opacity for the target viewing conditions. Changes rendering preparation, not semantic noise selection. |
 | `animate-transform` | Apply keyed position/rotation/scale offsets to the whole subject over time. | `animation.keys` in reference-offset space, using the returned native schema. Key arrays are replaced in full when patched. VGS/PGS can carry motion samples; MINT cannot preserve this motion representation. |
 | `walk` | Mark the capture as walking along +Z with a speed. | `walk.speed` in metres/second, optional display units. Preview moves the floor; VGS export records walking metadata and leaves point positions in place. Does not create limb animation or clean geometry. |
-| `audio` | Attach the capture's own soundtrack or an external file, with offset, volume and optional looping. | `audio.source`, `file`, `offset` in seconds, `volume` 0..1 and `loop`. Paths belong to the editor's computer. Multiple tracks mix; VGS/PGS carry synchronized audio, MINT cannot. |
+| `audio` | Attach the capture's own soundtrack or an external file, with offset, volume and optional looping. | `audio.source`, `file`, `offset` in seconds, `volume` 0..1 and `loop`. Paths belong to the editor's computer. Multiple tracks mix; VGS/PGS carry synchronized AAC audio and MINT carries MP3. |
 | `loop-morph` | Close a loop without a jump: frames added after End that morph the End frame back into the Start frame - or, with a negative length, the range's last frames carrying the playing capture into Start (End stands for Start and is not played). | `morph.seconds` (length of the added frames; negative: the frames before End it overlaps, at most all but Start's), `morph.leadIn` (overlapping only: also blend into the motion of as many frames before Start, when the source has them) and `morph.markers`: `{number, end, endFrame, start, startFrame}` with `end`/`start` the same point of the subject in capture-local coordinates (before the transform) on the End and Start frames. Only markers whose frames match the current End/Start are used. Rather than writing coordinates, seek Start or End, take a snapshot and use `place_morph_marker` with points on it; `get_loop_morph` reads the markers, how far off each is and a suggested point for the next one; `remove_morph_markers` removes them. Removing modifiers above it shape the two frames it morphs; those below it apply to its frames. Seek past End to inspect the added frames (overlapping, the frames before End). Every export (.vgs, .pgs, .mint, .ply sequence) writes them after the range, or in place of its last frames. |
+
+## Audio sources and saved projects
+
+Importing a MINT or VGS/PGS with embedded audio automatically creates an enabled
+`audio` modifier named **Capture audio**. Read `get_project` first and reuse its ID;
+adding another capture-source Audio layer plays the same track twice. Opening a saved
+project preserves its layers, including disabled or removed Audio layers.
+
+The UI's Source dropdown maps to these exact native values:
+
+| UI source | Native fields inside `audio` |
+|---|---|
+| Included in capture | `"source":"capture"`; `file` is empty. Uses the source capture's embedded track, or silence if it has none. |
+| External file | `"source":"file","file":"D:/Audio/music.mp3"`. MP3, AAC (.m4a), Opus and WAV are supported; the path is on the editor PC. |
+
+Configure an external track using `edit_modifier`:
+
+```json
+{"modifier_id":"AUDIO_ID","patch":{"audio":{"source":"file","file":"D:/Audio/music.mp3","offset":0.25,"volume":0.7,"loop":false}}}
+```
+
+`offset` is seconds on the capture timeline: positive delays the track, negative starts
+it earlier. Embedded audio also accounts for the capture's original start offset.
+`volume` is 0..1. All enabled Audio layers mix during playback, following play, pause,
+seek and playback speed. `loop` repeats this track; it is separate from the timeline loop.
+Switch back to the embedded track with:
+
+```json
+{"modifier_id":"AUDIO_ID","patch":{"audio":{"source":"capture"}}}
+```
+
+Mute a layer with `{"modifier_id":"AUDIO_ID","patch":{"enabled":false}}`.
+Disabling all Audio layers also silences exports. With no Audio layers at all, export
+retains the source track for compatibility; removing a layer is therefore different
+from muting it. With ffmpeg, VGS/PGS exports bake the mix to AAC and MINT to MP3,
+including timing, volume and looping. Without it, only one unchanged track is kept;
+MINT requires an MP3 starting with the capture. MINT export also writes the companion
+MP3 used by GraciaStudio.
+
+Edits change the live project; call `save_project` to persist them. `.vgsproj` stores
+each layer's ID, name, enabled state, source, external path, offset, volume and loop.
+External paths are saved relative to the project and resolved on reopening; embedded
+audio remains in the source capture. The project references these files and does not
+bundle their audio bytes. Move the project, capture and external files together while
+preserving their relative paths. `open_project` restores the settings without creating
+duplicate Audio layers.
 
 ## Crop volumes: removing the bulk first
 

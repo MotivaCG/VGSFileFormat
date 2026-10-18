@@ -87,8 +87,7 @@ quint16 floatToHalf(float f)
         return quint16(sign | rounded);
     }
     // Round to nearest, ties away from zero. The GPU that the format was measured
-    // against truncates instead, which shifts rotations by about 4e-4; that is far
-    // below anything an export or a color edit cares about. See MINT_FORMAT.md 6.6.
+    // against truncates instead, which shifts rotations by about 4e-4.
     const quint32 rounded = (mantissa + 0x1000u) >> 13;
     if (rounded & 0x400u)
         return quint16(sign | (quint32(exponent + 1) << 10));
@@ -99,7 +98,7 @@ float readHalf(const char* p) { return halfToFloat(readU16(p)); }
 
 // ------------------------------------------------------------ format helpers
 
-// 21 bits per axis, sharing one scalar range. See MINT_FORMAT.md 6.4.
+// 21 bits per axis, sharing one scalar range.
 void unpackPosition(quint64 word, double lo, double hi, float* xyz)
 {
     const double scale = (hi - lo) / 2097151.0;
@@ -108,7 +107,7 @@ void unpackPosition(quint64 word, double lo, double hi, float* xyz)
     xyz[2] = float(lo + double((word >> 1) & 0x1FFFFFull) * scale);
 }
 
-// Smallest-three variant, stored wxyz, returned xyzw. See MINT_FORMAT.md 6.6.
+// Smallest-three variant, stored wxyz, returned xyzw.
 void unpackQuaternion(quint32 word, float* xyzw)
 {
     static const float kMax[3] = {1023.0f, 1023.0f, 511.0f};
@@ -315,9 +314,11 @@ void MintFile::close()
     m_chunks.clear();
     m_payloadStart = 0;
     m_indexOffset = 0;
+    m_audioOffset = m_audioSize = 0;
     m_fileSize = 0;
     m_headerOnly = false;
     m_duration = 0.0;
+    m_shDegree = 0;
     m_modified = false;
 }
 
@@ -326,6 +327,11 @@ bool MintFile::open(const QString& path, QString* error)
     return load(path, false, error);
 }
 bool MintFile::openReadOnly(const QString& path,QString* error) {return load(path,false,error,true);}
+
+QByteArray MintFile::audio() const {
+    if (m_headerOnly || !m_audioSize) return {};
+    return QByteArray(raw(m_audioOffset),qsizetype(m_audioSize));
+}
 
 bool MintFile::openHeader(const QString& path, QString* error)
 {
@@ -424,7 +430,15 @@ bool MintFile::parse(QString* error)
             haveIndex = true;
             cursor += 24;
         } else if (kind == 2) {
-            cursor += 32;   // optional payload, empty in every file seen so far
+            if (cursor + 32 > m_payloadStart)
+                return fail(QObject::tr("Audio record runs past the metadata"));
+            const quint64 offset=readU64(raw(cursor+16)), length=readU64(raw(cursor+24));
+            if (length) {
+                if (m_audioSize || offset > size-m_payloadStart || length > size-m_payloadStart-offset)
+                    return fail(QObject::tr("Invalid embedded MINT audio range"));
+                m_audioOffset=m_payloadStart+offset;m_audioSize=length;
+            }
+            cursor += 32;
         } else {
             return fail(QObject::tr("Unknown top-level record type %1").arg(kind));
         }
@@ -555,6 +569,9 @@ bool MintFile::parse(QString* error)
                 if (block.type == 3) { block.intervals = intervals; shared = &block; }
             if (!shared)
                 return fail(QObject::tr("Chunk %1 has no shared dictionary block").arg(c));
+            const bool staticSh=shared->shStaticEntries && !shared->array("sh_static_codebooks").isEmpty();
+            const bool temporalSh=shared->shTemporalEntries && !shared->array("sh_temporal_codebooks").isEmpty();
+            if (staticSh || temporalSh) m_shDegree=3;
         }
 
         m_chunks.append(chunk);
@@ -829,6 +846,7 @@ bool MintFile::decode(double seconds, MintFrame* out, bool includeSh, QString* e
     out->colorDc.resize(int(total * 3));
     out->active.resize(int(total));
     out->shRest.clear();
+    includeSh = includeSh && (shared->shStaticEntries || shared->shTemporalEntries);
     if (shOutput) shOutput->resize(includeSh ? size_t(total*45) : 0);
     else if (includeSh) out->shRest.resize(int(total * 45));
 
@@ -872,7 +890,7 @@ bool MintFile::decode(double seconds, MintFrame* out, bool includeSh, QString* e
                 unpackPosition(readU64(row + (frame + 1) * 8), group->positionMin, group->positionMax, b);
                 // This build interpolates per-sample positions with normalized
                 // chunk time, not with the fraction inside the interval. It looks
-                // like a defect, but it is what the runtime does. See 6.4.
+                // like a defect, but it is what the runtime does.
                 for (int c = 0; c < 3; ++c)
                     positionOut[int((written + i) * 3 + quint64(c))] = a[c] + (b[c] - a[c]) * r;
             }
@@ -1000,7 +1018,7 @@ bool MintFile::decode(double seconds, MintFrame* out, bool includeSh, QString* e
             const quint64 ns = shared->shStaticEntries;
             const quint64 nt = shared->shTemporalEntries;
             // The temporal codebook is read at `frame` with no interpolation to the
-            // next sample, unlike every other temporal table. See 6.8.
+            // next sample, unlike every other temporal table.
             static const int kShift[3] = {20, 10, 0};
 
             // Convert the small dictionaries once, rather than converting two

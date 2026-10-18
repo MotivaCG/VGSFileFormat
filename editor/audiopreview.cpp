@@ -11,7 +11,6 @@
 #include "audiopreview.h"
 #include <QAudioOutput>
 #include <QBuffer>
-#include <QCryptographicHash>
 #include <QFileInfo>
 #include <QMediaPlayer>
 #include <QUrl>
@@ -30,8 +29,11 @@ void AudioPreview::setFile(const QString &path) {
     player_->setSource(QUrl::fromLocalFile(QFileInfo(path).absoluteFilePath()));
 }
 void AudioPreview::setBytes(const QByteArray &bytes, const QString &suffix) {
-    const QString key = QStringLiteral("bytes:") + QString::fromLatin1(QCryptographicHash::hash(bytes, QCryptographicHash::Sha1).toHex()) + suffix;
-    if (key == key_) return;
+    const QString key = QStringLiteral("bytes:") + suffix;
+    // CaptureInfo and this player share the QByteArray: unchanged audio is a pointer
+    // comparison, without hashing the whole soundtrack at every timeline tick.
+    if (key == key_ && bytes_.size() == bytes.size() &&
+        (bytes_.constData() == bytes.constData() || bytes_ == bytes)) return;
     clear(); key_ = key; bytes_ = bytes;
     buffer_ = new QBuffer(&bytes_, this); buffer_->open(QIODevice::ReadOnly);
     // The name only tells the decoder what the bytes are.

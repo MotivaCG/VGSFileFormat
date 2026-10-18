@@ -419,6 +419,12 @@ MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory,const QStr
         viewport_->setSplatAntialiasing(info.antialiased);
         processingState_={};
         project_ = pendingProject_.value_or(defaultProject()); project_.asset = info.path;
+        // A newly imported soundtrack is visible and editable in the stack. Saved
+        // projects keep their own choices, including a muted or removed Audio layer.
+        if (!pendingProject_ && !info.audio.isEmpty()) {
+            Modifier audio;audio.id=Project::newId();audio.name=tr("Capture audio");audio.type=ModifierType::Audio;
+            project_.modifiers.append(audio);
+        }
         if (project_.captureSettings.title.isEmpty()) project_.captureSettings.title = info.title;
         projectPath_ = pendingProjectPath_;
         const bool recovered=recovering_;
@@ -955,11 +961,13 @@ void MainWindow::buildUi() {
     // Audio: the capture's own track or a file, and where it sits on the timeline.
     audioProperties_=new QGroupBox(tr("Audio"));audioProperties_->setObjectName("audioModifierProperties");auto *audioForm=new QFormLayout(audioProperties_);
     audioProperties_->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Maximum);
+    audioSourceType_=new QComboBox;audioSourceType_->setObjectName("audioSourceType");
+    audioSourceType_->addItem(tr("Included in capture"));audioSourceType_->addItem(tr("External file"));
+    audioSourceType_->setToolTip(tr("Use the audio embedded in the MINT or VGS/PGS capture, or choose a separate sound file."));audioForm->addRow(tr("Source"),audioSourceType_);
     audioSource_=new QLabel;audioSource_->setObjectName("audioSource");audioSource_->setWordWrap(true);audioForm->addRow(tr("Track"),audioSource_);
     auto *audioButtons=new QWidget;auto *audioRow=new QHBoxLayout(audioButtons);audioRow->setContentsMargins(0,0,0,0);
-    auto *audioFile=new QPushButton(tr("Choose file\u2026"));audioFile->setObjectName("audioChooseFile");audioFile->setToolTip(tr("Play a sound file with the capture: MP3, AAC (.m4a), Opus or WAV.\nExports mix it with the other Audio modifiers into one AAC track, cut to the exported range."));
-    audioCaptureTrack_=new QPushButton(tr("Use the capture's track"));audioCaptureTrack_->setObjectName("audioUseCapture");audioCaptureTrack_->setToolTip(tr("Play the sound track the capture carries."));
-    audioRow->addWidget(audioFile);audioRow->addWidget(audioCaptureTrack_);audioForm->addRow(audioButtons);
+    auto *audioFile=new QPushButton(tr("Choose file\u2026"));audioFile->setObjectName("audioChooseFile");audioFile->setToolTip(tr("Play a sound file with the capture: MP3, AAC (.m4a), Opus or WAV.\nExports mix it with the other Audio modifiers into one track, cut to the exported range: AAC for VGS/PGS, MP3 for MINT."));
+    audioRow->addWidget(audioFile);audioForm->addRow(audioButtons);
     audioOffset_=new QDoubleSpinBox;audioOffset_->setObjectName("audioOffset");audioOffset_->setRange(-3600,3600);audioOffset_->setDecimals(3);audioOffset_->setSingleStep(0.04);audioOffset_->setSuffix(" s");
     audioOffset_->setToolTip(tr("When the track starts on the capture's timeline: positive delays it, negative starts it earlier.\nUse it to line the sound up with the picture."));
     audioForm->addRow(tr("Offset"),audioOffset_);
@@ -969,16 +977,21 @@ void MainWindow::buildUi() {
     audioLoop_=new QCheckBox(tr("Loop"));audioLoop_->setObjectName("audioLoop");audioLoop_->setToolTip(tr("Repeat the track from its start whenever it ends, for as long as the capture plays."));
     audioForm->addRow(audioLoop_);
     auto *audioNote=new QLabel(tr("Plays with the timeline, at its speed; every enabled Audio modifier plays, mixed. Disable one to mute it. "
-                                  "VGS/PGS exports mix them into one AAC track cut to the exported range; MINT cannot hold audio."));
+                                  "Exports mix them into one track cut to the exported range: AAC for VGS/PGS, MP3 for MINT."));
     audioNote->setWordWrap(true);audioForm->addRow(audioNote);side->addWidget(audioProperties_);
     SpinScrubber::attachFormLabel(audioOffset_,0.005);SpinScrubber::attachFormLabel(audioVolume_,0.5);
-    connect(audioFile,&QPushButton::clicked,this,[this] {
+    auto chooseAudioFile=[this] {
         auto *m=project_.modifier();if (!m || m->type!=ModifierType::Audio) return;
         const QString path=QFileDialog::getOpenFileName(this,tr("Choose a sound file"),history_.openPath("Audio"),tr("Sound (*.mp3 *.m4a *.aac *.opus *.ogg *.wav)"));
-        if (path.isEmpty()) return;
+        if (path.isEmpty()) {syncUi();return;}
         m->audioFile=QFileInfo(path).absoluteFilePath();syncUi();dirty();viewport_->setFocus();
+    };
+    connect(audioFile,&QPushButton::clicked,this,chooseAudioFile);
+    connect(audioSourceType_,&QComboBox::activated,this,[this,chooseAudioFile](int source) {
+        auto *m=project_.modifier();if (syncing_ || !m || m->type!=ModifierType::Audio) return;
+        if (source==1) {if (m->audioFile.isEmpty()) chooseAudioFile();return;}
+        m->audioFile.clear();syncUi();dirty();viewport_->setFocus();
     });
-    connect(audioCaptureTrack_,&QPushButton::clicked,this,[this] {auto *m=project_.modifier();if (!m || m->type!=ModifierType::Audio) return;m->audioFile.clear();syncUi();dirty();viewport_->setFocus();});
     connect(audioOffset_,&QDoubleSpinBox::valueChanged,this,[this](double value) {auto *m=project_.modifier();if (syncing_ || !m || m->type!=ModifierType::Audio) return;m->audioOffset=value;syncAudio();dirty();});
     connect(audioVolume_,&QDoubleSpinBox::valueChanged,this,[this](double value) {auto *m=project_.modifier();if (syncing_ || !m || m->type!=ModifierType::Audio) return;m->audioVolume=value/100;syncAudio();dirty();});
     connect(audioLoop_,&QCheckBox::toggled,this,[this](bool on) {auto *m=project_.modifier();if (syncing_ || !m || m->type!=ModifierType::Audio) return;m->audioLoop=on;syncAudio();dirty();});
@@ -1522,7 +1535,8 @@ void MainWindow::syncUi() {
     }
     const bool audio=selected && selected->type==ModifierType::Audio;audioProperties_->setVisible(audio);
     if (audio) {
-        audioProperties_->setTitle(tr("Audio: %1").arg(selected->name));audioOffset_->setValue(selected->audioOffset);audioVolume_->setValue(selected->audioVolume*100);audioLoop_->setChecked(selected->audioLoop);audioCaptureTrack_->setEnabled(!info_.audio.isEmpty() && !selected->audioFile.isEmpty());
+        audioProperties_->setTitle(tr("Audio: %1").arg(selected->name));audioOffset_->setValue(selected->audioOffset);audioVolume_->setValue(selected->audioVolume*100);audioLoop_->setChecked(selected->audioLoop);
+        audioSourceType_->setCurrentIndex(selected->audioFile.isEmpty() ? 0 : 1);
         audioSource_->setText(!selected->audioFile.isEmpty() ? (QFileInfo::exists(selected->audioFile) ? QFileInfo(selected->audioFile).fileName() : tr("%1 (not found)").arg(QFileInfo(selected->audioFile).fileName()))
                              : !info_.audio.isEmpty() ? tr("The capture's own track (%1)").arg(info_.audioSuffix.toUpper()) : tr("None: the capture carries no track. Choose a file."));
         audioSource_->setToolTip(selected->audioFile);

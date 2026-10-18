@@ -32,7 +32,7 @@
 
 class AutomationTests : public QObject {
     Q_OBJECT
-    static QString capture(const QString &directory, int frames=4) {
+    static QString capture(const QString &directory, int frames=4,const vgs::Bytes &audio={}) {
         const QString path=directory+"/source.pgs";
         vgs::Frame f;f.count=3;f.active={1,1,1};f.position={-.2f,1,0,.2f,1,0,0,1.3f,0};
         f.rotation={0,0,0,1,0,0,0,1,0,0,0,1};f.scale={.01f,.02f,.03f,.01f,.02f,.03f,.01f,.02f,.03f};
@@ -40,6 +40,7 @@ class AutomationTests : public QObject {
         vgs::Header h;h.shDegree=0;h.frameCount=h.durationTicks=frames;h.chunks.resize(frames);
         for (size_t i=0;i<size_t(frames);++i) {h.chunks[i].startTick=i;h.chunks[i].intervals=1;}
         vgs::EncodeOptions options;options.signer=vgs::authoringSigner();options.shDegree=0;options.compression=vgs::Compression::None;
+        if (!audio.empty()) options.extras.push_back({vgs::AudioExtra,vgs::Wav,audio});
         QFile file(path);if (!file.open(QIODevice::WriteOnly)) throw std::runtime_error("Cannot create capture.");
         vgs::encodeSequence(h,[&](size_t) {return packExportFrame(f,0);},[&](uint64_t offset,const uint8_t *data,size_t count) {
             if (!file.seek(qint64(offset)) || file.write(reinterpret_cast<const char *>(data),qint64(count))!=qint64(count)) throw std::runtime_error("Cannot write capture.");
@@ -50,6 +51,42 @@ class AutomationTests : public QObject {
         QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir);
     }
 private slots:
+    void audioSourcesAndSettingsSurviveAutomationSaveAndOpen() {
+        QTemporaryDir dir;QVERIFY(dir.isValid());settings(dir.path());
+        // A valid mono WAV: the test exercises project persistence, not playback.
+        const auto wav=QByteArray::fromHex("524946462c00000057415645666d74201000000001000100401f0000803e0000020010006461746108000000")+QByteArray(8,0);
+        const auto asset=capture(dir.path(),4,vgs::Bytes(wav.begin(),wav.end()));
+        QVERIFY(QDir().mkpath(dir.filePath("music")));QVERIFY(QDir().mkpath(dir.filePath("project")));
+        const auto sound=dir.filePath("music/song.wav");QFile file(sound);QVERIFY(file.open(QIODevice::WriteOnly));QCOMPARE(file.write(wav),wav.size());file.close();
+        MainWindow window(nullptr,dir.filePath("presets"));EditorAutomation bridge(&window,dir.filePath("sessions"));
+        bridge.execute("open",{{"path",asset}});QTRY_VERIFY_WITH_TIMEOUT(bridge.state()["ready"].toBool(),5000);
+        auto readAudio=[&] {QJsonArray found;for (const auto &m:bridge.execute("project",{})["modifiers"].toArray()) if (m.toObject()["type"]=="audio") found.append(m);return found;};
+        auto layers=readAudio();QCOMPARE(layers.size(),1);const auto original=layers[0].toObject();const auto id=original["id"].toString();QVERIFY(!id.isEmpty());
+        QCOMPARE(original["audio"].toObject()["source"].toString(),QString("capture"));QVERIFY(original["enabled"].toBool());
+        const QJsonObject audio{{"source","file"},{"file",sound},{"offset",-.25},{"volume",.35},{"loop",true}};
+        bridge.execute("edit_modifier",{{"modifier_id",id},{"patch",QJsonObject{{"name","Music"},{"enabled",false},{"audio",audio}}}});
+        QTRY_VERIFY_WITH_TIMEOUT(bridge.state()["ready"].toBool(),5000);
+        const auto saved=dir.filePath("project/edit.vgsproj");bridge.execute("save",{{"path",saved}});
+        Project disk;QString error;QVERIFY2(Project::read(saved,&disk,&error),qPrintable(error));
+        const Modifier *stored=nullptr;for (const auto &m:disk.modifiers) if (m.id==id) stored=&m;QVERIFY(stored);
+        QCOMPARE(QFileInfo(stored->audioFile).canonicalFilePath(),QFileInfo(sound).canonicalFilePath());QCOMPARE(stored->audioOffset,-.25);QCOMPARE(stored->audioVolume,.35);QVERIFY(stored->audioLoop);QVERIFY(!stored->enabled);
+        QFile json(saved);QVERIFY(json.open(QIODevice::ReadOnly));const auto root=QJsonDocument::fromJson(json.readAll()).object();json.close();
+        QJsonObject savedAudio;for (const auto &m:root["modifiers"].toArray()) if (m.toObject()["id"]==id) savedAudio=m.toObject()["audio"].toObject();
+        QCOMPARE(savedAudio["file"].toString(),QString("../music/song.wav"));
+        bridge.execute("open",{{"path",saved}});QTRY_VERIFY_WITH_TIMEOUT(bridge.state()["ready"].toBool(),5000);
+        layers=readAudio();QCOMPARE(layers.size(),1);auto restored=layers[0].toObject();
+        QCOMPARE(restored["id"].toString(),id);QCOMPARE(restored["name"].toString(),QString("Music"));QVERIFY(!restored["enabled"].toBool());
+        auto settings=restored["audio"].toObject();QCOMPARE(settings,savedAudio);
+        // The dropdown's capture choice discards the external reference and keeps
+        // the other settings. Reopening must not add another embedded track.
+        bridge.execute("edit_modifier",{{"modifier_id",id},{"patch",QJsonObject{{"audio",QJsonObject{{"source","capture"}}}}}});
+        QTRY_VERIFY_WITH_TIMEOUT(bridge.state()["ready"].toBool(),5000);bridge.execute("save",{{"path",saved}});
+        bridge.execute("open",{{"path",saved}});QTRY_VERIFY_WITH_TIMEOUT(bridge.state()["ready"].toBool(),5000);
+        layers=readAudio();QCOMPARE(layers.size(),1);restored=layers[0].toObject();settings=restored["audio"].toObject();
+        QCOMPARE(settings["source"].toString(),QString("capture"));QCOMPARE(settings["file"].toString(),QString());
+        QCOMPARE(settings["offset"].toDouble(),-.25);QCOMPARE(settings["volume"].toDouble(),.35);QVERIFY(settings["loop"].toBool());QVERIFY(!restored["enabled"].toBool());
+        window.setWindowModified(false);
+    }
     void loopMorphIsReadSeekedAndEditedByAutomation() {try {loopMorphAutomation(0);} catch (const std::exception &e) {QFAIL(e.what());}}
     void loopMorphAutomation(int) { // a slot with an argument, so QTest does not run it on its own
         QTemporaryDir dir;QVERIFY(dir.isValid());settings(dir.path());const auto path=capture(dir.path(),6);

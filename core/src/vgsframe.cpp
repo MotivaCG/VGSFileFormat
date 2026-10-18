@@ -81,8 +81,7 @@ uint16_t floatToHalf(float f) {
   }
   // Round to nearest, ties away from zero. The GPU that the format was measured
   // against truncates instead, which shifts rotations by about 4e-4; that is
-  // far below anything an export or a color edit cares about. See
-  // MINT_FORMAT.md 6.6.
+  // far below anything an export or a color edit cares about.
   const uint32_t rounded = (mantissa + 0x1000u) >> 13;
   if (rounded & 0x400u)
     return uint16_t(sign | (uint32_t(exponent + 1) << 10));
@@ -93,7 +92,7 @@ float readHalf(const char *p) { return halfToFloat(readU16(p)); }
 
 // ------------------------------------------------------------ format helpers
 
-// 21 bits per axis, sharing one scalar range. See MINT_FORMAT.md 6.4.
+// 21 bits per axis, sharing one scalar range.
 void unpackPosition(uint64_t word, double lo, double hi, float *xyz) {
   const double scale = (hi - lo) / 2097151.0;
   xyz[0] = float(lo + double((word >> 43) & 0x1FFFFFull) * scale);
@@ -101,7 +100,7 @@ void unpackPosition(uint64_t word, double lo, double hi, float *xyz) {
   xyz[2] = float(lo + double((word >> 1) & 0x1FFFFFull) * scale);
 }
 
-// Smallest-three variant, stored wxyz, returned xyzw. See MINT_FORMAT.md 6.6.
+// Smallest-three variant, stored wxyz, returned xyzw.
 void unpackQuaternion(uint32_t word, float *xyzw) {
   static const float kMax[3] = {1023.0f, 1023.0f, 511.0f};
   static const int kShift[3] = {20, 10, 1};

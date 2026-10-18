@@ -28,6 +28,21 @@
 #include <limits>
 #include <thread>
 #include <utility>
+#include <mutex>
+#include <QDateTime>
+
+struct PreviewExportStore {
+    std::mutex mutex;
+    QString asset;
+    qint64 fileSize=0,modified=0;
+    QByteArray key;
+    std::map<int,std::weak_ptr<const ExportVisibilityMask>> frames;
+    std::atomic<size_t> hits{0};
+};
+namespace {
+std::mutex exportStoresMutex;
+std::vector<std::weak_ptr<PreviewExportStore>> exportStores;
+}
 
 class CaptureWorker::FileSource : public vgsdec::Source {
 public:
@@ -42,10 +57,42 @@ public:
     uint64_t size() const override { return uint64_t(file.size()); }
 };
 CaptureWorker::CaptureWorker(QObject *parent,previewmemory::Probe memoryProbe) : QObject(parent),memory_(std::move(memoryProbe)) {
+    exportStore_=std::make_shared<PreviewExportStore>();
+    {std::lock_guard<std::mutex> lock(exportStoresMutex);exportStores.push_back(exportStore_);}
     memoryTimer_=new QTimer(this);memoryTimer_->setInterval(500);
     connect(memoryTimer_,&QTimer::timeout,this,&CaptureWorker::relieveMemoryPressure);
 }
 CaptureWorker::~CaptureWorker() = default;
+size_t CaptureWorker::exportVisibilityHits() const {return exportStore_->hits.load();}
+void CaptureWorker::forgetExportVisibility(int frame) {
+    std::lock_guard<std::mutex> lock(exportStore_->mutex);
+    if (frame<0) {exportStore_->frames.clear();exportStore_->key.clear();}
+    else exportStore_->frames.erase(frame);
+}
+std::function<bool(int,const std::vector<uint8_t> &,std::vector<uint8_t> &)> CaptureWorker::exportVisibilityLookup(const Project &project) {
+    const CompiledModifiers modifiers(project);
+    if (modifiers.isolations.isEmpty() || (modifiers.despill && !modifiers.despillPreview && modifiers.greensAfterColour())) return {};
+    Project identity=project;identity.updatePreviewCacheKeys();const auto key=identity.previewVisibilityKeys[0];
+    const QFileInfo file(project.asset);const auto asset=file.canonicalFilePath();const auto size=file.size(),modified=file.lastModified().toMSecsSinceEpoch();
+    std::weak_ptr<PreviewExportStore> selected;
+    {std::lock_guard<std::mutex> registry(exportStoresMutex);
+     for (auto it=exportStores.begin();it!=exportStores.end();) {
+        const auto store=it->lock();if (!store) {it=exportStores.erase(it);continue;}++it;
+        std::lock_guard<std::mutex> lock(store->mutex);
+        if (store->asset==asset && store->fileSize==size && store->modified==modified && store->key==key) {selected=store;break;}
+     }}
+    if (selected.expired()) return {};
+    return [selected,key](int frame,const std::vector<uint8_t> &active,std::vector<uint8_t> &out) {
+        const auto store=selected.lock();if (!store) return false;
+        std::shared_ptr<const ExportVisibilityMask> mask;
+        {std::lock_guard<std::mutex> lock(store->mutex);if (store->key!=key) return false;
+         const auto found=store->frames.find(frame);if (found==store->frames.end()) return false;mask=found->second.lock();}
+        if (!mask || mask->records!=active.size() || mask->points!=size_t(std::count_if(active.begin(),active.end(),[](uint8_t a){return a!=0;}))) return false;
+        out.assign(active.size(),0);size_t row=0;bool visible=true;
+        for (uint32_t run:mask->runs) {for (uint32_t k=0;k<run;++k) {while (row<active.size() && !active[row]) ++row;if (row==active.size()) return false;out[row++]=visible;}visible=!visible;}
+        ++store->hits;return true;
+    };
+}
 namespace {
 size_t frameBufferBytes(const RenderFrame &f) {
     return sizeof(RenderFrame)+f.records.capacity()*sizeof(Splat)+f.active.capacity()+f.points.capacity()*sizeof(PointVertex)+f.sh.capacity()*sizeof(float);
@@ -112,7 +159,7 @@ void CaptureWorker::relieveMemoryPressure() {
     if (remaining && morph_) {const auto bytes=morph_->cachedBytes();morph_->trimCache(bytes>remaining ? size_t(bytes-remaining) : 0);released(bytes-morph_->cachedBytes());}
     while (remaining && !visibilityOrder_.empty()) {
         const auto it=visibility_.find(visibilityOrder_.front());visibilityOrder_.pop_front();
-        if (it!=visibility_.end()) {const auto bytes=it->second.bytes();visibilityBytes_-=bytes;--visibilityStageFrames_[it->first.second];visibilityStageBytes_[it->first.second]-=bytes;visibility_.erase(it);released(bytes);}
+        if (it!=visibility_.end()) {const auto bytes=it->second.bytes();visibilityBytes_-=bytes;--visibilityStageFrames_[it->first.second];visibilityStageBytes_[it->first.second]-=bytes;if (!it->first.second) forgetExportVisibility(it->first.first);visibility_.erase(it);released(bytes);}
     }
     if (remaining) {const auto bytes=reusableFrameBytes();framePool_={};morphScratch_={};released(bytes);}
     if (remaining) {pruneScores_.clear();if (vgs_) vgs_->releaseCache();}
@@ -157,6 +204,7 @@ void CaptureWorker::applyDespill(RenderFrame &out,const CompiledModifiers &modif
 #endif
 }
 void CaptureWorker::clearVisibility(int context) {
+    if (context<=0) forgetExportVisibility();
     if (context<0) {visibilityKeys_={};visibility_.clear();visibilityOrder_.clear();visibilityBytes_=0;visibilityStageFrames_={};visibilityStageBytes_={};return;}
     for (auto it=visibility_.begin();it!=visibility_.end();) if (it->first.second==context) {visibilityBytes_-=it->second.bytes();it=visibility_.erase(it);} else ++it;
     visibilityOrder_.erase(std::remove_if(visibilityOrder_.begin(),visibilityOrder_.end(),[context](const auto &id) {return id.second==context;}),visibilityOrder_.end());
@@ -167,29 +215,33 @@ bool CaptureWorker::cachedVisibility(RenderFrame &out,const Project &project,int
     Q_UNUSED(project);if (!cachingEnabled_) return false;
     const auto hit=visibility_.find({int(std::lround(out.seconds*info_.fps)),context});
     if (hit==visibility_.end()) return false;
-    size_t count=0;for (uint32_t run:hit->second.runs) count+=run;
+    size_t count=0;for (uint32_t run:hit->second.mask->runs) count+=run;
     if (count!=out.points.size()) return false;
     size_t at=0;bool visible=true;
-    for (uint32_t run:hit->second.runs) {for (uint32_t k=0;k<run;++k) out.points[at++].modifierVisibility=visible ? 1.f : 0.f;visible=!visible;}
+    for (uint32_t run:hit->second.mask->runs) {for (uint32_t k=0;k<run;++k) out.points[at++].modifierVisibility=visible ? 1.f : 0.f;visible=!visible;}
     out.greensApplied=hit->second.greensApplied;out.prune=hit->second.prune;out.visibilityFromCache=true;return true;
 }
 void CaptureWorker::keepVisibility(const RenderFrame &out,const Project &project,int context) {
     if (!project.previewPlaying || !cachingEnabled_) return;
     if (!memory_.canRetain((out.points.size()+1)*sizeof(uint32_t)+sizeof(Visibility)+128)) {cacheLimited_=true;return;}
     Visibility kept;kept.greensApplied=out.greensApplied;kept.prune=out.prune;bool visible=true;uint32_t run=0;
-    for (const auto &p:out.points) {if ((p.modifierVisibility>=.5f)!=visible) {kept.runs.push_back(run);run=0;visible=!visible;}++run;}
-    kept.runs.push_back(run);kept.runs.shrink_to_fit();
+    auto mask=std::make_shared<ExportVisibilityMask>();mask->records=out.records.size();mask->points=out.points.size();
+    for (const auto &p:out.points) {if ((p.modifierVisibility>=.5f)!=visible) {mask->runs.push_back(run);run=0;visible=!visible;}++run;}
+    mask->runs.push_back(run);mask->runs.shrink_to_fit();kept.mask=mask;
     const VisibilityId id{int(std::lround(out.seconds*info_.fps)),context};
-    auto &slot=visibility_[id];const auto replaced=slot.runs.empty() ? 0 : slot.bytes();visibilityBytes_-=replaced;visibilityStageBytes_[context]-=replaced;
-    if (slot.runs.empty()) {visibilityOrder_.push_back(id);++visibilityStageFrames_[context];}
+    auto &slot=visibility_[id];const auto replaced=slot.mask ? slot.bytes() : 0;visibilityBytes_-=replaced;visibilityStageBytes_[context]-=replaced;
+    if (!slot.mask) {visibilityOrder_.push_back(id);++visibilityStageFrames_[context];}
     slot=std::move(kept);visibilityBytes_+=slot.bytes();visibilityStageBytes_[context]+=slot.bytes();
+    if (!context && std::any_of(project.modifiers.begin(),project.modifiers.end(),[](const Modifier &m) {return m.active() && m.type==ModifierType::PurgeIsolated;})) {
+        std::lock_guard<std::mutex> lock(exportStore_->mutex);exportStore_->key=visibilityKeys_[0];exportStore_->frames[id.first]=mask;
+    }
     while (visibilityBytes_>VisibilityBudget && !visibilityOrder_.empty()) {
         cacheLimited_=true;
         const auto oldest=visibility_.find(visibilityOrder_.front());visibilityOrder_.pop_front();
-        if (oldest!=visibility_.end()) {visibilityBytes_-=oldest->second.bytes();--visibilityStageFrames_[oldest->first.second];visibilityStageBytes_[oldest->first.second]-=oldest->second.bytes();visibility_.erase(oldest);}
+        if (oldest!=visibility_.end()) {visibilityBytes_-=oldest->second.bytes();--visibilityStageFrames_[oldest->first.second];visibilityStageBytes_[oldest->first.second]-=oldest->second.bytes();if (!oldest->first.second) forgetExportVisibility(oldest->first.first);visibility_.erase(oldest);}
     }
 }
-size_t CaptureWorker::Visibility::bytes() const {return sizeof(Visibility)+runs.size()*sizeof(uint32_t)+prune.size()*sizeof(PruneStats)+96;}
+size_t CaptureWorker::Visibility::bytes() const {return sizeof(Visibility)+sizeof(ExportVisibilityMask)+(mask ? mask->runs.capacity()*sizeof(uint32_t) : 0)+prune.size()*sizeof(PruneStats)+160;}
 const std::vector<float> &CaptureWorker::pruneScores(size_t chunk) {
     if (auto it = pruneScores_.find(chunk); it != pruneScores_.end()) return it->second;
     double start, end;
@@ -236,7 +288,7 @@ FramePtr CaptureWorker::frame(double time, bool includeSh) {
         s = mintFrame.scale.constData(); c = mintFrame.colorDc.constData();
         o = mintFrame.opacity.constData(); a = mintFrame.active.constData(); count = mintFrame.count;
         chunkIndex = size_t(mintFrame.chunkIndex);
-        if (includeSh) { sh = out->sh.data(); coefficients = 15; }
+        if (includeSh && !out->sh.empty()) { sh = out->sh.data(); coefficients = 15; }
     } else {
         const auto &f = vgs_->setTime(time, includeSh);
         p = f.positions; r = f.rotations; s = f.scales; c = f.colors;
@@ -291,9 +343,11 @@ void CaptureWorker::open(const QString &path, quint64 generation, bool sh) {
             candidate.mint_ = std::make_unique<MintFile>(); QString error;
             if (!candidate.mint_->openReadOnly(path, &error)) throw std::runtime_error(error.toStdString());
             candidate.info_.duration = candidate.mint_->duration(); candidate.info_.fps = candidate.mint_->frameRate();
-            candidate.info_.shDegree = 3;
+            candidate.info_.shDegree = candidate.mint_->shDegree();
             bounds = candidate.mint_->boundingBox();
             candidate.info_.antialiased = true;
+            candidate.info_.audio = candidate.mint_->audio();
+            if (!candidate.info_.audio.isEmpty()) candidate.info_.audioSuffix = QStringLiteral("mp3");
         } else if (ext == "vgs" || ext == "pgs") {
             candidate.source_ = std::make_unique<FileSource>(path);
             candidate.vgs_ = std::make_unique<vgsdec::Capture>(vgsdec::Capture::openStream(*candidate.source_));
@@ -337,6 +391,7 @@ void CaptureWorker::open(const QString &path, quint64 generation, bool sh) {
         vgs_.reset(); source_.reset(); mint_.reset();
         source_ = std::move(candidate.source_); vgs_ = std::move(candidate.vgs_); mint_ = std::move(candidate.mint_);
         framePool_={};clearColours();dependencyRevision_=0;dependencyMorphKey_.clear();info_ = candidate.info_; generation_ = generation; pruneScores_.clear(); morph_.reset();morphScratch_={}; morphKey_.clear(); clearVisibility();
+        {const QFileInfo file(path);std::lock_guard<std::mutex> lock(exportStore_->mutex);exportStore_->asset=file.canonicalFilePath();exportStore_->fileSize=file.size();exportStore_->modified=file.lastModified().toMSecsSinceEpoch();}
         memoryTimer_->start();relieveMemoryPressure();
         emit opened(info_, first, generation);
         emit openedRequest(info_, first, generation, request_);

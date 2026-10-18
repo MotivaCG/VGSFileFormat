@@ -16,12 +16,7 @@ class QFile;
 
 // Reader, editor and writer for Gracia .mint volumetric captures.
 //
-// The container and the attribute reconstruction are specified in MINT_FORMAT.md,
-// which this class implements; the despill operator is specified in DESPILL.md.
-// Both live next to this file. Where a comment below says "see 6.4" it means a
-// section of MINT_FORMAT.md.
-//
-// Only the observed format-6 container is supported, and the input is assumed to
+// Supports the format-6 container. The input is assumed to
 // be a well-formed file from Gracia: open() validates structure enough to fail
 // cleanly on something that is not a .mint, but it is not a hardened parser for
 // untrusted input.
@@ -176,7 +171,11 @@ public:
     QString path() const { return m_path; }
     quint64 fileSize() const { return m_fileSize; }
     quint64 payloadStart() const { return m_payloadStart; }
+    bool hasAudio() const { return m_audioSize != 0; }
+    // The embedded MP3. Header-only opens report its presence without reading it.
+    QByteArray audio() const;
     double duration() const { return m_duration; }
+    int shDegree() const { return m_shDegree; }
     const QVector<MintChunk>& chunks() const { return m_chunks; }
     const double* boundingBox() const { return m_bbox; }  // minXYZ then maxXYZ
     quint64 splatCount() const;
@@ -247,7 +246,9 @@ private:
     bool m_headerOnly = false;
     quint64 m_payloadStart = 0;
     quint64 m_indexOffset = 0;
+    quint64 m_audioOffset = 0, m_audioSize = 0;
     double m_duration = 0.0;
+    int m_shDegree = 0;
     double m_bbox[6] = {0, 0, 0, 0, 0, 0};
     QVector<MintChunk> m_chunks;
     bool m_modified = false;

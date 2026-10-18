@@ -15,6 +15,7 @@
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+#include <QTemporaryFile>
 
 namespace {
 constexpr uint32_t sharedSlots[]={8,112,128,168,184,208,232,248,264,304,320};
@@ -30,7 +31,7 @@ const vgs::Bytes *array(const vgs::DecodedChunk &chunk,uint32_t group,uint32_t a
     return nullptr;
 }
 vgs::DecodedChunk prepare(vgs::DecodedChunk chunk,int degree,uint64_t intervals) {
-    setNativeShDegree(chunk,degree,3);
+    setNativeShDegree(chunk,degree,degree ? 3 : 0);
     if (chunk.groups.empty() || chunk.groups.front().type!=0) throw std::runtime_error("MINT export requires a shared dictionary block.");
     if (chunk.groups.size()==1) {vgs::Group empty;empty.type=1;empty.intervals=intervals;chunk.groups.push_back(empty);}
     return chunk;
@@ -54,47 +55,57 @@ BlockPlan blockPlan(const vgs::DecodedChunk &chunk,uint32_t group) {
 }
 }
 void writeMintSequence(const vgs::Header &source,const std::function<vgs::DecodedChunk(size_t)> &provider,
-                       const vgs::WriteSink &sink,const vgs::Progress &progress) {
+                       const vgs::WriteSink &sink,const vgs::Progress &progress,const vgs::Bytes &audio) {
     if (source.chunks.empty() || !source.timeDenominator || !provider || !sink) throw std::runtime_error("Invalid MINT sequence.");
     const size_t count=source.chunks.size();const double tick=double(source.timeNumerator)/source.timeDenominator;
     auto report=[&](size_t done) {if (progress && !progress(int(done),int(2*count))) throw std::runtime_error("Export canceled.");};
-    std::vector<std::vector<BlockPlan>> plans(count);size_t metadataSize=48+56+24*count;
+    const size_t indexOffset=audio.empty() ? 48 : 80;
+    std::vector<std::vector<BlockPlan>> plans(count);size_t metadataSize=indexOffset+56+24*count;
+    // The directory precedes the data. Spool each prepared chunk once to disk instead
+    // of rerunning modifiers on a second pass or retaining the whole capture in RAM.
+    QTemporaryFile payload;if (!payload.open()) throw std::runtime_error(payload.errorString().toStdString());
+    const uint8_t zeros[256]={};
+    auto append=[&](const uint8_t *bytes,uint64_t size) {if (payload.write(reinterpret_cast<const char *>(bytes),qint64(size))!=qint64(size)) throw std::runtime_error(payload.errorString().toStdString());};
     std::array<double,6> bounds{};bool any=false;
     for (size_t ci=0;ci<count;++ci) {
         report(ci);auto chunk=prepare(provider(ci),source.shDegree,source.chunks[ci].intervals);
         for (uint32_t group=0;group<chunk.groups.size();++group) {plans[ci].push_back(blockPlan(chunk,group));metadataSize+=32+plans[ci].back().header.size();}
-        vgs::FrameDecoder decoder(chunk,tick);
+        vgs::FrameDecoder decoder(chunk,tick,vgs::FrameDecoder::Contents::Positions);std::vector<float> positions;
         for (uint64_t sample=0;sample<source.chunks[ci].intervals;++sample) {
-            const auto frame=decoder.evaluate(double(sample)/source.chunks[ci].intervals,false);
-            for (size_t row=0;row<frame.count;++row) if (frame.active[row]) {
-                for (int axis=0;axis<3;++axis) {const double v=frame.position[row*3+axis];bounds[axis]=any ? std::min(bounds[axis],v) : v;bounds[axis+3]=any ? std::max(bounds[axis+3],v) : v;}
-                any=true;
+            decoder.evaluatePositions(double(sample)/source.chunks[ci].intervals,&positions);size_t record=0;
+            for (uint32_t group=1;group<chunk.groups.size();++group) {
+                const auto *life=array(chunk,group,vgs::Lifetimes);
+                if (!life || life->size()<chunk.groups[group].splats*2) throw std::runtime_error("Invalid MINT lifetimes.");
+                for (size_t row=0;row<chunk.groups[group].splats;++row,++record) if (sample>=(*life)[2*row] && sample+1<=(*life)[2*row+1]) {
+                    for (int axis=0;axis<3;++axis) {const double v=positions[record*3+axis];bounds[axis]=any ? std::min(bounds[axis],v) : v;bounds[axis+3]=any ? std::max(bounds[axis+3],v) : v;}
+                    any=true;
+                }
             }
+        }
+        for (uint32_t group=0;group<chunk.groups.size();++group) for (size_t i=0;i<plans[ci][group].sizes.size();++i) {
+            const auto size=plans[ci][group].sizes[i];if (!size) continue;
+            const auto *bytes=array(chunk,group,(group==0 ? vgs::ScaleLut : vgs::ScaleIndices)+uint32_t(i));append(bytes->data(),size);
+            uint64_t padding=padded(size)-size;while (padding) {const auto n=std::min<uint64_t>(padding,sizeof zeros);append(zeros,n);padding-=n;}
         }
     }
     metadataSize=(metadataSize+255)/256*256;vgs::Bytes metadata(metadataSize);
-    put64(metadata,0,6);put64(metadata,8,1);put64(metadata,16,metadataSize);put64(metadata,24,1);put64(metadata,40,48);
-    put64(metadata,48,count);for (int i=0;i<6;++i) putDouble(metadata,56+i*8,bounds[i]);
-    size_t descriptor=104+count*24;uint64_t payloadOffset=0;
+    put64(metadata,0,6);put64(metadata,8,audio.empty() ? 1 : 2);put64(metadata,16,metadataSize);put64(metadata,24,1);put64(metadata,40,indexOffset);
+    put64(metadata,indexOffset,count);for (int i=0;i<6;++i) putDouble(metadata,indexOffset+8+i*8,bounds[i]);
+    size_t descriptor=indexOffset+56+count*24;uint64_t payloadOffset=0;
     for (size_t ci=0;ci<count;++ci) {
-        const size_t entry=104+ci*24;putDouble(metadata,entry,source.chunks[ci].intervals*tick);put64(metadata,entry+8,plans[ci].size());put64(metadata,entry+16,descriptor);
+        const size_t entry=indexOffset+56+ci*24;putDouble(metadata,entry,source.chunks[ci].intervals*tick);put64(metadata,entry+8,plans[ci].size());put64(metadata,entry+16,descriptor);
         for (size_t group=0;group<plans[ci].size();++group) {
             const auto &plan=plans[ci][group];put64(metadata,descriptor,group==0 ? 3 : 1);put64(metadata,descriptor+8,payloadOffset);put64(metadata,descriptor+16,plan.payloadSize);put64(metadata,descriptor+24,plan.header.size());
             std::copy(plan.header.begin(),plan.header.end(),metadata.begin()+descriptor+32);descriptor+=32+plan.header.size();payloadOffset+=plan.payloadSize;
         }
     }
-    sink(0,metadata.data(),metadata.size());uint64_t offset=metadataSize;const uint8_t zeros[256]={};
+    if (!audio.empty()) {put64(metadata,48,2);put64(metadata,64,payloadOffset);put64(metadata,72,audio.size());}
+    if (uint64_t(payload.size())!=payloadOffset || !payload.seek(0)) throw std::runtime_error("Invalid MINT payload spool.");
+    sink(0,metadata.data(),metadata.size());uint64_t offset=metadataSize;
     for (size_t ci=0;ci<count;++ci) {
-        report(count+ci);auto chunk=prepare(provider(ci),source.shDegree,source.chunks[ci].intervals);
-        if (chunk.groups.size()!=plans[ci].size()) throw std::runtime_error("MINT source changed during export.");
-        for (uint32_t group=0;group<chunk.groups.size();++group) {
-            const auto &plan=plans[ci][group];if (blockPlan(chunk,group).header!=plan.header) throw std::runtime_error("MINT attributes changed during export.");
-            for (size_t i=0;i<plan.sizes.size();++i) {
-                const auto *bytes=array(chunk,group,(group==0 ? vgs::ScaleLut : vgs::ScaleIndices)+uint32_t(i));const auto size=plan.sizes[i];
-                if (size) {sink(offset,bytes->data(),size);offset+=size;uint64_t padding=padded(size)-size;
-                    while (padding) {const size_t n=size_t(std::min<uint64_t>(padding,sizeof zeros));sink(offset,zeros,n);offset+=n;padding-=n;}}
-            }
-        }
+        report(count+ci);uint64_t remaining=0;for (const auto &plan:plans[ci]) remaining+=plan.payloadSize;
+        while (remaining) {const auto bytes=payload.read(qint64(std::min<uint64_t>(remaining,4*1024*1024)));if (bytes.isEmpty()) throw std::runtime_error("Cannot read MINT payload spool.");sink(offset,reinterpret_cast<const uint8_t *>(bytes.constData()),size_t(bytes.size()));offset+=bytes.size();remaining-=bytes.size();}
     }
+    if (!audio.empty()) sink(offset,audio.data(),audio.size());
     report(2*count);
 }

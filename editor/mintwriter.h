@@ -13,7 +13,8 @@
 #include <functional>
 
 // Rebuild a Gracia format-6 container from edited encoding-0 attributes.
-// MINT holds raw padded arrays and always carries fifteen higher SH slots.
+// MINT holds raw padded arrays. Degree 0 omits higher SH; other degrees use fifteen slots.
+// Optional MP3 bytes follow the geometry, referenced by a type-2 payload-relative record.
 void writeMintSequence(const vgs::Header &,
                        const std::function<vgs::DecodedChunk(size_t)> &,
-                       const vgs::WriteSink &,const vgs::Progress & = {});
+                       const vgs::WriteSink &,const vgs::Progress & = {},const vgs::Bytes &audio = {});

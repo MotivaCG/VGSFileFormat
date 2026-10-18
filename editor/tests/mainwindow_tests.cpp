@@ -20,6 +20,14 @@
 #include "vgssign.h"
 #include "editortheme.h"
 #include "capturesettingsdialog.h"
+#include "audiomix.h"
+#include "mintwriter.h"
+#include <QAudioOutput>
+#include <QMediaPlayer>
+#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
+#include <QAudioBufferOutput>
+#include <QAudioBuffer>
+#endif
 #include <QApplication>
 #include <QSurfaceFormat>
 #include <QTemporaryDir>
@@ -50,6 +58,71 @@
 class MainWindowTests : public QObject {
     Q_OBJECT
 private slots:
+    void audioSourcesPlayAndKeepTheirLayers_data() {
+        QTest::addColumn<QString>("format");QTest::addColumn<bool>("external");QTest::addColumn<bool>("mp3");
+        QTest::newRow("embedded-vgs")<<QString("vgs")<<false<<false;
+        QTest::newRow("embedded-mint")<<QString("mint")<<false<<false;
+        QTest::newRow("external-wav")<<QString("vgs")<<true<<false;
+        QTest::newRow("external-mp3")<<QString("vgs")<<true<<true;
+    }
+    void audioSourcesPlayAndKeepTheirLayers() {
+        QFETCH(QString,format);QFETCH(bool,external);QFETCH(bool,mp3);
+        QTemporaryDir dir;QVERIFY(dir.isValid());QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());
+        const int rate=24000,samples=rate*3;QByteArray pcm(samples*2,0);
+        for (int i=0;i<samples;++i) {const qint16 value=qint16(4000*std::sin(2*3.14159265358979*440*i/rate));pcm[i*2]=char(value);pcm[i*2+1]=char(value>>8);}
+        auto u32=[](QByteArray &b,quint32 value) {for (int i=0;i<4;++i) b.append(char(value>>(8*i)));};
+        auto u16=[](QByteArray &b,quint16 value) {b.append(char(value));b.append(char(value>>8));};
+        QByteArray wav("RIFF");u32(wav,36+pcm.size());wav+="WAVEfmt ";u32(wav,16);u16(wav,1);u16(wav,1);u32(wav,rate);u32(wav,rate*2);u16(wav,2);u16(wav,16);wav+="data";u32(wav,pcm.size());wav+=pcm;
+        QString sound=dir.filePath("external.wav");QFile track(sound);QVERIFY(track.open(QIODevice::WriteOnly));QCOMPARE(track.write(wav),wav.size());track.close();
+        QByteArray embedded=wav;
+        if (format=="mint" || mp3) {if (ffmpegPath().isEmpty()) QSKIP("ffmpeg is needed to create the MP3 fixture.");embedded=mixAudioMp3({{sound,0,1,false}},3);}
+        if (mp3) {sound=dir.filePath("external.mp3");QFile encoded(sound);QVERIFY(encoded.open(QIODevice::WriteOnly));QCOMPARE(encoded.write(embedded),embedded.size());}
+        vgs::Frame frame;frame.count=1;frame.active={1};frame.position={0,1,0};frame.rotation={0,0,0,1};frame.scale={.01f,.02f,.03f};frame.colorDc={.5f,.5f,.5f};frame.opacity={1};
+        vgs::Header h;h.shDegree=0;h.timeDenominator=25;h.frameCount=h.durationTicks=100;h.chunks.resize(100);
+        for (size_t i=0;i<h.chunks.size();++i) {h.chunks[i].startTick=i;h.chunks[i].intervals=1;}
+        const auto capture=dir.filePath("source."+format);QFile file(capture);QVERIFY(file.open(QIODevice::WriteOnly));
+        auto provider=[&](size_t) {return packExportFrame(frame,0);};
+        auto sink=[&](uint64_t at,const uint8_t *data,size_t count) {if (!file.seek(qint64(at)) || file.write(reinterpret_cast<const char *>(data),qint64(count))!=qint64(count)) throw std::runtime_error("Cannot create audio fixture.");};
+        if (format=="mint") writeMintSequence(h,provider,sink,{},vgs::Bytes(embedded.begin(),embedded.end()));
+        else {vgs::EncodeOptions options;options.signer=vgs::authoringSigner();options.shDegree=0;options.compression=vgs::Compression::None;
+            if (!external) options.extras.push_back({vgs::AudioExtra,vgs::Wav,vgs::Bytes(embedded.begin(),embedded.end())});vgs::encodeSequence(h,provider,sink,options);}
+        file.close();QString input=capture,error;
+        if (external) {Project project;project.asset=capture;project.out=99/25.;Modifier audio;audio.id=Project::newId();audio.type=ModifierType::Audio;audio.name="Music";audio.audioFile=sound;project.modifiers.append(audio);
+            input=dir.filePath("external.vgsproj");QVERIFY2(project.write(input,&error),qPrintable(error));}
+        MainWindow window(nullptr,dir.filePath("presets"));window.show();QVERIFY(QTest::qWaitForWindowExposed(&window));window.openPath(input);
+        auto *viewport=window.findChild<Viewport *>();auto *tree=window.findChild<QTreeWidget *>("modifierTree");QVERIFY(viewport && tree);
+        QTRY_VERIFY_WITH_TIMEOUT(!window.findChildren<QMediaPlayer *>().isEmpty(),10000);
+        auto *player=window.findChild<QMediaPlayer *>();QVERIFY(player);QTRY_VERIFY_WITH_TIMEOUT(player->hasAudio(),5000);QCOMPARE(player->error(),QMediaPlayer::NoError);
+        QVERIFY(player->audioOutput());QCOMPARE(player->audioOutput()->volume(),1.f);QVERIFY(!player->audioOutput()->isMuted());player->audioOutput()->setMuted(true);
+        QTreeWidgetItem *audioItem=nullptr;for (int i=0;i<tree->topLevelItemCount();++i) if (tree->topLevelItem(i)->text(1)=="Audio") {QVERIFY(!audioItem);audioItem=tree->topLevelItem(i);}
+        QVERIFY(audioItem);tree->setCurrentItem(audioItem);
+        auto *source=window.findChild<QComboBox *>("audioSourceType");auto *label=window.findChild<QLabel *>("audioSource");QVERIFY(source && label);QVERIFY(source->isVisible());QCOMPARE(source->currentIndex(),external ? 1 : 0);
+        QVERIFY(label->text().contains(external ? QFileInfo(sound).fileName() : QString("capture's own track")));
+#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
+        auto buffers=std::make_unique<QAudioBufferOutput>();player->setAudioBufferOutput(buffers.get());bool heard=false;
+        connect(buffers.get(),&QAudioBufferOutput::audioBufferReceived,&window,[&](const QAudioBuffer &b) {if (b.isValid()) {const auto *data=b.constData<char>();heard |= std::any_of(data,data+b.byteCount(),[](char c) {return c!=0;});}});
+#endif
+        window.activateWindow();QApplication::setActiveWindow(&window);viewport->setFocus();QTest::keyClick(viewport,Qt::Key_Space);
+        QTRY_COMPARE_WITH_TIMEOUT(player->playbackState(),QMediaPlayer::PlayingState,5000);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
+        QTRY_VERIFY_WITH_TIMEOUT(heard,5000);buffers.reset();
+#endif
+        QTest::keyClick(viewport,Qt::Key_Space);QTRY_VERIFY(player->playbackState()!=QMediaPlayer::PlayingState);
+        auto *slider=window.findChild<RangeSlider *>();QVERIFY(slider);emit slider->playheadChanged(25);QTRY_VERIFY(std::abs(player->position()-1000)<100);
+        const auto saved=dir.filePath("saved.vgsproj");QVERIFY2(window.saveTo(saved,&error),qPrintable(error));Project restored;QVERIFY2(Project::read(saved,&restored,&error),qPrintable(error));
+        QCOMPARE(restored.audioModifiers().size(),1);QCOMPARE(restored.audioModifiers().front()->audioFile,external ? sound : QString());
+        if (external) {
+            source->setCurrentIndex(0);QVERIFY(QMetaObject::invokeMethod(source,"activated",Qt::DirectConnection,Q_ARG(int,0)));
+            QCOMPARE(source->currentIndex(),0);QTRY_COMPARE(window.findChildren<QMediaPlayer *>().size(),1);QVERIFY(!window.findChild<QMediaPlayer *>()->hasAudio());
+            auto *undo=window.findChild<QAction *>("editUndo");
+            QVERIFY(undo && undo->isEnabled());undo->trigger();QCOMPARE(source->currentIndex(),1);QTRY_VERIFY(window.findChild<QMediaPlayer *>()->hasAudio());
+        }
+        audioItem->setCheckState(0,Qt::Unchecked);QTRY_VERIFY(window.findChildren<QMediaPlayer *>().isEmpty());
+        QVERIFY2(window.saveTo(saved,&error),qPrintable(error));const auto revision=viewport->frameRevision();window.openPath(saved);QTRY_VERIFY(viewport->frameRevision()>revision);
+        QTRY_VERIFY(tree->isEnabled());QCOMPARE(window.findChildren<QMediaPlayer *>().size(),0);QVERIFY2(window.saveTo(saved,&error),qPrintable(error));QVERIFY(Project::read(saved,&restored,&error));
+        int audioCount=0;for (const auto &m:restored.modifiers) if (m.type==ModifierType::Audio) {++audioCount;QVERIFY(!m.enabled);}QCOMPARE(audioCount,1);
+        window.setWindowModified(false);
+    }
     void cacheMenuPrecalculatesAndShowsPerLayerIndicators() {
         QTemporaryDir dir;QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());
         const auto source=dir.filePath("cache.pgs");vgs::Frame f;

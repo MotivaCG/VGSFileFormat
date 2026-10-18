@@ -1,5 +1,26 @@
 # Playback measurements, 2026-10-17
 
+## MINT compatibility and export, 2026-10-18
+
+The installed GraciaStudio desktop interface opens a same-basename MP3 companion when
+loading a MINT. The embedded type-2 MP3 is valid independently: the native reader reports
+`has_audio=true` for the original and the editor's reexport. Export now produces both files.
+The native reader also accepts the reexport of `tempboxing_sinsh3.mint`, preserving the
+absence of higher SH dictionaries and indices. Both companions retain the original 42,840
+MP3 bytes unchanged in the no-ffmpeg roundtrip test.
+
+On `tempboxing.mint`, a 31-frame PGS export with Purge Isolated took 6,692.6 ms without
+preview visibility and 3,372.6 ms after precalculation (4,227.5 ms to bake). There were 31
+export cache hits, with 4,048,284 bytes of visibility retention. Positions, colours, opacity
+and full SH matched at the compared times. This measures an uncompressed PGS export of
+this short capture, not compressed VGS performance or the cost of exporting a morph.
+
+Export visibility access uses weak references to existing masks and checks source identity,
+modifier dependencies, transform, frame and record counts. Invalidated or evicted entries
+fall back to computation. Export colour processing, morph fitting, encoding and output
+verification remain separate work. MINT payloads are spooled to a temporary file in one
+preparation pass, avoiding a second modifier pass and full-capture RAM retention.
+
 Measurements use Release/MSVC, Qt 6.8.0, RTX 4070, full source SH and the local `morph.vgsproj` referencing `arabs.mint`. The original project and capture are unchanged.
 
 `playback_bench` processes every requested frame and forces a framebuffer readback. Its timings include GPU completion and image transfer to the CPU. They are conservative and differ from normal playback, which overlaps worker processing with rendering. `mainwindow_tests::playbackTimingOnARealCapture` measures distinct presented frames in the actual editor after five seconds of warm-up.
