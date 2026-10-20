@@ -105,7 +105,7 @@ public:
 signals:
     void closeAborted();
     void mcpEnabledRequested(bool enabled);
-    void openRequested(QString path, quint64 generation, bool sh, quint64 request);
+    void openRequested(QString path, quint64 generation, bool sh, quint64 request,Project project={});
     void decodeRequested(double time, quint64 generation, bool sh,Project project, quint64 request);
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -179,6 +179,8 @@ private:
     void refreshPresets(const QString &selectedPath = {});
     void openPresetFolder();
     void editCaptureSettings();
+    void applyCaptureSettings(const CaptureSettings &settings);
+    void syncPlyTiming();
     void syncModifiers();
     void revealModifierProperties();
     Project defaultProject() const;

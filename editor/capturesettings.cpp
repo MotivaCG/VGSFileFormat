@@ -18,9 +18,10 @@ QJsonObject CaptureSettings::json() const {
         {"takeName",takeName},{"studio",studio},{"copyright",copyright},{"softwareName",softwareName},{"softwareVersion",softwareVersion},
         {"tags",QJsonArray::fromStringList(tags)},{"extraJson",extraJson},{"plain",plain},{"shDegree",shDegree},{"playbackMode",playbackMode},
         {"despill",despill},{"despillStrength",despillStrength},{"greenGain",greenGain},{"viewChromaScale",viewChromaScale},{"recoverSkin",recoverSkin},
-        {"normals",normals},{"normalRig",normalRig==1 ? QStringLiteral("THE4DSCANNER") : QStringLiteral("SMNV1")}};
+        {"normals",normals},{"normalRig",normalRig==1 ? QStringLiteral("THE4DSCANNER") : QStringLiteral("SMNV1")},{"plyFps",plyFps},{"plyRowOffset",plyRowOffset}};
 }
 bool CaptureSettings::validate(QString *error) const {
+    if (!std::isfinite(plyFps) || plyFps<1 || plyFps>1000 || plyRowOffset<0 || plyRowOffset>10000000) {*error=QStringLiteral("Invalid PLY frame rate or birth row offset.");return false;}
     for (const auto &value : {catalogueId,title,author,projectName,takeName,studio,copyright,softwareName,softwareVersion})
         if (value.toUtf8().size()>1024) { *error = QStringLiteral("Metadata fields must not exceed 1024 UTF-8 bytes."); return false; }
     if (tags.size()>256) { *error = QStringLiteral("Use no more than 256 tags."); return false; }
@@ -49,6 +50,8 @@ bool CaptureSettings::fromJson(const QJsonObject &o,CaptureSettings *result,QStr
     s.plain = boolean("plain"); s.despill = boolean("despill"); s.recoverSkin = boolean("recoverSkin");
     s.shDegree = integer("shDegree"); s.playbackMode = integer("playbackMode");
     s.despillStrength = number("despillStrength"); s.greenGain = number("greenGain"); s.viewChromaScale = number("viewChromaScale");
+    if (o.contains("plyFps")) s.plyFps=number("plyFps");
+    if (o.contains("plyRowOffset")) s.plyRowOffset=integer("plyRowOffset");
     // Added later: settings saved before them keep the defaults.
     if (o.contains("normals")) s.normals = boolean("normals");
     if (o.contains("normalRig")) {

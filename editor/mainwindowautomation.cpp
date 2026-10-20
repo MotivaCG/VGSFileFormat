@@ -385,7 +385,7 @@ QJsonObject MainWindow::automationCommand(const QString &method,const QJsonObjec
     }
     if (method=="export_settings") {
         auto root=w.project_.json(w.projectPath_);root["captureSettings"]=merge(root["captureSettings"].toObject(),a);
-        Project parsed;validateAutomationProject(root,&parsed);w.project_.captureSettings=parsed.captureSettings;automationChanged();return state();
+        Project parsed;validateAutomationProject(root,&parsed);w.applyCaptureSettings(parsed.captureSettings);if (!w.loading_) automationChanged();return state();
     }
     if (method=="save") {
         const QString path=QFileInfo(text(a,"path")).absoluteFilePath();

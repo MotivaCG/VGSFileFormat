@@ -113,6 +113,9 @@ void CaptureWorker::trimFramePool() {
 }
 void CaptureWorker::clear() {
     memoryTimer_->stop();clearColours();
+#ifndef VGS_VIEWER
+    ply_.reset();
+#endif
     vgs_.reset(); source_.reset(); mint_.reset(); info_ = {}; generation_ = 0; pruneScores_.clear(); morph_.reset();morphScratch_={}; morphKey_.clear(); clearVisibility();framePool_={};
     dependencyRevision_=0;dependencyVisibilityKeys_={};dependencyMorphKey_.clear();dependencyColourKey_.clear();
 }
@@ -245,6 +248,9 @@ size_t CaptureWorker::Visibility::bytes() const {return sizeof(Visibility)+sizeo
 const std::vector<float> &CaptureWorker::pruneScores(size_t chunk) {
     if (auto it = pruneScores_.find(chunk); it != pruneScores_.end()) return it->second;
     double start, end;
+#ifndef VGS_VIEWER
+    if (ply_) {const auto &c=ply_->chunks().at(qsizetype(chunk));start=c.first/info_.fps;end=(c.first+c.frames)/info_.fps;} else
+#endif
     if (mint_) { const auto &c = mint_->chunks().at(qsizetype(chunk)); start = c.start; end = c.start + c.duration; }
     else { const auto &c = vgs_->chunk(chunk); start = c.startSeconds; end = c.endSeconds; }
     std::vector<vgs::Frame> samples;
@@ -281,6 +287,14 @@ FramePtr CaptureWorker::frame(double time, bool includeSh) {
     const uint8_t *a; uint64_t count; int coefficients = 0; size_t chunkIndex = 0;
     auto out=reusableFrame();
     MintFrame mintFrame;
+#ifndef VGS_VIEWER
+    vgs::Frame plyFrame;
+    if (ply_) {
+        plyFrame=ply_->frame(time,includeSh);const auto &f=plyFrame;
+        p=f.position.data();r=f.rotation.data();s=f.scale.data();c=f.colorDc.data();o=f.opacity.data();a=f.active.data();count=f.count;
+        sh=f.shRest.empty() ? nullptr : f.shRest.data();coefficients=f.shCoefficients;chunkIndex=size_t(f.chunkIndex);
+    } else
+#endif
     if (mint_) {
         QString error;
         if (!mint_->decode(time, &mintFrame, includeSh, &error, &out->sh)) throw std::runtime_error(error.toStdString());
@@ -326,6 +340,12 @@ FramePtr CaptureWorker::frame(double time, bool includeSh) {
 void CaptureWorker::openRequest(const QString &path, quint64 generation, bool sh, quint64 request) {
     const QScopedValueRollback<quint64> scope(request_,request);open(path,generation,sh);
 }
+#ifndef VGS_VIEWER
+void CaptureWorker::openSourceRequest(const QString &path,quint64 generation,bool sh,quint64 request,Project project) {
+    openingPly_=project.plySequence;openingPlyFps_=project.captureSettings.plyFps;openingPlyOffset_=project.captureSettings.plyRowOffset;
+    openRequest(path,generation,sh,request);openingPly_={};openingPlyFps_=30;openingPlyOffset_=0;
+}
+#endif
 void CaptureWorker::decodeRequest(double time, quint64 generation, bool sh, Project project, quint64 request) {
     const QScopedValueRollback<quint64> scope(request_,request);decode(time,generation,sh,std::move(project));
 }
@@ -339,6 +359,14 @@ void CaptureWorker::open(const QString &path, quint64 generation, bool sh) {
         candidate.info_.path = QFileInfo(path).absoluteFilePath();
         candidate.info_.title = QFileInfo(path).completeBaseName();
         candidate.info_.format = ext.toUpper();
+#ifndef VGS_VIEWER
+        if (ext=="ply") {
+            auto saved=openingPly_;if (!saved.empty()) saved.rowOffset=openingPlyOffset_;
+            candidate.ply_=std::make_unique<PlySequence>(path,saved,openingPlyFps_,[&](int done,int total,const QString &file) {emit sourceProgress(done,total,file,generation,request_);});
+            candidate.info_.plySequence=candidate.ply_->spec();candidate.info_.fps=candidate.ply_->fps();candidate.info_.duration=candidate.ply_->frames()/candidate.info_.fps;
+            candidate.info_.shDegree=candidate.ply_->degree();bounds=candidate.ply_->bounds();
+        } else
+#endif
         if (ext == "mint") {
             candidate.mint_ = std::make_unique<MintFile>(); QString error;
             if (!candidate.mint_->openReadOnly(path, &error)) throw std::runtime_error(error.toStdString());
@@ -366,14 +394,20 @@ void CaptureWorker::open(const QString &path, quint64 generation, bool sh) {
                 const auto format = candidate.vgs_->audioFormat();
                 candidate.info_.audioSuffix = format == Format::Mp3 ? "mp3" : format == Format::Aac ? "m4a" : format == Format::Opus ? "opus" : format == Format::Wav ? "wav" : "";
             }
+#ifdef VGS_VIEWER
         } else throw std::runtime_error("Unsupported format. Open a .vgs, .pgs or .mint file.");
+#else
+        } else throw std::runtime_error("Unsupported format. Open a .vgs, .pgs, .mint or .ply file.");
+#endif
         if (!std::isfinite(candidate.info_.duration) || candidate.info_.duration <= 0 ||
             !std::isfinite(candidate.info_.fps) || candidate.info_.fps <= 0 ||
             candidate.info_.duration * candidate.info_.fps > std::numeric_limits<int>::max() - 1)
             throw std::runtime_error("The capture has an invalid timeline.");
         candidate.info_.frames = std::max(1, int(std::ceil(candidate.info_.duration * candidate.info_.fps - 1e-6)));
 #ifndef VGS_VIEWER
-        if (candidate.mint_) {
+        if (candidate.ply_) {
+            for (int i=1;i<candidate.ply_->chunks().size();++i) candidate.info_.chunkBoundaries.append(candidate.ply_->chunks()[i].first/candidate.info_.fps);
+        } else if (candidate.mint_) {
             const auto &chunks = candidate.mint_->chunks();
             for (qsizetype i = 1; i < chunks.size(); ++i)
                 candidate.info_.chunkBoundaries.append(chunks[i].start);
@@ -390,6 +424,9 @@ void CaptureWorker::open(const QString &path, quint64 generation, bool sh) {
         auto first = candidate.frame(0, sh);
         vgs_.reset(); source_.reset(); mint_.reset();
         source_ = std::move(candidate.source_); vgs_ = std::move(candidate.vgs_); mint_ = std::move(candidate.mint_);
+#ifndef VGS_VIEWER
+        ply_=std::move(candidate.ply_);
+#endif
         framePool_={};clearColours();dependencyRevision_=0;dependencyMorphKey_.clear();info_ = candidate.info_; generation_ = generation; pruneScores_.clear(); morph_.reset();morphScratch_={}; morphKey_.clear(); clearVisibility();
         {const QFileInfo file(path);std::lock_guard<std::mutex> lock(exportStore_->mutex);exportStore_->asset=file.canonicalFilePath();exportStore_->fileSize=file.size();exportStore_->modified=file.lastModified().toMSecsSinceEpoch();}
         memoryTimer_->start();relieveMemoryPressure();
@@ -403,6 +440,20 @@ void CaptureWorker::open(const QString &path, quint64 generation, bool sh) {
 void CaptureWorker::decode(double time, quint64 generation, bool sh,Project project) {
     if (generation != generation_) { emit failed("Capture replaced.", generation, false);emit failedRequest("Capture replaced.",generation,false,request_);return; }
     try {
+#ifndef VGS_VIEWER
+        if (ply_) {
+            if (project.captureSettings.plyRowOffset!=ply_->spec().rowOffset) {
+                auto spec=project.plySequence.empty() ? ply_->spec() : project.plySequence;spec.rowOffset=project.captureSettings.plyRowOffset;spec.chunks.clear();
+                auto replacement=std::make_unique<PlySequence>(info_.path,spec,project.captureSettings.plyFps);
+                ply_=std::move(replacement);info_.plySequence=ply_->spec();info_.chunkBoundaries.clear();
+                for (int start:ply_->spec().chunks) if (start>0) info_.chunkBoundaries.append(start/ply_->fps());
+                project.plySequence=info_.plySequence;clearVisibility();clearColours();pruneScores_.clear();morph_.reset();morphKey_.clear();framePool_={};
+                emit sourceReindexed(info_,generation);
+            }
+            if (ply_->fps()!=project.captureSettings.plyFps) clearColours();
+            ply_->setFps(project.captureSettings.plyFps);info_.fps=ply_->fps();info_.duration=ply_->frames()/info_.fps;
+        }
+#endif
         preparePreview(project);
         relieveMemoryPressure();
         const auto out=evaluate(time,sh,project);

@@ -15,6 +15,7 @@ INCLUDEPATH += $$PWD $$EDITOR $$EDITOR/dependencies/mint $$EDITOR/dependencies/e
     $$VGS_ROOT/decoder/include $$VGS_ROOT/core/include/vgs $$VGS_ROOT/core/crypto $$VGS_ROOT/core/src
 
 SOURCES += $$PWD/viewermain.cpp $$PWD/viewerwindow.cpp \
+    $$EDITOR/plysequencespec.cpp \
     $$EDITOR/editortheme.cpp $$EDITOR/displayscaling.cpp $$EDITOR/viewport.cpp $$EDITOR/viewcube.cpp \
     $$EDITOR/rangeslider.cpp $$EDITOR/audiopreview.cpp $$EDITOR/captureworker.cpp $$EDITOR/isolation.cpp $$EDITOR/loopmorph.cpp \
     $$EDITOR/pruning.cpp $$EDITOR/project.cpp $$EDITOR/modifiers.cpp $$EDITOR/capturesettings.cpp $$EDITOR/previewmemory.cpp \

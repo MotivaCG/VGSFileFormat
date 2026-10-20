@@ -291,9 +291,9 @@ async def pause_playback() -> dict[str, Any]:
 
 @mcp.tool(title="Import capture", annotations=WRITE)
 async def import_capture(path: str, discard_unsaved: bool = False) -> dict[str, Any]:
-    """Import a local .vgs/.pgs/.mint capture on the editor PC into a new project (File > Import capture) and wait for decoding. Embedded audio automatically gets a Capture audio layer. Replaces the current project and resets undo history. Unsaved work blocks it unless discard_unsaved=true explicitly abandons it. Does not overwrite the source. For a .vgsproj use open_project."""
-    if Path(path).suffix.lower() not in (".vgs", ".pgs", ".mint"):
-        raise ToolError("import_capture takes a .vgs, .pgs or .mint capture; open a .vgsproj with open_project.")
+    """Import a local .vgs/.pgs/.mint/.ply on the editor PC and wait for decoding. A numbered PLY starts a forward sequence with the same prefix/digit width until the first missing file; unnumbered PLY is one frame. Sidecars are optional. PLY starts at 30 fps; set_export_settings(patch={'plyFps':24}) changes timing. Embedded audio automatically gets a Capture audio layer. Replaces the project and resets undo; unsaved work needs discard_unsaved=true. Does not overwrite the source. For .vgsproj use open_project. PLY details: vgs-editor://tools."""
+    if Path(path).suffix.lower() not in (".vgs", ".pgs", ".mint", ".ply"):
+        raise ToolError("import_capture takes a .vgs, .pgs, .mint or .ply capture; open a .vgsproj with open_project.")
     await _request("open", {"path": path, "discard_unsaved": discard_unsaved})
     return await _settled()
 
@@ -308,7 +308,7 @@ async def new_project(discard_unsaved: bool = False) -> dict[str, Any]:
 async def open_project(path: str, discard_unsaved: bool = False) -> dict[str, Any]:
     """Open a saved .vgsproj project on the editor PC (File > Open project) and wait for its capture to decode. Restores Audio sources, offsets, volume, looping and muted layers without adding duplicates. Replaces the current project and resets undo history. Unsaved work blocks it unless discard_unsaved=true explicitly abandons it. For a capture use import_capture."""
     if Path(path).suffix.lower() != ".vgsproj":
-        raise ToolError("open_project takes a .vgsproj project; import a .vgs, .pgs or .mint with import_capture.")
+        raise ToolError("open_project takes a .vgsproj project; import a .vgs, .pgs, .mint or .ply with import_capture.")
     await _request("open", {"path": path, "discard_unsaved": discard_unsaved})
     return await _settled()
 
@@ -655,7 +655,7 @@ async def save_project(path: str, overwrite: bool = False) -> dict[str, Any]:
 
 @mcp.tool(title="Set metadata and export options", annotations=EDIT)
 async def set_export_settings(patch: dict[str, Any]) -> dict[str, Any]:
-    """Undoably patch exact get_project.captureSettings fields, e.g. title/author/tags, shDegree, playbackMode, despill, or normals (bool, off by default) with normalRig ("SMNV1" or "THE4DSCANNER", the studio that recorded it). Unknown/invalid fields fail. Does not change range, select path or launch export. Some settings affect output only; extension selects format, plain is legacy."""
+    """Undoably patch exact get_project.captureSettings fields, e.g. title/author/tags, shDegree, playbackMode or normals (bool) with normalRig ('SMNV1'/'THE4DSCANNER'). For PLY, plyFps (1..1000, default 30) retimes playback/range/export while preserving frame indices; plyRowOffset (default 0) shifts birth-event row IDs, reindexes records and clears Erase picks (Undo restores both). Unknown/invalid fields fail. Does not select an output path or launch export. Extension selects output format; plain is legacy."""
     return await _edit("export_settings", patch)
 
 

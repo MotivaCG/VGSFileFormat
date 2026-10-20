@@ -24,6 +24,8 @@ struct CaptureSettings {
     bool normals = false;
     int normalRig = 0;
     int shDegree = -1,playbackMode = -1; // -1 preserves the source setting.
+    double plyFps = 30;
+    int plyRowOffset = 0;
     double despillStrength = 1,greenGain = 0.97,viewChromaScale = 0.5;
     QJsonObject json() const;
     bool validate(QString *error) const;

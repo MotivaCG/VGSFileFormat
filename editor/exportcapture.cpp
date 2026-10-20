@@ -23,6 +23,7 @@
 #include "audiomix.h"
 #include "mintfile.h"
 #include "captureworker.h"
+#include "plyexport.h"
 #include "mintskinrecovery.h"
 #include "despillcolor.h"
 #include "vgsdecoder/vgsdecoder.h"
@@ -341,6 +342,33 @@ public:
     bool read(uint64_t offset,size_t count,uint8_t *out) override {return file.seek(qint64(offset)) && file.read(reinterpret_cast<char *>(out),qint64(count))==qint64(count);}
     uint64_t size() const override {return uint64_t(file.size());}
 };
+// Transient logical chunks on disk: PLY trajectory fitting is done once, without
+// retaining the whole take in the encoder's prepared-chunk RAM cache.
+class PlyChunkSpool {
+    QTemporaryFile file_;std::map<size_t,qint64> offsets_;
+    void write(const void *data,size_t bytes) {if (file_.write(static_cast<const char *>(data),qint64(bytes))!=qint64(bytes)) throw std::runtime_error("Cannot spool PLY chunk.");}
+    void read(void *data,size_t bytes) {if (file_.read(static_cast<char *>(data),qint64(bytes))!=qint64(bytes)) throw std::runtime_error("Cannot read PLY chunk spool.");}
+public:
+    PlyFitCheck check;
+    vgs::DecodedChunk get(PlySequence &source,size_t index,int degree,const ExportProgress &progress,std::vector<uint32_t> &order) {
+        const auto found=offsets_.find(index);
+        if (found!=offsets_.end()) {
+            if (!file_.seek(found->second)) throw std::runtime_error("Cannot seek PLY chunk spool.");
+            uint32_t count=0;read(&count,4);if (count>10000000) throw std::runtime_error("Invalid PLY spool identity count.");order.resize(count);read(order.data(),order.size()*4);
+            vgs::DecodedChunk out;read(&count,4);if (count>64) throw std::runtime_error("Invalid PLY spool group count.");out.groups.resize(count);read(out.groups.data(),out.groups.size()*sizeof(vgs::Group));
+            read(&count,4);if (count>64) throw std::runtime_error("Invalid PLY spool page count.");out.pages.resize(count);
+            for (auto &p:out.pages) {read(&p.descriptor.attribute,4);read(&p.descriptor.group,4);uint64_t bytes=0;read(&bytes,8);if (bytes>512*previewmemory::MiB) throw std::runtime_error("Invalid PLY spool page.");p.bytes.resize(size_t(bytes));read(p.bytes.data(),p.bytes.size());p.descriptor.spec.rows=p.descriptor.totalRows=bytes;}
+            return assembleNativeChunk(std::move(out));
+        }
+        auto chunk=packPlySequenceChunk(source,index,degree,progress,&order,&check);
+        if (!file_.isOpen() && !file_.open()) throw std::runtime_error("Cannot create PLY chunk spool.");
+        if (!file_.seek(file_.size())) throw std::runtime_error("Cannot append PLY chunk spool.");offsets_[index]=file_.pos();
+        uint32_t count=uint32_t(order.size());write(&count,4);write(order.data(),order.size()*4);
+        count=uint32_t(chunk.groups.size());write(&count,4);write(chunk.groups.data(),chunk.groups.size()*sizeof(vgs::Group));count=uint32_t(chunk.pages.size());write(&count,4);
+        for (const auto &p:chunk.pages) {write(&p.descriptor.attribute,4);write(&p.descriptor.group,4);uint64_t bytes=p.bytes.size();write(&bytes,8);write(p.bytes.data(),p.bytes.size());}
+        return chunk;
+    }
+};
 vgs::Frame copyFrame(const vgsdec::Frame &f) {
     vgs::Frame out;out.count=f.splatCount;out.seconds=f.seconds;out.shCoefficients=f.shCoefficients;
     const size_t n=size_t(f.splatCount);out.position.assign(f.positions,f.positions+3*n);out.rotation.assign(f.rotations,f.rotations+4*n);
@@ -602,14 +630,20 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
     if (QFileInfo(project.asset).absoluteFilePath().compare(QFileInfo(destination).absoluteFilePath(),Qt::CaseInsensitive)==0)
         throw std::runtime_error("Choose a destination different from the source capture.");
     report(progress,0,QStringLiteral("Opening source capture"));
-    std::unique_ptr<MintFile> mint;std::unique_ptr<FileSource> source;std::unique_ptr<vgsdec::Capture> capture;
+    std::unique_ptr<MintFile> mint;std::unique_ptr<FileSource> source;std::unique_ptr<vgsdec::Capture> capture;std::unique_ptr<PlySequence> ply;
     ExportResult result;
     double rate,duration;int sourceDegree=3;vgs::Header header,sourceHeader;vgs::EncodeOptions options;
     std::unique_ptr<vgs::MintLogicalSource> nativeMint;bool native=supportsNativeTransform(project);
     // Native blocks test Remove green on the source's colours; one below a despilling Color
     // modifier needs the despilled ones, which only the sampled path has.
     if (native && project.captureSettings.despill && CompiledModifiers(project).greensAfterColour()) {native=false;result.notes << QStringLiteral("A Remove green below a despilling Color modifier tests despilled colours, so the export is sampled.");}
-    if (QFileInfo(project.asset).suffix().compare("mint",Qt::CaseInsensitive)==0) {
+    if (QFileInfo(project.asset).suffix().compare("ply",Qt::CaseInsensitive)==0) {
+        auto spec=project.plySequence;if (!spec.empty()) spec.rowOffset=project.captureSettings.plyRowOffset;
+        ply=std::make_unique<PlySequence>(project.asset,spec,project.captureSettings.plyFps,[&](int done,int total,const QString &) {report(progress,0,QStringLiteral("Indexing PLY sequence %1 / %2").arg(done).arg(total));});
+        rate=ply->fps();duration=ply->frames()/rate;sourceDegree=ply->degree();sourceHeader=plySequenceHeader(*ply);
+        header.timeNumerator=sourceHeader.timeNumerator;header.timeDenominator=sourceHeader.timeDenominator;
+        result.notes << QStringLiteral("PLY sequence: %1 frames, %2 source chunks, birth events %3; invisible-to-visible and scale-change splits enabled.").arg(ply->frames()).arg(ply->chunks().size()).arg(ply->spec().births.isEmpty() ? "absent (inferred records)" : "applied");
+    } else if (QFileInfo(project.asset).suffix().compare("mint",Qt::CaseInsensitive)==0) {
         mint=std::make_unique<MintFile>();if (!mint->openReadOnly(project.asset,&error)) throw std::runtime_error(error.toStdString());
         if (mint->hasAudio()) {
             const auto track=mint->audio();sourceAudio.assign(track.begin(),track.end());sourceAudioFormat=vgs::Mp3;
@@ -742,7 +776,8 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
 
     // Native chunks are prepared on the chunk workers; the sampled path decodes frames
     // through one reader and one baker, which are not shared.
-    options.threadSafeProvider=native;
+    options.threadSafeProvider=native && !ply;
+    if (ply) {options.chunkThreads=1;options.chunkMemoryBudget=512*previewmemory::MiB;options.preparedCacheBudget=0;}
     options.shDegree=degree;options.signer=vgs::authoringSigner();options.compression=project.captureSettings.plain ? vgs::Compression::None : vgs::Compression::Auto;
     options.playbackMode=project.captureSettings.playbackMode<0 ? (capture ? vgs::PlaybackMode(capture->playbackMode()) : vgs::PlaybackMode::Loop) : vgs::PlaybackMode(project.captureSettings.playbackMode);
     options.motionType=header.motionType;options.movingSpeed=header.movingSpeed;
@@ -796,10 +831,12 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
     const CompiledModifiers handErased(project); // Erase: the splats picked by hand, per source chunk
     auto sourcePruning=[&](size_t chunk) {
         double start,end;
-        if (mint) {const auto &c=mint->chunks().at(qsizetype(chunk));start=c.start;end=c.start+c.duration;}
+        if (ply) {const auto &c=ply->chunks().at(qsizetype(chunk));start=c.first/rate;end=(c.first+c.frames)/rate;}
+        else if (mint) {const auto &c=mint->chunks().at(qsizetype(chunk));start=c.start;end=c.start+c.duration;}
         else {const auto &c=capture->chunk(chunk);start=c.startSeconds;end=c.endSeconds;}
         std::vector<PruneStats> stats;
         auto keep=pruneChunk(start,end,[&](double t) {
+            if (ply) return ply->frame(t,false);
             if (mint) {MintFrame decoded;if (!mint->decode(t,&decoded,false,&error)) throw std::runtime_error(error.toStdString());return copyFrame(decoded);}
             return copyFrame(capture->setTime(t,false));},sourceAntialiased,pruneFilters,[&] {report(progress,currentPercent,QStringLiteral("Prune low contribution: scoring splats"));return false;},&stats);
         countPruning(result,stats,keep);return keep;
@@ -823,6 +860,7 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
     if (morphFrames) {
         const SourceFrameReader read=[&](double seconds,int *chunk,double *start,double *end) {
             std::lock_guard<std::mutex> guard(readerMutex);seconds=std::min(seconds,duration-1e-7);
+            if (ply) {const size_t ci=ply->chunkAt(seconds);const auto &c=ply->chunks()[qsizetype(ci)];*chunk=int(ci);*start=c.first/rate;*end=(c.first+c.frames)/rate;return ply->frame(seconds,true);}
             if (mint) {
                 MintFrame decoded;if (!mint->decode(seconds,&decoded,true,&error)) throw std::runtime_error(error.toStdString());
                 const auto &c=mint->chunks().at(decoded.chunkIndex);*chunk=decoded.chunkIndex;*start=c.start;*end=c.start+c.duration;return copyFrame(decoded);
@@ -834,6 +872,7 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
         result.notes << morphNote(*morph,inputProject,last);
     }
     const QMatrix4x4 morphWorld=inputProject.transformAtFrame(last).matrix();
+    PlyChunkSpool plyChunks;
     auto provider=[&](size_t index) {
         reportHere(QStringLiteral("%1 %2 %3 / %4").arg(writing ? "Writing" : "Preparing",index>=rangeChunks ? "loop morph frame" : native ? "native block" : "frame").arg(index+1).arg(header.chunks.size()));
         if (index>=rangeChunks) {
@@ -848,10 +887,11 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
             return chunk;
         }
         if (native) {
-            const auto &plan=nativePlan[index];vgs::DecodedChunk chunk;
+            const auto &plan=nativePlan[index];vgs::DecodedChunk chunk;std::vector<uint32_t> plyOrder;
             // The source is read under a lock and nothing else is: reading a chunk is
             // milliseconds against the seconds of work that follow it.
-            if (nativeMint) {reportHere(QStringLiteral("Loading native attributes"));std::lock_guard<std::mutex> guard(readerMutex);chunk=nativeMint->chunk(plan.sourceIndex);}
+            if (ply) {std::lock_guard<std::mutex> guard(readerMutex);chunk=plyChunks.get(*ply,plan.sourceIndex,degree,innerProgress,plyOrder);}
+            else if (nativeMint) {reportHere(QStringLiteral("Loading native attributes"));std::lock_guard<std::mutex> guard(readerMutex);chunk=nativeMint->chunk(plan.sourceIndex);}
             else {
                 const auto &entry=sourceHeader.chunks[plan.sourceIndex];vgs::Bytes bytes(size_t(entry.size));
                 {std::lock_guard<std::mutex> guard(readerMutex);
@@ -890,7 +930,8 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
             }
             if (!handErased.erased.empty()) {
                 size_t records=0;for (const auto &g:chunk.groups) if (g.type==1) records+=g.splats;
-                const auto erase=handErased.eraseKeep(int(plan.sourceIndex),records);
+                auto erase=handErased.eraseKeep(int(plan.sourceIndex),records);
+                if (!plyOrder.empty()) {const auto sourceKeep=erase;for (size_t i=0;i<plyOrder.size();++i) erase[i]=sourceKeep[plyOrder[i]];}
                 if (keepMask.empty()) keepMask=erase;else for (size_t i=0;i<keepMask.size() && i<erase.size();++i) keepMask[i]&=erase[i];
             }
             if (!keepMask.empty()) pruned=&keepMask;
@@ -906,15 +947,23 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
             // What it counts goes to this chunk own result and is merged in chunk order
             // below, so the report does not depend on which worker finished first.
             ExportResult chunkResult;
+            ExportVisibilityLookup orderedVisibility=cachedVisibility;
+            if (!plyOrder.empty() && cachedVisibility) orderedVisibility=[&](int frame,const std::vector<uint8_t> &active,std::vector<uint8_t> &keep) {
+                std::vector<uint8_t> original(active.size()),sourceKeep;
+                for (size_t i=0;i<plyOrder.size();++i) original[plyOrder[i]]=active[i];
+                if (!cachedVisibility(frame,original,sourceKeep) || sourceKeep.size()!=original.size()) return false;
+                keep.resize(sourceKeep.size());for (size_t i=0;i<plyOrder.size();++i) keep[i]=sourceKeep[plyOrder[i]];return true;
+            };
             auto edited=editNativeChunk(std::move(chunk),plan,project,writing ? nullptr : &chunkResult,innerProgress,classification ? &*classification : nullptr,moving ? &models : nullptr,
-                                        int(sourceHeader.chunks[plan.sourceIndex].startTick)+plan.first,pruned,cachedVisibility);
+                                        int(sourceHeader.chunks[plan.sourceIndex].startTick)+plan.first,pruned,orderedVisibility);
             if (!writing) {std::lock_guard<std::mutex> guard(stateMutex);chunkStatistics[index]=std::move(chunkResult);}
             edited=withNormals(std::move(edited));
             if (moving) edited.pages.push_back(motionPage(samples));
             return edited;
         }
         const double seconds=std::min(double(first+int(index))/rate,duration-1e-7);vgs::Frame frame;size_t sourceChunk=0;
-        if (mint) {MintFrame decoded;if (!mint->decode(seconds,&decoded,true,&error)) throw std::runtime_error(error.toStdString());frame=copyFrame(decoded);sourceChunk=size_t(decoded.chunkIndex);}
+        if (ply) {frame=ply->frame(seconds,true);sourceChunk=ply->chunkAt(seconds);}
+        else if (mint) {MintFrame decoded;if (!mint->decode(seconds,&decoded,true,&error)) throw std::runtime_error(error.toStdString());frame=copyFrame(decoded);sourceChunk=size_t(decoded.chunkIndex);}
         else {frame=copyFrame(capture->setTime(seconds,true));sourceChunk=capture->chunkAt(seconds);}
         std::vector<uint8_t> keepMask;const std::vector<uint8_t> *pruned=nullptr;
         if (!pruneFilters.isEmpty()) {
@@ -943,6 +992,7 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
     for (const auto &entry : chunkStatistics) {
         result.kept+=entry.second.kept;result.removed+=entry.second.removed;result.notes << entry.second.notes;
     }
+    if (ply && native) result.notes << plyChunks.check.note();
     if (normals) {gaussiannormals::Result seen;seen.opaque=normalOpaque;seen.opaqueSeen=normalSeen;normalsNote(seen,s,&result);}
     if (!result.kept) throw std::runtime_error("The selected range contains no Gaussian records after applying active modifiers.");
     if (!temporary.flush()) throw std::runtime_error(temporary.errorString().toStdString());
@@ -1007,7 +1057,8 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
 
 ExportEstimate estimateExportSize(const Project &project,const ExportProgress &progress,const QByteArray &thumbnailJpeg) {
     double rate=0,duration=0;QString error;
-    if (QFileInfo(project.asset).suffix().compare("mint",Qt::CaseInsensitive)==0) {MintFile mint;if (!mint.open(project.asset,&error)) throw std::runtime_error(error.toStdString());rate=mint.frameRate();duration=mint.duration();}
+    if (QFileInfo(project.asset).suffix().compare("ply",Qt::CaseInsensitive)==0) {rate=project.captureSettings.plyFps;duration=(project.plySequence.empty() ? PlySequence(project.asset).frames() : project.plySequence.files.size())/rate;}
+    else if (QFileInfo(project.asset).suffix().compare("mint",Qt::CaseInsensitive)==0) {MintFile mint;if (!mint.open(project.asset,&error)) throw std::runtime_error(error.toStdString());rate=mint.frameRate();duration=mint.duration();}
     else {FileSource source(project.asset);const auto capture=vgsdec::Capture::openStream(source);rate=capture.frameRate();duration=capture.duration();}
     if (!(rate>0) || !(duration>0)) throw std::runtime_error("Invalid capture timeline.");
     const int available=std::max(1,int(std::ceil(duration*rate-1e-6)));
@@ -1073,7 +1124,11 @@ class PlySource {
 public:
     PlySource(const Project &project,const ExportProgress &progress) : project_(project),progress_(progress),prunes_(CompiledModifiers(project).prunes) {
         QString error;
-        if (QFileInfo(project.asset).suffix().compare("mint",Qt::CaseInsensitive)==0) {
+        if (QFileInfo(project.asset).suffix().compare("ply",Qt::CaseInsensitive)==0) {
+            auto spec=project.plySequence;if (!spec.empty()) spec.rowOffset=project.captureSettings.plyRowOffset;
+            ply_=std::make_unique<PlySequence>(project.asset,spec,project.captureSettings.plyFps,[&](int done,int total,const QString &) {report(progress,0,QStringLiteral("Reading PLY sequence %1 / %2").arg(done).arg(total));});
+            rate=ply_->fps();duration=ply_->frames()/rate;sourceDegree=ply_->degree();antialiased_=false;
+        } else if (QFileInfo(project.asset).suffix().compare("mint",Qt::CaseInsensitive)==0) {
             mint_=std::make_unique<MintFile>();if (!mint_->openReadOnly(project.asset,&error)) throw std::runtime_error(error.toStdString());
             rate=mint_->frameRate();duration=mint_->duration();sourceDegree=mint_->shDegree();antialiased_=true;
         } else {
@@ -1081,10 +1136,13 @@ public:
             rate=capture_->frameRate();duration=capture_->duration();sourceDegree=capture_->shDegree();antialiased_=capture_->antialiased();
         }
         if (!(rate>0) || !(duration>0)) throw std::runtime_error("Invalid capture timeline.");
+        sourceFiles_.insert(pathKey(project.asset));if (ply_) for (const auto &file:ply_->spec().files) sourceFiles_.insert(pathKey(file));
     }
+    void protectDestination(const QString &path) const {if (sourceFiles_.count(pathKey(path))) throw std::runtime_error("Choose an output that does not overwrite a source PLY or capture.");}
     // The source's frame at `seconds` as it is, with the chunk it is in and where that starts and ends.
     vgs::Frame raw(double seconds,int *chunk,double *chunkStart,double *chunkEnd) {
         QString error;const double at=std::min(seconds,duration-1e-7);
+        if (ply_) {const size_t index=ply_->chunkAt(at);const auto &c=ply_->chunks()[qsizetype(index)];*chunk=int(index);*chunkStart=c.first/rate;*chunkEnd=(c.first+c.frames)/rate;return ply_->frame(at,true);}
         if (mint_) {
             MintFrame decoded;if (!mint_->decode(at,&decoded,true,&error)) throw std::runtime_error(error.toStdString());
             const auto &c=mint_->chunks().at(decoded.chunkIndex);*chunk=decoded.chunkIndex;*chunkStart=c.start;*chunkEnd=c.start+c.duration;return copyFrame(decoded);
@@ -1095,16 +1153,9 @@ public:
     bool antialiased() const {return antialiased_;}
     // The frame at `seconds`, and in `keep` what survives pruning and erasing (empty: all).
     vgs::Frame frame(double seconds,std::vector<uint8_t> *keep,ExportResult &result) {
-        QString error;vgs::Frame frame;int chunk=0;double chunkStart=0,chunkEnd=0;
+        QString error;int chunk=0;double chunkStart=0,chunkEnd=0;
         const double at=std::min(seconds,duration-1e-7);
-        if (mint_) {
-            MintFrame decoded;if (!mint_->decode(at,&decoded,true,&error)) throw std::runtime_error(error.toStdString());
-            frame=copyFrame(decoded);chunk=decoded.chunkIndex;
-            const auto &c=mint_->chunks().at(decoded.chunkIndex);chunkStart=c.start;chunkEnd=c.start+c.duration;
-        } else {
-            frame=copyFrame(capture_->setTime(at,true));chunk=int(capture_->chunkAt(at));
-            const auto &c=capture_->chunk(size_t(chunk));chunkStart=c.startSeconds;chunkEnd=c.endSeconds;
-        }
+        auto frame=raw(at,&chunk,&chunkStart,&chunkEnd);
         keep->clear();
         if (!prunes_.isEmpty()) {
             auto found=pruned_.find(chunk);
@@ -1112,6 +1163,7 @@ public:
                 std::vector<PruneStats> stats;
                 auto scoring=[&] {report(progress_,10,QStringLiteral("Prune low contribution: scoring splats"));return false;};
                 auto pruned=pruneChunk(chunkStart,chunkEnd,[&](double t) {
+                    if (ply_) return ply_->frame(t,false);
                     if (mint_) {MintFrame f;if (!mint_->decode(t,&f,false,&error)) throw std::runtime_error(error.toStdString());return copyFrame(f);}
                     return copyFrame(capture_->setTime(t,false));},antialiased_,prunes_,scoring,&stats);
                 countPruning(result,stats,pruned);found=pruned_.emplace(chunk,std::move(pruned)).first;
@@ -1126,8 +1178,15 @@ public:
     }
     double rate=0,duration=0;int sourceDegree=3;
 private:
+    static QString pathKey(const QString &path) {const QFileInfo file(path);const auto real=file.canonicalFilePath();auto result=QDir::cleanPath(real.isEmpty() ? file.absoluteFilePath() : real);
+#ifdef Q_OS_WIN
+        result=result.toCaseFolded();
+#endif
+        return result;
+    }
+    std::set<QString> sourceFiles_;
     const Project &project_;ExportProgress progress_;QVector<PruneFilter> prunes_;
-    std::unique_ptr<MintFile> mint_;std::unique_ptr<FileSource> source_;std::unique_ptr<vgsdec::Capture> capture_;
+    std::unique_ptr<MintFile> mint_;std::unique_ptr<FileSource> source_;std::unique_ptr<vgsdec::Capture> capture_;std::unique_ptr<PlySequence> ply_;
     bool antialiased_=true;std::map<int,std::vector<uint8_t>> pruned_;
 };
 }
@@ -1137,6 +1196,7 @@ ExportResult exportFramePly(const Project &projectAsGiven,double seconds,const Q
     QString error;if (!project.captureSettings.validate(&error)) throw std::runtime_error(error.toStdString());
     report(progress,0,QStringLiteral("Decoding the frame"));
     PlySource source(project,progress);ExportResult result;std::vector<uint8_t> keep;
+    source.protectDestination(destination);
     const int degree=project.captureSettings.shDegree<0 ? source.sourceDegree : project.captureSettings.shDegree;
     vgs::Frame frame,baked;double fraction=0;
     if (project.inMorph(seconds,source.rate,&fraction)) {
@@ -1181,6 +1241,7 @@ ExportResult exportPlySequence(const Project &projectAsGiven,const QString &dest
     const int morphFrames=project.morphFrames(rate);const bool overlaps=project.morphOverlaps() && morphFrames;
     const int plainLast=overlaps ? last-morphFrames-1 : last,firstMorph=plainLast+1,lastWritten=plainLast+morphFrames;
     const int digits=std::max(4,int(QString::number(lastWritten).size()));
+    for (int frame=first;frame<=lastWritten;++frame) source.protectDestination(plySequenceFile(destination,frame,digits));
     const int degree=project.captureSettings.shDegree<0 ? source.sourceDegree : project.captureSettings.shDegree;
     ExportResult result;std::vector<uint8_t> keep;int empty=0;size_t seenOpaque=0,seenBy=0;
     for (int f=first;f<=plainLast;++f) {

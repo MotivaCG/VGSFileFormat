@@ -45,7 +45,7 @@ int main(int argc, char *argv[])
     a.setWindowIcon(QIcon(":/icons/logo.png"));
     EditorTheme::install();
     QCommandLineParser parser; parser.addHelpOption();
-    parser.addPositionalArgument("capture", "A .vgs, .pgs, .mint or .vgsproj file.");
+    parser.addPositionalArgument("capture", "A .vgs, .pgs, .mint, .ply or .vgsproj file.");
     QCommandLineOption smoke("smoke-test", "Open, seek, verify a project and save a PNG preview.", "output");
     QCommandLineOption playbackReport("playback-report", "Measure actual editor playback and write a JSON report.", "output");
     QCommandLineOption smokeScreen("smoke-screen", "Maximize an automated preview on the specified screen index.", "index");

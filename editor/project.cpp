@@ -97,6 +97,7 @@ QJsonObject Project::json(const QString &path) const {
             return items;}()},{"selection",QJsonObject{{"modifier",selectedModifier}}},
         {"spaces",QJsonArray{int(spaces[0]),int(spaces[1]),int(spaces[2])}},
         {"captureSettings",captureSettings.json()},
+        {"plySequence",plySequence.empty() ? QJsonValue() : QJsonValue(plySequence.json(QFileInfo(path).absolutePath()))},
         {"timeline", QJsonObject{{"time", time}, {"in", in}, {"out", out}, {"speed", speed}, {"loop", loop}}},
         {"view", QJsonObject{{"grid", grid}, {"axes", axes}, {"frontMarker", frontMarker}, {"sh", true}, {"pointSize", pointSize}}}};
 }
@@ -126,6 +127,9 @@ bool Project::fromJson(const QJsonObject &root,const QString &baseDirectory,Proj
         !root["asset"].isString() || root["asset"].toString().isEmpty()) return fail();
     Project p;
     p.asset = QDir::cleanPath(QDir(baseDirectory).absoluteFilePath(root["asset"].toString()));
+    if (!root["plySequence"].isUndefined() && !root["plySequence"].isNull() && !root["plySequence"].isObject()) return fail();
+    try {if (root["plySequence"].isObject()) p.plySequence=PlySequenceSpec::fromJson(root["plySequence"].toObject(),baseDirectory);}
+    catch (const std::exception &e) {*error=QString::fromUtf8(e.what());return false;}
     bool valid = true;
     // Values are stored as floats, so a limit written back reads a rounding off it (the
     // 0.0001 m crop minimum as 9.99999975e-05): within a millionth it is the limit.

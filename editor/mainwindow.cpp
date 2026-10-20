@@ -403,7 +403,14 @@ MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory,const QStr
     for (auto *spin:findChildren<QAbstractSpinBox *>()) spin->setKeyboardTracking(false);
     worker_->moveToThread(&thread_);
     connect(&thread_, &QThread::finished, worker_, &QObject::deleteLater);
-    connect(this, &MainWindow::openRequested, worker_, &CaptureWorker::openRequest);
+    connect(this, &MainWindow::openRequested, worker_, &CaptureWorker::openSourceRequest);
+    connect(worker_,&CaptureWorker::sourceProgress,this,[this](int done,int total,const QString &,quint64 gen,quint64 request) {
+        if (loading_ && gen==openingGeneration_ && request==openingRequest_) statusBar()->showMessage(tr("Reading PLY sequence: %1 / %2").arg(done).arg(total));
+    });
+    connect(worker_,&CaptureWorker::sourceReindexed,this,[this](CaptureInfo info,quint64 gen) {
+        if (gen!=generation_ || info.plySequence.rowOffset!=project_.captureSettings.plyRowOffset) return;
+        project_.plySequence=info.plySequence;info_=info;syncPlyTiming();recordUndo();syncUi();
+    });
     connect(this, &MainWindow::decodeRequested, worker_, &CaptureWorker::decodeRequest);
     connect(worker_, &CaptureWorker::openedRequest, this, [this](CaptureInfo info, FramePtr frame, quint64 gen, quint64 request) {
         if (gen != openingGeneration_ || request!=openingRequest_) return;
@@ -419,6 +426,8 @@ MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory,const QStr
         viewport_->setSplatAntialiasing(info.antialiased);
         processingState_={};
         project_ = pendingProject_.value_or(defaultProject()); project_.asset = info.path;
+        project_.plySequence=info.plySequence;
+        if (!info.plySequence.empty()) {project_.captureSettings.plyFps=info.fps;project_.captureSettings.plyRowOffset=info.plySequence.rowOffset;}
         // A newly imported soundtrack is visible and editable in the stack. Saved
         // projects keep their own choices, including a muted or removed Audio layer.
         if (!pendingProject_ && !info.audio.isEmpty()) {
@@ -576,7 +585,7 @@ void MainWindow::buildUi() {
         if (!path.isEmpty()) openPath(path);
     });
     auto *openAction = file->addAction(tr("Import capture…"), QKeySequence("Ctrl+I"), this, [this] {
-        const QString path = QFileDialog::getOpenFileName(this, tr("Import capture"), history_.openPath("Capture"), tr("Captures (*.vgs *.pgs *.mint)"));
+        const QString path = QFileDialog::getOpenFileName(this, tr("Import capture"), history_.openPath("Capture"), tr("Captures (*.vgs *.pgs *.mint *.ply)"));
         if (!path.isEmpty()) openPath(path);
     });
     recentMenu_ = file->addMenu(tr("Open recent")); recentMenu_->setToolTipsVisible(true);
@@ -1564,6 +1573,8 @@ void MainWindow::syncUi() {
     presetFolderButton_->setEnabled(loaded_ && !loading_);
     saveAction_->setEnabled(loaded_ && !loading_); saveAsAction_->setEnabled(loaded_ && !loading_); imageAction_->setEnabled(loaded_ && !loading_); inspectionAction_->setEnabled(loaded_ && !loading_); exportAction_->setEnabled(loaded_ && !loading_); plyAction_->setEnabled(loaded_ && !loading_); taskAction_->setEnabled(loaded_ && !loading_); estimateAction_->setEnabled(loaded_ && !loading_);
     assetLabel_->setText(loaded_ ? info_.title : tr("No capture"));
+    if (!project_.plySequence.empty() && project_.plySequence.chunks.isEmpty())
+        for (auto *action:{saveAction_,saveAsAction_,exportAction_,plyAction_,taskAction_,estimateAction_}) action->setEnabled(false);
     assetLabel_->setToolTip(project_.asset);
     metadata_->setText(loaded_ ? tr("%1 · %2 fps\n%3 s · %4 frames").arg(info_.format).arg(info_.fps,0,'f',2).arg(info_.duration,0,'f',3).arg(info_.frames) : QString());
     const auto target = viewport_->displayedTransform();
@@ -1633,6 +1644,7 @@ void MainWindow::title() {
 QString MainWindow::autosaveFile() const {return autosaveDirectory_+QStringLiteral("/recovery-%1.vgsproj").arg(QCoreApplication::applicationPid());}
 void MainWindow::autosaveNow() {
     if (!loaded_ || loading_ || !isWindowModified() || autosaveDirectory_.isEmpty()) return;
+    if (!project_.plySequence.empty() && project_.plySequence.chunks.isEmpty()) return;
     QDir().mkpath(autosaveDirectory_);project_.camera=viewport_->camera();QString error;
     if (!project_.write(autosaveFile(),&error)) {statusBar()->showMessage(tr("Autosave failed: %1").arg(error),5000);return;}
     QFile about(autosaveFile()+".json");
@@ -1703,11 +1715,14 @@ void MainWindow::stepUndo(bool redo) {
     if (!loaded_ || loading_ || from.isEmpty()) return;
     play(false);
     to.append({project_,undoKey(project_)});
-    const Project target=from.takeLast().project;
+    const Project target=from.takeLast().project;const double previousFps=info_.fps;
     // Only what is undone comes back; the view, the playhead and the display stay as they are.
     if (project_.selectedModifier!=target.selectedModifier) viewport_->setTransformMode(TransformMode::None);
     project_.transform=target.transform;project_.modifiers=target.modifiers;project_.selectedModifier=target.selectedModifier;
     project_.in=target.in;project_.out=target.out;project_.captureSettings=target.captureSettings;
+    project_.plySequence=target.plySequence;
+    syncPlyTiming();
+    if (!project_.plySequence.empty()) project_.time*=previousFps/info_.fps;
     project_.time=std::clamp(project_.time,project_.in,project_.timelineEnd(info_.fps));
     if (viewport_->cropEditing() && !(project_.modifier() && project_.modifier()->type==ModifierType::Crop)) viewport_->setCropEditing(false);
     project_.showCropsAtFrame(currentFrame());viewport_->setCrop(project_.crop());
@@ -1740,6 +1755,7 @@ bool MainWindow::save(bool saveAs) {
 }
 bool MainWindow::saveTo(const QString &path, QString *error) {
     if (!loaded_ || loading_) {if (error) *error=tr("Import a capture or open a project first, and wait for loading.");return false;}
+    if (!project_.plySequence.empty() && project_.plySequence.chunks.isEmpty()) {if (error) *error=tr("Wait for PLY identities to finish reindexing before saving.");return false;}
     project_.camera=viewport_->camera();QString failure;
     if (!project_.write(path,&failure)) {if (error) *error=failure;return false;}
     projectPath_=QFileInfo(path).absoluteFilePath();history_.remember(projectPath_);updateRecentMenu();
@@ -1775,14 +1791,15 @@ bool MainWindow::openPath(const QString &path, Interaction interaction, bool dis
         if (!Project::read(absolute,&p,&failure)) return failed(failure);
         if (!QFileInfo(p.asset).isFile()) return failed(tr("The project's source capture is missing."));
         candidate=p;asset=p.asset;
-    } else if (suffix!="vgs" && suffix!="pgs" && suffix!="mint") return failed(tr("Open a VGS, PGS, MINT or VGSPROJ file."));
+    } else if (suffix!="vgs" && suffix!="pgs" && suffix!="mint" && suffix!="ply") return failed(tr("Open a VGS, PGS, MINT, PLY or VGSPROJ file."));
     pendingProject_=candidate;pendingProjectPath_=candidate ? absolute : QString();
     openingRemote_=interaction==Interaction::Automation;openingRequest_=++requestSerial_;
     automationError_.clear();
     play(false); viewport_->setTransformMode(TransformMode::None); viewport_->setCropEditing(false); loading_ = true; openingGeneration_ = ++serial_; syncUi();
     loadingOverlay_->start(QFileInfo(asset).fileName());
     statusBar()->showMessage(tr("Loading %1…").arg(QFileInfo(asset).fileName()));
-    emit openRequested(asset, openingGeneration_, true, openingRequest_);return true;
+    Project opening=candidate.value_or(defaultProject());if (!candidate) {opening.captureSettings.plyFps=30;opening.captureSettings.plyRowOffset=0;}
+    emit openRequested(asset, openingGeneration_, true, openingRequest_,opening);return true;
 }
 int MainWindow::timelineFrame(double displayedValue, bool tail) const {
     const int last=std::max(0,info_.frames-1)+(tail ? project_.morphTail(info_.fps) : 0);
@@ -2268,7 +2285,7 @@ void MainWindow::receiveFrame(FramePtr frame) {
             QMetaObject::invokeMethod(cropShapeCombo_,"activated",Qt::DirectConnection,Q_ARG(int,cropShapeCombo_->currentIndex()));
             if (project_.crop().shape!=CropShape::Box || !cropWidth_->isVisible() || cropRadius_->isVisible()) { qApp->exit(2); return; }
             if (!viewport_->grabFramebuffer().save(smokeOutput_+".box-edit.png")) { qApp->exit(2); return; }
-            CaptureSettings options = project_.captureSettings; options.title = "Editor metadata smoke"; options.despill = true; options.plain = true; options.tags = {"test","crop"};
+            CaptureSettings options = project_.captureSettings; options.title = "Editor metadata smoke"; options.despill = false; options.plain = false; options.tags = {"test","crop"};
             CaptureSettingsDialog metadataDialog(project_,presetStore_,this); metadataDialog.setSettings(options);
             if (metadataDialog.settings().json()!=options.json() || !metadataDialog.grab().save(smokeOutput_+".metadata.ui.png")) { qApp->exit(2); return; }
             project_.captureSettings = options;
@@ -2571,10 +2588,32 @@ void MainWindow::editCaptureSettings() {
     if (!loaded_ || loading_) return;
     play(false); CaptureSettingsDialog dialog(project_,presetStore_,this);
     if (dialog.exec()==QDialog::Accepted) {
-        project_.captureSettings = dialog.settings();
+        applyCaptureSettings(dialog.settings());
         settings_.setValue("CaptureSettings/Last",QJsonDocument(project_.captureSettings.json()).toJson(QJsonDocument::Compact)); settings_.sync(); dirty();
+        requestFrame();
     }
     refreshPresets(); viewport_->setFocus();
+}
+void MainWindow::syncPlyTiming() {
+    if (project_.plySequence.empty()) return;
+    info_.fps=project_.captureSettings.plyFps;info_.duration=info_.frames/info_.fps;info_.chunkBoundaries.clear();
+    for (int start:project_.plySequence.chunks) if (start>0) info_.chunkBoundaries.append(start/info_.fps);
+    QVector<double> boundaries;for (double start:info_.chunkBoundaries) boundaries.append(start*info_.fps);
+    slider_->setChunkBoundaries(boundaries);modifierPanel_->setChunks(boundaries);
+}
+void MainWindow::applyCaptureSettings(const CaptureSettings &settings) {
+    if (!project_.plySequence.empty()) {
+        const double ratio=info_.fps/settings.plyFps;project_.time*=ratio;project_.in*=ratio;project_.out*=ratio;
+        if (settings.plyRowOffset!=project_.captureSettings.plyRowOffset) {
+            // The mapping changes record IDs. Clearing picks is part of this undoable
+            // edit; Undo restores both the old source mapping and its picks.
+            project_.plySequence.rowOffset=settings.plyRowOffset;
+            project_.plySequence.chunks.clear();
+            for (auto &m:project_.modifiers) if (m.type==ModifierType::Erase) m.erased.clear();
+            statusBar()->showMessage(tr("Reindexing PLY identities; Erase picks cleared."),5000);
+        }
+    }
+    project_.captureSettings=settings;syncPlyTiming();syncUi();
 }
 void MainWindow::loadSelectedPreset() {
     if (!loaded_ || loading_) return;

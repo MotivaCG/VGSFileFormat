@@ -51,6 +51,44 @@ class AutomationTests : public QObject {
         QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir);
     }
 private slots:
+    void plySequenceTimingIsEditableAndSavedThroughAutomation() {
+        QTemporaryDir dir;QVERIFY(dir.isValid());settings(dir.path());
+        vgs::Frame f;f.count=1;f.active={1};f.position={0,1,0};f.rotation={0,0,0,1};f.scale={.02f,.03f,.04f};f.opacity={.8f};f.colorDc={.4f,.5f,.6f};
+        for (int i=48;i<=50;++i) {f.position[0]=float(i-48);writePly(f,dir.filePath(QString::number(i).rightJustified(8,'0')+".ply"));}
+        MainWindow window(nullptr,dir.filePath("presets"));EditorAutomation bridge(&window,dir.filePath("sessions"));
+        bridge.execute("open",{{"path",dir.filePath("00000048.ply")}});QTRY_VERIFY_WITH_TIMEOUT(bridge.state()["ready"].toBool(),5000);
+        QCOMPARE(bridge.state()["frames"].toInt(),3);QCOMPARE(bridge.state()["fps"].toDouble(),30.);
+        bridge.execute("seek",{{"frame",1}});QTRY_VERIFY(bridge.state()["ready"].toBool());
+        bridge.execute("export_settings",{{"plyFps",24.}});QTRY_VERIFY(bridge.state()["ready"].toBool());
+        QCOMPARE(bridge.state()["fps"].toDouble(),24.);QCOMPARE(bridge.state()["frame"].toInt(),1);QCOMPARE(bridge.state()["end_frame"].toInt(),2);
+        bridge.execute("undo",{});QTRY_VERIFY(bridge.state()["ready"].toBool());QCOMPARE(bridge.state()["fps"].toDouble(),30.);QCOMPARE(bridge.state()["frame"].toInt(),1);
+        bridge.execute("redo",{});QTRY_VERIFY(bridge.state()["ready"].toBool());QCOMPARE(bridge.state()["fps"].toDouble(),24.);
+        const auto saved=dir.filePath("ply.vgsproj");bridge.execute("save",{{"path",saved}});writePly(f,dir.filePath("00000051.ply"));
+        bridge.execute("open",{{"path",saved}});QTRY_VERIFY(bridge.state()["ready"].toBool());QCOMPARE(bridge.state()["frames"].toInt(),3);QCOMPARE(bridge.state()["fps"].toDouble(),24.);
+        const auto spec=bridge.execute("project",{})["plySequence"].toObject();QCOMPARE(spec["files"].toArray().size(),3);QCOMPARE(spec["numbers"].toArray().first().toString(),QString("48"));
+        window.setWindowModified(false);
+    }
+    void plyBirthOffsetReindexesAndUndoRestoresErasePicks() {
+        try {
+        QTemporaryDir dir;QVERIFY(dir.isValid());settings(dir.path());
+        vgs::Frame f;f.count=2;f.active={1,1};f.position={0,1,0,1,1,0};f.rotation={0,0,0,1,0,0,0,1};f.scale={.02f,.03f,.04f,.02f,.03f,.04f};f.opacity={.8f,.8f};f.colorDc={.4f,.5f,.6f,.4f,.5f,.6f};
+        for (int i=0;i<3;++i) writePly(f,dir.filePath(QString::number(i).rightJustified(8,'0')+".ply"));
+        QFile births(dir.filePath("birth_events.tsv"));QVERIFY(births.open(QIODevice::WriteOnly));births.write("1\t0\t1\n");births.close();
+        PlySequence source(dir.filePath("00000000.ply"));Project project;project.asset=source.spec().files.first();project.plySequence=source.spec();project.out=2/30.;
+        Modifier erase;erase.id=Project::newId();erase.name="Erase";erase.type=ModifierType::Erase;erase.erased[0]={0};project.modifiers={erase};project.selectedModifier=erase.id;
+        const auto saved=dir.filePath("offset.vgsproj");QString error;QVERIFY2(project.write(saved,&error),qPrintable(error));
+        MainWindow window(nullptr,dir.filePath("presets"));EditorAutomation bridge(&window,dir.filePath("sessions"));
+        bridge.execute("open",{{"path",saved}});QTRY_VERIFY_WITH_TIMEOUT(bridge.state()["ready"].toBool(),5000);
+        auto picks=[&] {return bridge.state()["modifiers"].toArray().last().toObject()["erase"].toObject()["chunks"].toArray().size();};QCOMPARE(picks(),1);
+        bridge.execute("export_settings",{{"plyRowOffset",1}});QTRY_VERIFY_WITH_TIMEOUT(bridge.state()["ready"].toBool(),5000);QCOMPARE(picks(),0);
+        QCOMPARE(bridge.execute("project",{})["plySequence"].toObject()["rowOffset"].toInt(),1);
+        bridge.execute("undo",{});QTRY_VERIFY_WITH_TIMEOUT(bridge.state()["ready"].toBool(),5000);QCOMPARE(picks(),1);
+        QCOMPARE(bridge.execute("project",{})["plySequence"].toObject()["rowOffset"].toInt(),0);
+        bridge.execute("redo",{});QTRY_VERIFY_WITH_TIMEOUT(bridge.state()["ready"].toBool(),5000);QCOMPARE(picks(),0);
+        bridge.execute("save",{{"path",saved}});bridge.execute("open",{{"path",saved}});QTRY_VERIFY_WITH_TIMEOUT(bridge.state()["ready"].toBool(),5000);QCOMPARE(picks(),0);
+        QCOMPARE(bridge.execute("project",{})["plySequence"].toObject()["rowOffset"].toInt(),1);window.setWindowModified(false);
+        } catch (const std::exception &e) {QFAIL(e.what());}
+    }
     void audioSourcesAndSettingsSurviveAutomationSaveAndOpen() {
         QTemporaryDir dir;QVERIFY(dir.isValid());settings(dir.path());
         // A valid mono WAV: the test exercises project persistence, not playback.

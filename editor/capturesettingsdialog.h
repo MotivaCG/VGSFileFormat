@@ -17,6 +17,7 @@ class QComboBox;
 class QPlainTextEdit;
 class QCheckBox;
 class QDoubleSpinBox;
+class QSpinBox;
 class CaptureSettingsDialog : public QDialog {
     Q_OBJECT
 public:
@@ -34,5 +35,6 @@ private:
     QPlainTextEdit *extraJson_;
     QComboBox *presets_, *shDegree_, *playback_, *normalRig_;
     QCheckBox *despill_, *recoverSkin_, *normals_;
-    QDoubleSpinBox *strength_, *gain_, *chroma_;
+    QDoubleSpinBox *strength_, *gain_, *chroma_, *plyFps_;
+    QSpinBox *plyRowOffset_;
 };

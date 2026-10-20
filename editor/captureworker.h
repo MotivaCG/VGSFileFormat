@@ -11,6 +11,9 @@
 #pragma once
 #include "mintfile.h"
 #include "project.h"
+#ifndef VGS_VIEWER // the viewer reads no PLY sequences
+#include "plysequence.h"
+#endif
 #include "pruning.h"
 #include "loopmorph.h"
 #include "previewmemory.h"
@@ -80,6 +83,7 @@ using FramePtr = std::shared_ptr<RenderFrame>;
 Q_DECLARE_METATYPE(FramePtr)
 struct CaptureInfo {
     QString path, title, format;
+    PlySequenceSpec plySequence;
     double duration = 0, fps = 30;
     int frames = 0;
     int shDegree = -1;
@@ -116,6 +120,9 @@ public slots:
     void open(const QString &path, quint64 generation, bool sh);
     void decode(double time, quint64 generation, bool sh,Project project = {});
     void openRequest(const QString &path, quint64 generation, bool sh, quint64 request);
+#ifndef VGS_VIEWER
+    void openSourceRequest(const QString &path,quint64 generation,bool sh,quint64 request,Project project);
+#endif
     void decodeRequest(double time, quint64 generation, bool sh, Project project, quint64 request);
     void precalculate(Project project,quint64 generation,quint64 request);
     void setCachingEnabled(bool enabled);
@@ -144,6 +151,8 @@ public:
 public slots:
 signals:
     void opened(CaptureInfo info, FramePtr frame, quint64 generation);
+    void sourceProgress(int done,int total,QString path,quint64 generation,quint64 request);
+    void sourceReindexed(CaptureInfo info,quint64 generation);
     void decoded(FramePtr frame, quint64 generation);
     void failed(QString message, quint64 generation, bool opening);
     void openedRequest(CaptureInfo info, FramePtr frame, quint64 generation, quint64 request);
@@ -161,6 +170,12 @@ private:
     std::unique_ptr<FileSource> source_;
     std::unique_ptr<vgsdec::Capture> vgs_;
     std::unique_ptr<MintFile> mint_;
+#ifndef VGS_VIEWER
+    std::unique_ptr<PlySequence> ply_;
+    PlySequenceSpec openingPly_;
+    double openingPlyFps_=30;
+    int openingPlyOffset_=0;
+#endif
     CaptureInfo info_;
     quint64 generation_ = 0;
     quint64 request_ = 0;

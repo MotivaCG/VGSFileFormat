@@ -20,6 +20,7 @@
 #include <QVector3D>
 #include <QVector>
 #include "capturesettings.h"
+#include "plysequencespec.h"
 
 struct Transform {
     QVector3D position{0, 0, 0};
@@ -189,6 +190,7 @@ struct Modifier {
 struct Project {
     Project();
     QString asset;
+    PlySequenceSpec plySequence;
     Transform transform;
     Camera camera;
     QVector<Modifier> modifiers;

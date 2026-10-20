@@ -17,9 +17,18 @@ HEADERS += $$PWD/editorautomation.h
 HEADERS += $$PWD/pointvisibility.h
 CONFIG += c++17
 DEFINES += VGS_AUTHORING
+msvc: DEFINES += EIGEN_DONT_PARALLELIZE
 TARGET = VGSEditor
 SOURCES += $$PWD/displayscaling.cpp
 SOURCES += $$PWD/previewmemory.cpp
+SOURCES += $$PWD/plysequencespec.cpp
+SOURCES += $$PWD/plysequence.cpp
+SOURCES += $$PWD/plyexport.cpp
+SOURCES += $$PWD/dependencies/plyseq/plyfit.cpp
+HEADERS += $$PWD/dependencies/plyseq/plyfit.h
+HEADERS += $$PWD/plysequencespec.h
+HEADERS += $$PWD/plysequence.h
+HEADERS += $$PWD/plyexport.h
 HEADERS += $$PWD/previewmemory.h
 HEADERS += $$PWD/displayscaling.h \
     licensemanagement.h
@@ -38,7 +47,7 @@ SOURCES += $$PWD/main.cpp $$PWD/mainwindow.cpp $$PWD/inspection.cpp $$PWD/viewpo
     $$VGS_ROOT/core/src/mgscodec.cpp $$VGS_ROOT/core/crypto/vgscrypto.cpp \
     $$VGS_ROOT/core/crypto/tweetnacl.c
 HEADERS += $$PWD/mainwindow.h $$PWD/viewport.h $$PWD/viewcube.h $$PWD/captureworker.h $$PWD/project.h $$PWD/filehistory.h $$PWD/presetstore.h $$PWD/capturesettings.h $$PWD/capturesettingsdialog.h $$PWD/dependencies/mint/mintfile.h
-msvc: QMAKE_CXXFLAGS += /utf-8 /bigobj
+msvc: QMAKE_CXXFLAGS += /utf-8 /bigobj /openmp
 win32: LIBS += -lopengl32 -luser32
 RESOURCES += $$PWD/resources.qrc
 win32: RC_ICONS = $$PWD/assets/gracia/logo.ico

@@ -25,6 +25,52 @@ several poses to evaluate them. Animation varies a modifier over time where supp
 | `audio` | Attach the capture's own soundtrack or an external file, with offset, volume and optional looping. | `audio.source`, `file`, `offset` in seconds, `volume` 0..1 and `loop`. Paths belong to the editor's computer. Multiple tracks mix; VGS/PGS carry synchronized AAC audio and MINT carries MP3. |
 | `loop-morph` | Close a loop without a jump: frames added after End that morph the End frame back into the Start frame - or, with a negative length, the range's last frames carrying the playing capture into Start (End stands for Start and is not played). | `morph.seconds` (length of the added frames; negative: the frames before End it overlaps, at most all but Start's), `morph.leadIn` (overlapping only: also blend into the motion of as many frames before Start, when the source has them) and `morph.markers`: `{number, end, endFrame, start, startFrame}` with `end`/`start` the same point of the subject in capture-local coordinates (before the transform) on the End and Start frames. Only markers whose frames match the current End/Start are used. Rather than writing coordinates, seek Start or End, take a snapshot and use `place_morph_marker` with points on it; `get_loop_morph` reads the markers, how far off each is and a suggested point for the next one; `remove_morph_markers` removes them. Removing modifiers above it shape the two frames it morphs; those below it apply to its frames. Seek past End to inspect the added frames (overlapping, the frames before End). Every export (.vgs, .pgs, .mint, .ply sequence) writes them after the range, or in place of its last frames. |
 
+## Importing PLY frames and sequences
+
+`import_capture` accepts Gaussian 3DGS PLY and ordinary XYZ/RGB point clouds, binary
+little/big endian or ASCII. Select one file, not a directory. A final numeric suffix
+starts a sequence forward from that file: same directory, prefix, extension and digit
+width, stopping at the first missing number. Thus `00000048.ply` through `00000054.ply`
+are seven frames; `00000056.ply` is excluded when 55 is absent. No final digits means
+one frame. Spirula's `frames/NNN/splat.ply` layout is also supported by selecting one
+`splat.ply`; the numbered parent directories determine the sequence.
+
+Splats are followed by row, so a temporal import needs frames that hold every row in
+every frame plus `birth_events.tsv`, which names each splat `(row, generation)`; its
+frame column is local to the run's first file, even when import starts later. Spirula's
+`frames/` and Forge's aligned `.work/vgs_<first frame>/` (kept with `-graciakeepwork`)
+qualify. Selecting Forge's published frames switches to that run's aligned frames when
+they exist, and otherwise fails naming the run's `.vgs`: published frames are decoded
+from it and hold only the shown splats. Without a birth log, rows are trusted, with a
+new record when a previously invisible row becomes visible or its scale changes; no
+spatial nearest matching is done. Rows invisible throughout a chunk are omitted.
+A chunk runs while each frame stays compatible with the one before (same population and
+schema, not every row renewed, no `sequence.json` boundary), up to 255 frames and to the
+lesser of 12 GiB and the free memory less 2 GiB for fitting it at export; incompatible frames are
+chunks of their own. A saved project keeps its chunk layout. Records unchanged into the next chunk's first frame
+run into that closing sample. Native export notes report the fit checked at every frame.
+
+PLY defaults to 30 fps. Use `set_export_settings` with `{"plyFps":24}` to change it,
+as in Metadata and processing. Frame indices and keyframes stay fixed; the timeline,
+duration and exported timing change. `plyRowOffset` is normally 0, including subject-only
+Spirula/Forge output. Only set it for PLYs with room rows prepended but omitted by the
+birth log: it is the leading room vertex count. Changing it clears Erase picks as
+record IDs change; Undo restores the mapping and picks. An adjacent `room.ply` is not
+automatically included in the sequence.
+
+`get_project.plySequence` records the exact files, original numeric indices, chunk
+starts, optional birth-log path and local-frame origin. `save_project` persists it,
+with paths relative to the project, and `captureSettings.plyFps`/`plyRowOffset`.
+`open_project` reuses that frozen list instead of appending files added later.
+The timeline starts at frame zero. A missing next file ends discovery normally;
+an existing unreadable/corrupt PLY fails the import with its error. Frames are read
+progressively and the identity index is spooled to disk. Export retains compatible
+temporal chunks and uses disk spooling to avoid keeping all fitted chunks in RAM.
+Native VGS/PGS export fits encoding 0 using the `vgsplyseq` algorithm, including
+residual rotations and constant median higher SH per record. Source-frame preview
+and PLY snapshots keep the original per-frame SH. Rank ordering is mapped back to
+source record IDs when applying Erase and preview visibility caches.
+
 ## Audio sources and saved projects
 
 Importing a MINT or VGS/PGS with embedded audio automatically creates an enabled

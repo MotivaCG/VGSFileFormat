@@ -14,6 +14,8 @@
 #include <QDesktopServices>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
+#include <QSpinBox>
+#include <QFileInfo>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -54,6 +56,11 @@ CaptureSettingsDialog::CaptureSettingsDialog(const Project &project,PresetStore 
     extraJson_ = new QPlainTextEdit; extraJson_->setPlaceholderText(tr("Optional JSON metadata")); extraJson_->setMinimumHeight(110); form->addRow(tr("Extra JSON"),extraJson_);
     columns->addWidget(metadata,1);
     auto *processing = new QGroupBox(tr("Processing and output")); auto *options = new QFormLayout(processing);
+    const bool ply=QFileInfo(project.asset).suffix().compare("ply",Qt::CaseInsensitive)==0;
+    plyFps_=new QDoubleSpinBox;plyFps_->setObjectName("plyFps");plyFps_->setRange(1,1000);plyFps_->setDecimals(3);plyFps_->setSuffix(" fps");
+    plyFps_->setToolTip(tr("Frame rate of the imported PLY sequence. Changes timeline duration and export timing without adding or removing frames."));options->addRow(tr("PLY frame rate"),plyFps_);options->setRowVisible(plyFps_,ply);
+    plyRowOffset_=new QSpinBox;plyRowOffset_->setObjectName("plyRowOffset");plyRowOffset_->setRange(0,10000000);
+    plyRowOffset_->setToolTip(tr("Leading room rows not counted by birth_events.tsv. Use 0 for Spirula and Forge subject-only exports. Changing this reindexes the sequence and clears Erase picks; Undo restores both."));options->addRow(tr("Birth row offset"),plyRowOffset_);options->setRowVisible(plyRowOffset_,ply);
     shDegree_ = new QComboBox; shDegree_->addItem(tr("Keep source"),-1); for (int i=0; i<=3; ++i) shDegree_->addItem(tr("Degree %1").arg(i),i); options->addRow(tr("SH degree"),shDegree_);
     playback_ = new QComboBox; playback_->addItem(tr("Keep source"),-1); playback_->addItem(tr("Once"),0); playback_->addItem(tr("Loop"),1); playback_->addItem(tr("Ping-pong"),2); options->addRow(tr("Playback"),playback_);
     normals_ = new QCheckBox(tr("Write normals"));
@@ -100,12 +107,14 @@ CaptureSettings CaptureSettingsDialog::settings() const {
     s.despill = despill_->isChecked(); s.despillStrength = strength_->value(); s.greenGain = gain_->value(); s.viewChromaScale = chroma_->value(); s.recoverSkin = recoverSkin_->isChecked();
     s.despill = false; // a Colour modifier's setting now
     s.normals = normals_->isChecked(); s.normalRig = normalRig_->currentData().toInt();
+    s.plyFps=plyFps_->value();s.plyRowOffset=plyRowOffset_->value();
     return s;
 }
 void CaptureSettingsDialog::setSettings(const CaptureSettings &s) {
     const QString values[] = {s.title,s.catalogueId,s.author,s.projectName,s.takeName,s.studio,s.copyright,s.softwareName,s.softwareVersion};
     for (int i=0; i<9; ++i) fields_[i]->setText(values[i]); tags_->setText(s.tags.join(", ")); extraJson_->setPlainText(s.extraJson);
     shDegree_->setCurrentIndex(shDegree_->findData(s.shDegree)); playback_->setCurrentIndex(playback_->findData(s.playbackMode));
+    plyFps_->setValue(s.plyFps);plyRowOffset_->setValue(s.plyRowOffset);
     despill_->setChecked(s.despill); strength_->setValue(s.despillStrength); gain_->setValue(s.greenGain); chroma_->setValue(s.viewChromaScale); recoverSkin_->setChecked(s.recoverSkin);
     for (auto *spin : {strength_,gain_,chroma_}) spin->setEnabled(s.despill); recoverSkin_->setEnabled(s.despill);
     normals_->setChecked(s.normals); normalRig_->setCurrentIndex(normalRig_->findData(s.normalRig)); normalRig_->setEnabled(s.normals);

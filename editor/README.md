@@ -8,11 +8,53 @@ or ownership rights. Other uses require a separate written licence and the
 agreed payment conditions.
 The free VGS Decoder licence does not grant permission to use this editor.
 
-Qt 6 desktop editor for animated `.vgs`, `.pgs` and `.mint` captures.
+Qt 6 desktop editor for animated `.vgs`, `.pgs`, `.mint` and PLY sequences or single frames.
 The viewport draws **opaque points** with depth testing. Point size is fixed in
 pixels and adjustable; Gaussian opacity and individual scale do not affect the
 preview. Temporal activity determines which records are displayed. The scene
 scale transforms the entire capture without changing point size.
+
+## Importing PLY
+
+Choose or drop one `.ply`. A final numeric suffix starts a forward sequence with the
+same prefix and digit width, ending at the first missing number. Selecting
+`00000048.ply` loads 48 through 54 when 55 is missing; 56 is not included. An unnumbered
+PLY is one frame. Spirula's numbered `frames/NNN/splat.ply` directories are also supported.
+Standard 3DGS SH0..SH3 and XYZ/RGB PLYs can be binary little/big endian or ASCII.
+
+A splat is followed through time by its row, so the frames must hold every row in every
+frame, with `birth_events.tsv` beside them: `(row,generation)` names a splat, with local
+frame indices from the run's first file. Spirula's `frames/` and Forge's aligned frames
+(`.work/vgs_<first frame>/`, kept with `-graciakeepwork`) are such frames. Selecting
+Forge's published `000000NN.ply` takes that run's aligned frames instead when they exist;
+without them the import stops and names the run's `.vgs`, because the published frames
+are decoded from it and hold only the shown splats, so their rows change meaning every frame.
+Without a birth log, rows are trusted within compatible chunks and a reappearance or scale
+change starts a new record. A chunk runs while each frame stays compatible with the one
+before: the same population and schema, not every row renewed (by the birth log, or all
+changing without one) and no boundary in Forge's `sequence.json`. It is also cut at the
+format's 255 frames and where fitting it at export would exceed 12 GiB or the memory free
+less 2 GiB when first indexed (a saved project keeps its layout); frames all incompatible are
+chunks of one frame. Indexing itself holds only the previous frame. A splat present and
+unchanged in the next chunk's first frame runs into it, the chunk's closing sample, as
+`vgsplyseq` does. Entirely invisible rows are dropped per chunk.
+
+PLY starts at **30 fps**. Change **PLY frame rate** in **Metadata and processing**
+(`Ctrl+M`): frame/key indices stay fixed while playback duration and export timing change.
+**Birth row offset** stays zero for normal Spirula/Forge output; it is only for custom
+PLYs with leading room rows excluded from the birth log. Changing it reindexes records
+and clears Erase picks; Undo restores the mapping and picks. `room.ply` is not appended
+automatically. A saved `.vgsproj` freezes the file list, original numbers, chunk layout,
+FPS and birth mapping, with relative source paths, so new neighboring files do not
+extend an existing project on reopening. Existing corrupt files are errors, not gaps.
+Frames are read progressively and identity indices/fitted export chunks are spooled to
+temporary disk files instead of retaining the entire take in RAM.
+Native VGS/PGS export uses the encoding-0 fitter from `vgsplyseq`: weighted position
+atoms, a base colour plus residual curves, residual rotations, and median higher SH
+per identity record. Preview and PLY snapshots retain each frame's original SH.
+Each fitted chunk is decoded at every source frame and compared with its PLY rows; the
+export notes report splats shown, visible splats not shown and position RMS/max (before
+modifiers), the round trip `vgsplyseq` verifies.
 
 ## Controls
 

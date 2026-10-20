@@ -208,8 +208,9 @@ void Project::updatePreviewCacheKeys() {
         return QJsonObject{{"matrix",matrix},{"rgb",rgb(c)}};
     };
     const CompiledModifiers cAll(allColour),cAbove(aboveColour),cBelow(belowColour);
-    previewVisibilityKeys[0]=digest({{"stack",all},{"model",model},{"colour",colourVisibility(cAll)}});
-    previewVisibilityKeys[1]=digest({{"stack",above},{"model",model},{"colour",colourVisibility(cAbove)}});
+    const QJsonObject source=plySequence.empty() ? QJsonObject{} : QJsonObject{{"ply",plySequence.json({})},{"fps",captureSettings.plyFps},{"offset",captureSettings.plyRowOffset}};
+    previewVisibilityKeys[0]=digest({{"stack",all},{"model",model},{"colour",colourVisibility(cAll)},{"source",source}});
+    previewVisibilityKeys[1]=digest({{"stack",above},{"model",model},{"colour",colourVisibility(cAbove)},{"source",source}});
     previewMorphKey=digest({{"source",QString::fromLatin1(previewVisibilityKeys[1].toHex())},{"rgb",rgb(cAbove)},{"morph",morph},{"in",in},{"out",out}});
     previewVisibilityKeys[2]=digest({{"morph",QString::fromLatin1(previewMorphKey.toHex())},{"stack",below},{"model",model},{"colour",colourVisibility(cBelow)}});
     previewColourKey=digest(rgb(cAll));
