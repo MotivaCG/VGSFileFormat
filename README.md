@@ -56,6 +56,8 @@ grant a general right to use, modify or distribute its contents.
     logo_trans.png  the same on a transparent background: the source of every icon
     logo.svg     the same as vector art, transparent
     logo.ico     the mark as a Windows icon, 16 to 256 pixels, compiled into the tools
+    logo_text_trans.png  the mark with the name, transparent: light lettering above, for
+                 dark backgrounds, dark below, for light ones
 
 `core/` builds nothing on its own. It hands the other two a list of sources each, and the
 lists are not the same:

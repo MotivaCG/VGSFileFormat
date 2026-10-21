@@ -21,9 +21,10 @@ Blender 5.3 or later, Windows x64.
   viewport. Each becomes a point cloud of type Gaussian Splat. Import options: harmonics,
   loop mode, up axis (Y Up by default: +90° about X, which is how captures
   are written), fit the scene's range and frame rate to the first capture.
-- **Per capture**, in *Properties > Data > VGS*, under the logo (`vgs/logo.png`: a
-  256-pixel copy of the project's `logo_trans.png`, cropped to the mark, transparent for
-  Blender's dark interface): capture path, phase and start frame (the same setting
+- **Per capture**, in *Properties > Data > VGS*, under the logo (`vgs/logo.png`: the
+  mark and the light lettering from the upper half of the project's `logo_text_trans.png`,
+  restacked with the name, at 90 %, under the mark to fill the square a panel draws an
+  image in; 512 pixels wide, transparent for Blender's dark interface): capture path, phase and start frame (the same setting
   twice: where in the capture the scene's first frame falls, as a fraction and as a
   capture frame counted from 0), speed
   (negative plays backwards from the phase), loop (From Capture, No Loop, Loop, Ping-Pong),

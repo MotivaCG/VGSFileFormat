@@ -17,8 +17,10 @@ from .operators import VGS_OT_fit_scene, VGS_OT_import, VGS_OT_reload
 # The logo, loaded once as a preview icon: the only way a panel can show an image.
 _previews = None
 
-# How large it is drawn, in multiples of an icon's height: about five lines of the panel.
-_LOGO_SCALE = 5.0
+# How large it is drawn, in multiples of an icon's height: a preview is always drawn in a
+# square, which is why the logo is stacked, the name under the mark, rather than wide.
+# About 145 pixels at scale 1, less in a narrower editor.
+_LOGO_SCALE = 7.2
 
 
 def _logo_icon():
@@ -57,9 +59,12 @@ class DATA_PT_vgs_capture(Panel):
 
         icon = _logo_icon()
         if icon:
+            # In icon heights of 20 pixels, less two for the panel's margins.
+            width = context.region.width if context.region is not None else 300
+            fits = width / (20 * context.preferences.system.ui_scale) - 2
             row = layout.row()
             row.alignment = 'CENTER'
-            row.template_icon(icon_value=icon, scale=_LOGO_SCALE)
+            row.template_icon(icon_value=icon, scale=min(_LOGO_SCALE, fits))
 
         layout.prop(settings, "filepath")
         if not settings.filepath:
