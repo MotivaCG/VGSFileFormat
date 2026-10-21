@@ -5,7 +5,8 @@ Unmodified copies from
 at the project owner's request. These are local resources; the editor does not
 load graphics from the converter checkout at runtime.
 
-- `logo.png`, `logo.ico`: current converter application branding.
+- `logo.png`, `logo.ico`: application icon, shared with the converter. Replaced in both
+  on 2026-10-20 with renders of the project's `logo.svg` (on white, full frame).
 - `logo_bbb.svg`: legacy converter logo, retained for future use.
 - `calib.png`, `calibtotem.png`, `range.png`: converter tool illustrations.
 
