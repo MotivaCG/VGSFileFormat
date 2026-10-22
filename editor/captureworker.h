@@ -105,6 +105,9 @@ Q_DECLARE_METATYPE(CaptureInfo)
 struct ExportVisibilityMask {
     std::vector<uint32_t> runs;
     size_t records=0,points=0;
+    // Which records the runs cover, hashed: an export uses the mask only on the same ones,
+    // never just on as many - two samples of a chunk can have equal counts of other records.
+    uint64_t identity=0;
 };
 struct PreviewExportStore;
 

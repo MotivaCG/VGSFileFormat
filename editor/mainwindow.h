@@ -192,6 +192,11 @@ private:
     QString projectPath_;
     std::optional<Project> pendingProject_;
     QString pendingProjectPath_;
+    // The pending project's source was found elsewhere: once open, it has that change to save.
+    bool pendingRelocated_ = false;
+    // Asks where a project's missing source is now, starting where it was; a PLY sequence's
+    // other files move with it. False when cancelled or the sequence is not all there.
+    bool locateSource(Project *project);
     bool loaded_ = false, loading_ = false, decoding_ = false, pendingDecode_ = false, syncing_ = false;
     quint64 serial_ = 0, generation_ = 0, openingGeneration_ = 0;
     quint64 requestSerial_ = 0, openingRequest_ = 0, decodeRequest_ = 0;

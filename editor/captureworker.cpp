@@ -42,6 +42,11 @@ struct PreviewExportStore {
 namespace {
 std::mutex exportStoresMutex;
 std::vector<std::weak_ptr<PreviewExportStore>> exportStores;
+// FNV-1a over the record indices a mask covers, in order.
+struct RecordIdentity {
+    uint64_t value=1469598103934665603ull;
+    void add(uint64_t record) {for (int k=0;k<8;++k) {value^=(record>>(8*k))&0xFF;value*=1099511628211ull;}}
+};
 }
 
 class CaptureWorker::FileSource : public vgsdec::Source {
@@ -88,6 +93,8 @@ std::function<bool(int,const std::vector<uint8_t> &,std::vector<uint8_t> &)> Cap
         {std::lock_guard<std::mutex> lock(store->mutex);if (store->key!=key) return false;
          const auto found=store->frames.find(frame);if (found==store->frames.end()) return false;mask=found->second.lock();}
         if (!mask || mask->records!=active.size() || mask->points!=size_t(std::count_if(active.begin(),active.end(),[](uint8_t a){return a!=0;}))) return false;
+        RecordIdentity identity;for (size_t row=0;row<active.size();++row) if (active[row]) identity.add(row);
+        if (identity.value!=mask->identity) return false;
         out.assign(active.size(),0);size_t row=0;bool visible=true;
         for (uint32_t run:mask->runs) {for (uint32_t k=0;k<run;++k) {while (row<active.size() && !active[row]) ++row;if (row==active.size()) return false;out[row++]=visible;}visible=!visible;}
         ++store->hits;return true;
@@ -229,7 +236,9 @@ void CaptureWorker::keepVisibility(const RenderFrame &out,const Project &project
     if (!memory_.canRetain((out.points.size()+1)*sizeof(uint32_t)+sizeof(Visibility)+128)) {cacheLimited_=true;return;}
     Visibility kept;kept.greensApplied=out.greensApplied;kept.prune=out.prune;bool visible=true;uint32_t run=0;
     auto mask=std::make_shared<ExportVisibilityMask>();mask->records=out.records.size();mask->points=out.points.size();
-    for (const auto &p:out.points) {if ((p.modifierVisibility>=.5f)!=visible) {mask->runs.push_back(run);run=0;visible=!visible;}++run;}
+    RecordIdentity identity;
+    for (const auto &p:out.points) {identity.add(uint64_t(p.id));if ((p.modifierVisibility>=.5f)!=visible) {mask->runs.push_back(run);run=0;visible=!visible;}++run;}
+    mask->identity=identity.value;
     mask->runs.push_back(run);mask->runs.shrink_to_fit();kept.mask=mask;
     const VisibilityId id{int(std::lround(out.seconds*info_.fps)),context};
     auto &slot=visibility_[id];const auto replaced=slot.mask ? slot.bytes() : 0;visibilityBytes_-=replaced;visibilityStageBytes_[context]-=replaced;

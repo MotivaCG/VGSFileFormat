@@ -457,8 +457,8 @@ MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory,const QStr
         else viewport_->fit(info.minimum, info.maximum);
         project_.camera = viewport_->camera();
         if (!pendingProject_) {fitCrop();viewport_->setCropEditing(false);viewport_->setTransformMode(TransformMode::None);}
-        setWindowModified(!pendingProject_.has_value() || recovered);
-        pendingProject_.reset(); refreshPresets(); syncUi(); title();
+        setWindowModified(!pendingProject_.has_value() || recovered || pendingRelocated_);
+        pendingProject_.reset();pendingRelocated_=false; refreshPresets(); syncUi(); title();
         // What was opened is where the history starts: opening is not undone.
         resetUndo();
         viewport_->setPlaybackRate(false,info_.fps*project_.speed);
@@ -1784,15 +1784,19 @@ bool MainWindow::openPath(const QString &path, Interaction interaction, bool dis
     else if (isWindowModified() && !discardUnsaved) return failed(tr("Unsaved project. Save it or explicitly set discard_unsaved=true."));
     const QString absolute=QFileInfo(path).absoluteFilePath();
     if (!QFileInfo(absolute).isFile()) return failed(tr("Capture or project does not exist."));
-    QString asset=absolute;std::optional<Project> candidate;
+    QString asset=absolute;std::optional<Project> candidate;bool relocated=false;
     const QString suffix=QFileInfo(absolute).suffix().toLower();
     if (suffix=="vgsproj") {
         Project p;QString failure;
         if (!Project::read(absolute,&p,&failure)) return failed(failure);
-        if (!QFileInfo(p.asset).isFile()) return failed(tr("The project's source capture is missing."));
+        if (!QFileInfo(p.asset).isFile()) {
+            if (interaction!=Interaction::Gui) return failed(tr("The project's source capture is missing."));
+            if (!locateSource(&p)) return false;
+            relocated=true;
+        }
         candidate=p;asset=p.asset;
     } else if (suffix!="vgs" && suffix!="pgs" && suffix!="mint" && suffix!="ply") return failed(tr("Open a VGS, PGS, MINT, PLY or VGSPROJ file."));
-    pendingProject_=candidate;pendingProjectPath_=candidate ? absolute : QString();
+    pendingProject_=candidate;pendingProjectPath_=candidate ? absolute : QString();pendingRelocated_=relocated;
     openingRemote_=interaction==Interaction::Automation;openingRequest_=++requestSerial_;
     automationError_.clear();
     play(false); viewport_->setTransformMode(TransformMode::None); viewport_->setCropEditing(false); loading_ = true; openingGeneration_ = ++serial_; syncUi();
@@ -1800,6 +1804,32 @@ bool MainWindow::openPath(const QString &path, Interaction interaction, bool dis
     statusBar()->showMessage(tr("Loading %1…").arg(QFileInfo(asset).fileName()));
     Project opening=candidate.value_or(defaultProject());if (!candidate) {opening.captureSettings.plyFps=30;opening.captureSettings.plyRowOffset=0;}
     emit openRequested(asset, openingGeneration_, true, openingRequest_,opening);return true;
+}
+bool MainWindow::locateSource(Project *project) {
+    const QFileInfo old(project->asset);
+    // The dialog opens on the old name in the nearest folder still there.
+    QString folder=old.absolutePath();
+    while (!QFileInfo(folder).isDir()) {const QString parent=QFileInfo(folder).path();if (parent==folder) break;folder=parent;}
+    const QString suffix=old.suffix().toLower();
+    const QString path=QFileDialog::getOpenFileName(this,tr("Where is %1?").arg(old.fileName()),QDir(folder).filePath(old.fileName()),
+        tr("%1 capture (*.%2);;Captures (*.vgs *.pgs *.mint *.ply)").arg(suffix.toUpper(),suffix));
+    if (path.isEmpty()) return false;
+    const QFileInfo found(path);
+    // A PLY sequence's frames and birth events keep their places relative to its first frame.
+    if (!project->plySequence.empty()) {
+        const QDir from=old.absoluteDir(),to=found.absoluteDir();
+        auto moved=[&](const QString &file) {return file.isEmpty() ? file : QDir::cleanPath(to.absoluteFilePath(from.relativeFilePath(file)));};
+        auto &spec=project->plySequence;
+        for (auto &file:spec.files) file=moved(file);
+        spec.births=moved(spec.births);
+        const auto missing=std::find_if(spec.files.begin(),spec.files.end(),[](const QString &file) {return !QFileInfo(file).isFile();});
+        if (missing!=spec.files.end()) {
+            showError(tr("The PLY sequence is not all beside %1: %2 is missing.").arg(found.fileName(),QDir::toNativeSeparators(*missing)));
+            return false;
+        }
+    }
+    project->asset=found.absoluteFilePath();
+    return true;
 }
 int MainWindow::timelineFrame(double displayedValue, bool tail) const {
     const int last=std::max(0,info_.frames-1)+(tail ? project_.morphTail(info_.fps) : 0);

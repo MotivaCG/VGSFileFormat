@@ -818,8 +818,13 @@ bool MintFile::decode(double seconds, MintFrame* out, bool includeSh, QString* e
     const quint64 samples = intervals + 1;
     const float r = float(normalized);
     const float sampleTime = r * float(intervals);
-    const quint64 frame = std::min<quint64>(quint64(std::floor(sampleTime)), intervals - 1);
-    const float alpha = sampleTime - float(frame);
+    // A frame's own time, through float32, can land a hair short of its sample: within a
+    // thousandth of the next one, it is that sample, not the end of the one before.
+    float sample = std::floor(sampleTime);
+    if (sampleTime - sample > 0.999f)
+        sample += 1.0f;
+    const quint64 frame = std::min<quint64>(quint64(sample), intervals - 1);
+    const float alpha = std::max(0.0f, sampleTime - float(frame));
 
     bool needPosition = false, needRotation = false;
     for (const MintBlock* group : groups) {
