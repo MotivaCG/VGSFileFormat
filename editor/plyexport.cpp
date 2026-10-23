@@ -20,15 +20,17 @@ vgs::Header plySequenceHeader(const PlySequence &source) {
     vgs::Header h;h.timeNumerator=1000000;h.timeDenominator=uint32_t(std::llround(source.fps()*1000000));h.frameCount=h.durationTicks=source.frames();h.shDegree=source.degree();
     for (const auto &c:source.chunks()) {vgs::ChunkEntry e;e.startTick=c.first;e.intervals=c.frames;h.chunks.push_back(e);}return h;
 }
+vgs::DecodedChunk emptyTemporalChunk(int intervals,int degree) {
+    const int S=intervals+1;
+    vgs::Frame sentinel;sentinel.count=1;sentinel.active={0};sentinel.position={0,0,0};sentinel.rotation={0,0,0,1};sentinel.scale={0,0,0};sentinel.opacity={0};sentinel.colorDc={.5f,.5f,.5f};
+    auto out=packExportFrame(sentinel,degree);for (auto &g:out.groups) g.intervals=intervals;
+    for (auto &p:out.pages) {const auto id=p.descriptor.attribute;if (id==vgs::PositionSamples || id==vgs::RotationSamples || id==vgs::Sh0Trajectories || id==vgs::OpacityTrajectories || id==vgs::ShTemporalBook) {const size_t stride=p.bytes.size()/2;Bytes expanded(size_t(S)*stride);for (int s=0;s<S;++s) std::copy_n(p.bytes.data(),stride,expanded.data()+size_t(s)*stride);p.bytes=std::move(expanded);p.descriptor.spec={};p.descriptor.spec.rows=p.descriptor.totalRows=p.bytes.size();}}
+    return assembleNativeChunk(std::move(out));
+}
 vgs::DecodedChunk packPlySequenceChunk(PlySequence &source,size_t index,int degree,const ExportProgress &progress,std::vector<uint32_t> *sourceRecords,PlyFitCheck *check) {
     const auto &chunk=source.chunks().at(qsizetype(index));const auto records=source.records(index);const size_t n=records.size();const int T=chunk.frames,S=T+1,kept=std::min(degree,chunk.degree),K=kept==3 ? 15 : kept==2 ? 8 : kept==1 ? 3 : 0;
     if (sourceRecords) sourceRecords->clear();
-    if (!n) {
-        vgs::Frame sentinel;sentinel.count=1;sentinel.active={0};sentinel.position={0,0,0};sentinel.rotation={0,0,0,1};sentinel.scale={0,0,0};sentinel.opacity={0};sentinel.colorDc={.5f,.5f,.5f};
-        auto out=packExportFrame(sentinel,degree);for (auto &g:out.groups) g.intervals=T;
-        for (auto &p:out.pages) {const auto id=p.descriptor.attribute;if (id==vgs::PositionSamples || id==vgs::RotationSamples || id==vgs::Sh0Trajectories || id==vgs::OpacityTrajectories || id==vgs::ShTemporalBook) {const size_t stride=p.bytes.size()/2;Bytes expanded(size_t(S)*stride);for (int s=0;s<S;++s) std::copy_n(p.bytes.data(),stride,expanded.data()+size_t(s)*stride);p.bytes=std::move(expanded);p.descriptor.spec={};p.descriptor.spec.rows=p.descriptor.totalRows=p.bytes.size();}}
-        return assembleNativeChunk(std::move(out));
-    }
+    if (!n) return emptyTemporalChunk(T,degree);
     // As indexing planned it: free memory less 2 GiB left to the rest of the computer.
     const quint64 work=n*quint64(S)*(48+quint64(K*12))*2+64*previewmemory::MiB;const auto memory=previewmemory::systemSnapshot();
     if (!memory.valid || memory.physicalAvailable<work+2*previewmemory::GiB) throw std::runtime_error("Not enough free memory to prepare this PLY chunk safely.");

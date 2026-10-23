@@ -24,6 +24,7 @@
 #include "mintfile.h"
 #include "captureworker.h"
 #include "plyexport.h"
+#include "dependencies/plyseq/plyfit.h"
 #include "mintskinrecovery.h"
 #include "despillcolor.h"
 #include "vgsdecoder/vgsdecoder.h"
@@ -47,6 +48,7 @@
 #include <map>
 #include <set>
 #include <optional>
+#include <unordered_map>
 
 namespace {
 constexpr double C0 = 0.28209479177387814, Pi = 3.14159265358979323846;
@@ -163,8 +165,9 @@ public:
         return keep;
     }
     std::vector<uint8_t> keeps(const vgs::Frame &source,const ExportProgress &progress,const std::vector<uint8_t> *pruned) const {vgs::Frame input;return decide(source,input,progress,pruned);}
-    vgs::Frame bake(const vgs::Frame &source,const ExportProgress &progress,const std::vector<uint8_t> *pruned=nullptr) const {
-        vgs::Frame input;const auto keep=decide(source,input,progress,pruned);
+    // `kept`, given, says which of the source's records each baked splat is.
+    vgs::Frame bake(const vgs::Frame &source,const ExportProgress &progress,const std::vector<uint8_t> *pruned=nullptr,std::vector<uint32_t> *kept=nullptr) const {
+        vgs::Frame input;const auto keep=decide(source,input,progress,pruned);if (kept) kept->clear();
         auto sourceRgb=[&](size_t i) {return QVector3D(source.colorDc[3*i],source.colorDc[3*i+1],source.colorDc[3*i+2]);};
         auto processedRgb=[&](size_t i) {return QVector3D(input.colorDc[3*i],input.colorDc[3*i+1],input.colorDc[3*i+2]);};
         vgs::Frame out;out.shCoefficients=coefficients;out.seconds=source.seconds;
@@ -190,7 +193,7 @@ public:
                 opacityFactor=bakedOpacityFactor(ratios);}
             for (int c=0;c<3;++c) { out.position.push_back(world[c]);out.scale.push_back(scales[c]); }
             for (int c=0;c<4;++c) out.rotation.push_back(float(rotation.coeffs()[c]));
-            out.opacity.push_back(std::min(1.f,input.opacity[i]*opacityFactor*modifiers.opacity));out.active.push_back(1);
+            out.opacity.push_back(std::min(1.f,input.opacity[i]*opacityFactor*modifiers.opacity));out.active.push_back(1);if (kept) kept->push_back(uint32_t(i));
             Eigen::Matrix<double,16,3> colours=Eigen::Matrix<double,16,3>::Zero();
             for (int c=0;c<3;++c) colours(0,c)=(input.colorDc[3*i+c]-.5)/C0;
             for (int k=0;k<input.shCoefficients;++k) for (int c=0;c<3;++c) colours(k+1,c)=input.shRest[(i*input.shCoefficients+k)*3+c];
@@ -532,35 +535,73 @@ public:
         const QMatrix4x4 toEnd=intoEnd(first);
         std::vector<loopmorph::Pair> list;for (const auto &pair:project.morphPairs(rate)) list.push_back({pair.end,toEnd.map(pair.start)});
         pairs=int(list.size());
-        auto end=shaped(last,progress),start=shaped(first,progress);
+        auto end=shaped(last,progress,&end_),start=shaped(first,progress,&start_);
         report(progress,0,QStringLiteral("Loop morph: fitting"));
         const auto cancelled=[&] {return progress && !progress(0,QStringLiteral("Loop morph: fitting"));};
         morph_=std::make_unique<loopmorph::Morph>(std::move(end),std::move(start),list,cancelled);
         if (overlaps && frames) {
             report(progress,0,QStringLiteral("Loop morph: following the frames before End"));
-            morph_->follow(false,followed(last),cancelled);
-            if (leadIn) morph_->follow(true,followed(first),cancelled);
+            const auto back=followed(last);for (const auto &t:back) endChunks_.push_back(int(t.chunk));
+            morph_->follow(false,back,cancelled);
+            if (leadIn) {const auto before=followed(first);for (const auto &t:before) startChunks_.push_back(int(t.chunk));morph_->follow(true,before,cancelled);}
         }
     }
     // The morph's frame k of `frames`, k/(frames+1) of the way, so neither End nor Start shows
     // twice, in End's capture coordinates. Overlapping, it is the capture's frame as many
     // before End as there are morph frames still to come, End itself standing for Start.
-    vgs::Frame frame(int k,double seconds,const ExportProgress &progress) const {
-        const double s=double(k)/double(frames+1);
-        if (!overlaps) return morphFrameOf(morph_->evaluate(s),seconds);
-        loopmorph::Morph::Live live;live.back=size_t(frames+1-k);
-        const auto end=shaped(last_-int(live.back),progress);live.end=&end;
-        loopmorph::Cloud start;if (leadIn) {start=shaped(first_-int(live.back),progress);live.start=&start;}
-        return morphFrameOf(morph_->evaluate(s,live),seconds);
+    // `identity`, given, names each splat by the source frame's record it comes from: the
+    // same splat from frame to frame while those frames are in one source chunk.
+    vgs::Frame frame(int k,double seconds,const ExportProgress &progress,std::vector<uint64_t> *identity=nullptr) const {
+        const double s=double(k)/double(frames+1);std::vector<uint32_t> source;
+        if (!overlaps) {
+            const auto cloud=morph_->evaluate(s,identity ? &source : nullptr);
+            if (identity) identify(source,end_,start_,identity);
+            return morphFrameOf(cloud,seconds);
+        }
+        loopmorph::Morph::Live live;live.back=size_t(frames+1-k);Side endSide,startSide=start_;
+        const auto end=shaped(last_-int(live.back),progress,&endSide);live.end=&end;
+        loopmorph::Cloud start;if (leadIn) {start=shaped(first_-int(live.back),progress,&startSide);live.start=&start;}
+        const auto cloud=morph_->evaluate(s,live,identity ? &source : nullptr);
+        if (identity) identify(source,endSide,startSide,identity);
+        return morphFrameOf(cloud,seconds);
+    }
+    // Where the morph's chunks start, as frames k: at its first, and wherever a source frame it
+    // follows is in another source chunk than the frame before, for a splat is only the same
+    // one within a chunk; and after at most `longest` frames.
+    std::vector<int> chunkStarts(int longest) const {
+        std::vector<int> starts;std::pair<int,int> previous{-1,-1};
+        for (int k=1;k<=frames;++k) {
+            const size_t back=size_t(frames+1-k);
+            const std::pair<int,int> sources{overlaps && back<endChunks_.size() ? endChunks_[back] : end_.chunk,leadIn && back<startChunks_.size() ? startChunks_[back] : start_.chunk};
+            if (starts.empty() || sources!=previous || k-starts.back()>=longest) starts.push_back(k);
+            previous=sources;
+        }
+        return starts;
     }
 private:
+    // A shaped frame's source chunk, and the record each of its cloud's splats is.
+    struct Side {int chunk=-1;std::vector<uint32_t> records;};
     const Project &project_;int first_,last_;double rate_;int degree_;bool antialiased_;SourceFrameReader read_;
     QMatrix4x4 unEnd_;std::unique_ptr<loopmorph::Morph> morph_;
+    Side end_,start_;
+    // The source chunk of the frame `i` before End, and before Start, as followed.
+    std::vector<int> endChunks_,startChunks_;
     mutable std::mutex pruneMutex_;mutable std::map<int,std::vector<uint8_t>> pruned_; // per source chunk
     // A frame's capture coordinates carried into End's.
     QMatrix4x4 intoEnd(int frame) const {return unEnd_*project_.transformAtFrame(frame).matrix();}
+    // The morph numbers the End side's splats first, then the Start side's.
+    static void identify(const std::vector<uint32_t> &source,const Side &end,const Side &start,std::vector<uint64_t> *identity) {
+        identity->resize(source.size());const size_t ends=end.records.size();
+        auto key=[](uint64_t side,int chunk,uint32_t record) {return side<<63 | uint64_t(uint32_t(chunk) & 0x7FFFFFFF)<<32 | record;};
+        for (size_t i=0;i<source.size();++i) {
+            const size_t v=source[i];
+            if (v<ends) (*identity)[i]=key(0,end.chunk,end.records[v]);
+            else if (v-ends<start.records.size()) (*identity)[i]=key(1,start.chunk,start.records[v-ends]);
+            else throw std::runtime_error("The loop morph names a splat it does not have.");
+        }
+    }
     // A frame as the modifiers above the morph leave it, in End's capture coordinates.
-    loopmorph::Cloud shaped(int frame,const ExportProgress &progress) const {
+    loopmorph::Cloud shaped(int frame,const ExportProgress &progress,Side *side=nullptr) const {
         int chunk=0;double start=0,end=0;const vgs::Frame f=read_(frame/rate_,&chunk,&start,&end);
         Project above=project_;above.transform=project_.transformAtFrame(frame);above.modifiers=project_.modifiersAboveMorph(frame);
         for (auto &m:above.modifiers) m.showErased=false;
@@ -572,7 +613,9 @@ private:
             mask=found->second;
         }
         if (!stack.erased.empty()) {const auto erase=stack.eraseKeep(chunk,f.count);if (mask.empty()) mask=erase;else for (size_t i=0;i<mask.size() && i<erase.size();++i) mask[i]&=erase[i];}
-        return morphCloud(f,Baker(above,degree_).keeps(f,progress,mask.empty() ? nullptr : &mask),intoEnd(frame));
+        const auto keep=Baker(above,degree_).keeps(f,progress,mask.empty() ? nullptr : &mask);
+        if (side) {side->chunk=chunk;side->records.clear();for (size_t i=0;i<keep.size();++i) if (keep[i]) side->records.push_back(uint32_t(i));}
+        return morphCloud(f,keep,intoEnd(frame));
     }
     // Every splat the source shows at `from` and the morph's length of frames before it, in
     // End's capture coordinates, for the morph to follow.
@@ -594,9 +637,69 @@ private:
 // One of the morph's frames, `k`, baked as the capture is: in the world as End is placed (or,
 // `baked` given, in that baked frame's coordinates), through what is below the morph.
 static vgs::Frame bakeMorphFrame(const ExportMorph &morph,int k,const Project &project,int last,int degree,const ExportProgress &progress,
-                                 double seconds,const Transform *baked=nullptr) {
+                                 double seconds,const Transform *baked=nullptr,std::vector<uint64_t> *identity=nullptr) {
     Project pose=project;pose.transform=baked ? *baked : project.transformAtFrame(last);pose.modifiers=project.modifiersBelowMorph(last);
-    return Baker(pose,degree).bake(morph.frame(k,seconds,progress),progress);
+    std::vector<uint64_t> named;std::vector<uint32_t> kept;
+    auto out=Baker(pose,degree).bake(morph.frame(k,seconds,progress,identity ? &named : nullptr),progress,nullptr,identity ? &kept : nullptr);
+    if (identity) {identity->resize(kept.size());for (size_t i=0;i<kept.size();++i) (*identity)[i]=named[kept[i]];}
+    return out;
+}
+namespace {
+// Baked frames of a Loop morph packed as one native chunk, as a PLY sequence's chunk is: a
+// splat followed by its identity through the frames it shows in without a break is one record,
+// fitted along those frames. Its scale is the one it starts with, its higher SH its average.
+class MorphChunk {
+public:
+    MorphChunk(int frames,int coefficients) : frames_(frames),samples_(size_t(frames)+1),terms_(size_t(coefficients)*3) {}
+    void add(const vgs::Frame &f,const std::vector<uint64_t> &identity) {
+        const int s=added_++;
+        if (s>=frames_ || identity.size()!=f.count || (f.count && size_t(f.shCoefficients)*3!=terms_)) throw std::runtime_error("Invalid loop morph frame.");
+        for (size_t i=0;i<f.count;++i) {
+            auto &open=open_.try_emplace(identity[i],Open{}).first->second;
+            if (open.last==s) continue; // the same splat twice: the first stands
+            if (open.last!=s-1) {open.record=grow();lives_.push_back({uint32_t(s),uint32_t(s)});
+                for (int c=0;c<3;++c) tracks_.scale[size_t(open.record)*3+c]=std::log(std::max(f.scale[3*i+c],1e-30f));}
+            open.last=s;const size_t r=open.record,at=r*samples_+size_t(s);lives_[r].last=uint32_t(s);
+            std::copy_n(f.position.data()+3*i,3,tracks_.position.data()+at*3);tracks_.opacity[at]=f.opacity[i];
+            tracks_.rotation[at*4]=f.rotation[4*i+3];for (int c=0;c<3;++c) tracks_.rotation[at*4+1+c]=f.rotation[4*i+c];
+            for (int c=0;c<3;++c) tracks_.color[at*3+c]=float((f.colorDc[3*i+c]-.5)/C0);
+            for (size_t k=0;k<terms_;++k) tracks_.rest[r*terms_+k]+=f.shRest[i*terms_+k];
+            ++shown_[r];
+        }
+    }
+    vgs::DecodedChunk finish(int degree,const ExportProgress &progress) {
+        if (added_!=frames_) throw std::runtime_error("A loop morph chunk is missing frames.");
+        const size_t n=lives_.size(),S=samples_;
+        if (!n) return emptyTemporalChunk(frames_,degree);
+        tracks_.count=n;tracks_.samples=S;tracks_.weight.assign(n*S,0);
+        for (size_t r=0;r<n;++r) {
+            const auto &life=lives_[r];
+            // Before and after its frames a record holds where it is, as the PLY packer's do.
+            for (size_t s=0;s<S;++s) if (s<life.first || s>life.last) {
+                const size_t from=r*S+std::clamp<size_t>(s,life.first,life.last),to=r*S+s;
+                std::copy_n(tracks_.position.data()+from*3,3,tracks_.position.data()+to*3);std::copy_n(tracks_.rotation.data()+from*4,4,tracks_.rotation.data()+to*4);
+                std::copy_n(tracks_.color.data()+from*3,3,tracks_.color.data()+to*3);tracks_.opacity[to]=tracks_.opacity[from];
+            }
+            for (size_t s=1;s<S;++s) {auto *q=tracks_.rotation.data()+(r*S+s)*4;const auto *previous=q-4;float dot=0;
+                for (int c=0;c<4;++c) dot+=q[c]*previous[c];if (dot<0) for (int c=0;c<4;++c) q[c]=-q[c];}
+            for (size_t s=life.first;s<=std::min<size_t>(life.last+1,S-1);++s) tracks_.weight[r*S+s]=1;
+            for (size_t k=0;k<terms_;++k) tracks_.rest[r*terms_+k]/=float(shown_[r]);
+        }
+        auto result=plyfit::fit(std::move(tracks_),lives_,terms_/3,[&](const std::string &stage) {report(progress,0,QString::fromStdString(stage));});
+        return assembleNativeChunk(std::move(result.chunk));
+    }
+private:
+    struct Open {uint32_t record=0;int last=-2;};
+    int frames_,added_=0;size_t samples_,terms_;
+    std::unordered_map<uint64_t,Open> open_;
+    std::vector<plyfit::Record> lives_;std::vector<uint32_t> shown_;
+    plyfit::Tracks tracks_;
+    uint32_t grow() {
+        const size_t r=lives_.size(),n=r+1,S=samples_;
+        tracks_.position.resize(n*S*3);tracks_.rotation.resize(n*S*4);tracks_.color.resize(n*S*3);tracks_.opacity.resize(n*S);
+        tracks_.scale.resize(n*3);tracks_.rest.resize(n*terms_);shown_.push_back(0);return uint32_t(r);
+    }
+};
 }
 // What an export says of its Loop morph.
 static QString morphNote(const ExportMorph &morph,const Project &project,int last) {
@@ -770,9 +873,7 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
     }
     const auto nativePlan=native ? nativeExportPlan(sourceHeader,first,result.frames) : std::vector<NativeChunkPlan>{};
     const size_t rangeChunks=native ? nativePlan.size() : size_t(result.frames);
-    header.shDegree=degree;header.frameCount=header.durationTicks=totalFrames;header.chunks.resize(rangeChunks+size_t(morphFrames));
-    uint64_t outputTick=0;
-    for (size_t i=0;i<header.chunks.size();++i) {header.chunks[i].startTick=outputTick;header.chunks[i].intervals=i<rangeChunks && native ? nativePlan[i].intervals : 1;outputTick+=header.chunks[i].intervals;}
+    header.shDegree=degree;header.frameCount=header.durationTicks=totalFrames;
 
     // Native chunks are prepared on the chunk workers; the sampled path decodes frames
     // through one reader and one baker, which are not shared.
@@ -871,19 +972,39 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
         morph=std::make_unique<ExportMorph>(inputProject,first,last,rate,degree,sourceAntialiased,read,progress);
         result.notes << morphNote(*morph,inputProject,last);
     }
+    // The range's chunks, then the morph's: several frames each. At most 48, so a morph that
+    // follows a source chunk of 32 frames is not split where its reader takes the frame after
+    // it from that chunk's closing sample, as float time can at a chunk change.
+    const std::vector<int> morphStarts=morph ? morph->chunkStarts(48) : std::vector<int>{};
+    auto morphChunk=[&](size_t m) {return std::make_pair(morphStarts[m],(m+1<morphStarts.size() ? morphStarts[m+1] : morphFrames+1)-morphStarts[m]);};
+    header.chunks.resize(rangeChunks+morphStarts.size());
+    uint64_t outputTick=0;
+    for (size_t i=0;i<header.chunks.size();++i) {
+        header.chunks[i].startTick=outputTick;
+        header.chunks[i].intervals=i>=rangeChunks ? uint64_t(morphChunk(i-rangeChunks).second) : native ? nativePlan[i].intervals : 1;
+        outputTick+=header.chunks[i].intervals;
+    }
     const QMatrix4x4 morphWorld=inputProject.transformAtFrame(last).matrix();
+    std::mutex morphMutex;
     PlyChunkSpool plyChunks;
     auto provider=[&](size_t index) {
         reportHere(QStringLiteral("%1 %2 %3 / %4").arg(writing ? "Writing" : "Preparing",index>=rangeChunks ? "loop morph frame" : native ? "native block" : "frame").arg(index+1).arg(header.chunks.size()));
         if (index>=rangeChunks) {
             // Frame k of n is k/(n+1) of the way, so neither End nor Start shows twice. The
             // morph is in End's capture coordinates: the baked transform takes it to the world,
-            // or, moving, to where the data is baked, and its motion samples the rest.
-            const int k=int(index-rangeChunks)+1;
-            auto baked=bakeMorphFrame(*morph,k,inputProject,last,degree,innerProgress,double(result.frames+k-1)/rate,&project.transform);
-            if (!writing) {std::lock_guard<std::mutex> guard(stateMutex);result.kept+=baked.count;}
-            auto chunk=withNormals(packFrame(std::move(baked),degree));
-            if (moving) {const auto sample=similarityFrom(morphWorld*unbake,last);chunk.pages.push_back(motionPage({sample,sample}));}
+            // or, moving, to where the data is baked, and its motion samples the rest. One
+            // morph chunk at a time: its frames' tracks are a whole chunk's worth of memory.
+            const auto [start,length]=morphChunk(index-rangeChunks);
+            std::lock_guard<std::mutex> one(morphMutex);
+            MorphChunk packed(length,(degree+1)*(degree+1)-1);std::vector<uint64_t> identity;uint64_t kept=0;
+            for (int k=start;k<start+length;++k) {
+                reportHere(QStringLiteral("%1 loop morph frame %2 / %3").arg(writing ? "Writing" : "Preparing").arg(k).arg(morphFrames));
+                const auto baked=bakeMorphFrame(*morph,k,inputProject,last,degree,innerProgress,double(result.frames+k-1)/rate,&project.transform,&identity);
+                kept+=baked.count;packed.add(baked,identity);
+            }
+            if (!writing) {std::lock_guard<std::mutex> guard(stateMutex);result.kept+=kept;}
+            auto chunk=withNormals(packed.finish(degree,innerProgress));
+            if (moving) {const auto sample=similarityFrom(morphWorld*unbake,last);chunk.pages.push_back(motionPage(std::vector<vgs::Motion>(size_t(length)+1,sample)));}
             return chunk;
         }
         if (native) {
