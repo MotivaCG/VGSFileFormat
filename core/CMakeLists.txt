@@ -23,6 +23,7 @@ set(VGS_CORE_INCLUDE_DIRS
 
 # Read a capture, check that it is genuine, decode its frames.
 set(VGS_CORE_SHARED_SOURCES
+    ${VGS_ENTROPY_SOURCES}
     ${core}/src/vgscontainer.cpp
     ${core}/src/vgsframe.cpp
     ${core}/src/mgscodec.cpp

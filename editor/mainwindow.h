@@ -49,6 +49,7 @@ class QFormLayout;
 class LoadingOverlay;
 class QProgressDialog;
 class AudioPreview;
+class AudioPathLabel;
 class EditorAutomation;
 enum class EditorCloseResult { Ready, Waiting, Cancelled };
 
@@ -225,7 +226,7 @@ private:
     // Audio: its panel, and a player per active Audio modifier, by its id, all following the
     // timeline together.
     QGroupBox *audioProperties_;
-    QLabel *audioSource_;
+    AudioPathLabel *audioSource_;
     QComboBox *audioSourceType_;
     QDoubleSpinBox *audioOffset_, *audioVolume_;
     QCheckBox *audioLoop_;

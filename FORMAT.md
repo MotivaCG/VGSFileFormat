@@ -1,4 +1,4 @@
-# VFGS version 4: the `.vgs` and `.pgs` container
+# VFGS version 5: the `.vgs` and `.pgs` container
 
 A capture is a 4D Gaussian splat recording: a timeline of frames, each a few hundred
 thousand splats, laid out so a player fetches and decodes one chunk of time at a time
@@ -9,7 +9,7 @@ one is in the decoder's own README, and how the projects here are built is in th
 repository's.
 
 Two extensions share one container. `.vgs` codes its attribute pages with VGS's
-16-bit-renormalized static rANS stream;
+per-attribute FSE, Pcodec, rANS16 or Raw selection;
 `.pgs` stores them as they are. Nothing else differs, and a reader does not need to know
 which it has: the header declares the codec per attribute, so both are read by the same
 code. `.pgs` exists for cases where CPU time matters more than bytes.
@@ -53,13 +53,13 @@ planes of three coefficients, one 32-bit word per splat each, so a degree keeps 
 planes: five at degree 3, three at degree 2, one at degree 1, none at degree 0, where both
 SH layers are absent. Degree 2 has its DC coefficient plus eight higher-order
 coefficients. Its three higher-order storage planes have room for nine, so the ninth
-position is only padding and is never evaluated. VGS v4 writes that position's index
+position is only padding and is never evaluated. VGS v5 writes that position's index
 and codebook entries as zero,
 including across page boundaries. Readers evaluate whole bands only, so canonicalizing
 that slot does not change any evaluated coefficient.
 
 The plane count also appears in each SH index page's `width`, which is what sizes the page.
-The signed header is authoritative: a v4 reader rejects an inconsistent plane count. On
+The signed header is authoritative: a v5 reader rejects an inconsistent plane count. On
 `boxing.mint` the degrees measure 44.85, 38.40, 31.99 and 28.78 MB — degree 2 costs 14.4%
 less than degree 3, and it is a third of the shader's work in the viewer as well.
 
@@ -101,11 +101,19 @@ wrong. Readers validate it as zero today.
 
 ## Compression and raw mode
 
-`Compression::Auto` measures raw storage and every supported model over **all pages**
-of each attribute type in the file. The smallest aggregate payload wins, once per type.
-Policies never change between groups or chunks. rANS16 is the only entropy codec in v4;
-raw is a genuine no-entropy-code path. No TurboPFor, Rust, pcodec or new dependency is used.
-`Compression::None` assigns raw to every type and skips all entropy trials.
+`Compression::Auto` measures Raw, FSE, FSE8, Pcodec-symbol and Pcodec-numeric
+candidates, plus the rANS16 reference, over **all pages** of each attribute.
+It chooses a minimum-payload numerical model/type per codec and a fast global
+mixture with less than 1% growth against rANS. Costs include 16-byte page
+alignment. Header and directory layouts do not grow. A bounded Pareto search
+uses deterministic decode-work priors from the portable WASM experiment, not
+native timing on the encoder's machine. It is a performance heuristic, not a
+promise for every capture or phone. One policy applies to an attribute across
+all groups and chunks. `Compression::None` skips all trials and assigns Raw.
+
+FSE and Pcodec introduce no additional quantization; every coded page must
+reconstruct the original logical array bytes. The implementation vendors FSE
+and pco 1.0.4; Cargo is a build dependency only, not a browser dependency.
 
 Raw data retains its binary numerical packing (including quantized values, VQ indices
 and f16 fields already present in the source). It is not expanded float32 frame data.
@@ -220,7 +228,7 @@ that these fields do not describe.
 | Offset | Type | Field |
 |---:|---|---|
 | 0 | u32 | magic `VFGS` = `0x53474656` |
-| 4 | u32 | version = 4 |
+| 4 | u32 | version = 5 |
 | 8 | u64 | headerSize: the fixed header and the four tables |
 | 16 | u64 | signedSize: headerSize plus the metadata block; where the signature starts |
 | 24 | u64 | fileSize |
@@ -252,11 +260,11 @@ that these fields do not describe.
 and `signedSize = headerSize + metadataSize`. The header block holds the policies, then
 the layer table, then the extras table, then the chunk index, then the metadata.
 
-The version is exact. Version 4 keeps the 256-byte signed header layout of version 3,
-but changes codec 1's entropy stream and canonicalizes degree-2 spare SH entries.
-Version-3 files are rejected; rewriting the header version alone cannot convert their
-page payloads. Version 3 had added `renderHints` and grew the fixed header from 192 to
-256 bytes. The 64 reserved bytes are written as zero and a reader refuses anything else.
+The version is exact. Version 5 retains the 256-byte header layout and numerical
+attribute semantics of version 4, and adds FSE/Pcodec policy codecs. Earlier VGS
+versions are rejected, including raw `.pgs` files. Re-exporting is required;
+rewriting the version field alone does not migrate payloads or signatures.
+The 64 reserved bytes remain zero.
 
 **When it was written.** `createdMillis` is inside the signed region, so it is the
 capture's own statement rather than a filesystem timestamp that copying, uploading or
@@ -317,7 +325,7 @@ separately. Header degree describes the complete capture, not the currently load
 `maxChunkSplatRecords` counts all splat records in the largest chunk, including those not
 simultaneously alive. Consumers must not use the frame maximum to size chunk storage.
 
-Each **policy** is six u32: attribute ID, codec (0 raw / 1 VGS rANS16), model, model family,
+Each **policy** is six u32: attribute ID, codec (0 Raw, 1 rANS16, 2 FSE, 3 Pcodec symbols, 4 Pcodec numeric, 5 FSE8), model, model family,
 flags and a zero. Flag bit 0 marks the attribute **optional**: a reader that cannot name
 the attribute may skip its pages and still reconstruct a frame. An attribute ID a reader
 does not know is accepted when it is optional, whichever range it is in, and refused when
@@ -368,7 +376,7 @@ stays in sync - the editor writes the range's first source frame into `startTick
 purpose — block 1 belongs to whoever produced the capture, block 2 to whoever uses it, and
 neither has to parse or preserve the other's.
 
-Types 5..0x7FFF are reserved for future revisions of this specification; a version 4 reader
+Types 5..0x7FFF are reserved for future revisions of this specification; a version 5 reader
 rejects them rather than guessing. Vendor payloads must be ignorable: a reader that does not
 know a vendor type skips it and still plays the capture. Metadata keys `creator`, `source`,
 `take`, `capturedAt`, `license` and `units` are reserved by this specification; anything
@@ -439,12 +447,43 @@ their encoded bytes exactly. All bounds and malformed-table checks apply before
 using untrusted bytes. This is a different wire format from MGS's 8-bit rANS
 (`L = 2^23`); neither decoder may silently use the other.
 
+**Codecs 2 and 5: FSE.** Numerical models and contexts retain their meanings.
+Codec 2 searches 12/8-bit high-symbol splits; codec 5 fixes the split to 8 bits.
+The decoder is identical for both because the split is recorded in each wide
+column. Each symbol stream stores varuint alphabet size (1..4096), u8 frequency
+precision (8..12), varuint context count, then normalized frequencies per context.
+Frequency modes 0/1/2 retain the empty/sparse/dense varint tables. Mode 3 stores a
+varuint byte length and the FSE NCount representation. The writer validates the
+NCount roundtrip and falls back to a varint table if it cannot represent a sparse
+U16 alphabet exactly. Precision is min(12,max(8,bitlen(maxPresent-1)+2)), with the
+empty case treated as zero present bits. All nonempty context frequencies sum to
+2^precision. A u8 state count is 4 at >=4096 symbols, otherwise 1. A varuint byte
+length precedes one backwards FSE bitstream, including flushed final states.
+Symbol i uses state i modulo stateCount and its numerical context. All final
+states must be zero and the bitstream consumed exactly. Tables use the pinned
+FSEU16 implementation, with 12-bit symbols and 4-byte decoding entries.
+
+**Codec 3: Pcodec symbols.** Keep the VGS numerical models and wide-bit packing,
+but merge entropy contexts. Each symbol stream is varuint alphabet size,
+varuint context count (always 1), varuint symbol count, varuint compressed length,
+then a standalone Pco u32 stream. Decoding verifies the expected count and symbol
+range before reconstructing the original packed columns.
+
+**Codec 4: Pcodec numeric.** Bypass the VGS numerical models. Policy model is the
+numeric reinterpretation: 1=u8, 2=u16, 4=u32, 5=f16. Model 5 is permitted only for
+half-valued attributes. Page payload is a standalone Pco stream over the logical
+page bytes viewed as that little-endian type; the decoded byte count must equal
+`decodedSize`. The writer uses compression level 8 with eight-bit type support.
+This preserves half NaN payloads, signed zero and all integer/packed bit patterns.
+The encoder chooses the type globally by payload bytes for each attribute.
+
+
 The temporal SH entry dictionary may occupy one page or several contiguous blocks
 of complete samples. Each block begins on an `entries`-row boundary and resets its
 entry predictor at that boundary. Its `firstRow` places decoded rows back into the
 original sample-major array; no entry gather or permutation is involved. The
 sample count and entry stride retain their full attribute meaning. Opt-in encoder
-searches may also vary stored rANS precision and high/low bit splits within the
+searches may also vary legal entropy and high/low bit-split choices within the
 already supported ranges. Neither option changes the encoding ID or model IDs.
 
 Attribute IDs and shapes are named in `core/include/vgs/vgscodec.h` and `attributeName()`. IDs 1..12

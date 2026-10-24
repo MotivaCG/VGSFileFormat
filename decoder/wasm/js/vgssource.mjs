@@ -218,6 +218,10 @@ export class BufferedSource {
       // fetches the opening chunks a second time, behind the playback that just read
       // them, which is the most expensive moment of the whole session to waste.
       this.#keep(offset, end, bytes);
+      // Urgent reads can finish the whole download while the background fill is
+      // waiting. It then has no further block to fetch and sends no notification.
+      // Publish this progress too, or a player can wait forever at 0% downloaded.
+      if (this.buffer && !this.stopped) this.onProgress?.(this.filledFraction);
       return bytes;
     } finally {
       this.urgent.delete(span);

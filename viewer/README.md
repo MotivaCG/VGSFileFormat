@@ -11,6 +11,11 @@ the installer.
 
 ## Build with CMake
 
+VGS 5 builds require CMake 3.21+, Python 3 and Rust/Cargo 1.87+. Both CMake and
+qmake compile the vendored FSE sources and build the pinned Pcodec dependency
+offline. qmake invokes the shared CMake builder before linking. The installed
+viewer needs no separate Rust runtime.
+
 From this directory:
 
 ```powershell

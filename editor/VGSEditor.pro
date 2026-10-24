@@ -35,6 +35,7 @@ HEADERS += $$PWD/displayscaling.h \
 SOURCES += $$PWD/editortheme.cpp
 HEADERS += $$PWD/editortheme.h
 VGS_ROOT = $$clean_path($$PWD/..)
+include($$VGS_ROOT/cmake/VGSEntropy.pri)
 # Resolve local headers when regenerating the incremental build dependencies,
 # including the shared cache information used by inspection and the modifier UI.
 DEPENDPATH += $$PWD
