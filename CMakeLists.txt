@@ -1,5 +1,5 @@
-cmake_minimum_required(VERSION 3.16)
-project(VGSFileFormat VERSION 4.0.0 LANGUAGES C CXX)
+cmake_minimum_required(VERSION 3.20)
+project(VGSFileFormat VERSION 5.0.0 LANGUAGES C CXX)
 
 # The VFGS container: an encoder, a decoder, and the codec they share.
 #
@@ -99,6 +99,10 @@ set(VGS_ENCODER_PREFIX encoder)
 # static library that links one would carry it into its exported target set, and a
 # consumer of the installed package should need nothing but the library itself.
 function(vgs_apply_settings target)
+  get_target_property(vgs_sources ${target} SOURCES)
+  if("${CMAKE_SOURCE_DIR}/core/src/mgscodec.cpp" IN_LIST vgs_sources)
+    vgs_link_entropy(${target})
+  endif()
   if(MSVC)
     target_compile_options(${target} PRIVATE /W4 /permissive- /EHsc)
     target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -119,6 +123,12 @@ else()
   set(VGS_ICON "")
 endif()
 
+# Enable testing before descending so WASM's artifact checks are registered too.
+if(VGS_BUILD_TESTS)
+  enable_testing()
+endif()
+
+include(cmake/VGSEntropy.cmake)
 add_subdirectory(core)
 # The encoder is native only. A WebAssembly build is a reader in a browser, and building
 # the authoring library there would mean compiling the private key for a target whose
@@ -165,6 +175,5 @@ if(VGS_BUILD_VIEWER AND NOT VGS_BUILD_WASM)
 endif()
 
 if(VGS_BUILD_TESTS AND NOT VGS_BUILD_WASM)
-  enable_testing()
   add_subdirectory(tests)
 endif()

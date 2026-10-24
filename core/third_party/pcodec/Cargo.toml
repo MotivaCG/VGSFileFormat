@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = ["pco", "better_io", "dtype_dispatch"]
+[workspace.dependencies]
+better_io = { path = "better_io" }
+dtype_dispatch = { path = "dtype_dispatch" }
+half = "2.0.0"
+rand_xoshiro = "0.6.0"
+divan = "0.1.21"

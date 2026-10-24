@@ -15,6 +15,12 @@ set(VGS_TEST_MINT "" CACHE FILEPATH "A .mint capture for the tests that need one
 
 # ---- always ----------------------------------------------------------------------------
 
+add_executable(vgs_hybrid hybrid.cpp)
+target_include_directories(vgs_hybrid PRIVATE ${VGS_CORE_INCLUDE_DIRS})
+target_link_libraries(vgs_hybrid PRIVATE ${VGS_DECODER_LINK})
+vgs_apply_settings(vgs_hybrid)
+add_test(NAME hybrid_codecs COMMAND vgs_hybrid)
+
 add_executable(vgs_framepack framepack.cpp)
 target_link_libraries(vgs_framepack PRIVATE ${VGS_DECODER_LINK})
 vgs_apply_settings(vgs_framepack)

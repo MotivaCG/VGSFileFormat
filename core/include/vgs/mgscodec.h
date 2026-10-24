@@ -155,6 +155,11 @@ Bytes encodeAttribute(const AttributeSpec& spec, int model, const uint8_t* data,
 // Thorough searches legal table precisions and more high/low bit splits. It keeps
 // Standard as a candidate and changes neither the models nor the decoded values.
 enum class EntropySearch { Standard, Thorough };
+// VGS 5 can select an entropy backend independently for each attribute.
+// Rans16 is retained as a size-budget candidate; MGS always keeps its own stream.
+enum class VgsEntropy : uint32_t { Rans16 = 1, Fse = 2, Pcodec = 3, Fse8 = 5 };
+Bytes encodeVgsAttribute(const AttributeSpec&, int model, const uint8_t*, size_t,
+                         VgsEntropy, EntropySearch = EntropySearch::Standard);
 Bytes encodeAttribute(const AttributeSpec& spec, int model, const uint8_t* data, size_t size,
                       EntropySearch search);
 // VGS v4's independent entropy stream. The numerical columns and models retain their
@@ -166,6 +171,8 @@ struct DecodeStats {
     double tableMilliseconds = 0, symbolMilliseconds = 0;
     uint64_t streams = 0, symbols = 0, tablePayloadBytes = 0, maxTableBytes = 0;
 };
+Bytes decodeVgsAttribute(const AttributeSpec&, int model, const uint8_t*, size_t,
+                         VgsEntropy, DecodeStats* = nullptr);
 Bytes decodeAttribute(const AttributeSpec& spec, int model, const uint8_t* data, size_t size);
 // Optional profiling, accumulated into stats. Timing is disabled on the normal path.
 Bytes decodeAttribute(const AttributeSpec& spec, int model, const uint8_t* data, size_t size,

@@ -168,6 +168,26 @@ int main(int argc, char **argv) {
     }
     check(everyTimeResolves, "every time in the capture resolves to a chunk");
 
+    // A time this library hands out names what it came from. startSeconds is ticks times
+    // the tick's length, and dividing it back is not always exact (frame 992 at 30 fps
+    // divides to 991.99999999999989): a reader naming a chunk by its own start was given
+    // the chunk before it. So every chunk's start, and every sample's instant, has to
+    // come back to itself.
+    bool startsResolve = true;
+    for (size_t i = 0; i < capture.chunkCount(); ++i)
+      if (capture.chunkAt(capture.chunk(i).startSeconds) != i)
+        startsResolve = false;
+    check(startsResolve, "every chunk's start resolves to that chunk");
+    bool samplesResolve = true;
+    const double perFrame = 1.0 / capture.frameRate();
+    for (uint64_t k = 0; k < capture.frameCount(); ++k) {
+      const vgsdec::Instant at = capture.instantAt(double(k) * perFrame);
+      const vgsdec::ChunkInfo &info = capture.chunk(at.chunkIndex);
+      if (info.startTick - capture.chunk(0).startTick + at.sampleA != k || at.alpha != 0.0f)
+        samplesResolve = false;
+    }
+    check(samplesResolve, "every sample's instant resolves to that sample");
+
     // Decoding: shapes have to agree with each other and with the header.
     const vgsdec::Frame &frame = capture.setTime(capture.duration() / 2);
     check(frame.splatCount > 0, "the middle of the capture decodes to splats");

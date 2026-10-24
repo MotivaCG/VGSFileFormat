@@ -1,4 +1,7 @@
 #include "mgscodec.h"
+#include "pcodec_bridge.h"
+#define FSE_STATIC_LINKING_ONLY
+#include "fse.h"
 
 #include <algorithm>
 #include <cmath>
@@ -22,6 +25,9 @@ const uint64_t kMaxTableEntries = 1u << 24;
 thread_local EntropySearch entropySearch = EntropySearch::Standard;
 thread_local DecodeStats* decodeStats = nullptr;
 thread_local bool vgsRans16 = false;
+thread_local VgsEntropy vgsEntropy = VgsEntropy::Rans16;
+bool useFse() { return vgsRans16 && (vgsEntropy==VgsEntropy::Fse || vgsEntropy==VgsEntropy::Fse8); }
+bool usePcodec() { return vgsRans16 && vgsEntropy==VgsEntropy::Pcodec; }
 template <class T> struct ScopedValue {
     T& target;
     T previous;
@@ -232,6 +238,20 @@ void normalize(const uint32_t* counts, uint32_t A, uint32_t* f, uint32_t M)
 
 void writeTable(Writer& w, const uint32_t* f, uint32_t A)
 {
+    if (useFse()) {
+        uint32_t total=0;for(uint32_t i=0;i<A;++i)total+=f[i];
+        if(!total){w.u8(0);return;}
+        std::vector<short> norm(A);for(uint32_t i=0;i<A;++i)norm[i]=short(f[i]);
+        const unsigned bits=unsigned(bitlen(total)-1);
+        Bytes packed(FSE_NCountWriteBound(A-1,bits)+16);
+        const size_t n=FSE_writeNCount(packed.data(),packed.size(),norm.data(),A-1,bits);
+        if(FSE_isError(n))throw Error(FSE_getErrorName(n));
+        std::vector<short> check(A);unsigned max=A-1,log=0;
+        const size_t read=FSE_readNCount(check.data(),&max,&log,packed.data(),n);
+        bool valid=!FSE_isError(read)&&read==n&&log==bits;
+        for(uint32_t i=0;i<A;++i)valid=valid&&check[i]==norm[i];
+        if(valid){w.u8(3);w.varint(n);w.bytes(packed.data(),n);return;}
+    }
     uint32_t k = 0;
     for (uint32_t s = 0; s < A; ++s)
         k += f[s] != 0;
@@ -275,10 +295,14 @@ void writeTable(Writer& w, const uint32_t* f, uint32_t A)
     }
 }
 
+#include "vgsentropy.inc"
+
 // ctx: null, or one context per symbol.
 template <class Ctx>
 void encodeSymbols(Writer& w, const int32_t* sym, size_t N, const Ctx* ctx)
 {
+    if(useFse()){encodeFseSymbols(w,sym,N,ctx);return;}
+    if(usePcodec()){encodePcoSymbols(w,sym,N);return;}
     int32_t max = 0;
     for (size_t i = 0; i < N; ++i) {
         if (sym[i] < 0 || sym[i] > 65535)
@@ -424,8 +448,12 @@ struct Tables
                     throw Error("malformed frequency table");
                 int64_t s = -1;
                 for (uint64_t j = 0; j < k; ++j) {
-                    s += int64_t(r.varint()) + 1;
-                    const uint64_t v = r.varint() + 1;
+                    const uint64_t delta=r.varint(), next=uint64_t(s+1);
+                    if(delta>=uint64_t(A)-next)throw Error("malformed frequency index");
+                    s+=int64_t(delta)+1;
+                    const uint64_t frequency=r.varint();
+                    if(frequency>=M)throw Error("malformed frequency");
+                    const uint64_t v=frequency+1;
                     if (s >= int64_t(A) || v > M)
                         throw Error("malformed frequency table");
                     f[s] = uint32_t(v);
@@ -543,6 +571,8 @@ void checkOutput(const Tables& t)
 template <class Out>
 void decodeSymbols(Reader& r, Out* out, size_t N)
 {
+    if(useFse()){decodeFseSymbols(r,out,N,[](size_t,const Out*){return uint32_t(0);});return;}
+    if(usePcodec()){decodePcoSymbols(r,out,N);return;}
     Tables t;
     t.read(r);
     checkOutput<Out>(t);
@@ -552,6 +582,8 @@ void decodeSymbols(Reader& r, Out* out, size_t N)
 template <class Out, class Ctx>
 void decodeSymbols(Reader& r, Out* out, size_t N, const Ctx* ctx)
 {
+    if(useFse()){decodeFseSymbols(r,out,N,[ctx](size_t i,const Out*){return uint32_t(ctx[i]);});return;}
+    if(usePcodec()){decodePcoSymbols(r,out,N);return;}
     Tables t;
     t.read(r);
     checkOutput<Out>(t);
@@ -566,6 +598,15 @@ void decodeSymbols(Reader& r, Out* out, size_t N, const Ctx* ctx)
 template <class Out>
 void decodeSymbolsRun(Reader& r, Out* out, size_t N, uint64_t P, int64_t start)
 {
+    if(usePcodec()){if(!P)throw Error("invalid symbol run");decodePcoSymbols(r,out,N);return;}
+    if(useFse()){
+        FseTables t;t.read(r);checkFseOutput<Out>(t);
+        const uint32_t first=start<0?t.A:uint32_t(start);
+        if(!P||first>=t.nctx||t.A>t.nctx)throw Error("FSE run context");
+        decodeFseLoop(r,out,N,t,[P,first,next=uint64_t(0)](size_t i,const Out* o)mutable{
+            if(uint64_t(i)==next){next+=P;return first;}return uint32_t(o[i-1]);
+        });return;
+    }
     Tables t;
     t.read(r);
     checkOutput<Out>(t);
@@ -614,12 +655,14 @@ void encodeWide(Writer& w, const int32_t* v, size_t N, const Ctx* ctx)
     const int bl = bitlen(uint32_t(max));
     std::vector<int> options;
     for (int drop : {16, 12, 8}) {
+        if(useFse() && (drop>12 || (vgsEntropy==VgsEntropy::Fse8 && drop!=8)))continue;
         const int lo = std::max(0, bl - drop);
         if (std::find(options.begin(), options.end(), lo) == options.end())
             options.push_back(lo);
     }
     if (entropySearch == EntropySearch::Thorough)
         for (int drop : {14, 10}) {
+            if(useFse() && (drop>12 || vgsEntropy==VgsEntropy::Fse8))continue;
             const int lo = std::max(0, bl - drop);
             if (std::find(options.begin(), options.end(), lo) == options.end())
                 options.push_back(lo);
@@ -2142,6 +2185,13 @@ Bytes encodeAttribute(const AttributeSpec& spec, int model, const uint8_t* data,
 }
 Bytes encodeVgsAttribute(const AttributeSpec& spec, int model, const uint8_t* data, size_t size,
                          EntropySearch search) {
+    return encodeVgsAttribute(spec,model,data,size,VgsEntropy::Rans16,search);
+}
+Bytes encodeVgsAttribute(const AttributeSpec& spec,int model,const uint8_t* data,size_t size,
+                         VgsEntropy codec,EntropySearch search) {
+    if(codec!=VgsEntropy::Rans16&&codec!=VgsEntropy::Fse&&codec!=VgsEntropy::Fse8&&codec!=VgsEntropy::Pcodec)
+        throw Error("invalid VGS entropy codec");
+    ScopedValue<VgsEntropy> backend(vgsEntropy,codec);
     ScopedValue<bool> stream(vgsRans16, true);
     return encodeAttribute(spec, model, data, size, search);
 }
@@ -2160,6 +2210,13 @@ Bytes decodeAttribute(const AttributeSpec& spec, int model, const uint8_t* data,
 }
 Bytes decodeVgsAttribute(const AttributeSpec& spec, int model, const uint8_t* data, size_t size,
                          DecodeStats* stats) {
+    return decodeVgsAttribute(spec,model,data,size,VgsEntropy::Rans16,stats);
+}
+Bytes decodeVgsAttribute(const AttributeSpec& spec,int model,const uint8_t* data,size_t size,
+                         VgsEntropy codec,DecodeStats* stats) {
+    if(codec!=VgsEntropy::Rans16&&codec!=VgsEntropy::Fse&&codec!=VgsEntropy::Fse8&&codec!=VgsEntropy::Pcodec)
+        throw Error("invalid VGS entropy codec");
+    ScopedValue<VgsEntropy> backend(vgsEntropy,codec);
     ScopedValue<bool> stream(vgsRans16, true);
     return decodeAttribute(spec, model, data, size, stats);
 }

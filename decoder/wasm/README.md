@@ -1,12 +1,49 @@
 # VGS Decoder for the web
 
 The decoder compiled to WebAssembly, with the JavaScript that drives it.
+VGS 5 uses per-attribute FSE/Pcodec/Raw selection; older captures must be exported
+again. Pcodec is linked into the module, so no Rust runtime download is needed.
+`VGS_WASM_SIMD128=ON` (default) enables portable SIMD128 in Pcodec. Set it OFF for
+a scalar module; neither variant requires AVX2. Building from source requires
+Rust/Cargo 1.87+ and the `wasm32-unknown-unknown` target. Dependencies are vendored
+and built offline; `THIRD_PARTY_NOTICES.txt` installs with the decoder.
 
     vgsdecoder.js    the module, with the .wasm embedded in it
     vgs.mjs          the API you use
     vgssource.mjs    where the bytes come from, and the background download
 
 Terms are in the licence beside the library, one directory up.
+
+## Build configurations
+
+A WASM build defaults to `Release` when no configuration is selected. `Release`
+uses O3/LTO; `MinSizeRel` uses Oz/LTO. Both strip internal symbol names and debug
+metadata, omit source maps, and minify the generated Emscripten glue. The public
+JavaScript API is preserved. This raises the effort of inspection; it does not
+encrypt the module or make it impossible to reverse engineer.
+
+`Debug` uses O0, full DWARF, internal names and runtime assertions.
+`RelWithDebInfo` uses O2 with the same debug information and assertions. Neither
+configuration applies the stripping/minification used by Release. For Ninja:
+
+```sh
+emcmake cmake -S . -B build_wasm_debug -DVGS_BUILD_WASM=ON -DCMAKE_BUILD_TYPE=Debug
+cmake --build build_wasm_debug
+emcmake cmake -S . -B build_wasm_symbols -DVGS_BUILD_WASM=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake --build build_wasm_symbols
+```
+
+`-DVGS_WASM_DEBUG_INFO=ON` also preserves full debug information and internal
+names in an otherwise optimized configuration. It defaults to OFF; Debug and
+RelWithDebInfo retain debug information regardless of that option. Debug data
+is embedded in the module, so no separate source-map file is required. The
+packaging script explicitly rebuilds Release with this option OFF.
+
+With `VGS_BUILD_TESTS=ON`, `ctest --test-dir BUILD_DIR` checks the actual embedded
+WASM: release artifacts must omit debug/name sections, while debug artifacts
+must retain names and DWARF. For a multi-config generator, also pass `-C CONFIG`.
+`tests/wasm_browser.cjs` optionally compares three decoded frames across builds
+using a current-format capture and an installed Edge/Playwright-core setup.
 
 ## Reading a capture
 

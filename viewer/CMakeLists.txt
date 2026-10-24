@@ -18,16 +18,19 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 find_package(Qt6 6.5 REQUIRED COMPONENTS Widgets OpenGL OpenGLWidgets Multimedia)
 set(VGS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." CACHE PATH "VGSFileFormat sources")
+include("${VGS_ROOT}/cmake/VGSEntropy.cmake")
 set(VGS_EDITOR_DIR "${VGS_ROOT}/editor")
 
 # Compile only the reader. Neither the authoring code nor its signing key is linked.
 add_library(viewer_decoder STATIC
+    ${VGS_ENTROPY_SOURCES}
     ${VGS_ROOT}/decoder/src/vgsdecoder.cpp
     ${VGS_ROOT}/core/src/vgscontainer.cpp
     ${VGS_ROOT}/core/src/vgsframe.cpp
     ${VGS_ROOT}/core/src/mgscodec.cpp
     ${VGS_ROOT}/core/crypto/vgscrypto.cpp
     ${VGS_ROOT}/core/crypto/tweetnacl.c)
+vgs_link_entropy(viewer_decoder)
 target_include_directories(viewer_decoder PUBLIC ${VGS_ROOT}/decoder/include PRIVATE
     ${VGS_ROOT}/core/include/vgs ${VGS_ROOT}/core/crypto ${VGS_ROOT}/core/src)
 

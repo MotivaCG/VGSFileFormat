@@ -298,6 +298,9 @@ named Despill, only on export, with its settings.
 audio automatically adds a **Capture audio** layer. Its **Source** dropdown selects
 **Included in capture** or **External file** (MP3, AAC .m4a, Opus or WAV). Opening a saved
 project preserves its Audio layers, including disabled or removed ones.
+External tracks show their full path with middle ellipsis when it exceeds the
+panel width; hovering shows the entire path. Project files store audio paths
+relative to the project where possible and resolve them on opening.
 An **Offset** slides the track along the capture's
 timeline to line it up, a **Volume** (100% as recorded) and **Loop**, which repeats the track
 from its start whenever it ends. Every enabled Audio modifier plays, mixed, so a voice, music
@@ -640,6 +643,12 @@ resolved from `$$PWD`, including shadow builds. After adding or changing sources
 use **Build > Run qmake** if Creator retains an earlier Makefile.
 Both qmake Debug and Release builds have been checked.
 
+VGS 5 builds require CMake 3.21+, Python 3 and Rust/Cargo 1.87+. Both build
+systems compile the vendored FSE sources and build Pcodec offline from its
+lockfile; qmake invokes the shared CMake builder automatically before linking.
+Cargo is also located in the user's `.cargo/bin` when absent from PATH. No
+separate Rust runtime is needed to run the editor.
+
 CMake builds the same sources and adds automated tests:
 
 ```powershell
@@ -651,7 +660,8 @@ ctest --test-dir build/cmake-msvc -C Release --output-on-failure
 
 Requires OpenGL 3.3. CMake's `VGS_ROOT` overrides the VGSFileFormat source directory;
 its default is the parent folder. qmake compiles the same sources directly, so
-Debug and Release use their respective runtimes without prebuilt `.lib` files.
+Debug and Release use their respective runtimes, and build their own Pcodec
+companion library rather than requiring a prebuilt SDK.
 Use `windeployqt` to run outside Qt Creator.
 
 ## Version, deploy and installer

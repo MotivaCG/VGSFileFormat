@@ -464,6 +464,25 @@ struct Capture::State {
   }
 
   /**
+   * The tick an instant falls on, as a real number: the one conversion from seconds, for
+   * everything that asks where on the timeline a time is.
+   *
+   * The times this library hands out are ticks x secondsPerTick, and dividing does not
+   * always undo that multiplication: frame 992 at 30 fps is 33.0666... s, which divides
+   * back to 991.99999999999989. Chunk 31 of a 32-frame-chunk capture starts there, so
+   * chunkAt(chunk(31).startSeconds) answered 30, and a reader that named the chunk by its
+   * own start prepared the wrong one; instantAt put that instant at the end of sample 991
+   * instead of on 992. A quotient within a few ulps of a whole tick is that tick. The
+   * tolerance is relative, since rounding error grows with the tick, and a billionth of a
+   * tick is far below any instant anyone could mean.
+   */
+  double ticksAt(double seconds) const {
+    const double tick = seconds / secondsPerTick();
+    const double nearest = std::round(tick);
+    return std::abs(tick - nearest) <= 1e-9 * std::max(1.0, std::abs(nearest)) ? nearest : tick;
+  }
+
+  /**
    * A pointer to a range, copying only when it has to. A capture in memory and a source
    * that implements map() both answer without a copy; anything else is read into
    * `scratch`, which the caller keeps alive for as long as it uses the pointer.
@@ -671,7 +690,7 @@ size_t Capture::chunkAt(double seconds) const {
   const auto &chunks = state->chunks;
   if (chunks.empty() || !(seconds >= 0))
     return chunks.size();
-  const double tick = seconds / state->secondsPerTick();
+  const double tick = state->ticksAt(seconds);
   for (size_t i = 0; i < chunks.size(); ++i)
     if (tick < double(chunks[i].startTick + chunks[i].intervals))
       return i;
@@ -742,7 +761,7 @@ size_t Capture::selectChunk(double seconds, uint32_t mask) {
   s.evaluator = entry->evaluator.get();
 
   const ChunkInfo &info = s.chunks[index];
-  const double tick = clamped / s.secondsPerTick();
+  const double tick = s.ticksAt(clamped);
   const double normalized =
       info.intervals ? (tick - double(info.startTick)) / double(info.intervals) : 0.0;
   // Just below 1, not 1: the evaluator's domain is [0, 1), because a normalised time of
@@ -896,7 +915,7 @@ Instant Capture::instantAt(double seconds) const {
   // Ticks are samples: a chunk of n intervals has n + 1 of them, and a frame sits between
   // two. The pair is clamped to the chunk rather than allowed to reach into the next one,
   // whose data a shader will not have uploaded.
-  const double tick = clamped / state->secondsPerTick() - double(info.startTick);
+  const double tick = state->ticksAt(clamped) - double(info.startTick);
   const double bounded = std::min(std::max(tick, 0.0), double(info.intervals));
   const double floor = std::floor(bounded);
 
@@ -923,7 +942,7 @@ Motion Capture::motionAt(double seconds) const {
   // The fraction again in double, from the same clamped tick instantAt used.
   const ChunkInfo &info = state->chunks[at.chunkIndex];
   const double clamped = std::min(std::max(seconds, 0.0), duration());
-  const double tick = std::min(std::max(clamped / state->secondsPerTick() - double(info.startTick), 0.0),
+  const double tick = std::min(std::max(state->ticksAt(clamped) - double(info.startTick), 0.0),
                                double(info.intervals));
   const double alpha = tick - double(at.sampleA);
   const vgs::Motion m =

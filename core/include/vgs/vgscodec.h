@@ -16,10 +16,9 @@ using Bytes = mgs::Bytes;
 using Error = mgs::Error;
 using Spec = mgs::AttributeSpec;
 constexpr uint32_t Magic = 0x53474656; // VFGS
-// Version 4 gives VGS its own 16-bit-renormalized entropy stream and canonical unused
-// SH2 slots. Older VGS files are deliberately rejected; a separate transcoder can
-// migrate them when needed. The signed header layout remains 256 bytes.
-constexpr uint32_t Version = 4;
+// Version 5 selects FSE/Pcodec/Raw independently per attribute. The signed layout
+// stays 256 bytes; older versions are deliberately rejected.
+constexpr uint32_t Version = 5;
 constexpr uint32_t FixedHeaderSize = 256;
 // Bytes at the end of the fixed header kept for later fields: written as zero, and a
 // reader refuses anything else rather than guess what a newer writer meant.
@@ -197,7 +196,7 @@ inline uint8_t opacityScaleCode(float factor) {
   const float code = std::round(-16.0f * std::log2(std::min(factor, 1.0f)));
   return uint8_t(std::min(255.0f, std::max(0.0f, code)));
 }
-enum Codec : uint32_t { Raw = 0, Rans = 1 }; // v4 codec 1 uses rANS16, not MGS rANS8
+enum Codec : uint32_t { Raw=0, Rans=1, Fse=2, PcodecSymbols=3, PcodecNumeric=4, Fse8=5 };
 // An optional attribute may be skipped by a reader that does not know its ID, which is
 // how this format grows without breaking readers already in the field. Attributes a
 // frame cannot be reconstructed without are never optional.

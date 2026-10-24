@@ -5,6 +5,7 @@
 // authoring code.
 
 #include "vgsinternal.h"
+#include "pcodec_bridge.h"
 #include "vgsframe.h"
 #include "vgspublickey.h"
 #include <algorithm>
@@ -206,8 +207,9 @@ Header readHeader(const uint8_t *data, size_t size) {
     // it; anything else would mean silently dropping data a frame needs.
     if (r.u32() || p.flags > OptionalAttribute ||
         (std::string(attributeName(p.attribute)) == "unknown" && !optional) ||
-        !seen.insert(p.attribute).second || p.codec > Rans || p.family > 9 ||
-        p.model > (p.family == 9 ? 3u : 1u) ||
+        !seen.insert(p.attribute).second || p.codec > Fse8 || p.family > 9 ||
+        (p.codec==PcodecNumeric ? (p.model!=1&&p.model!=2&&p.model!=4&&p.model!=5) :
+            p.model > (p.family == 9 ? 3u : 1u)) ||
         (p.codec == Raw && p.model))
       throw Error("invalid VGS policy");
     h.policies.push_back(p);
@@ -394,7 +396,12 @@ Bytes decodePage(const Header &h, const Page &p, const uint8_t *data,
       throw Error("invalid raw VGS page");
     return Bytes(data, data + size);
   }
-  return mgs::decodeVgsAttribute(p.spec, int(pol.model), data, size);
+  if(pol.codec==PcodecNumeric){
+    if(pol.model==5&&p.spec.kind!=0)throw Error("invalid Pcodec numeric type");
+    Bytes out(size_t(p.decodedSize));
+    mgs::pcoDecompress(data,size,out.data(),out.size(),pol.model);return out;
+  }
+  return mgs::decodeVgsAttribute(p.spec,int(pol.model),data,size,mgs::VgsEntropy(pol.codec));
 }
 DecodedChunk decodeChunk(const Header &h, size_t index, const uint8_t *data,
                          size_t size, uint32_t mask,

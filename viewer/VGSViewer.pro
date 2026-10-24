@@ -11,6 +11,7 @@ TARGET = VGSViewer
 DEFINES += VGS_VIEWER
 EDITOR = $$clean_path($$PWD/../editor)
 VGS_ROOT = $$clean_path($$PWD/..)
+include($$VGS_ROOT/cmake/VGSEntropy.pri)
 INCLUDEPATH += $$PWD $$EDITOR $$EDITOR/dependencies/mint $$EDITOR/dependencies/eigen \
     $$VGS_ROOT/decoder/include $$VGS_ROOT/core/include/vgs $$VGS_ROOT/core/crypto $$VGS_ROOT/core/src
 

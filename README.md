@@ -306,19 +306,23 @@ including the JavaScript one, on purpose.
 | `vgsexport capture.vgs out/` | the whole capture as a numbered `.ply` sequence |
 | `vgspagecost capture.vgs` | where the bytes and decoding time go, per attribute and per detail level, and what a CPU-sorting player spends |
 
-The recommended export uses the defaults: VGS 4 rANS16 entropy coding, 65536 target
-rows per page, and temporal SH splitting disabled. The `.mint` import defaults to
-SH3; `--sh 0..3` selects a lower degree and records it in the signed header. VGS 4
-readers reject VGS 3 files, and VGS 3 readers reject VGS 4 files. The decoder's rANS
-loop optimization needs no encoder flag. The [implementation review](docs/VGS4_IMPLEMENTATION_20261011.md)
-records the measured size and CPU tradeoffs and the chunk preparation change.
+The default export is VGS 5: FSE, Pcodec and Raw selected independently per
+attribute, with 65536 target rows per page and temporal SH splitting disabled.
+The encoder measures actual sizes over the complete capture and selects a fast
+mixture under a global 1% growth bound against rANS, including page alignment.
+Decode-work estimates use the portable WASM profile; they are a heuristic rather
+than a measurement of the viewer's device. rANS remains available where needed
+to meet the size budget. No extra quantization is introduced.
+The `.mint` import defaults to SH3; `--sh 0..3` selects a lower degree.
+VGS 5 readers reject older VGS versions, including 4. Existing captures must be
+exported again; changing their header version cannot convert them.
 
 The encoder stores each group's splats in spatial (Morton) order inside their rank runs,
 which makes captures about 2% smaller at no measurable decode cost; `--no-spatial-order`,
 `setSpatialOrder(false)` or `vgs_encoder_set_spatial_order(e, 0)` keeps the source order.
 
-Two experimental opt-in encoder settings preserve decoded attributes within VGS 4:
-`--entropy-search` compares more rANS precisions, bit splits and table representations;
+Two experimental opt-in encoder settings preserve decoded attributes within VGS 5:
+`--entropy-search` compares additional legal entropy/bit-split choices;
 `--split-temporal-sh` divides the temporal SH dictionary into complete sample blocks
 near `--page-rows`. The first trades encoding time for size, the second trades a little
 size for smaller decode tasks. Both are off by default. The C++ setters are
@@ -349,17 +353,40 @@ capture, and prints what a CPU-sorting player then spends per second of playback
 The earlier `prepare(chunk, budget, bool)` still compiles and means what it did (true is
 `Full`, false `Base`), and so does the JavaScript `{ sphericalHarmonics }` option.
 
+## Research notes
+
+The [VGS 5 implementation report](docs/VGS5_IMPLEMENTATION_20261023.md) records
+the production hybrid policies, compatibility break, validation and final web
+footprint, including the ScanMeNow PlayCanvas integration.
+
+The [4DS/webplayer review](docs/REVISION_4DS_WEBPLAYER_20261023.md) separates
+existing VGS mechanisms and earlier experiments from possible extensions. Its
+concrete finding concerns read-ahead when a capture exceeds the cache budget;
+it establishes no new compression improvement.
+
+The [FSE/rANS comparison on boxingfull](docs/FSE_RANS_COMPARISON_20261023.md)
+measures page sizes, native/WASM decoding and mixtures per attribute. It includes
+matched entropy controls and keeps the production format and codecs unchanged.
+
+The [portable mobile codec study](docs/MOBILE_CODEC_COMPARISON_20261023.md)
+compares PivCo, FastPFOR and Pcodec against those baselines in scalar/SIMD128
+WASM32, with a global 1% size budget and a standalone phone benchmark. Its
+timings come from desktop Edge; physical Android/iPhone validation is pending.
+The [rANS mixture follow-up](docs/RANS_MIX_COMPARISON_20261023.md) checks whether
+retaining rANS improves those policies under global 1% and 0% size-growth caps.
+
 ## Third-party code
 
-One file is not ours: `core/crypto/tweetnacl.c`, the reference Ed25519 and SHA-512
-implementation, vendored unchanged and in the public domain. Its header records where it
-came from and who wrote it.
+TweetNaCl remains vendored unchanged in the public domain. FSE (BSD-2-Clause)
+and Pcodec/pco 1.0.4 (Apache-2.0), with their locked Rust dependencies, are vendored
+under `core/third_party`. Distributed packages include `THIRD_PARTY_NOTICES.txt`.
+FSE's U16 bitfields have a small documented MSVC layout fix.
 
-Public domain means there is nothing to comply with and nothing for a customer to carry,
-so the package that ships says nothing about it - a notice somebody does not owe is noise
-in a document they are reading to get started. The fact lives here and in the file itself,
-which is where anyone auditing a binary would look.
-
-The JavaScript has no third-party code. Verifying a signature in a browser would otherwise
-mean bundling an MIT-licensed Ed25519 library and carrying its notice into every consumer
-bundle; doing the check inside the WebAssembly module removes that entirely.
+Building VGS now requires Cargo/Rust 1.87+ and CMake 3.20+. Web builds additionally
+need `rustup target add wasm32-unknown-unknown`. Registry sources are vendored;
+the build uses `--offline --locked`. Native cross builds can set `VGS_RUST_TARGET`.
+Consumers of the installed native SDK use prebuilt libraries and need no Rust.
+The web downloads only the final decoder module, not Cargo or Rust libraries.
+`VGS_WASM_SIMD128=ON` enables portable SIMD128 in Pcodec; turn it OFF for a scalar
+module. AVX2 is not required. Release metadata stripping and Debug symbols work
+as described in `decoder/wasm/README.md`.

@@ -52,10 +52,16 @@ if (-not $SkipWasm) {
     $env:PATH = "$EmsdkRoot\upstream\emscripten;$node;$python;$ninja;$saved"
     try {
         if (-not (Test-Path "$wasmDir\CMakeCache.txt")) {
-            emcmake cmake -S $root -B $wasmDir -G Ninja -DVGS_BUILD_WASM=ON | Out-Null
+            emcmake cmake -S $root -B $wasmDir -G Ninja -DVGS_BUILD_WASM=ON -DCMAKE_BUILD_TYPE=Release -DVGS_WASM_DEBUG_INFO=OFF | Out-Null
+        } else {
+            # A developer may have last used this tree for Debug/RelWithDebInfo.
+            # Packaging always rebuilds the stripped Release configuration.
+            cmake -S $root -B $wasmDir -DCMAKE_BUILD_TYPE=Release -DVGS_WASM_DEBUG_INFO=OFF | Out-Null
         }
-        cmake --build $wasmDir | Out-Null
-        cmake --install $wasmDir | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'the WebAssembly configure failed' }
+        cmake --build $wasmDir --config Release | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'the WebAssembly build failed' }
+        cmake --install $wasmDir --config Release | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'the WebAssembly build failed' }
     } finally {
         $env:PATH = $saved

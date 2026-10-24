@@ -61,6 +61,7 @@
 #include <QJsonDocument>
 #include <QIcon>
 #include <QLabel>
+#include <QResizeEvent>
 #include <QMenuBar>
 #include <QMenu>
 #include <QMessageBox>
@@ -93,6 +94,34 @@
 #include <QVBoxLayout>
 #include <algorithm>
 #include <cmath>
+
+class AudioPathLabel final : public QLabel {
+    QString fullText_;
+    bool external_ = false;
+    void updateText() {
+        setText(external_ ? fontMetrics().elidedText(fullText_,Qt::ElideMiddle,
+            std::max(0,contentsRect().width()-2*margin())) : fullText_);
+    }
+public:
+    AudioPathLabel() {
+        setTextFormat(Qt::PlainText);
+        setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Preferred);
+    }
+    void setSource(const QString &path,const QString &description) {
+        external_=!path.isEmpty();
+        const QString fullPath=external_ ? QDir::toNativeSeparators(QFileInfo(path).absoluteFilePath()) : QString();
+        fullText_=external_ ? fullPath+(QFileInfo::exists(path) ? QString() : tr(" (not found)")) : description;
+        setToolTip(fullPath);
+        setWordWrap(!external_);
+        updateText();
+    }
+protected:
+    void resizeEvent(QResizeEvent *event) override {QLabel::resizeEvent(event);updateText();}
+    void changeEvent(QEvent *event) override {
+        QLabel::changeEvent(event);
+        if (event->type()==QEvent::FontChange || event->type()==QEvent::StyleChange) updateText();
+    }
+};
 
 static QIcon transportIcon(QStyle *style,QStyle::StandardPixmap symbol,const QColor &colour = QColor("#eeeeee")) {
     QIcon icon;
@@ -973,7 +1002,7 @@ void MainWindow::buildUi() {
     audioSourceType_=new QComboBox;audioSourceType_->setObjectName("audioSourceType");
     audioSourceType_->addItem(tr("Included in capture"));audioSourceType_->addItem(tr("External file"));
     audioSourceType_->setToolTip(tr("Use the audio embedded in the MINT or VGS/PGS capture, or choose a separate sound file."));audioForm->addRow(tr("Source"),audioSourceType_);
-    audioSource_=new QLabel;audioSource_->setObjectName("audioSource");audioSource_->setWordWrap(true);audioForm->addRow(tr("Track"),audioSource_);
+    audioSource_=new AudioPathLabel;audioSource_->setObjectName("audioSource");audioForm->addRow(tr("Track"),audioSource_);
     auto *audioButtons=new QWidget;auto *audioRow=new QHBoxLayout(audioButtons);audioRow->setContentsMargins(0,0,0,0);
     auto *audioFile=new QPushButton(tr("Choose file\u2026"));audioFile->setObjectName("audioChooseFile");audioFile->setToolTip(tr("Play a sound file with the capture: MP3, AAC (.m4a), Opus or WAV.\nExports mix it with the other Audio modifiers into one track, cut to the exported range: AAC for VGS/PGS, MP3 for MINT."));
     audioRow->addWidget(audioFile);audioForm->addRow(audioButtons);
@@ -1546,9 +1575,8 @@ void MainWindow::syncUi() {
     if (audio) {
         audioProperties_->setTitle(tr("Audio: %1").arg(selected->name));audioOffset_->setValue(selected->audioOffset);audioVolume_->setValue(selected->audioVolume*100);audioLoop_->setChecked(selected->audioLoop);
         audioSourceType_->setCurrentIndex(selected->audioFile.isEmpty() ? 0 : 1);
-        audioSource_->setText(!selected->audioFile.isEmpty() ? (QFileInfo::exists(selected->audioFile) ? QFileInfo(selected->audioFile).fileName() : tr("%1 (not found)").arg(QFileInfo(selected->audioFile).fileName()))
-                             : !info_.audio.isEmpty() ? tr("The capture's own track (%1)").arg(info_.audioSuffix.toUpper()) : tr("None: the capture carries no track. Choose a file."));
-        audioSource_->setToolTip(selected->audioFile);
+        audioSource_->setSource(selected->audioFile,
+            !info_.audio.isEmpty() ? tr("The capture's own track (%1)").arg(info_.audioSuffix.toUpper()) : tr("None: the capture carries no track. Choose a file."));
     }
     if (prune) {pruneProperties_->setTitle(tr("Prune low contribution: %1").arg(selected->name));prunePercent_->setValue(selected->prune.percent);pruneProtect_->setValue(selected->prune.protectAbove);showPruneStatus();}
     if (bake) {bakeProperties_->setTitle(tr("Bake anti-aliasing: %1").arg(selected->name));bakeDistance_->setValue(selected->bakeDistance);bakeScreenHeight_->setValue(selected->bakeScreenHeight);

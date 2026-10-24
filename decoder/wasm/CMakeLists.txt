@@ -16,6 +16,17 @@ if(NOT EMSCRIPTEN)
   message(FATAL_ERROR "VGS_BUILD_WASM needs the Emscripten toolchain: run emcmake cmake")
 endif()
 
+# Ninja has no default configuration. Keep a plain WASM build ready to ship, but
+# honour an explicit Debug/RelWithDebInfo configuration, including multi-config
+# generators. The native targets are unaffected.
+if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build configuration" FORCE)
+endif()
+option(VGS_WASM_DEBUG_INFO "Keep WASM debug information even in an optimized configuration" OFF)
+set(vgs_wasm_debug "$<OR:$<CONFIG:Debug>,$<CONFIG:RelWithDebInfo>,$<BOOL:${VGS_WASM_DEBUG_INFO}>>")
+set(vgs_wasm_optimized "$<NOT:$<OR:$<CONFIG:Debug>,$<CONFIG:RelWithDebInfo>>>")
+set(vgs_wasm_speed "$<NOT:$<OR:$<CONFIG:Debug>,$<CONFIG:RelWithDebInfo>,$<CONFIG:MinSizeRel>>>")
+
 # The native C interface is left out: vgswasm.cpp is this build's C interface, and the two
 # use the same names for the same ideas - vgs_open, vgs_set_time, vgs_bounds - because both
 # are the decoder seen from C. Linking them together would be two definitions of each.
@@ -23,6 +34,7 @@ set(VGS_WASM_SOURCES ${VGS_DECODER_SOURCES})
 list(FILTER VGS_WASM_SOURCES EXCLUDE REGEX "vgsdecoder_c\.(cpp|h)$")
 
 add_executable(vgsdecoder_wasm ${VGS_WASM_SOURCES} vgswasm.cpp)
+vgs_link_entropy(vgsdecoder_wasm)
 target_include_directories(vgsdecoder_wasm
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include ${VGS_CORE_INCLUDE_DIRS})
 
@@ -39,12 +51,18 @@ target_include_directories(vgsdecoder_wasm
 # translation units deep, and nothing inlines across them without it.
 set_target_properties(vgsdecoder_wasm PROPERTIES POSITION_INDEPENDENT_CODE OFF)
 vgs_apply_cache_defaults(vgsdecoder_wasm)
-# No -msimd128. It was measured: decompression did not move outside the noise and the
-# module grew by a quarter, because the compiler cannot vectorise what dominates here.
-# An entropy decoder is serial by construction - each symbol depends on the state the
-# previous one left - so the gain would have to come from the format carrying several
-# independent streams to decode in step, not from a compiler flag.
-target_compile_options(vgsdecoder_wasm PRIVATE -O3 -flto -fwasm-exceptions)
+# C++ stays scalar: the useful SIMD128 path is inside Pcodec's Rust code, selected
+# by VGS_WASM_SIMD128. FSE's interleaved states do not require AVX2 or SIMD.
+set(vgs_wasm_optimization
+    "$<$<CONFIG:Debug>:-O0>"
+    "$<$<CONFIG:RelWithDebInfo>:-O2>"
+    "$<$<CONFIG:MinSizeRel>:-Oz>"
+    "$<${vgs_wasm_speed}:-O3>"
+    "$<${vgs_wasm_optimized}:-flto>")
+target_compile_options(vgsdecoder_wasm PRIVATE
+    ${vgs_wasm_optimization} -fwasm-exceptions
+    "$<${vgs_wasm_debug}:-g3>"
+    "$<$<NOT:${vgs_wasm_debug}>:-g0>")
 
 set(VGS_WASM_EXPORTS
     _malloc,_free
@@ -74,7 +92,18 @@ if(VGS_WASM_NODE)
 endif()
 
 target_link_options(vgsdecoder_wasm PRIVATE
-    -O3 -flto -fwasm-exceptions
+    "$<$<BOOL:${VGS_WASM_SIMD128}>:-msimd128>"
+    ${vgs_wasm_optimization} -fwasm-exceptions
+    # -g0 also minifies the generated glue and WASM import/export names at O2+.
+    # Keep the public Module API; strip only internal names and debug metadata.
+    "$<${vgs_wasm_debug}:-g3>"
+    "$<${vgs_wasm_debug}:-sASSERTIONS=1>"
+    "$<$<NOT:${vgs_wasm_debug}>:-g0>"
+    # Do not use --strip-all: removing target_features before Binaryen runs
+    # loses the exception-handling/sign-extension features needed by this SDK.
+    "$<$<NOT:${vgs_wasm_debug}>:-Wl,--strip-debug>"
+    "$<$<NOT:${vgs_wasm_debug}>:-sASSERTIONS=0>"
+    "$<$<NOT:${vgs_wasm_debug}>:-sEMIT_PRODUCERS_SECTION=0>"
     -sMODULARIZE=1 -sEXPORT_ES6=1 -sEXPORT_NAME=createVgsDecoder -sSINGLE_FILE=1
     -sENVIRONMENT=${VGS_WASM_ENVIRONMENT}
     -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=33554432 -sMAXIMUM_MEMORY=2147483648
@@ -83,10 +112,23 @@ target_link_options(vgsdecoder_wasm PRIVATE
 
 set_target_properties(vgsdecoder_wasm PROPERTIES OUTPUT_NAME vgsdecoder SUFFIX .js)
 
+if(VGS_BUILD_TESTS)
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  find_program(VGS_NODE NAMES node)
+  if(VGS_NODE)
+    add_test(NAME buffered_source_progress
+        COMMAND "${VGS_NODE}" "${CMAKE_SOURCE_DIR}/tests/buffered_source.mjs")
+  endif()
+  add_test(NAME wasm_build_metadata
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/wasm_build_info.py"
+          "$<TARGET_FILE:vgsdecoder_wasm>"
+          "$<IF:${vgs_wasm_debug},debug,stripped>")
+endif()
+
 # The module and the JavaScript that drives it install together: neither is any use on its
 # own, and a web project wants both dropped into the same folder.
 install(FILES
-    ${CMAKE_CURRENT_BINARY_DIR}/vgsdecoder.js
+    "$<TARGET_FILE:vgsdecoder_wasm>"
     ${CMAKE_CURRENT_SOURCE_DIR}/js/vgs.mjs
     ${CMAKE_CURRENT_SOURCE_DIR}/js/vgssource.mjs
     ${CMAKE_CURRENT_SOURCE_DIR}/README.md
