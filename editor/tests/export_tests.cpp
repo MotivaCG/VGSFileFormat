@@ -1307,6 +1307,35 @@ private slots:
             QVERIFY(edited.groups[1].splats<source.groups[1].splats);QCOMPARE(edited.groups[1].intervals,uint64_t(plan.intervals));
         }
     }
+    void nativeRangedCropActsOnItsFramesOnly() {
+        auto source=temporalFixture(true);vgs::FrameDecoder reference(source);Project project;
+        // A crop keeping the group at x=0, on frames 2 and 3 only: before and after, all stays.
+        auto &m=*project.modifier();m.crop.enabled=true;m.crop.transform.position={0,0,0};m.crop.radius=m.crop.radiusZ=1;m.crop.height=2;m.start=2;m.end=3;
+        QVERIFY(project.hasTimedRemoval());
+        const NativeChunkPlan plan{0,0,6};ExportResult result;auto edited=editNativeChunk(source,plan,project,&result,{},nullptr,nullptr,plan.first);vgs::FrameDecoder output(edited);
+        std::vector<size_t> counts;
+        for (int tick=0;tick<plan.intervals;++tick) {
+            auto original=reference.evaluate(tick/6.,true),actual=output.evaluate(tick/double(plan.intervals),true);
+            const CompiledModifiers at(project.modifiersAtFrame(tick));size_t expected=0,actualCount=0;
+            for (size_t row=0;row<original.count;++row) if (original.active[row] && at.keepsPosition({original.position[row*3],original.position[row*3+1],original.position[row*3+2]})) ++expected;
+            for (size_t row=0;row<actual.count;++row) if (actual.active[row]) ++actualCount;
+            QCOMPARE(actualCount,expected);counts.push_back(actualCount);
+        }
+        QVERIFY(counts[2]<counts[1] && counts[3]<counts[4] && counts[0]==counts[1]);
+    }
+    void rangedModifiersAreSampledAndTheirSoundFades() {
+        QTemporaryDir dir;const auto source=dir.filePath("source.pgs");sourceFile(source,5);
+        Project project;project.asset=source;project.in=0;project.out=4./25;project.time=0;project.modifiers.clear();
+        Modifier colour;colour.id=Project::newId();colour.name="Grade";colour.type=ModifierType::Colour;colour.colourExposure=1;colour.start=2;colour.fadeIn=2;
+        project.modifiers={colour};project.selectedModifier=colour.id;
+        const auto result=exportCaptureFile(project,dir.filePath("graded.vgs"));
+        QVERIFY2(result.notes.contains("A modifier acts on part of the timeline only, so the export is sampled frame by frame."),qPrintable(result.notes.join('\n')));
+        if (ffmpegPath().isEmpty()) QSKIP("No ffmpeg beside the tests (tools/ffmpeg.exe).");
+        // A track heard from 0.2 s to 0.6 s, fading in and out: the soundtrack keeps its length.
+        writeTone(dir.filePath("tone.wav"),1,440);
+        AudioInput input{dir.filePath("tone.wav"),0,1,false};input.from=.2;input.to=.6;input.fadeIn=.1;input.fadeOut=.1;
+        const auto mixed=mixAudioAac({input},1.);QVERIFY(std::abs(m4aSeconds(mixed)-1)<.03);
+    }
     void nativeAnimatedCropKeepsWhatItContainsAtEachSample() {
         auto source=temporalFixture(true);vgs::FrameDecoder reference(source);Project project;
         auto &m=*project.modifier();m.crop.enabled=true;CropVolume a=m.crop,b=m.crop;

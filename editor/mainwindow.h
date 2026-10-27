@@ -41,6 +41,7 @@ class QAction;
 class QCloseEvent;
 class QMenu;
 class QToolButton;
+class QSplitter;
 class QSlider;
 class QButtonGroup;
 class QComboBox;
@@ -334,6 +335,7 @@ private:
     QDoubleSpinBox *greenSaturation_, *greenHue_;
     QCheckBox *greenLinearRgb_;
     QWidget *tools_, *timeline_, *displayControls_;
+    QSplitter *timelineSplit_=nullptr; // the viewport over the timeline
     QDoubleSpinBox *transform_[3][3], *speed_, *pointSize_;
     QDoubleSpinBox *cropRadius_, *cropRadiusZ_, *cropHeight_;
     QDoubleSpinBox *cropWidth_, *cropDepth_;

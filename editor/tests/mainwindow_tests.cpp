@@ -40,6 +40,7 @@
 #include <QLineEdit>
 #include <QTimer>
 #include <QTreeWidget>
+#include <QSplitter>
 #include <QToolButton>
 #include <QMenu>
 #include <QMenuBar>
@@ -184,6 +185,41 @@ private slots:
         QTest::qWait(1000);QVERIFY(maskHits>=6);QVERIFY(colourHits>=6);QVERIFY(shapeHits>=2);
         QTest::keyClick(viewport,Qt::Key_Space);
         window.setWindowModified(false);
+    }
+    void timelineBorderGivesTheBarsRoom() {
+        QTemporaryDir dir;MainWindow window(nullptr,dir.filePath("presets"));window.resize(1400,900);window.show();QVERIFY(QTest::qWaitForWindowExposed(&window));
+        auto *split=window.findChild<QSplitter *>("timelineSplit");auto *tree=window.findChild<QTreeWidget *>("modifierTree");QVERIFY(split && tree);
+        // The border between the viewport and the timeline dragged up: the modifier list grows with it.
+        const int before=tree->height();const auto sizes=split->sizes();QCOMPARE(sizes.size(),2);
+        split->setSizes({sizes[0]-200,sizes[1]+200});QTRY_VERIFY(tree->height()>=before+150);
+        if (const auto shot=qEnvironmentVariable("VGS_WINDOW_SHOT");!shot.isEmpty()) window.grab().save(shot);
+    }
+    void barsTrimMoveAndFadeModifiers() {
+        ModifierPanel panel;Project project;project.modifiers.clear();
+        for (auto type:{ModifierType::Crop,ModifierType::Colour,ModifierType::Walk}) {Modifier m;m.type=type;m.id=Project::newId();m.name="M";m.crop.enabled=true;project.modifiers.append(m);}
+        panel.resize(900,300);panel.show();panel.setProject(project);panel.setTimeline(0,99);panel.setView(-0.5,99.5);QApplication::processEvents();
+        auto *tree=panel.findChild<QTreeWidget *>("modifierTree");QVERIFY(tree);QSignalSpy changed(&panel,&ModifierPanel::stackChanged);
+        const auto [left,width]=panel.trackSpan();auto *view=tree->viewport();
+        // The x of a frame boundary, and the middle of a row, in the tree's viewport.
+        auto x=[&](double frame) {return view->mapFromGlobal(QPoint(int(std::lround(left+width*(frame+0.5)/100.)),0)).x();};
+        auto y=[&](int row,int dy=0) {return tree->visualItemRect(tree->topLevelItem(row)).center().y()+dy;};
+        auto drag=[&](QPoint from,QPoint to) {
+            QTest::mousePress(view,Qt::LeftButton,{},from);
+            for (int i=1;i<=6;++i) {const QPoint at=from+(to-from)*i/6;QMouseEvent move(QEvent::MouseMove,at,view->mapToGlobal(at),Qt::NoButton,Qt::LeftButton,Qt::NoModifier);QApplication::sendEvent(view,&move);}
+            QTest::mouseRelease(view,Qt::LeftButton,{},to);QApplication::processEvents();
+        };
+        auto at=[&](int row) {return panel.project().modifiers[row];};
+        // Its end dragged in, then its start: the crop acts on frames 20 to 59 only.
+        drag({x(99.5)-1,y(0)},{x(59.5),y(0)});QCOMPARE(at(0).start,-1);QVERIFY(std::abs(at(0).end-59)<=1);
+        drag({x(-0.5)+1,y(0)},{x(19.5),y(0)});QVERIFY(std::abs(at(0).start-20)<=1);QCOMPARE(changed.count(),2);
+        // The bar moved keeps its length.
+        const int length=at(0).end-at(0).start;drag({x(40),y(0)},{x(50),y(0)});
+        QCOMPARE(at(0).end-at(0).start,length);QVERIFY(std::abs(at(0).start-30)<=1);QCOMPARE(at(0).fadeIn,0);
+        // Color's handle on its top left corner fades it in over ten frames.
+        drag({x(-0.5)+1,y(1,-5)},{x(9.5),y(1,-5)});QVERIFY(std::abs(at(1).fadeIn-10)<=1);QCOMPARE(at(1).start,-1);
+        // Walk acts on all of the timeline whatever is dragged.
+        drag({x(99.5)-1,y(2)},{x(50),y(2)});QCOMPARE(at(2).end,-1);QVERIFY(!at(2).ranged());
+        if (const auto shot=qEnvironmentVariable("VGS_PANEL_SHOT");!shot.isEmpty()) {panel.setTimeline(45,99);QApplication::processEvents();panel.grab().save(shot);}
     }
     void cacheIndicatorsDistinguishGpuWorkAndPartialMorphCoverage() {
         ModifierPanel panel;Project project;project.modifiers.clear();

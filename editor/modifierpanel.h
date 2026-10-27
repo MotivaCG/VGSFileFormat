@@ -66,6 +66,17 @@ private:
     int frameAt(double x) const;
     bool onPlayhead(const QPointF &at) const;
     QPair<int,qulonglong> erasedChunkAt(const QPointF &at) const;
+    // A bar's part of the timeline, edited like a clip: the bar moves it, its ends trim it
+    // and, on Color and Audio, the handles at its top corners set the fades.
+    enum class RangePart {None,Body,Start,End,FadeIn,FadeOut};
+    // `edge`: the x of the end or handle found, to tell it from the playhead when both are near.
+    RangePart rangePartAt(const QPointF &at,int *row,double *edge=nullptr) const;
+    void dragRange(double x);
+    // The current time as one line down the whole bars area, over every row and the space
+    // below them, as the timeline's playhead continued.
+    QWidget *playheadLine_=nullptr;
+    void placePlayhead();
+    int rangeRow_=-1;RangePart rangePart_=RangePart::None;double rangeFromX_=0;bool rangeDragging_=false;Modifier rangeOriginal_;
     double panX_=0;
     void addModifier();
     void removeSelection();

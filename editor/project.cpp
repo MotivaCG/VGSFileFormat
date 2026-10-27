@@ -205,7 +205,14 @@ bool Project::fromJson(const QJsonObject &root,const QString &baseDirectory,Proj
         };
         for (const auto &value:root["modifiers"].toArray()) {
             if (!value.isObject()) return fail();const auto item=value.toObject();Modifier m;
-            m.id=identity(item,"id",80);m.name=identity(item,"name",120);valid &= !ids.contains(m.id) && item["enabled"].isBool() && item["timeline"]=="full";ids.insert(m.id);m.enabled=item["enabled"].toBool();
+            m.id=identity(item,"id",80);m.name=identity(item,"name",120);valid &= !ids.contains(m.id) && item["enabled"].isBool() && (item["timeline"]=="full" || item["timeline"].isObject());ids.insert(m.id);m.enabled=item["enabled"].toBool();
+            if (item["timeline"].isObject()) {
+                // Part of the timeline: frames, null for an open end, and fades in frames.
+                const auto range=item["timeline"].toObject();
+                auto frame=[&](const char *key) {const auto v=range[key];if (v.isNull() || v.isUndefined()) return -1;valid &= v.isDouble() && v.toDouble()>=0 && v.toDouble()<1e9;return int(v.toDouble());};
+                m.start=frame("start");m.end=frame("end");valid &= m.start<0 || m.end<0 || m.end>=m.start;
+                m.fadeIn=std::max(0,frame("fadeIn"));m.fadeOut=std::max(0,frame("fadeOut"));
+            }
             if (item["type"]=="crop") {
                 const auto c=item["crop"].toObject();valid &= c["space"]=="world" && (c["shape"]=="box" || c["shape"]=="cylinder");m.crop.enabled=m.enabled;m.crop.shape=c["shape"]=="box" ? CropShape::Box : CropShape::Cylinder;
                 m.crop.radius=float(number(c,"radius",.0001,1e6));m.crop.radiusZ=c.contains("radiusZ") ? float(number(c,"radiusZ",.0001,1e6)) : m.crop.radius;m.crop.height=float(number(c,"height",.0001,1e6));m.crop.width=float(number(c,"width",.0001,1e6));m.crop.depth=float(number(c,"depth",.0001,1e6));

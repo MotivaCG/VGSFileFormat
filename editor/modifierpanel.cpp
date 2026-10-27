@@ -40,6 +40,24 @@ namespace {
 constexpr int ModifierRole=Qt::UserRole+1;
 constexpr int CacheRole=Qt::UserRole+20;
 constexpr int CacheProgressRole=Qt::UserRole+21;
+// A bar's part of the timeline: start, end, fade in, fade out (frames; -1 an open end), and
+// whether it has a range at all and whether it fades.
+constexpr int RangeRole=Qt::UserRole+8;
+QVariantList rangeOf(const Modifier &m) {return {m.start,m.end,m.fadeIn,m.fadeOut,Modifier::timed(m.type),Modifier::fades(m.type)};}
+// Its ends, as they show: an open one at the timeline's start or end.
+QPair<int,int> rangeFrames(const QVariantList &range,int maximum) {
+    const int start=std::max(0,range.value(0).toInt()),end=range.value(1).toInt()<0 ? maximum : std::max(start,range.value(1).toInt());return {start,end};
+}
+// Kept sensible after an edit: ends at the timeline's start or end open again, and the fades
+// within the range.
+void tidyRange(Modifier &m,int maximum) {
+    if (!Modifier::fades(m.type)) m.fadeIn=m.fadeOut=0;
+    if (m.start<=0) m.start=-1;
+    if (m.end>=maximum && m.fadeOut==0) m.end=-1;
+    const int start=std::max(0,m.start),end=m.end<0 ? maximum : m.end,length=std::max(0,end-start+1);
+    m.fadeIn=std::clamp(m.fadeIn,0,length);m.fadeOut=std::clamp(m.fadeOut,0,std::max(0,length-m.fadeIn));
+    if (m.end<0) m.fadeOut=0;
+}
 // 0: disabled; 1: empty; 2: complete; 3: working; 4: partial;
 // 5: direct processing; 6: included in another layer's cache.
 int previewDespill(const Project &project) {
@@ -62,7 +80,7 @@ QVariantList erasedChunks(const Modifier &m) {
     return chunks;
 }
 QJsonArray visualState(const Project &project) {
-    QJsonArray items;for (const auto &m:project.modifiers) items.append(QJsonObject{{"id",m.id},{"name",m.name},{"active",m.active()},{"type",int(m.type)},{"shape",int(m.crop.shape)},{"keys",QJsonArray::fromVariantList(keyFrames(m))},{"erased",QJsonArray::fromVariantList(erasedChunks(m))}});return items;
+    QJsonArray items;for (const auto &m:project.modifiers) items.append(QJsonObject{{"id",m.id},{"name",m.name},{"active",m.active()},{"type",int(m.type)},{"shape",int(m.crop.shape)},{"keys",QJsonArray::fromVariantList(keyFrames(m))},{"erased",QJsonArray::fromVariantList(erasedChunks(m))},{"range",QJsonArray::fromVariantList(rangeOf(m))}});return items;
 }
 QString typeName(const Modifier &modifier) {
     switch (modifier.type) {
@@ -142,6 +160,18 @@ QIcon whiteIcon(const QIcon &source,const QColor &colour=Qt::white) {
         auto pixmap=source.pixmap(24,24);QPainter painter(&pixmap);painter.setCompositionMode(QPainter::CompositionMode_SourceIn);painter.fillRect(pixmap.rect(),mode==QIcon::Disabled ? QColor("#606060") : colour);painter.end();icon.addPixmap(pixmap,mode);
     }return icon;
 }
+// A line drawn over the bars, letting the mouse through to them.
+class PlayheadLine : public QWidget {
+public:
+    explicit PlayheadLine(QWidget *parent):QWidget(parent) {setAttribute(Qt::WA_TransparentForMouseEvents);setAttribute(Qt::WA_NoSystemBackground);}
+    double x=-1;
+protected:
+    void paintEvent(QPaintEvent *) override {
+        if (x<0) return;QPainter painter(this);painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(QPen(QColor(0,0,0,90),3));painter.drawLine(QPointF(x,0),QPointF(x,height()));
+        painter.setPen(QPen(Qt::white,2));painter.drawLine(QPointF(x,0),QPointF(x,height()));
+    }
+};
 class CoverageDelegate : public QStyledItemDelegate {
 public:
     using QStyledItemDelegate::QStyledItemDelegate;
@@ -195,6 +225,19 @@ public:
         const int margin=style->pixelMetric(QStyle::PM_FocusFrameHMargin,&option,option.widget)+1;
         return style->subElementRect(QStyle::SE_ItemViewItemText,&option,option.widget).adjusted(margin,0,-margin,0);
     }
+    // Where a bar's range, its fades and their handles are, in pixels.
+    struct Clip {double left=0,right=0,fadeIn=0,fadeOut=0;bool full=true;};
+    Clip clipGeometry(const QRect &rect,const QVariantList &range,int maximum) const {
+        Clip c;c.left=rect.left();c.right=rect.right()+1;
+        if (!range.value(4).toBool()) return c;
+        const auto [start,end]=rangeFrames(range,maximum);
+        c.full=range.value(0).toInt()<0 && range.value(1).toInt()<0 && range.value(2).toInt()==0 && range.value(3).toInt()==0;
+        const double left=frameX(rect,start-0.5),right=frameX(rect,end+0.5);
+        c.left=std::clamp(left,double(rect.left()),double(rect.right()+1));c.right=std::clamp(right,double(rect.left()),double(rect.right()+1));
+        c.fadeIn=std::max(0.,std::min(c.right-c.left,frameX(rect,start-0.5+range.value(2).toInt())-c.left));
+        c.fadeOut=std::max(0.,std::min(c.right-c.left-c.fadeIn,c.right-frameX(rect,end+0.5-range.value(3).toInt())));
+        return c;
+    }
     // Thin, centred range bar; keyframe hits use the same horizontal extent.
     static QRect barRect(const QRect &cell) {const int height=13;return {cell.left()+8,cell.center().y()-height/2,cell.width()-16,height};}
     QSize sizeHint(const QStyleOptionViewItem &option,const QModelIndex &index) const override {
@@ -237,11 +280,28 @@ public:
         const QWidget *widget=option.widget;(widget ? widget->style() : QApplication::style())->drawControl(QStyle::CE_ItemViewItem,&copy,painter,widget);
         const bool active=index.data(Qt::UserRole+2).toBool() && (option.state & QStyle::State_Enabled);const auto type=ModifierType(index.data(Qt::UserRole+3).toInt());
         painter->save();const auto rect=barRect(option.rect);painter->setPen(Qt::NoPen);
-        painter->setBrush(!active ? QColor(75,80,86) : modifierColour(type));painter->drawRoundedRect(rect,3,3);
         const int current=index.data(Qt::UserRole+6).toInt();
+        // Its part of the timeline, the rest of the row a dark track; a fade slopes the bar's
+        // top from nothing to full, with a handle where it ends.
+        const QColor colour=!active ? QColor(75,80,86) : modifierColour(type);
+        const auto range=index.data(RangeRole).toList();const int maximum=index.data(Qt::UserRole+5).toInt();
+        const auto clip=clipGeometry(rect,range,maximum);
+        if (clip.full) {painter->setBrush(colour);painter->drawRoundedRect(rect,3,3);}
+        else {
+            painter->setBrush(QColor(36,39,43));painter->drawRoundedRect(rect,3,3);
+            if (clip.right>clip.left) {
+                painter->setRenderHint(QPainter::Antialiasing,true);painter->setBrush(colour);
+                painter->drawPolygon(QPolygonF{{clip.left,double(rect.bottom()+1)},{clip.left+clip.fadeIn,double(rect.top())},{clip.right-clip.fadeOut,double(rect.top())},{clip.right,double(rect.bottom()+1)}});
+                painter->setRenderHint(QPainter::Antialiasing,false);
+            }
+        }
+        if (range.value(5).toBool() && clip.right>clip.left) {
+            painter->setRenderHint(QPainter::Antialiasing,true);painter->setPen(QPen(QColor(0,0,0,140),1));painter->setBrush(QColor("#e7eaeb"));
+            for (const double x:{clip.left+clip.fadeIn,clip.right-clip.fadeOut}) painter->drawEllipse(QPointF(x,rect.top()+1.5),3,3);
+            painter->setPen(Qt::NoPen);painter->setRenderHint(QPainter::Antialiasing,false);
+        }
         // An Erase's picked chunks: spans over their frames in the bar's own colour, a shade
         // darker; not diamonds, since a pick holds for its whole chunk rather than at one time.
-        const int maximum=index.data(Qt::UserRole+5).toInt();
         for (const auto &entry:index.data(Qt::UserRole+7).toList()) {
             const auto [first,last]=chunkFrames(entry.toList().value(0).toInt(),maximum);
             const double left=std::max<double>(rect.left(),frameX(rect,first)),right=std::min<double>(rect.right()+1,frameX(rect,last+1));
@@ -250,11 +310,8 @@ public:
             painter->drawRect(QRectF(left,rect.top()+2,right-left,rect.height()-4));
         }
         painter->setRenderHint(QPainter::Antialiasing,true);
-        // The current time: the timeline's playhead carried down through every bar; dragging it
+        // The current time is one line over all the rows (the panel's PlayheadLine); dragging it
         // in any row moves the time (see the panel's event filter).
-        if (inView(current)) {const double x=frameX(rect,current);
-            painter->setPen(QPen(QColor(0,0,0,90),3));painter->drawLine(QPointF(x,rect.top()-3),QPointF(x,rect.bottom()+4));
-            painter->setPen(QPen(Qt::white,2));painter->drawLine(QPointF(x,rect.top()-3),QPointF(x,rect.bottom()+4));}
         for (const auto &key:index.data(Qt::UserRole+4).toList()) {
             const int frame=key.toInt();if (!inView(frame)) continue;const double x=frameX(rect,frame),y=rect.center().y();
             painter->setPen(QPen(active ? QColor("#325777") : QColor("#555b61"),1));painter->setBrush(active ? frame==current ? Qt::white : QColor("#dcebf7") : QColor("#888888"));painter->drawPolygon(QPolygonF{{x,y-5},{x+4,y},{x,y+5},{x-4,y}});
@@ -311,7 +368,7 @@ ModifierPanel::ModifierPanel(QWidget *parent):QWidget(parent) {
     type_->setIconSize({12,12});type_->setMaxVisibleItems(type_->count());
     toolbar->addWidget(type_);
     type_->setToolTip(tr("Choose a modifier to add.\nHover a kind to see what it does."));
-    addModifier_=button(tr("+ Modifier"),"addModifier",tr("Add the selected modifier type to the stack. Modifiers affect the full capture timeline."),[this] {addModifier();});
+    addModifier_=button(tr("+ Modifier"),"addModifier",tr("Add the selected modifier type to the stack. It acts on the whole timeline; drag its bar's ends to limit it to part of it."),[this] {addModifier();});
     duplicate_=button(tr("Duplicate"),"duplicateModifier",tr("Duplicate the selected modifier."),[this] {duplicateSelection();});
     up_=button(tr("Up"),"moveModifierUp",tr("Move the selected modifier up."),[this] {moveSelection(-1);});
     down_=button(tr("Down"),"moveModifierDown",tr("Move the selected modifier down."),[this] {moveSelection(1);});
@@ -324,7 +381,7 @@ ModifierPanel::ModifierPanel(QWidget *parent):QWidget(parent) {
     layout->addLayout(toolbar);
     tree_=new QTreeWidget;tree_->setObjectName("modifierTree");tree_->setColumnCount(3);tree_->setHeaderLabels({tr("Modifier"),tr("Type"),QString()});
     tree_->setColumnHidden(1,true);
-    tree_->setUniformRowHeights(true);tree_->setRootIsDecorated(false);tree_->setSelectionMode(QAbstractItemView::SingleSelection);tree_->setMinimumHeight(90);tree_->setMaximumHeight(190);
+    tree_->setUniformRowHeights(true);tree_->setRootIsDecorated(false);tree_->setSelectionMode(QAbstractItemView::SingleSelection);tree_->setMinimumHeight(90);tree_->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Expanding);
     tree_->setAlternatingRowColors(true);
     auto palette=tree_->palette();palette.setColor(QPalette::Base,EditorTheme::field());palette.setColor(QPalette::AlternateBase,EditorTheme::panel());
     palette.setColor(QPalette::Highlight,QColor("#333a40"));palette.setColor(QPalette::HighlightedText,EditorTheme::text());tree_->setPalette(palette);
@@ -332,11 +389,14 @@ ModifierPanel::ModifierPanel(QWidget *parent):QWidget(parent) {
         "QTreeWidget::item:selected {background: #333a40; color: #e7eaeb;} QTreeWidget::item:hover:!selected {background: #1b1e21;}");
     tree_->header()->setSectionResizeMode(0,QHeaderView::Fixed);tree_->header()->setSectionResizeMode(1,QHeaderView::ResizeToContents);tree_->header()->setSectionResizeMode(2,QHeaderView::Stretch);
     tree_->viewport()->installEventFilter(this);tree_->viewport()->setMouseTracking(true); // the playhead's hover cursor
+    playheadLine_=new PlayheadLine(tree_->viewport());
+    connect(tree_->header(),&QHeaderView::sectionResized,this,&ModifierPanel::placePlayhead);
+    connect(tree_->header(),&QHeaderView::geometriesChanged,this,&ModifierPanel::placePlayhead);
     connect(tree_->header(),&QHeaderView::sectionResized,this,&ModifierPanel::trackMoved);
     connect(tree_->header(),&QHeaderView::geometriesChanged,this,&ModifierPanel::trackMoved);
     auto *delegate=new CoverageDelegate(tree_);delegate->seek=[this](int frame) {emit seekFrame(frame);};
     // Measured while painting: refit and realign afterwards, not in the middle of a paint.
-    delegate->textMoved=[this] {QMetaObject::invokeMethod(this,[this] {fitNames();emit trackMoved();},Qt::QueuedConnection);};tree_->setItemDelegate(delegate);tree_->setToolTip(tr("Click the eye to enable or disable a modifier.\nSelect a modifier to edit its properties in Tools.\nClick a keyframe diamond to seek, or drag the white time line.\nCtrl+wheel zooms the timeline, Shift+wheel or a middle drag pans it."));layout->addWidget(tree_);
+    delegate->textMoved=[this] {QMetaObject::invokeMethod(this,[this] {fitNames();emit trackMoved();},Qt::QueuedConnection);};tree_->setItemDelegate(delegate);tree_->setToolTip(tr("Click the eye to enable or disable a modifier.\nSelect a modifier to edit its properties in Tools.\nDrag a bar's ends to limit the modifier to part of the timeline, and the bar to move that part;\non Color and Audio the handles on its top corners fade it in and out.\nClick a keyframe diamond to seek, or drag the white time line.\nCtrl+wheel zooms the timeline, Shift+wheel or a middle drag pans it."));layout->addWidget(tree_,1); /* as tall as the timeline lets it be */
     connect(tree_,&QTreeWidget::currentItemChanged,this,[this](QTreeWidgetItem *item) {
         if (updating_ || !item) return;project_.selectedModifier=item->data(0,ModifierRole).toString();emit selectionChanged();
     });
@@ -360,6 +420,11 @@ ModifierPanel::ModifierPanel(QWidget *parent):QWidget(parent) {
             menu.addSeparator();const bool enabled=item->checkState(0)==Qt::Checked;
             menu.addAction(enabled ? tr("Disable temporarily") : tr("Enable"),this,[this,enabled] {if (auto *current=tree_->currentItem()) current->setCheckState(0,enabled ? Qt::Unchecked : Qt::Checked);});
             menu.addAction(tr("Rename"),this,[this] {if (auto *current=tree_->currentItem()) tree_->editItem(current,0);});
+            const int row=tree_->indexOfTopLevelItem(item);
+            if (row>=0 && row<project_.modifiers.size() && (project_.modifiers[row].ranged() || project_.modifiers[row].fadeIn>0))
+                menu.addAction(tr("Whole timeline"),this,[this,row] {
+                    if (row>=project_.modifiers.size()) return;auto &m=project_.modifiers[row];m.start=m.end=-1;m.fadeIn=m.fadeOut=0;emit stackChanged();
+                })->setToolTip(tr("Make it act on the whole timeline again, without fades."));
             menu.addAction(tr("Duplicate"),this,[this] {duplicateSelection();});
             menu.addAction(tr("Move up"),this,[this] {moveSelection(-1);});menu.addAction(tr("Move down"),this,[this] {moveSelection(1);});
             menu.addSeparator();menu.addAction(tr("Remove"),this,[this] {removeSelection();});
@@ -521,7 +586,7 @@ void ModifierPanel::setProject(const Project &project) {
                 auto *item=tree_->topLevelItem(i);const auto &m=project_.modifiers[i];
                 item->setText(0,m.name);item->setText(1,typeName(m));item->setToolTip(0,typeName(m)+"\n"+typeDescription(m.type));item->setToolTip(2,item->toolTip(0));
                 item->setCheckState(0,m.active() ? Qt::Checked : Qt::Unchecked);item->setData(2,Qt::UserRole+2,m.active());item->setData(2,Qt::UserRole+3,int(m.type));
-                item->setData(2,Qt::UserRole+4,keyFrames(m));item->setData(2,Qt::UserRole+7,erasedChunks(m));
+                item->setData(2,Qt::UserRole+4,keyFrames(m));item->setData(2,Qt::UserRole+7,erasedChunks(m));item->setData(2,RangeRole,rangeOf(m));
             }
             renderedModifiers_=visualState(project_);updating_=false;fitNames();tree_->viewport()->update();
         }
@@ -536,13 +601,12 @@ void ModifierPanel::rebuild() {
         const QString type=typeName(m);
         auto *item=new QTreeWidgetItem(tree_,{m.name,type,QString()});item->setFlags(item->flags()|Qt::ItemIsEditable|Qt::ItemIsUserCheckable);item->setCheckState(0,m.active() ? Qt::Checked : Qt::Unchecked);
         item->setToolTip(0,type+"\n"+typeDescription(m.type));
-        item->setData(2,Qt::UserRole+4,keyFrames(m));item->setData(2,Qt::UserRole+5,maximum_);item->setData(2,Qt::UserRole+6,frame_);item->setData(2,Qt::UserRole+7,erasedChunks(m));
+        item->setData(2,Qt::UserRole+4,keyFrames(m));item->setData(2,Qt::UserRole+5,maximum_);item->setData(2,Qt::UserRole+6,frame_);item->setData(2,Qt::UserRole+7,erasedChunks(m));item->setData(2,RangeRole,rangeOf(m));
         item->setData(0,ModifierRole,m.id);item->setData(2,Qt::UserRole+2,m.active());item->setData(2,Qt::UserRole+3,int(m.type));item->setToolTip(2,item->toolTip(0));
         if (project_.selectedModifier==m.id) selected=item;
     }
     if (selected) tree_->setCurrentItem(selected);addModifier_->setEnabled(true);duplicate_->setEnabled(selected);remove_->setEnabled(selected);up_->setEnabled(selected);down_->setEnabled(selected);
-    tree_->setFixedHeight(std::min(250,30*std::max(4,int(project_.modifiers.size()))+tree_->header()->height()+4));
-    renderedModifiers_=visualState(project_);updating_=false;clearCacheState();fitNames();
+    renderedModifiers_=visualState(project_);updating_=false;clearCacheState();fitNames();placePlayhead();
 }
 // As wide as the longest name, and never narrower than the minimum asked for.
 void ModifierPanel::fitNames() {
@@ -568,7 +632,7 @@ QPair<double,double> ModifierPanel::view() const {const auto *delegate=static_ca
 void ModifierPanel::setView(double first,double last) {
     auto *delegate=static_cast<CoverageDelegate *>(tree_->itemDelegate());
     if (delegate->viewFirst==first && delegate->viewLast==last) return;
-    delegate->viewFirst=first;delegate->viewLast=last;tree_->viewport()->update();
+    delegate->viewFirst=first;delegate->viewLast=last;tree_->viewport()->update();placePlayhead();
 }
 // The bars' extent in the tree viewport, and the frame under an x there.
 QPair<double,double> ModifierPanel::barSpan() const {
@@ -594,6 +658,56 @@ QPair<int,qulonglong> ModifierPanel::erasedChunkAt(const QPointF &at) const {
     for (const auto &entry:item->data(2,Qt::UserRole+7).toList()) if (entry.toList().value(0).toInt()==chunk) return {chunk,entry.toList().value(1).toULongLong()};
     return {-1,0};
 }
+ModifierPanel::RangePart ModifierPanel::rangePartAt(const QPointF &at,int *row,double *edge) const {
+    auto *item=tree_->itemAt(at.toPoint());if (!item) return RangePart::None;
+    const int index=tree_->indexOfTopLevelItem(item);if (index<0 || index>=project_.modifiers.size() || !Modifier::timed(project_.modifiers[index].type)) return RangePart::None;
+    const QRect cell=tree_->visualRect(tree_->model()->index(index,2));const QRect rect=CoverageDelegate::barRect(cell);
+    if (at.y()<rect.top()-5 || at.y()>rect.bottom()+5) return RangePart::None;
+    const auto *delegate=static_cast<CoverageDelegate *>(tree_->itemDelegate());
+    const auto range=item->data(2,RangeRole).toList();const auto clip=delegate->clipGeometry(rect,range,maximum_);
+    *row=index;const double x=at.x();
+    // The fade handles first (they sit on the corners), then the ends, then the bar itself.
+    double found=x;const auto part=[&] {
+        if (range.value(5).toBool() && at.y()<rect.center().y()) {
+            if (std::abs(x-(clip.left+clip.fadeIn))<=6) {found=clip.left+clip.fadeIn;return RangePart::FadeIn;}
+            if (std::abs(x-(clip.right-clip.fadeOut))<=6) {found=clip.right-clip.fadeOut;return RangePart::FadeOut;}
+        }
+        if (std::abs(x-clip.left)<=5) {found=clip.left;return RangePart::Start;}
+        if (std::abs(x-clip.right)<=5) {found=clip.right;return RangePart::End;}
+        return RangePart::None;
+    }();
+    if (edge) *edge=found;
+    if (part!=RangePart::None) return part;
+    if (x>clip.left && x<clip.right) return RangePart::Body;
+    return RangePart::None;
+}
+// The range being dragged, from how it was at the press and how far the mouse went.
+void ModifierPanel::dragRange(double x) {
+    if (rangeRow_<0 || rangeRow_>=project_.modifiers.size()) return;
+    const auto &o=rangeOriginal_;Modifier m=project_.modifiers[rangeRow_];
+    const int start=std::max(0,o.start),end=o.end<0 ? maximum_ : o.end,length=end-start,frame=frameAt(x),delta=frame-frameAt(rangeFromX_);
+    m.start=o.start;m.end=o.end;m.fadeIn=o.fadeIn;m.fadeOut=o.fadeOut;
+    switch (rangePart_) {
+    case RangePart::Body: m.start=std::clamp(start+delta,0,std::max(0,maximum_-length));m.end=m.start+length;break;
+    case RangePart::Start: m.start=std::clamp(start+delta,0,end);break;
+    case RangePart::End: m.end=std::clamp(end+delta,start,maximum_);break;
+    case RangePart::FadeIn: m.fadeIn=std::clamp(frame-start+1,0,length+1-o.fadeOut);break;
+    case RangePart::FadeOut: m.end=end;m.fadeOut=std::clamp(end-frame+1,0,length+1-o.fadeIn);break;
+    case RangePart::None: return;
+    }
+    tidyRange(m,maximum_);
+    auto &target=project_.modifiers[rangeRow_];target.start=m.start;target.end=m.end;target.fadeIn=m.fadeIn;target.fadeOut=m.fadeOut;
+    if (auto *item=tree_->topLevelItem(rangeRow_)) {const QSignalBlocker blocker(tree_);item->setData(2,RangeRole,rangeOf(target));}
+    renderedModifiers_=visualState(project_);tree_->viewport()->update();
+}
+void ModifierPanel::placePlayhead() {
+    if (!playheadLine_) return;
+    auto *line=static_cast<PlayheadLine *>(playheadLine_);
+    const auto [left,width]=barSpan();const auto [first,last]=view();
+    const bool shown=tree_->topLevelItemCount()>0 && frame_>=first-1e-6 && frame_<=last+1e-6 && last>first;
+    line->x=shown ? left+width*(frame_-first)/(last-first) : -1;
+    line->setGeometry(tree_->viewport()->rect());line->raise();line->update();
+}
 // Over the playhead line, in any modifier's row.
 bool ModifierPanel::onPlayhead(const QPointF &at) const {
     const auto [left,width]=barSpan();const auto [first,last]=view();
@@ -608,13 +722,33 @@ bool ModifierPanel::eventFilter(QObject *watched,QEvent *event) {
     switch (event->type()) {
     case QEvent::MouseButtonPress: case QEvent::MouseMove: case QEvent::MouseButtonRelease: {
         auto *mouse=static_cast<QMouseEvent *>(event);
-        if (event->type()==QEvent::MouseButtonPress && mouse->button()==Qt::LeftButton && onPlayhead(mouse->position())) {
+        // The playhead, unless a bar's end or fade handle is nearer the mouse (at the first
+        // frame both sit together).
+        int nearRow=-1;double edge=0;const auto nearPart=rangePartAt(mouse->position(),&nearRow,&edge);
+        const auto [barLeft,barWidth]=barSpan();const auto [viewFirst,viewLast]=view();
+        const double playheadX=barLeft+barWidth*(frame_-viewFirst)/std::max(1e-9,viewLast-viewFirst);
+        const bool endNearer=nearPart!=RangePart::None && nearPart!=RangePart::Body && std::abs(mouse->position().x()-edge)<std::abs(mouse->position().x()-playheadX);
+        if (event->type()==QEvent::MouseButtonPress && mouse->button()==Qt::LeftButton && onPlayhead(mouse->position()) && !endNearer) {
             scrubbing_=true;tree_->viewport()->setCursor(Qt::SizeHorCursor);return true;
         }
         if (scrubbing_) {
             if (event->type()==QEvent::MouseMove) {const int frame=frameAt(mouse->position().x());if (frame!=frame_) emit seekFrame(frame);}
             else if (event->type()==QEvent::MouseButtonRelease && mouse->button()==Qt::LeftButton) {scrubbing_=false;if (!onPlayhead(mouse->position())) tree_->viewport()->unsetCursor();}
             return true;
+        }
+        // A bar dragged by its ends, its fade handles or itself: once the mouse has gone a few
+        // pixels, so a click still selects the row (and goes to a key or an erased chunk).
+        if (event->type()==QEvent::MouseButtonPress && mouse->button()==Qt::LeftButton) {
+            int row=-1;rangePart_=rangePartAt(mouse->position(),&row);rangeDragging_=false;
+            if (rangePart_!=RangePart::None) {rangeRow_=row;rangeFromX_=mouse->position().x();rangeOriginal_=project_.modifiers[row];}
+        }
+        if (event->type()==QEvent::MouseMove && rangePart_!=RangePart::None && (mouse->buttons() & Qt::LeftButton)) {
+            if (!rangeDragging_ && std::abs(mouse->position().x()-rangeFromX_)<4) return true;
+            rangeDragging_=true;dragRange(mouse->position().x());return true;
+        }
+        if (event->type()==QEvent::MouseButtonRelease && mouse->button()==Qt::LeftButton && rangePart_!=RangePart::None) {
+            const bool dragged=rangeDragging_;rangePart_=RangePart::None;rangeDragging_=false;
+            if (dragged) emit stackChanged(); // the view still sees the release, as after any press
         }
         // A click on an Erase's picked chunk goes to its first frame, unless the time is already
         // in it; the row is selected as usual.
@@ -624,11 +758,13 @@ bool ModifierPanel::eventFilter(QObject *watched,QEvent *event) {
             if (chunk>=0 && delegate->chunkOf(frame_)!=chunk) emit seekFrame(delegate->chunkFrames(chunk,maximum_).first);
         }
         if (event->type()==QEvent::MouseMove && !panning_ && mouse->buttons()==Qt::NoButton) {
-            if (onPlayhead(mouse->position())) tree_->viewport()->setCursor(Qt::SizeHorCursor);
+            const auto part=onPlayhead(mouse->position()) && !endNearer ? RangePart::Start : nearPart;
+            if (part==RangePart::Start || part==RangePart::End || part==RangePart::FadeIn || part==RangePart::FadeOut) tree_->viewport()->setCursor(Qt::SizeHorCursor);
             else tree_->viewport()->unsetCursor();
         }
         break;
     }
+    case QEvent::Resize: placePlayhead();break;
     case QEvent::ToolTip: {
         auto *help=static_cast<QHelpEvent *>(event);const auto [chunk,records]=erasedChunkAt(help->pos());
         if (chunk<0) break;
@@ -664,7 +800,7 @@ void ModifierPanel::resizeEvent(QResizeEvent *event) {QWidget::resizeEvent(event
 void ModifierPanel::setTimeline(int frame,int maximum) {
     if (frame_==frame && maximum_==maximum) return;frame_=frame;maximum_=maximum;QSignalBlocker blocker(tree_);
     for (int row=0;row<tree_->topLevelItemCount();++row) {auto *item=tree_->topLevelItem(row);item->setData(2,Qt::UserRole+5,maximum);item->setData(2,Qt::UserRole+6,frame);}
-    tree_->viewport()->update();
+    tree_->viewport()->update();placePlayhead();
 }
 void ModifierPanel::addModifier() {
     Modifier m;m.id=Project::newId();const int type=type_->currentData().toInt();
