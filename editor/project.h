@@ -191,6 +191,11 @@ struct Modifier {
     // all of it. Color and Audio also come in and go out over `fadeIn` and `fadeOut` frames
     // at a closed end; what removes splats or moves the capture starts and stops at once.
     int start=-1, end=-1, fadeIn=0, fadeOut=0;
+    // The track (row) it sits on, as clips on a track: modifiers of one kind, one after
+    // another in time, never overlapping, and next to each other in the stack. Empty: a
+    // track of its own.
+    QString track;
+    QString trackId() const { return track.isEmpty() ? id : track; }
     static bool timed(ModifierType type) { return type!=ModifierType::LoopMorph && type!=ModifierType::Walk && type!=ModifierType::BakeAntialiasing; }
     static bool fades(ModifierType type) { return type==ModifierType::Colour || type==ModifierType::Audio; }
     // It acts on only part of the timeline, or fades.
@@ -226,6 +231,8 @@ struct Project {
     bool hasTimedRemoval() const;
     // A modifier acts on part of the timeline only: exports then take the stack frame by frame.
     bool hasRangedModifiers() const;
+    // Each track's modifiers together in the stack, in time order, where its first one was.
+    void groupTracks();
     // Refreshes the pose each animated crop shows to the one at this frame.
     void showCropsAtFrame(double frame);
     // The summed speed of the active Walk modifiers, and how far the capture has walked

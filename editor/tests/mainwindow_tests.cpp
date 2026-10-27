@@ -41,6 +41,11 @@
 #include <QTimer>
 #include <QTreeWidget>
 #include <QSplitter>
+#include <QHBoxLayout>
+#include <QListWidget>
+#include <QToolBar>
+#include <QToolButton>
+#include <QMenu>
 #include <QToolButton>
 #include <QMenu>
 #include <QMenuBar>
@@ -194,14 +199,54 @@ private slots:
         split->setSizes({sizes[0]-200,sizes[1]+200});QTRY_VERIFY(tree->height()>=before+150);
         if (const auto shot=qEnvironmentVariable("VGS_WINDOW_SHOT");!shot.isEmpty()) window.grab().save(shot);
     }
+    void sameKindFillsTheGapOnItsTrack() {
+        ModifierPanel panel;Project project;project.modifiers.clear();
+        Modifier crop;crop.type=ModifierType::Crop;crop.id=Project::newId();crop.name="Crop";crop.crop.enabled=true;crop.end=39;
+        project.modifiers={crop};project.selectedModifier=crop.id;
+        panel.resize(900,300);panel.show();panel.setProject(project);panel.setTimeline(60,99);panel.setView(-0.5,99.5);QApplication::processEvents();
+        auto *tree=panel.findChild<QTreeWidget *>("modifierTree");QVERIFY(tree);QCOMPARE(tree->topLevelItemCount(),1);
+        auto clipsIn=[&](int row) {return tree->topLevelItem(row)->data(2,Qt::UserRole+9).toList().size();};
+        // A crop at frame 60, past the first one's end: a clip from there on, on the same track.
+        panel.addModifierOfType(ModifierType::Crop);auto p=panel.project();panel.setProject(p);QApplication::processEvents();
+        QCOMPARE(p.modifiers.size(),2);QCOMPARE(p.modifiers[1].trackId(),p.modifiers[0].trackId());QCOMPARE(p.modifiers[1].start,60);QCOMPARE(p.modifiers[1].end,-1);
+        QCOMPARE(tree->topLevelItemCount(),1);QCOMPARE(clipsIn(0),2);QCOMPARE(p.selectedModifier,p.modifiers[1].id);
+        // No gap left at the time: a track of its own; another kind too.
+        panel.addModifierOfType(ModifierType::Crop);p=panel.project();QCOMPARE(p.modifiers.size(),3);QVERIFY(p.modifiers[2].trackId()!=p.modifiers[0].trackId());
+        panel.addModifierOfType(ModifierType::Colour);p=panel.project();panel.setProject(p);QApplication::processEvents();QCOMPARE(tree->topLevelItemCount(),3);
+        // A clip's end dragged right stops just before the next clip on its track (at 60).
+        auto *view=tree->viewport();
+        auto x=[&](double frame) {const auto [left,width]=panel.trackSpan();return view->mapFromGlobal(QPoint(int(std::lround(left+width*(frame+0.5)/100.)),0)).x();};
+        const int y=tree->visualItemRect(tree->topLevelItem(0)).center().y();
+        QTest::mousePress(view,Qt::LeftButton,{},QPoint(x(39.5)-1,y));
+        for (int i=1;i<=6;++i) {const QPoint at(x(39.5)-1+(x(80)-x(39.5))*i/6,y);QMouseEvent move(QEvent::MouseMove,at,view->mapToGlobal(at),Qt::NoButton,Qt::LeftButton,Qt::NoModifier);QApplication::sendEvent(view,&move);}
+        QTest::mouseRelease(view,Qt::LeftButton,{},QPoint(x(80),y));
+        p=panel.project();QCOMPARE(p.modifiers[0].end,59);QCOMPARE(p.selectedModifier,p.modifiers[0].id);
+        if (const auto shot=qEnvironmentVariable("VGS_TRACK_SHOT");!shot.isEmpty()) {panel.setProject(panel.project());QApplication::processEvents();panel.grab().save(shot);}
+        // The track is kept by a save and a load.
+        QTemporaryDir dir;p.asset=dir.filePath("source.mint");Project restored;QString error;
+        QVERIFY2(Project::fromJson(p.json(dir.filePath("scene.vgsproj")),dir.path(),&restored,&error),qPrintable(error));
+        QCOMPARE(restored.modifiers[1].trackId(),restored.modifiers[0].trackId());QVERIFY(restored.modifiers[2].trackId()!=restored.modifiers[0].trackId());
+        // Down the left side: a group's menu adds its kinds.
+        QToolBar bar;panel.fillToolbar(&bar);auto *cleaning=bar.findChild<QToolButton *>("modifierGroup0");QVERIFY(cleaning && cleaning->menu());
+        if (const auto shot=qEnvironmentVariable("VGS_BAR_SHOT");!shot.isEmpty()) {
+            bar.setOrientation(Qt::Vertical);bar.setIconSize({32,32});bar.show();QApplication::processEvents();bar.grab().save(shot);
+            QWidget menus;auto *row=new QHBoxLayout(&menus);
+            for (auto *button:bar.findChildren<QToolButton *>()) if (button->menu()) {auto *list=new QListWidget;for (auto *action:button->menu()->actions()) list->addItem(new QListWidgetItem(action->icon(),action->text().section(QChar(9),0,0)));list->setIconSize({32,32});row->addWidget(list);}
+            menus.resize(900,200);menus.show();QApplication::processEvents();menus.grab().save(QString(shot).replace(".png","_menus.png"));
+        }
+        QCOMPARE(cleaning->menu()->actions().size(),4);QVERIFY(cleaning->menu()->actions().last()->text().startsWith("Eraser"));
+        cleaning->menu()->actions().last()->trigger();QCOMPARE(panel.project().modifiers.last().type,ModifierType::Erase);
+        auto *colour=bar.findChild<QAction *>("addModifier9");QVERIFY(colour);const auto count=panel.project().modifiers.size();colour->trigger();QCOMPARE(panel.project().modifiers.size(),count+1);
+    }
     void barsTrimMoveAndFadeModifiers() {
         ModifierPanel panel;Project project;project.modifiers.clear();
         for (auto type:{ModifierType::Crop,ModifierType::Colour,ModifierType::Walk}) {Modifier m;m.type=type;m.id=Project::newId();m.name="M";m.crop.enabled=true;project.modifiers.append(m);}
         panel.resize(900,300);panel.show();panel.setProject(project);panel.setTimeline(0,99);panel.setView(-0.5,99.5);QApplication::processEvents();
         auto *tree=panel.findChild<QTreeWidget *>("modifierTree");QVERIFY(tree);QSignalSpy changed(&panel,&ModifierPanel::stackChanged);
-        const auto [left,width]=panel.trackSpan();auto *view=tree->viewport();
-        // The x of a frame boundary, and the middle of a row, in the tree's viewport.
-        auto x=[&](double frame) {return view->mapFromGlobal(QPoint(int(std::lround(left+width*(frame+0.5)/100.)),0)).x();};
+        auto *view=tree->viewport();
+        // The x of a frame boundary, and the middle of a row, in the tree's viewport (the bars
+        // as they are now: the names column settles after the first paint).
+        auto x=[&](double frame) {const auto [left,width]=panel.trackSpan();return view->mapFromGlobal(QPoint(int(std::lround(left+width*(frame+0.5)/100.)),0)).x();};
         auto y=[&](int row,int dy=0) {return tree->visualItemRect(tree->topLevelItem(row)).center().y()+dy;};
         auto drag=[&](QPoint from,QPoint to) {
             QTest::mousePress(view,Qt::LeftButton,{},from);
@@ -217,6 +262,11 @@ private slots:
         QCOMPARE(at(0).end-at(0).start,length);QVERIFY(std::abs(at(0).start-30)<=1);QCOMPARE(at(0).fadeIn,0);
         // Color's handle on its top left corner fades it in over ten frames.
         drag({x(-0.5)+1,y(1,-5)},{x(9.5),y(1,-5)});QVERIFY(std::abs(at(1).fadeIn-10)<=1);QCOMPARE(at(1).start,-1);
+        // Del on the list removes the selected modifier.
+        tree->setFocus();tree->setCurrentItem(tree->topLevelItem(2));QApplication::processEvents();const int before=int(panel.project().modifiers.size());
+        QTest::keyClick(tree,Qt::Key_Delete);QCOMPARE(int(panel.project().modifiers.size()),before-1);
+        project=panel.project();project.modifiers.append(Modifier{});project.modifiers.back().type=ModifierType::Walk;project.modifiers.back().id=Project::newId();project.modifiers.back().name="M";
+        panel.setProject(project);QApplication::processEvents();
         // Walk acts on all of the timeline whatever is dragged.
         drag({x(99.5)-1,y(2)},{x(50),y(2)});QCOMPARE(at(2).end,-1);QVERIFY(!at(2).ranged());
         if (const auto shot=qEnvironmentVariable("VGS_PANEL_SHOT");!shot.isEmpty()) {panel.setTimeline(45,99);QApplication::processEvents();panel.grab().save(shot);}

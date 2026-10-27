@@ -42,6 +42,7 @@ class QCloseEvent;
 class QMenu;
 class QToolButton;
 class QSplitter;
+class QToolBar;
 class QSlider;
 class QButtonGroup;
 class QComboBox;
@@ -336,6 +337,7 @@ private:
     QCheckBox *greenLinearRgb_;
     QWidget *tools_, *timeline_, *displayControls_;
     QSplitter *timelineSplit_=nullptr; // the viewport over the timeline
+    QToolBar *modifierToolbar_=nullptr; // the kinds of modifier, by group, down the left side
     QDoubleSpinBox *transform_[3][3], *speed_, *pointSize_;
     QDoubleSpinBox *cropRadius_, *cropRadiusZ_, *cropHeight_;
     QDoubleSpinBox *cropWidth_, *cropDepth_;

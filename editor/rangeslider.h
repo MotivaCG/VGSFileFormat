@@ -27,6 +27,9 @@ public:
     // Small yellow ticks at internal chunk changes. Empty by default (the viewer).
     // Positions are in frames and may be fractional, just like the second ticks.
     void setChunkBoundaries(const QVector<double> &frames);
+    // Faint by default; bright when what is being edited depends on them (picks or sculpting
+    // that hold within a chunk).
+    void setChunkEmphasis(bool emphasis);
     // The seconds labelled under the track: a regular step (1, 2, 5, 10, 15, 30 s, minutes...)
     // wide enough apart to read, none cut off at the track's ends; empty when the second
     // ticks themselves are too dense to draw.
@@ -97,6 +100,7 @@ private:
     double m_viewFirst = 0, m_viewLast = 0;
     double m_frameRate = 0;
     QVector<double> m_chunkBoundaries;
+    bool m_chunkEmphasis = false;
     bool m_labelsInSeconds = false;
     bool m_panning = false;
     double m_panX = 0;

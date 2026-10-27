@@ -51,6 +51,14 @@ void RangeSlider::setLabelsInSeconds(bool seconds)
     update();
 }
 
+void RangeSlider::setChunkEmphasis(bool emphasis)
+{
+    if (m_chunkEmphasis == emphasis)
+        return;
+    m_chunkEmphasis = emphasis;
+    update();
+}
+
 void RangeSlider::setChunkBoundaries(const QVector<double> &frames)
 {
     if (m_chunkBoundaries == frames)
@@ -359,7 +367,8 @@ void RangeSlider::paintEvent(QPaintEvent*)
         painter.save();
         painter.setRenderHint(QPainter::Antialiasing, false);
         painter.setClipRect(track.adjusted(0, -2, 0, 2));
-        painter.setPen(QPen(QColor(244, 197, 66), 2));
+        // Bright and over the track when they matter to the edit; a faint notch otherwise.
+        painter.setPen(m_chunkEmphasis ? QPen(QColor(244, 197, 66), 2) : QPen(QColor(244, 197, 66, 95), 1));
         int previousX = -1;
         for (double frame : m_chunkBoundaries) {
             if (!std::isfinite(frame) || frame < m_viewFirst || frame > m_viewLast)
@@ -367,7 +376,10 @@ void RangeSlider::paintEvent(QPaintEvent*)
             const int x = qRound(frameX(frame));
             if (x == previousX)
                 continue;
-            painter.drawLine(x, track.top() - 2, x, track.bottom() + 2);
+            if (m_chunkEmphasis)
+                painter.drawLine(x, track.top() - 2, x, track.bottom() + 2);
+            else
+                painter.drawLine(x, track.top(), x, track.bottom());
             previousX = x;
         }
         painter.restore();

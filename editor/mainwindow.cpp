@@ -22,6 +22,7 @@
 #include "audiopreview.h"
 #include "loopmorph.h"
 #include <QSplitter>
+#include <QToolBar>
 #include <QProgressDialog>
 #include <QDialogButtonBox>
 #include <atomic>
@@ -744,6 +745,11 @@ void MainWindow::buildUi() {
     controls->addWidget(speedControls);tl->addLayout(controls);tl->addWidget(slider_);
     loop_->setToolTip(tr("Toggle looping within the playback range (L)."));
     modifierPanel_=new ModifierPanel;modifierPanel_->setCacheEnabled(cacheEnabledAction_->isChecked());tl->addWidget(modifierPanel_,1);
+    // Down the left side, as in T4DEditor: an icon per group of kinds; a click adds one (into
+    // the gap at the time on the selected modifier's track when it is of the same kind).
+    modifierToolbar_=new QToolBar(tr("Modifiers"),this);modifierToolbar_->setObjectName("modifierToolbar");modifierToolbar_->setMovable(false);
+    modifierToolbar_->setIconSize({32,32});modifierToolbar_->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    addToolBar(Qt::LeftToolBarArea,modifierToolbar_);modifierPanel_->fillToolbar(modifierToolbar_);
     // The timeline's track runs exactly over the modifier bars, so a frame sits at the same x
     // in both; the space to its left heads the names column below. Queued: both settle first.
     connect(modifierPanel_,&ModifierPanel::trackMoved,this,&MainWindow::alignTimeline,Qt::QueuedConnection);
@@ -1539,6 +1545,8 @@ private:
 void MainWindow::syncUi() {
     const KeepTyping typing;
     syncing_ = true;
+    // The chunk changes stand out while an Eraser holds picks: those hold chunk by chunk.
+    slider_->setChunkEmphasis(std::any_of(project_.modifiers.cbegin(),project_.modifiers.cend(),[](const Modifier &m) {return m.active() && m.type==ModifierType::Erase && !m.erased.empty();}));
     // Animated crops show their pose at this frame. Edits are keyed before they get here.
     project_.showCropsAtFrame(currentFrame());
     if (project_.modifier() && project_.modifier()->type==ModifierType::Crop && project_.modifier()->cropAnimation.active()) viewport_->setCrop(project_.crop());
@@ -1596,7 +1604,7 @@ void MainWindow::syncUi() {
     ghostOpacitySlider_->setEnabled(viewport_->ghostEnabled() && loaded_ && !loading_);
     if (selected) {cropProperties_->setTitle(tr("Crop: %1").arg(selected->name));greenProperties_->setTitle(tr("Remove green: %1").arg(selected->name));greenSaturation_->setValue(selected->green.minimumSaturation*100);greenHue_->setValue(selected->green.hueTolerance);greenLinearRgb_->setChecked(selected->green.linearRgb);}
     // Nothing is edited while a capture opens: what it would edit is about to be replaced.
-    tools_->setEnabled(!loading_); timeline_->setEnabled(loaded_ && !loading_);
+    tools_->setEnabled(!loading_); timeline_->setEnabled(loaded_ && !loading_);if (modifierToolbar_) modifierToolbar_->setEnabled(loaded_ && !loading_);
     for (auto *group : tools_->findChildren<QGroupBox *>(QString(),Qt::FindDirectChildrenOnly))
         group->setEnabled(group==presetBox_ || (loaded_ && !loading_ && !(animation && !selected->enabled && group->property("transformGroup").toBool())));
     resetTransformButton_->setEnabled(loaded_ && !loading_ && !(animation && !selected->enabled));

@@ -16,12 +16,23 @@ class QTreeWidget;
 class QToolButton;
 class QComboBox;
 class QTimer;
+class QToolBar;
 class ModifierPanel : public QWidget {
     Q_OBJECT
 public:
     explicit ModifierPanel(QWidget *parent=nullptr);
     void setProject(const Project &project);
     void setTimeline(int frame,int maximum);
+    // Adds a modifier of this kind: into the gap at the time on the selected modifier's track
+    // when it is of the same kind and has one there, as a clip after the others; otherwise
+    // on a track of its own.
+    void addModifierOfType(ModifierType type);
+    // The kinds as tool buttons, one per group (cleaning, look, motion, sound, delivery): a
+    // group of one adds it, the others open a menu of their kinds.
+    void fillToolbar(QToolBar *bar);
+    // A kind's line icon, in `ink` (the toolbar's when invalid), its touch of colour the kind's
+    // own or `tint` (a group's menu gives its kinds the group's).
+    static QIcon modifierIcon(ModifierType type,const QColor &ink=QColor(),const QColor &tint=QColor());
     void setCacheState(const PreviewCacheState &state);
     void clearCacheState();
     void setCacheWorking(int groups=7);
@@ -56,6 +67,15 @@ signals:
     void resetViewRequested();
 private:
     void rebuild();
+    // The tracks as rows: the stack's indices of the modifiers on each, in time order.
+    QVector<QVector<int>> rows_;
+    void computeRows();
+    int rowOf(const QString &id) const;
+    // The modifier a row shows by its name and eye: the selected one when it is on that track,
+    // else the one at the time, else its first.
+    int shownIn(int row) const;
+    // Every row's name, eye, clips, keys and picks as the stack now has them.
+    void refreshRows();
     void fitNames();
     int textOffset() const;
     int minimumNameWidth_=0;

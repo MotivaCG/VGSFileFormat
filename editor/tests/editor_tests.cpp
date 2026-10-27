@@ -362,6 +362,15 @@ private slots:
         auto invalid=json;auto mods=invalid["modifiers"].toArray();auto m=mods[0].toObject();auto animation=m["animation"].toObject();auto keys=animation["keys"].toArray();keys.append(keys[0]);animation["keys"]=keys;m["animation"]=animation;mods[0]=m;invalid["modifiers"]=mods;QVERIFY(!Project::fromJson(invalid,dir.path(),&restored,&error));
         project.modifiers[0].enabled=false;project.modifiers[1].enabled=false;QCOMPARE(project.transformAtFrame(5).position,reference.position);
     }
+    void tracksKeepTheirClipsTogether() {
+        Project project;project.modifiers.clear();
+        auto make=[](const char *id,const char *track,int start) {Modifier m;m.id=id;m.name=id;m.type=ModifierType::Colour;m.track=track;m.start=start;m.end=start+9;return m;};
+        project.modifiers={make("a2","a",50),make("b","",0),make("a1","a",10)};
+        project.groupTracks();
+        // The track's clips together where its first one was, in time order.
+        QCOMPARE(project.modifiers[0].id,QString("a1"));QCOMPARE(project.modifiers[1].id,QString("a2"));QCOMPARE(project.modifiers[2].id,QString("b"));
+        QCOMPARE(project.modifiers[2].trackId(),QString("b"));
+    }
     void modifiersActOnPartOfTheTimeline() {
         Project project;project.modifiers.clear();
         Modifier crop;crop.id="crop";crop.type=ModifierType::Crop;crop.crop.enabled=true;crop.crop.remove=true;crop.crop.radius=1;crop.crop.height=10;
