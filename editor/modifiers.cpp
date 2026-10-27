@@ -14,6 +14,7 @@
 #include <QJsonDocument>
 #include <QCryptographicHash>
 #include <QUuid>
+#include <QSet>
 #include <algorithm>
 #include <iterator>
 #include <cmath>
@@ -94,6 +95,16 @@ QVector<Modifier> Project::modifiersAtFrame(double frame) const {
         }
     }
     return result;
+}
+void Project::groupTracks() {
+    QVector<Modifier> grouped;grouped.reserve(modifiers.size());QSet<QString> done;
+    for (qsizetype i=0;i<modifiers.size();++i) {
+        const QString track=modifiers[i].trackId();if (done.contains(track)) continue;done.insert(track);
+        const qsizetype first=grouped.size();
+        for (qsizetype j=i;j<modifiers.size();++j) if (modifiers[j].trackId()==track) grouped.append(modifiers[j]);
+        std::stable_sort(grouped.begin()+first,grouped.end(),[](const Modifier &a,const Modifier &b) {return std::max(0,a.start)<std::max(0,b.start);});
+    }
+    modifiers=std::move(grouped);
 }
 bool Project::hasTimedRemoval() const {
     for (const auto &m:modifiers) if (m.active() && (removesSplats(m.type) || m.type==ModifierType::Crop) && (m.ranged() || (m.type==ModifierType::Crop && m.cropAnimation.active()))) return true;
@@ -357,6 +368,7 @@ QJsonArray Project::modifierJson() const {
             case ModifierType::LoopMorph: type="loop-morph";break;
             }
             QJsonObject item{{"id",m.id},{"name",m.name},{"enabled",m.active()},{"type",type},{"timeline","full"}};
+            if (!m.track.isEmpty() && m.track!=m.id) item["track"]=m.track;
             // Part of the timeline: its first and last frames (null: open), and the fades.
             if (m.ranged() || (Modifier::fades(m.type) && (m.fadeIn>0 || m.fadeOut>0))) {
                 QJsonObject range{{"start",m.start>=0 ? QJsonValue(m.start) : QJsonValue()},{"end",m.end>=0 ? QJsonValue(m.end) : QJsonValue()}};

@@ -206,6 +206,8 @@ bool Project::fromJson(const QJsonObject &root,const QString &baseDirectory,Proj
         for (const auto &value:root["modifiers"].toArray()) {
             if (!value.isObject()) return fail();const auto item=value.toObject();Modifier m;
             m.id=identity(item,"id",80);m.name=identity(item,"name",120);valid &= !ids.contains(m.id) && item["enabled"].isBool() && (item["timeline"]=="full" || item["timeline"].isObject());ids.insert(m.id);m.enabled=item["enabled"].toBool();
+            // A track it shares with others, as clips; none, a track of its own.
+            if (item.contains("track")) {const auto track=item["track"].toString().trimmed();valid &= item["track"].isString() && track.size()<=80;m.track=track;}
             if (item["timeline"].isObject()) {
                 // Part of the timeline: frames, null for an open end, and fades in frames.
                 const auto range=item["timeline"].toObject();
@@ -300,6 +302,7 @@ bool Project::fromJson(const QJsonObject &root,const QString &baseDirectory,Proj
             } else return fail();
             p.modifiers.append(m);
         }
+        p.groupTracks();
         p.selectedModifier=root["selection"].toObject()["modifier"].toString();
         if (!p.modifier()) p.selectedModifier=p.modifiers.isEmpty() ? QString() : p.modifiers.front().id;
     }
