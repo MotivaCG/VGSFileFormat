@@ -186,6 +186,18 @@ struct Modifier {
     bool morphLeadIn = false;
     QVector<MorphMarker> morphMarkers;
     bool active() const { return enabled && (type!=ModifierType::Crop || crop.enabled); }
+    // The part of the timeline it acts on, in frames, both included; -1 leaves that end open
+    // (the timeline's start or end). Loop morph, Walk and Bake anti-aliasing always act on
+    // all of it. Color and Audio also come in and go out over `fadeIn` and `fadeOut` frames
+    // at a closed end; what removes splats or moves the capture starts and stops at once.
+    int start=-1, end=-1, fadeIn=0, fadeOut=0;
+    static bool timed(ModifierType type) { return type!=ModifierType::LoopMorph && type!=ModifierType::Walk && type!=ModifierType::BakeAntialiasing; }
+    static bool fades(ModifierType type) { return type==ModifierType::Colour || type==ModifierType::Audio; }
+    // It acts on only part of the timeline, or fades.
+    bool ranged() const { return timed(type) && (start>=0 || end>=0); }
+    bool covers(double frame) const;
+    // How much it acts at a frame: 0 outside its range, 1 inside, between them over a fade.
+    double weightAt(double frame) const;
 };
 struct Project {
     Project();
@@ -205,9 +217,15 @@ struct Project {
     void setAnimatedPose(int frame,const Transform &pose);
     bool hasAnimation() const;
     bool hasAnimatedMotion() const;
-    // The stack with every animated crop evaluated at a frame: what preview and export apply.
+    // The stack with every animated crop evaluated at a frame, the modifiers whose range
+    // leaves it out disabled and the fading ones weighed: what preview and export apply.
     QVector<Modifier> modifiersAtFrame(double frame) const;
     bool hasAnimatedCrop() const;
+    // Which splats are kept changes from frame to frame: an animated crop, or a modifier that
+    // removes splats on part of the timeline only.
+    bool hasTimedRemoval() const;
+    // A modifier acts on part of the timeline only: exports then take the stack frame by frame.
+    bool hasRangedModifiers() const;
     // Refreshes the pose each animated crop shows to the one at this frame.
     void showCropsAtFrame(double frame);
     // The summed speed of the active Walk modifiers, and how far the capture has walked

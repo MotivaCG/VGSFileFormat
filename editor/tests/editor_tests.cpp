@@ -362,6 +362,45 @@ private slots:
         auto invalid=json;auto mods=invalid["modifiers"].toArray();auto m=mods[0].toObject();auto animation=m["animation"].toObject();auto keys=animation["keys"].toArray();keys.append(keys[0]);animation["keys"]=keys;m["animation"]=animation;mods[0]=m;invalid["modifiers"]=mods;QVERIFY(!Project::fromJson(invalid,dir.path(),&restored,&error));
         project.modifiers[0].enabled=false;project.modifiers[1].enabled=false;QCOMPARE(project.transformAtFrame(5).position,reference.position);
     }
+    void modifiersActOnPartOfTheTimeline() {
+        Project project;project.modifiers.clear();
+        Modifier crop;crop.id="crop";crop.type=ModifierType::Crop;crop.crop.enabled=true;crop.crop.remove=true;crop.crop.radius=1;crop.crop.height=10;
+        crop.start=10;crop.end=20;
+        Modifier colour;colour.id="colour";colour.type=ModifierType::Colour;colour.colourExposure=2;colour.colourSaturation=0;colour.start=30;colour.end=60;colour.fadeIn=10;colour.fadeOut=5;
+        Modifier move;move.id="move";move.type=ModifierType::AnimateTransform;move.animation.setKey(0,Transform{});
+        Transform shifted;shifted.position={1,0,0};move.animation.keys[0].offset=shifted;move.start=100;
+        Modifier walk;walk.id="walk";walk.type=ModifierType::Walk;walk.start=5;walk.end=6; // never ranged: Walk acts on all of it
+        crop.name="Crop";colour.name="Color";move.name="Move";walk.name="Walk";
+        project.modifiers={crop,colour,move,walk};project.selectedModifier="crop";
+        // A crop acts on its frames only, at once, with no fade.
+        QVERIFY(CompiledModifiers(project.modifiersAtFrame(5)).keepsPosition({0,0,0}));
+        QVERIFY(!CompiledModifiers(project.modifiersAtFrame(10)).keepsPosition({0,0,0}));
+        QVERIFY(!CompiledModifiers(project.modifiersAtFrame(20)).keepsPosition({0,0,0}));
+        QVERIFY(CompiledModifiers(project.modifiersAtFrame(21)).keepsPosition({0,0,0}));
+        QCOMPARE(project.modifiersAtFrame(15).size(),project.modifiers.size()); // the stack keeps its order
+        QVERIFY(project.hasTimedRemoval());QVERIFY(project.hasRangedModifiers());
+        // Color fades in over 10 frames and out over 5: part of the way at the ramps.
+        QCOMPARE(project.modifiersAtFrame(29)[1].active(),false);
+        const auto rising=project.modifiersAtFrame(34)[1];QVERIFY(rising.active());
+        QVERIFY(rising.colourExposure>0.5 && rising.colourExposure<1.5);QVERIFY(rising.colourSaturation>0.3 && rising.colourSaturation<0.7);
+        QCOMPARE(project.modifiersAtFrame(45)[1].colourExposure,2.);
+        QVERIFY(project.modifiersAtFrame(59)[1].colourExposure<1);QCOMPARE(project.modifiersAtFrame(61)[1].active(),false);
+        QVERIFY(colour.weightAt(30)>0 && colour.weightAt(30)<0.2);QCOMPARE(colour.weightAt(45),1.);
+        // The transform moves the capture from its first frame on, at once.
+        QCOMPARE(project.transformAtFrame(99).position,QVector3D(0,0,0));QCOMPARE(project.transformAtFrame(100).position,QVector3D(1,0,0));
+        // Walk keeps acting everywhere.
+        QVERIFY(project.modifiersAtFrame(200)[3].active());QVERIFY(!project.modifiers[3].ranged());
+        // Saved and read back: open ends stay open; the whole timeline still reads "full".
+        QTemporaryDir dir;project.asset=dir.filePath("source.mint");Project restored;QString error;
+        QVERIFY2(Project::fromJson(project.json(dir.filePath("scene.vgsproj")),dir.path(),&restored,&error),qPrintable(error));
+        QCOMPARE(restored.modifierJson(),project.modifierJson());
+        QCOMPARE(restored.modifiers[1].fadeIn,10);QCOMPARE(restored.modifiers[1].fadeOut,5);QCOMPARE(restored.modifiers[2].start,100);QCOMPARE(restored.modifiers[2].end,-1);
+        QCOMPARE(project.modifierJson()[3].toObject()["timeline"].toString(),QStringLiteral("full"));
+        // An unranged stack is shared, not copied, frame after frame.
+        project.modifiers={walk};project.selectedModifier="walk";project.modifiers[0].start=project.modifiers[0].end=-1;
+        QVERIFY(!project.hasRangedModifiers() && !project.hasTimedRemoval());
+        QCOMPARE(project.modifiersAtFrame(3).constData(),project.modifiers.constData());
+    }
     void animatedCropInterpolatesSwitchesAndPersists() {
         Project project;auto &m=*project.modifier();QCOMPARE(m.type,ModifierType::Crop);m.crop.enabled=true;
         m.crop.radius=1;m.crop.remove=true;const auto still=m.crop;

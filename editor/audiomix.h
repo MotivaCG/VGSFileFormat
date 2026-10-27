@@ -21,6 +21,9 @@ struct AudioInput {
     QString path;
     double start = 0, volume = 1;
     bool loop = false;
+    // Heard only from `from` to `to`, in the soundtrack's seconds, coming in and going out
+    // over `fadeIn` and `fadeOut` seconds there.
+    double from = -1e9, to = 1e9, fadeIn = 0, fadeOut = 0;
 };
 
 // The ffmpeg the export uses: VGS_FFMPEG when set, otherwise tools/ffmpeg beside the program.

@@ -64,14 +64,44 @@ CropVolume Modifier::staticCrop() const {
     CropVolume c=crop;const auto &s=cropAnimation.still;c.transform=s.transform;
     c.radius=s.radius;c.radiusZ=s.radiusZ;c.height=s.height;c.width=s.width;c.depth=s.depth;return c;
 }
+bool Modifier::covers(double frame) const {
+    return !timed(type) || ((start<0 || frame>=start-1e-6) && (end<0 || frame<=end+1e-6));
+}
+double Modifier::weightAt(double frame) const {
+    if (!covers(frame)) return 0;
+    if (!fades(type)) return 1;
+    // Ramps over whole frames: the first frame of a fade-in already shows a little of it.
+    double weight=1;
+    if (fadeIn>0) weight=std::min(weight,(frame-std::max(0,start)+1)/double(fadeIn+1));
+    if (fadeOut>0 && end>=0) weight=std::min(weight,(end-frame+1)/double(fadeOut+1));
+    return std::clamp(weight,0.,1.);
+}
 QVector<Modifier> Project::modifiersAtFrame(double frame) const {
     auto result=modifiers;
     // A mutable range-for detaches the whole stack, including every Erase pick,
     // even when no crop is animated.
-    for (qsizetype i=0;i<modifiers.size();++i) if (modifiers[i].type==ModifierType::Crop && modifiers[i].cropAnimation.active()) {
-        auto &m=result[i];m.crop=m.cropAnimation.evaluate(m.crop,frame);
+    for (qsizetype i=0;i<modifiers.size();++i) {
+        const auto &source=modifiers[i];
+        if (source.type==ModifierType::Crop && source.cropAnimation.active()) {auto &m=result[i];m.crop=m.cropAnimation.evaluate(m.crop,frame);}
+        if (!source.ranged() && !(Modifier::fades(source.type) && source.fadeIn>0)) continue;
+        const double weight=source.weightAt(frame);
+        // Out of its range it is not there; disabled, so the stack keeps its order.
+        if (weight<=0) {auto &m=result[i];m.enabled=false;if (m.type==ModifierType::Crop) m.crop.enabled=false;continue;}
+        if (weight<1 && source.type==ModifierType::Colour) {
+            // Fading: each adjustment part of the way from none to its own.
+            auto &m=result[i];m.colourExposure*=weight;m.colourTemperature*=weight;m.colourTint*=weight;
+            m.colourSaturation=1+(m.colourSaturation-1)*weight;m.colourOpacity=1+(m.colourOpacity-1)*weight;
+        }
     }
     return result;
+}
+bool Project::hasTimedRemoval() const {
+    for (const auto &m:modifiers) if (m.active() && (removesSplats(m.type) || m.type==ModifierType::Crop) && (m.ranged() || (m.type==ModifierType::Crop && m.cropAnimation.active()))) return true;
+    return false;
+}
+bool Project::hasRangedModifiers() const {
+    for (const auto &m:modifiers) if (m.active() && (m.ranged() || (Modifier::fades(m.type) && m.fadeIn>0))) return true;
+    return false;
 }
 bool Project::hasAnimatedCrop() const {for (const auto &m:modifiers) if (m.active() && m.type==ModifierType::Crop && m.cropAnimation.active()) return true;return false;}
 void Project::showCropsAtFrame(double frame) {
@@ -92,7 +122,7 @@ QJsonArray TransformAnimation::json() const {
     return result;
 }
 QMatrix4x4 Project::animationMatrix(double frame) const {
-    QMatrix4x4 result;for (const auto &modifier:modifiers) if (modifier.active() && modifier.type==ModifierType::AnimateTransform) result*=modifier.animation.evaluate(frame).matrix();return result;
+    QMatrix4x4 result;for (const auto &modifier:modifiers) if (modifier.active() && modifier.type==ModifierType::AnimateTransform && modifier.covers(frame)) result*=modifier.animation.evaluate(frame).matrix();return result;
 }
 Transform Project::transformAtFrame(double frame) const {return hasAnimation() ? Transform::fromMatrix(transform.matrix()*animationMatrix(frame)) : transform;}
 double Modifier::bakeSize() const {
@@ -327,6 +357,12 @@ QJsonArray Project::modifierJson() const {
             case ModifierType::LoopMorph: type="loop-morph";break;
             }
             QJsonObject item{{"id",m.id},{"name",m.name},{"enabled",m.active()},{"type",type},{"timeline","full"}};
+            // Part of the timeline: its first and last frames (null: open), and the fades.
+            if (m.ranged() || (Modifier::fades(m.type) && (m.fadeIn>0 || m.fadeOut>0))) {
+                QJsonObject range{{"start",m.start>=0 ? QJsonValue(m.start) : QJsonValue()},{"end",m.end>=0 ? QJsonValue(m.end) : QJsonValue()}};
+                if (Modifier::fades(m.type)) {range["fadeIn"]=m.fadeIn;range["fadeOut"]=m.fadeOut;}
+                item["timeline"]=range;
+            }
             if (m.type==ModifierType::Crop) {const auto c=m.staticCrop();item["crop"]=QJsonObject{{"space","world"},{"shape",c.shape==CropShape::Box ? "box" : "cylinder"},
                 {"radius",c.radius},{"radiusZ",c.radiusZ},{"height",c.height},{"width",c.width},{"depth",c.depth},{"position",vector(c.transform.position)},
                 {"rotation",vector(c.transform.rotation)},{"scale",vector(c.transform.scale)},{"shear",vector(c.transform.shear)},

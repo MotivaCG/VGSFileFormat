@@ -439,6 +439,10 @@ std::array<double,256> exportShTransform(const Transform &transform) {
 // Despill is the Colour modifier's: its settings become the export's, and without one that
 // despills there is none (projects that despilled in their export settings were given one
 // when they were read).
+// A set of Prune modifiers as a key: a chunk's pruning is scored once for each set it meets.
+static QString pruneSignature(const QVector<PruneFilter> &prunes) {
+    QString key;for (const auto &p:prunes) key+=QStringLiteral("%1/%2;").arg(p.percent,0,'g',17).arg(p.protectAbove,0,'g',17);return key;
+}
 static Project withModifierDespill(Project project) {
     const CompiledModifiers compiled(project);auto &s=project.captureSettings;s.despill=compiled.despill;
     if (compiled.despill) {s.despillStrength=compiled.despillStrength;s.greenGain=compiled.greenGain;s.viewChromaScale=compiled.viewChroma;s.recoverSkin=compiled.recoverSkin;}
@@ -586,7 +590,7 @@ private:
     Side end_,start_;
     // The source chunk of the frame `i` before End, and before Start, as followed.
     std::vector<int> endChunks_,startChunks_;
-    mutable std::mutex pruneMutex_;mutable std::map<int,std::vector<uint8_t>> pruned_; // per source chunk
+    mutable std::mutex pruneMutex_;mutable std::map<std::pair<int,QString>,std::vector<uint8_t>> pruned_; // per source chunk and set of Prune modifiers
     // A frame's capture coordinates carried into End's.
     QMatrix4x4 intoEnd(int frame) const {return unEnd_*project_.transformAtFrame(frame).matrix();}
     // The morph numbers the End side's splats first, then the Start side's.
@@ -607,8 +611,8 @@ private:
         for (auto &m:above.modifiers) m.showErased=false;
         const CompiledModifiers stack(above.modifiers);std::vector<uint8_t> mask;
         if (!stack.prunes.isEmpty()) {
-            std::lock_guard<std::mutex> guard(pruneMutex_);auto found=pruned_.find(chunk);
-            if (found==pruned_.end()) found=pruned_.emplace(chunk,pruneChunk(start,end,[&](double t) {int c;double a,b;auto sample=read_(t,&c,&a,&b);sample.shRest.clear();sample.shCoefficients=0;return sample;},
+            std::lock_guard<std::mutex> guard(pruneMutex_);const std::pair<int,QString> key{chunk,pruneSignature(stack.prunes)};auto found=pruned_.find(key);
+            if (found==pruned_.end()) found=pruned_.emplace(key,pruneChunk(start,end,[&](double t) {int c;double a,b;auto sample=read_(t,&c,&a,&b);sample.shRest.clear();sample.shCoefficients=0;return sample;},
                 antialiased_,stack.prunes,[&] {report(progress,0,QStringLiteral("Loop morph: scoring splats"));return false;},nullptr)).first;
             mask=found->second;
         }
@@ -740,6 +744,13 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
     // Native blocks test Remove green on the source's colours; one below a despilling Color
     // modifier needs the despilled ones, which only the sampled path has.
     if (native && project.captureSettings.despill && CompiledModifiers(project).greensAfterColour()) {native=false;result.notes << QStringLiteral("A Remove green below a despilling Color modifier tests despilled colours, so the export is sampled.");}
+    // Native blocks evaluate crops and the transform at each sample, but the rest of the stack
+    // once per chunk: a modifier on part of the timeline only needs the frames one by one.
+    if (native && std::any_of(project.modifiers.cbegin(),project.modifiers.cend(),[](const Modifier &m) {
+            return m.active() && m.type!=ModifierType::Crop && m.type!=ModifierType::AnimateTransform && m.type!=ModifierType::Audio
+                   && (m.ranged() || (Modifier::fades(m.type) && m.fadeIn>0));})) {
+        native=false;result.notes << QStringLiteral("A modifier acts on part of the timeline only, so the export is sampled frame by frame.");
+    }
     if (QFileInfo(project.asset).suffix().compare("ply",Qt::CaseInsensitive)==0) {
         auto spec=project.plySequence;if (!spec.empty()) spec.rowOffset=project.captureSettings.plyRowOffset;
         ply=std::make_unique<PlySequence>(project.asset,spec,project.captureSettings.plyFps,[&](int done,int total,const QString &) {report(progress,0,QStringLiteral("Indexing PLY sequence %1 / %2").arg(done).arg(total));});
@@ -812,9 +823,16 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
         QVector<AudioInput> inputs;int silent=0;
         if (!hasAudioLayers) {if (const auto path=own();!path.isEmpty()) inputs.append({path,rangeStart+sourceStart,1,false});}
         else for (const auto *m:audioModifiers) {
-            if (!m->audioFile.isEmpty()) inputs.append({m->audioFile,rangeStart-m->audioOffset,m->audioVolume,m->audioLoop});
-            else if (const auto path=own();!path.isEmpty()) inputs.append({path,rangeStart+sourceStart-m->audioOffset,m->audioVolume,m->audioLoop});
-            else ++silent;
+            AudioInput input;
+            if (!m->audioFile.isEmpty()) input={m->audioFile,rangeStart-m->audioOffset,m->audioVolume,m->audioLoop};
+            else if (const auto path=own();!path.isEmpty()) input={path,rangeStart+sourceStart-m->audioOffset,m->audioVolume,m->audioLoop};
+            else {++silent;continue;}
+            // Its part of the timeline, in the soundtrack's seconds.
+            if (m->ranged() || m->fadeIn>0) {
+                input.from=std::max(0,m->start)/rate-rangeStart;if (m->end>=0) input.to=(m->end+1)/rate-rangeStart;
+                input.fadeIn=m->fadeIn/rate;input.fadeOut=m->end>=0 ? m->fadeOut/rate : 0;
+            }
+            inputs.append(input);
         }
         if (silent) result.notes << QStringLiteral("%1 Audio modifier(s) use the capture's own track, and it has none.").arg(silent);
         if (!inputs.isEmpty()) {
@@ -908,7 +926,7 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
     const auto json=QJsonDocument(provenance).toJson(QJsonDocument::Compact);options.extras.push_back({vgs::MetadataExtra2,vgs::JsonUtf8,vgs::Bytes(json.begin(),json.end())});
     QTemporaryFile temporary(QFileInfo(destination).absolutePath()+"/.vgs-export-XXXXXX");if (!temporary.open()) throw std::runtime_error(temporary.errorString().toStdString());
     const auto cachedVisibility=CaptureWorker::exportVisibilityLookup(inputProject);
-    const Baker baker(project,degree,cachedVisibility,rate);std::atomic<int> currentPercent{0};std::atomic<bool> writing{false};const bool animatedCrops=project.hasAnimatedCrop();
+    const Baker baker(project,degree,cachedVisibility,rate);std::atomic<int> currentPercent{0};std::atomic<bool> writing{false};const bool animatedCrops=project.hasAnimatedCrop() || project.hasRangedModifiers();
     // Native chunks are prepared on the encoder's chunk workers (EncodeOptions::
     // threadSafeProvider): answering costs seconds of decoding, despilling and refitting,
     // and doing it one chunk at a time starved those workers. What the provider shares is
@@ -928,9 +946,12 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
     };
     auto innerProgress=[&](int,const QString &message){reportHere(message);return true;};
     // Sampled export: each source chunk is scored once, as the preview scores it.
-    const auto pruneFilters=CompiledModifiers(project).prunes;std::map<size_t,std::vector<uint8_t>> pruneCache;
+    const auto pruneFilters=CompiledModifiers(project).prunes;std::map<std::pair<size_t,QString>,std::vector<uint8_t>> pruneCache;
     const CompiledModifiers handErased(project); // Erase: the splats picked by hand, per source chunk
-    auto sourcePruning=[&](size_t chunk) {
+    // With a Prune or Erase on part of the timeline, each frame prunes and erases with its own
+    // stack; a chunk is scored once for each set of Prune modifiers it meets.
+    const bool timedRemoval=project.hasTimedRemoval();
+    auto sourcePruning=[&](size_t chunk,const QVector<PruneFilter> &pruneFilters) {
         double start,end;
         if (ply) {const auto &c=ply->chunks().at(qsizetype(chunk));start=c.first/rate;end=(c.first+c.frames)/rate;}
         else if (mint) {const auto &c=mint->chunks().at(qsizetype(chunk));start=c.start;end=c.start+c.duration;}
@@ -1040,12 +1061,13 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
                 // Held for the whole scoring: two workers on the same source chunk would
                 // otherwise score it twice and count its splats twice.
                 std::lock_guard<std::mutex> guard(stateMutex);
-                auto found=pruneCache.find(plan.sourceIndex);
+                const std::pair<size_t,QString> key{plan.sourceIndex,pruneSignature(pruneFilters)};
+                auto found=pruneCache.find(key);
                 if (found==pruneCache.end()) {
                     const vgs::FrameDecoder scorer(chunk);std::vector<PruneStats> stats;
                     auto keep=pruneChunk(0,1,[&](double t) {return scorer.evaluate(std::min(t,1.-1e-9),false);},sourceAntialiased,pruneFilters,
                                          [&] {reportHere(QStringLiteral("Prune low contribution: scoring splats"));return false;},&stats);
-                    countPruning(result,stats,keep);found=pruneCache.emplace(plan.sourceIndex,std::move(keep)).first;
+                    countPruning(result,stats,keep);found=pruneCache.emplace(key,std::move(keep)).first;
                 }
                 keepMask=found->second;
             }
@@ -1087,13 +1109,16 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
         else if (mint) {MintFrame decoded;if (!mint->decode(seconds,&decoded,true,&error)) throw std::runtime_error(error.toStdString());frame=copyFrame(decoded);sourceChunk=size_t(decoded.chunkIndex);}
         else {frame=copyFrame(capture->setTime(seconds,true));sourceChunk=capture->chunkAt(seconds);}
         std::vector<uint8_t> keepMask;const std::vector<uint8_t> *pruned=nullptr;
-        if (!pruneFilters.isEmpty()) {
-            auto found=pruneCache.find(sourceChunk);
-            if (found==pruneCache.end()) found=pruneCache.emplace(sourceChunk,sourcePruning(sourceChunk)).first;
+        const CompiledModifiers frameStack(timedRemoval ? inputProject.modifiersAtFrame(first+int(index)) : QVector<Modifier>{});
+        const auto &prunes=timedRemoval ? frameStack.prunes : pruneFilters;const auto &erasing=timedRemoval ? frameStack : handErased;
+        if (!prunes.isEmpty()) {
+            const std::pair<size_t,QString> key{sourceChunk,pruneSignature(prunes)};
+            auto found=pruneCache.find(key);
+            if (found==pruneCache.end()) found=pruneCache.emplace(key,sourcePruning(sourceChunk,prunes)).first;
             keepMask=found->second;
         }
-        if (!handErased.erased.empty()) {
-            const auto erase=handErased.eraseKeep(int(sourceChunk),frame.count);
+        if (!erasing.erased.empty()) {
+            const auto erase=erasing.eraseKeep(int(sourceChunk),frame.count);
             if (keepMask.empty()) keepMask=erase;else for (size_t i=0;i<keepMask.size() && i<erase.size();++i) keepMask[i]&=erase[i];
         }
         if (!keepMask.empty()) pruned=&keepMask;
@@ -1278,20 +1303,24 @@ public:
         const double at=std::min(seconds,duration-1e-7);
         auto frame=raw(at,&chunk,&chunkStart,&chunkEnd);
         keep->clear();
-        if (!prunes_.isEmpty()) {
-            auto found=pruned_.find(chunk);
+        // With a Prune or Erase on part of the timeline, the frame's own stack decides.
+        const CompiledModifiers stack(project_.hasTimedRemoval() ? project_.modifiersAtFrame(std::lround(at*rate)) : project_.modifiers);
+        const auto &prunes=project_.hasTimedRemoval() ? stack.prunes : prunes_;
+        if (!prunes.isEmpty()) {
+            const std::pair<int,QString> key{chunk,pruneSignature(prunes)};
+            auto found=pruned_.find(key);
             if (found==pruned_.end()) {
                 std::vector<PruneStats> stats;
                 auto scoring=[&] {report(progress_,10,QStringLiteral("Prune low contribution: scoring splats"));return false;};
                 auto pruned=pruneChunk(chunkStart,chunkEnd,[&](double t) {
                     if (ply_) return ply_->frame(t,false);
                     if (mint_) {MintFrame f;if (!mint_->decode(t,&f,false,&error)) throw std::runtime_error(error.toStdString());return copyFrame(f);}
-                    return copyFrame(capture_->setTime(t,false));},antialiased_,prunes_,scoring,&stats);
-                countPruning(result,stats,pruned);found=pruned_.emplace(chunk,std::move(pruned)).first;
+                    return copyFrame(capture_->setTime(t,false));},antialiased_,prunes,scoring,&stats);
+                countPruning(result,stats,pruned);found=pruned_.emplace(key,std::move(pruned)).first;
             }
             *keep=found->second;
         }
-        if (const CompiledModifiers stack(project_);!stack.erased.empty()) {
+        if (!stack.erased.empty()) {
             const auto erase=stack.eraseKeep(chunk,frame.count);
             if (keep->empty()) *keep=erase;else for (size_t i=0;i<keep->size() && i<erase.size();++i) (*keep)[i]&=erase[i];
         }
@@ -1308,7 +1337,7 @@ private:
     std::set<QString> sourceFiles_;
     const Project &project_;ExportProgress progress_;QVector<PruneFilter> prunes_;
     std::unique_ptr<MintFile> mint_;std::unique_ptr<FileSource> source_;std::unique_ptr<vgsdec::Capture> capture_;std::unique_ptr<PlySequence> ply_;
-    bool antialiased_=true;std::map<int,std::vector<uint8_t>> pruned_;
+    bool antialiased_=true;std::map<std::pair<int,QString>,std::vector<uint8_t>> pruned_;
 };
 }
 

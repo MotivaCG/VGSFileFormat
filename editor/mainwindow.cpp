@@ -21,6 +21,7 @@
 #include "taskqueuedialog.h"
 #include "audiopreview.h"
 #include "loopmorph.h"
+#include <QSplitter>
 #include <QProgressDialog>
 #include <QDialogButtonBox>
 #include <atomic>
@@ -585,6 +586,7 @@ MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory,const QStr
     thread_.start(); syncUi(); title();
     restoreGeometry(settings_.value("geometry").toByteArray());
     restoreState(settings_.value("windowState").toByteArray());
+    if (!timelineSplit_->restoreState(settings_.value("Interface/TimelineSplit").toByteArray())) timelineSplit_->setSizes({1000,300});
     installCompactControls(this,settings_.value("Interface/CompactDensity",true).toBool());
 }
 MainWindow::~MainWindow() {
@@ -700,7 +702,11 @@ void MainWindow::buildUi() {
     saveAction_->setToolTip(tr("Save this project and its crop settings (Ctrl+S)."));
     auto *center = new QWidget; auto *layout = new QVBoxLayout(center);
     layout->setContentsMargins(0,0,0,0); layout->setSpacing(0);
-    viewport_ = new Viewport; layout->addWidget(viewport_, 1);
+    // The viewport over the timeline, the border between them dragged to give the modifier
+    // bars more or less room; remembered between sessions.
+    timelineSplit_ = new QSplitter(Qt::Vertical); timelineSplit_->setObjectName("timelineSplit"); timelineSplit_->setChildrenCollapsible(false);
+    timelineSplit_->setHandleWidth(5); layout->addWidget(timelineSplit_);
+    viewport_ = new Viewport; timelineSplit_->addWidget(viewport_);
     timeline_ = new QWidget; timeline_->setObjectName("timeline");
     auto *tl = new QVBoxLayout(timeline_); tl->setContentsMargins(18,8,18,12);tl->setSpacing(6);
     slider_ = new RangeSlider; slider_->setObjectName("captureRangeSlider");
@@ -737,7 +743,7 @@ void MainWindow::buildUi() {
     speed_ = new QDoubleSpinBox; speed_->setRange(0.1,4); speed_->setSingleStep(0.25); speed_->setSuffix(" ×"); speedLayout->addWidget(speed_);
     controls->addWidget(speedControls);tl->addLayout(controls);tl->addWidget(slider_);
     loop_->setToolTip(tr("Toggle looping within the playback range (L)."));
-    modifierPanel_=new ModifierPanel;modifierPanel_->setCacheEnabled(cacheEnabledAction_->isChecked());tl->addWidget(modifierPanel_);
+    modifierPanel_=new ModifierPanel;modifierPanel_->setCacheEnabled(cacheEnabledAction_->isChecked());tl->addWidget(modifierPanel_,1);
     // The timeline's track runs exactly over the modifier bars, so a frame sits at the same x
     // in both; the space to its left heads the names column below. Queued: both settle first.
     connect(modifierPanel_,&ModifierPanel::trackMoved,this,&MainWindow::alignTimeline,Qt::QueuedConnection);
@@ -766,7 +772,7 @@ void MainWindow::buildUi() {
     });
     connect(modifierPanel_,&ModifierPanel::cropAdded,this,&MainWindow::fitCrop);
     connect(modifierPanel_,&ModifierPanel::seekFrame,this,[this](int frame) {play(false);setTime(frame/info_.fps,true);});
-    layout->addWidget(timeline_); setCentralWidget(center);
+    timelineSplit_->addWidget(timeline_); timelineSplit_->setStretchFactor(0,1); timelineSplit_->setStretchFactor(1,0); setCentralWidget(center);
     loadingOverlay_ = new LoadingOverlay(center);
     auto *dock = new QDockWidget(tr("Tools"), this); dock->setObjectName("toolsDock");
     dock->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea);
@@ -1892,7 +1898,8 @@ void MainWindow::syncAudio() {
         if (!m->audioFile.isEmpty()) player->setFile(m->audioFile);
         else if (!info_.audio.isEmpty()) {player->setBytes(info_.audio,info_.audioSuffix);at+=info_.startSeconds;}
         else {player->clear();continue;}
-        player->setVolume(m->audioVolume);player->setLoop(m->audioLoop);
+        // Out of its part of the timeline it is silent; over a fade, partly heard.
+        player->setVolume(m->audioVolume*m->weightAt(currentFrame()));player->setLoop(m->audioLoop);
         player->follow(at,playback_.isActive(),project_.speed);
     }
     for (auto it=audio_.begin();it!=audio_.end();) {
@@ -2550,7 +2557,7 @@ void MainWindow::closeEvent(QCloseEvent *event) {
             event->ignore();return;
         }
     }
-    settings_.setValue("geometry",saveGeometry()); settings_.setValue("windowState",saveState()); settings_.sync();
+    settings_.setValue("geometry",saveGeometry()); settings_.setValue("windowState",saveState()); settings_.setValue("Interface/TimelineSplit",timelineSplit_->saveState()); settings_.sync();
     discardAutosave(); event->accept();
 }
 void MainWindow::dragEnterEvent(QDragEnterEvent *event) {

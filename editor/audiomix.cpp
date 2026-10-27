@@ -55,6 +55,13 @@ static QByteArray mixAudio(const QVector<AudioInput> &inputs,double length,const
         if (input.loop && input.start>0) chain+=QStringLiteral("atrim=start=%1,asetpts=PTS-STARTPTS,").arg(seconds(input.start));
         chain+=QStringLiteral("aresample=%1,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=%2").arg(mp3 ? 44100 : 48000).arg(seconds(std::clamp(input.volume,0.,1.)));
         if (input.start<0) {const qint64 delay=qint64(std::llround(-input.start*1000));chain+=QStringLiteral(",adelay=%1:all=1").arg(delay);}
+        // Its part of the soundtrack: silent outside, ramped over the fades.
+        if (input.from>-1e8 || input.to<1e8) {
+            const QString a=seconds(std::max(0.,input.from)),b=seconds(std::min(input.to,1e7));
+            const QString in=input.fadeIn>0 ? QStringLiteral("(t-%1)/%2").arg(a,seconds(input.fadeIn)) : QStringLiteral("1");
+            const QString out=input.fadeOut>0 && input.to<1e8 ? QStringLiteral("(%1-t)/%2").arg(b,seconds(input.fadeOut)) : QStringLiteral("1");
+            chain+=QStringLiteral(",volume='if(between(t,%1,%2),min(1,min(%3,%4)),0)':eval=frame").arg(a,b,in,out);
+        }
         chains << chain+QStringLiteral("[a%1]").arg(i);labels << QStringLiteral("[a%1]").arg(i);
     }
     // Mixed at their own levels, not divided among themselves, then padded with silence to

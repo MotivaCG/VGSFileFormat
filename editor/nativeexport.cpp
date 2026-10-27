@@ -672,7 +672,7 @@ vgs::DecodedChunk editNativeChunk(vgs::DecodedChunk chunk,const NativeChunkPlan 
     for (size_t group=1;group<chunk.groups.size();++group) offsets[group+1]=offsets[group]+chunk.groups[group].splats;
     std::vector<std::vector<Span>> kept(chunk.groups.size());std::vector<std::vector<int>> starts(chunk.groups.size());
     for (size_t group=1;group<chunk.groups.size();++group) starts[group].assign(size_t(chunk.groups[group].splats),-1);
-    const auto model=project.transform.matrix();CompiledModifiers modifiers(project);const bool animatedCrops=project.hasAnimatedCrop();
+    const auto model=project.transform.matrix();CompiledModifiers modifiers(project);const bool animatedCrops=project.hasTimedRemoval();
     std::unique_ptr<vgs::FrameDecoder> colourDecoder;vgs::Frame colourFrame;
     if (!modifiers.greens.isEmpty()) colourDecoder=std::make_unique<vgs::FrameDecoder>(classificationSource ? *classificationSource : chunk);
     std::vector<float> positions;
@@ -693,7 +693,8 @@ vgs::DecodedChunk editNativeChunk(vgs::DecodedChunk chunk,const NativeChunkPlan 
             const double normalized=std::min((plan.first+sample)/double(T),1.-1e-9);
             decoder.evaluatePositions(normalized,&positions);
             const QMatrix4x4 &world=sampleModels ? (*sampleModels)[size_t(sample)] : model;
-            // An animated crop only changes which splats are kept at each sample.
+            // An animated crop, or one on part of the timeline, only changes which splats are
+            // kept at each sample (the export is sampled when anything else is timed).
             const CompiledModifiers sampleModifiers=animatedCrops ? CompiledModifiers(project.modifiersAtFrame(sourceStartFrame+sample)) : modifiers;
             if (colourDecoder) colourDecoder->evaluateInto(normalized,false,&colourFrame);
             for (size_t group=1;group<chunk.groups.size();++group) {
