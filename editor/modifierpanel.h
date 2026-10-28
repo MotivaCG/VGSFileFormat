@@ -76,6 +76,9 @@ private:
     int shownIn(int row) const;
     // Every row's name, eye, clips, keys and picks as the stack now has them.
     void refreshRows();
+    // What Remove, Duplicate and Enable act on: the modifier each selected row shows (Ctrl or
+    // Shift+click adds rows), or the selected one alone.
+    QStringList selectedIds() const;
     void fitNames();
     int textOffset() const;
     int minimumNameWidth_=0;

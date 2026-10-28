@@ -199,6 +199,26 @@ private slots:
         split->setSizes({sizes[0]-200,sizes[1]+200});QTRY_VERIFY(tree->height()>=before+150);
         if (const auto shot=qEnvironmentVariable("VGS_WINDOW_SHOT");!shot.isEmpty()) window.grab().save(shot);
     }
+    void severalModifiersAreRemovedAtOnce() {
+        ModifierPanel panel;Project project;project.modifiers.clear();
+        for (auto type:{ModifierType::Crop,ModifierType::Colour,ModifierType::Audio,ModifierType::Walk}) {Modifier m;m.type=type;m.id=Project::newId();m.name="M";m.crop.enabled=true;project.modifiers.append(m);}
+        project.selectedModifier=project.modifiers[0].id;
+        panel.resize(900,300);panel.show();panel.setProject(project);panel.setTimeline(0,99);QApplication::processEvents();
+        QSignalSpy changed(&panel,&ModifierPanel::stackChanged);
+        QObject::connect(&panel,&ModifierPanel::stackChanged,&panel,[&] {panel.setProject(panel.project());});
+        auto *tree=panel.findChild<QTreeWidget *>("modifierTree");QVERIFY(tree);auto *view=tree->viewport();
+        auto name=[&](int row) {return tree->visualItemRect(tree->topLevelItem(row)).center()-QPoint(tree->visualItemRect(tree->topLevelItem(row)).width()/2-60,0);};
+        // A click on the first row, Ctrl+click on the third: two rows; Del removes both, once.
+        QTest::mouseClick(view,Qt::LeftButton,{},name(0));QTest::mouseClick(view,Qt::LeftButton,Qt::ControlModifier,name(2));
+        QCOMPARE(tree->selectedItems().size(),2);
+        tree->setFocus();QTest::keyClick(tree,Qt::Key_Delete);
+        QCOMPARE(changed.count(),1);QCOMPARE(panel.project().modifiers.size(),2);
+        QCOMPARE(panel.project().modifiers[0].type,ModifierType::Colour);QCOMPARE(panel.project().modifiers[1].type,ModifierType::Walk);
+        // Shift+click selects a span; Duplicate copies each.
+        QTest::mouseClick(view,Qt::LeftButton,{},name(0));QTest::mouseClick(view,Qt::LeftButton,Qt::ShiftModifier,name(1));
+        QCOMPARE(tree->selectedItems().size(),2);
+        panel.findChild<QToolButton *>("duplicateModifier")->click();QCOMPARE(panel.project().modifiers.size(),4);
+    }
     void sameKindFillsTheGapOnItsTrack() {
         ModifierPanel panel;Project project;project.modifiers.clear();
         Modifier crop;crop.type=ModifierType::Crop;crop.id=Project::newId();crop.name="Crop";crop.crop.enabled=true;crop.end=39;
@@ -512,8 +532,8 @@ private slots:
         QVERIFY(!QDir(dir.path()).entryList({"vgstasks-*.log"}).isEmpty());
     }
     void timelineTicksFollowDurationAndZoom() {
-        // A tick each second in a light green, one per frame halfway to the track's green, and
-        // neither while they would sit closer than a few pixels.
+        // Ticks every second or every few as the zoom allows, long where a label goes; one per
+        // frame halfway to the track's green when zoomed in; none closer than a few pixels.
         RangeSlider slider;slider.resize(640,38);slider.setTrackInsets(20,20);slider.setFrameRate(30);
         const QColor second(198,236,180),frame(165,222,140);
         auto count=[&](const QColor &colour) {
@@ -523,6 +543,10 @@ private slots:
             return columns;
         };
         slider.setFrameRange(0,299);slider.setRangeValues(0,299);slider.setPlayheadValue(15); // off the ticks
+        if (const auto shot=qEnvironmentVariable("VGS_RULER_SHOT");!shot.isEmpty()) {
+            RangeSlider banded;banded.resize(900,46);banded.setTrackInsets(20,20);banded.setFrameRate(30);banded.setFrameRange(0,899);banded.setRangeValues(60,840);
+            banded.setChunkBoundaries({30,61,95,150,210,262,330,400,455,520,600,650,720,800,860});banded.show();QApplication::processEvents();banded.grab().save(shot);
+        }
         QCOMPARE(count(second),10);QCOMPARE(count(frame),0);          // 10 s: seconds only
         slider.zoomAt(4,slider.trackRect().left());QVERIFY(count(frame)>40);QVERIFY(count(second)>=2); // zoomed: frames too
         // Seconds named under them: a regular step, apart enough to read, none at the ends.
@@ -531,8 +555,9 @@ private slots:
         QVERIFY((QList<int>{1,2,5,10,15,30,60}).contains(step));QVERIFY(labels.first()>0);QVERIFY(labels.last()<10);
         QCOMPARE(slider.secondLabel(2),QString("60"));slider.setLabelsInSeconds(true);QCOMPARE(slider.secondLabel(2),QString("2 s"));QCOMPARE(slider.secondLabel(75),QString("1:15"));
         slider.zoomAt(4,slider.trackRect().left());const auto zoomed=slider.labelledSeconds();QVERIFY(zoomed.size()>=2);QVERIFY(zoomed[1]-zoomed[0]<=step);
-        slider.setFrameRange(0,29999);QCOMPARE(count(second),0);QCOMPARE(count(frame),0);        // 1000 s: too dense for either
-        QVERIFY(slider.labelledSeconds().isEmpty());
+        // 1000 s: no frame ticks, and the long ticks and labels every few minutes, not smeared.
+        slider.setFrameRange(0,29999);const int sparse=count(second);QVERIFY(sparse>=2 && sparse<=12);QCOMPARE(count(frame),0);
+        const auto far=slider.labelledSeconds();QVERIFY(far.size()>=2);QVERIFY(far[1]-far[0]>=60);
     }
     void tabTogglesCropFromViewportAndFields() {
         QTemporaryDir dir;QVERIFY(dir.isValid());
