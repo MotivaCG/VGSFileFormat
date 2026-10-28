@@ -722,6 +722,15 @@ void MainWindow::buildUi() {
     timelineSecondsButton_=new QToolButton;timelineSecondsButton_->setObjectName("timelineSeconds");timelineSecondsButton_->setCheckable(true);timelineSecondsButton_->setChecked(settings_.value("Playback/SecondsDisplay",false).toBool());
     timelineSecondsButton_->setIcon(timelineClockIcon());timelineSecondsButton_->setIconSize({22,22});timelineSecondsButton_->setFixedSize(30,30);timelineSecondsButton_->setAccessibleName(tr("Timeline units"));
     timelineSecondsButton_->setProperty("neutralToggle",true);frames->insertWidget(0,timelineSecondsButton_);
+    // Before the clock: the capture's chunk changes on the timeline, shown or hidden.
+    {
+        auto *marks=new QToolButton;marks->setObjectName("timelineChunkMarks");marks->setCheckable(true);marks->setChecked(settings_.value("Playback/ChunkMarks",true).toBool());
+        marks->setIcon(RangeSlider::chunkMarksIcon());marks->setIconSize({22,22});marks->setFixedSize(30,30);marks->setAccessibleName(tr("Chunk marks"));
+        marks->setToolTip(tr("Show where the capture's chunks change (the yellow marks on the timeline)."));marks->setProperty("neutralToggle",true);
+        slider_->setChunksVisible(marks->isChecked());
+        connect(marks,&QToolButton::toggled,this,[this](bool on) {settings_.setValue("Playback/ChunkMarks",on);slider_->setChunksVisible(on);});
+        frames->insertWidget(0,marks);
+    }
     controls->addWidget(frameControls);controls->addStretch();
     auto *playbackControls=new QWidget;playbackControls->setObjectName("timelinePlaybackControls");playbackControls->setSizePolicy(QSizePolicy::Maximum,QSizePolicy::Fixed);
     auto *transport=new QHBoxLayout(playbackControls);transport->setContentsMargins(0,0,0,0);transport->setSpacing(5);
@@ -1545,8 +1554,6 @@ private:
 void MainWindow::syncUi() {
     const KeepTyping typing;
     syncing_ = true;
-    // The chunk changes stand out while an Eraser holds picks: those hold chunk by chunk.
-    slider_->setChunkEmphasis(std::any_of(project_.modifiers.cbegin(),project_.modifiers.cend(),[](const Modifier &m) {return m.active() && m.type==ModifierType::Erase && !m.erased.empty();}));
     // Animated crops show their pose at this frame. Edits are keyed before they get here.
     project_.showCropsAtFrame(currentFrame());
     if (project_.modifier() && project_.modifier()->type==ModifierType::Crop && project_.modifier()->cropAnimation.active()) viewport_->setCrop(project_.crop());

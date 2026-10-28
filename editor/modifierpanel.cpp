@@ -120,21 +120,21 @@ QString typeDescription(ModifierType type) {
     }
     return {};
 }
-// One family of hues per group: reds darkening through cleaning, grey for the look, blues for
-// motion, yellow for sound, greens for delivery.
+// One family of hues per group, lively without glaring: reds for cleaning (Crop the deepest),
+// grey for the look, sky to violet for motion, amber for sound, green to teal for delivery.
 QColor modifierColour(ModifierType type) {
     switch (type) {
-    case ModifierType::Crop: return QColor(QRgb(0xEF3450u));
-    case ModifierType::RemoveGreen: return QColor(QRgb(0xD83A60u));
-    case ModifierType::PurgeIsolated: return QColor(QRgb(0xA3214Fu));
-    case ModifierType::Erase: return QColor(QRgb(0x781638u));
-    case ModifierType::Colour: return QColor(QRgb(0xA0A6ADu));
-    case ModifierType::AnimateTransform: return QColor(QRgb(0x20C9D2u));
-    case ModifierType::Walk: return QColor(QRgb(0x3B82F6u));
-    case ModifierType::LoopMorph: return QColor(QRgb(0x8B5CF6u));
-    case ModifierType::Audio: return QColor(QRgb(0xF4C542u));
-    case ModifierType::PruneLowContribution: return QColor(QRgb(0x70C45Au));
-    case ModifierType::BakeAntialiasing: return QColor(QRgb(0x328D62u));
+    case ModifierType::Crop: return QColor(QRgb(0xEF3450u)); // the editor's own red, as its headings
+    case ModifierType::RemoveGreen: return QColor(QRgb(0xDB3C6Cu));
+    case ModifierType::PurgeIsolated: return QColor(QRgb(0xEF4A6Cu));
+    case ModifierType::Erase: return QColor(QRgb(0xF7637Bu));
+    case ModifierType::Colour: return QColor(QRgb(0x8A95A3u));
+    case ModifierType::AnimateTransform: return QColor(QRgb(0x1DA8E8u));
+    case ModifierType::Walk: return QColor(QRgb(0x2F7CF6u));
+    case ModifierType::LoopMorph: return QColor(QRgb(0x8657F5u));
+    case ModifierType::Audio: return QColor(QRgb(0xEAB308u));
+    case ModifierType::PruneLowContribution: return QColor(QRgb(0x22C55Eu));
+    case ModifierType::BakeAntialiasing: return QColor(QRgb(0x0EA58Fu));
     }
     return {75,80,86};
 }
@@ -310,7 +310,7 @@ public:
         const bool active=index.data(Qt::UserRole+2).toBool() && (option.state & QStyle::State_Enabled);const auto type=ModifierType(index.data(Qt::UserRole+3).toInt());
         painter->save();const auto rect=barRect(option.rect);painter->setPen(Qt::NoPen);
         const int current=index.data(Qt::UserRole+6).toInt();
-        // The track's clips, nearly as tall as the row, each with its name;
+        // The track's clips, nearly as tall as the row, plain (the row names them);
         // the rest of the row a dark lane. A fade slopes a clip's top from nothing to full, its
         // handles showing on the selected clip and the one under the mouse. The selected clip
         // is brighter and outlined; a disabled one grey and hatched.
@@ -328,15 +328,6 @@ public:
             painter->setPen(Qt::NoPen);painter->setBrush(fill);painter->drawPath(outline);
             if (!on) {painter->setBrush(QBrush(QColor(255,255,255,28),Qt::BDiagPattern));painter->drawPath(outline);}
             if (chosen) {painter->setPen(QPen(Qt::white,1.5));painter->setBrush(Qt::NoBrush);painter->drawPath(outline);painter->setPen(Qt::NoPen);}
-            // Its name where the clip is full height, in ink that reads on its colour.
-            const double textLeft=clip.left+clip.fadeIn+6,textRight=clip.right-clip.fadeOut-6;
-            if (textRight-textLeft>14) {
-                QFont font=painter->font();font.setPointSizeF(8);painter->setFont(font);
-                painter->setPen(fill.lightnessF()>0.55 ? QColor(14,15,16) : QColor(240,242,243));
-                const QRectF text(textLeft,rect.top(),textRight-textLeft,rect.height());
-                painter->drawText(text,Qt::AlignVCenter | Qt::AlignLeft,QFontMetricsF(font).elidedText(c.value("name").toString(),Qt::ElideRight,text.width()));
-                painter->setPen(Qt::NoPen);
-            }
             if (range.value(5).toBool() && (chosen || c.value("id").toString()==hoverId)) {
                 painter->setPen(QPen(QColor(0,0,0,150),1));painter->setBrush(QColor("#e7eaeb"));
                 for (const double x:{clip.left+clip.fadeIn,clip.right-clip.fadeOut}) painter->drawEllipse(QPointF(x,rect.top()+1.5),3.2,3.2);
@@ -418,7 +409,7 @@ ModifierPanel::ModifierPanel(QWidget *parent):QWidget(parent) {
     layout->addLayout(toolbar);
     tree_=new QTreeWidget;tree_->setObjectName("modifierTree");tree_->setColumnCount(3);tree_->setHeaderLabels({tr("Modifier"),tr("Type"),QString()});
     tree_->setColumnHidden(1,true);
-    tree_->setUniformRowHeights(true);tree_->setRootIsDecorated(false);tree_->setSelectionMode(QAbstractItemView::SingleSelection);tree_->setMinimumHeight(90);tree_->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Expanding);
+    tree_->setUniformRowHeights(true);tree_->setRootIsDecorated(false);tree_->setSelectionMode(QAbstractItemView::ExtendedSelection);tree_->setMinimumHeight(90);tree_->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Expanding);
     // Lanes: one shade, a dark line between tracks.
     tree_->setAlternatingRowColors(false);
     auto palette=tree_->palette();palette.setColor(QPalette::Base,EditorTheme::field());palette.setColor(QPalette::AlternateBase,EditorTheme::panel());
@@ -432,7 +423,7 @@ ModifierPanel::ModifierPanel(QWidget *parent):QWidget(parent) {
     // a name is being edited: the editor has the keys then).
     for (const QKeySequence &key:{QKeySequence(QKeySequence::Delete),QKeySequence(Qt::Key_Backspace)}) {
         auto *remove=new QShortcut(key,tree_);remove->setContext(Qt::WidgetShortcut);
-        connect(remove,&QShortcut::activated,this,[this] {if (isEnabled() && !project_.selectedModifier.isEmpty()) removeSelection();});
+        connect(remove,&QShortcut::activated,this,[this] {if (isEnabled() && !selectedIds().isEmpty()) removeSelection();});
     }
     connect(tree_->header(),&QHeaderView::sectionResized,this,&ModifierPanel::placePlayhead);
     connect(tree_->header(),&QHeaderView::geometriesChanged,this,&ModifierPanel::placePlayhead);
@@ -441,6 +432,8 @@ ModifierPanel::ModifierPanel(QWidget *parent):QWidget(parent) {
     auto *delegate=new CoverageDelegate(tree_);delegate->seek=[this](int frame) {emit seekFrame(frame);};
     // Measured while painting: refit and realign afterwards, not in the middle of a paint.
     delegate->textMoved=[this] {QMetaObject::invokeMethod(this,[this] {fitNames();emit trackMoved();},Qt::QueuedConnection);};tree_->setItemDelegate(delegate);tree_->setToolTip(tr("Click the eye to enable or disable a modifier.\nSelect a modifier to edit its properties in Tools.\nDrag a bar's ends to limit the modifier to part of the timeline, and the bar to move that part;\non Color and Audio the handles on its top corners fade it in and out.\nClick a keyframe diamond to seek, or drag the white time line.\nCtrl+wheel zooms the timeline, Shift+wheel or a middle drag pans it."));layout->addWidget(tree_,1); /* as tall as the timeline lets it be */
+    // Rows added to or taken from the selection: their clips outlined or not.
+    connect(tree_,&QTreeWidget::itemSelectionChanged,this,[this] {if (!updating_) refreshRows();});
     connect(tree_,&QTreeWidget::currentItemChanged,this,[this](QTreeWidgetItem *item) {
         if (updating_ || !item) return;project_.selectedModifier=item->data(0,ModifierRole).toString();emit selectionChanged();
     });
@@ -454,15 +447,21 @@ ModifierPanel::ModifierPanel(QWidget *parent):QWidget(parent) {
     });
     tree_->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(tree_,&QTreeWidget::customContextMenuRequested,this,[this](const QPoint &position) {
-        auto *item=tree_->itemAt(position);if (item) {tree_->setCurrentItem(item);item=tree_->currentItem();}
+        // A row already in the selection keeps it whole (the menu acts on all of it).
+        auto *item=tree_->itemAt(position);
+        if (item) {if (item->isSelected()) tree_->setCurrentItem(item,0,QItemSelectionModel::NoUpdate);else tree_->setCurrentItem(item);item=tree_->currentItem();}
         QMenu menu(this);auto *add=menu.addMenu(tr("Add modifier"));add->setToolTipsVisible(true);
         for (int type=0;type<type_->count();++type) {
             if (!type_->itemData(type).isValid()) {add->addSeparator();continue;} // the list's separators
             add->addAction(type_->itemIcon(type),type_->itemText(type),this,[this,type] {type_->setCurrentIndex(type);addModifier();})->setToolTip(type_->itemData(type,Qt::ToolTipRole).toString());
         }
         if (item) {
-            menu.addSeparator();const bool enabled=item->checkState(0)==Qt::Checked;
-            menu.addAction(enabled ? tr("Disable temporarily") : tr("Enable"),this,[this,enabled] {if (auto *current=tree_->currentItem()) current->setCheckState(0,enabled ? Qt::Unchecked : Qt::Checked);});
+            menu.addSeparator();const bool enabled=item->checkState(0)==Qt::Checked;const auto ids=selectedIds();
+            menu.addAction(enabled ? tr("Disable temporarily") : tr("Enable"),this,[this,enabled,ids] {
+                // Every selected modifier at once, one step to undo.
+                for (auto &m:project_.modifiers) if (ids.contains(m.id)) {m.enabled=!enabled;if (m.type==ModifierType::Crop) m.crop.enabled=m.enabled;}
+                emit stackChanged();
+            });
             menu.addAction(tr("Rename"),this,[this] {if (auto *current=tree_->currentItem()) tree_->editItem(current,0);});
             const int row=tree_->indexOfTopLevelItem(item);
             // Alone on its track, a clip can take the whole timeline back.
@@ -494,7 +493,7 @@ template<class Draw> QIcon lineIcon(const QColor &ink,Draw draw) {
 const QColor toolInk(0xe7,0xea,0xeb);
 // Switches the pen to the accent for what follows (the same width and ends); a dark kind's
 // colour lifted so it still shows on the dark bar.
-void accent(QPainter &p,const QColor &colour) {QPen pen=p.pen();pen.setColor(colour.lightnessF()<0.42 ? colour.lighter(165) : colour);p.setPen(pen);}
+void accent(QPainter &p,const QColor &colour) {QPen pen=p.pen();pen.setColor(colour.lightnessF()<0.5 ? colour.lighter(150) : colour);p.setPen(pen);}
 // Sparkles: the cleaning group, its small ones in the cleaning red.
 QIcon cleaningIcon() {
     return lineIcon(toolInk,[](QPainter &p) {
@@ -510,11 +509,13 @@ QIcon deliveryIcon() {
         accent(p,modifierColour(ModifierType::PruneLowContribution));p.drawLine(QPointF(10.5,6.8),QPointF(21.5,12.3));
     });
 }
+// The colour a group's icon and its menu's icons share: its first kind's (F1, F6, F11...).
+QColor groupTint(int,ModifierType first) {return modifierColour(first);}
 QIcon groupIcon(int group) {
     switch (group) {
     case 0: return cleaningIcon();
     case 1: return ModifierPanel::modifierIcon(ModifierType::Colour);
-    case 2: return ModifierPanel::modifierIcon(ModifierType::AnimateTransform);
+    case 2: return ModifierPanel::modifierIcon(ModifierType::AnimateTransform,QColor(),groupTint(2,ModifierType::AnimateTransform));
     case 3: return ModifierPanel::modifierIcon(ModifierType::Audio);
     default: return deliveryIcon();
     }
@@ -586,7 +587,7 @@ void ModifierPanel::fillToolbar(QToolBar *bar) {
             button->setPopupMode(QToolButton::InstantPopup);button->setAutoRaise(true);
             auto *menu=new QMenu(button);menu->setToolTipsVisible(true);QStringList names;
             // The kinds in the menu take the group icon's colour, its first kind's.
-            const QColor tint=modifierColour(kinds.kinds.first().type);
+            const QColor tint=groupTint(group,kinds.kinds.first().type);
             for (const auto &kind:kinds.kinds) {
                 // The key after a tab: menus show it in their shortcut column.
                 auto *action=menu->addAction(modifierIcon(kind.type,QColor(),tint),QStringLiteral("%1\tF%2").arg(tr(kind.name)).arg(key));
@@ -760,10 +761,10 @@ void ModifierPanel::refreshRows() {
         item->setText(0,m.name);item->setText(1,typeName(m));item->setToolTip(0,typeName(m)+"\n"+typeDescription(m.type));item->setToolTip(2,item->toolTip(0));
         item->setData(0,ModifierRole,m.id);item->setCheckState(0,m.active() ? Qt::Checked : Qt::Unchecked);
         item->setData(2,Qt::UserRole+2,m.active());item->setData(2,Qt::UserRole+3,int(m.type));item->setData(2,Qt::UserRole+5,maximum_);item->setData(2,Qt::UserRole+6,frame_);
-        QVariantList clips,keys,erased;
+        QVariantList clips,keys,erased;const bool rowSelected=item->isSelected();
         for (int i:rows_[row]) {
-            const auto &clip=project_.modifiers[i];
-            clips.append(QVariantMap{{"range",rangeOf(clip)},{"active",clip.active()},{"type",int(clip.type)},{"name",clip.name},{"id",clip.id},{"selected",clip.id==project_.selectedModifier}});
+            const auto &clip=project_.modifiers[i];const bool chosen=clip.id==project_.selectedModifier || (rowSelected && clip.id==m.id);
+            clips.append(QVariantMap{{"range",rangeOf(clip)},{"active",clip.active()},{"type",int(clip.type)},{"name",clip.name},{"id",clip.id},{"selected",chosen}});
             keys+=keyFrames(clip);erased+=erasedChunks(clip);
         }
         item->setData(2,ClipsRole,clips);item->setData(2,Qt::UserRole+4,keys);item->setData(2,Qt::UserRole+7,erased);
@@ -782,7 +783,10 @@ void ModifierPanel::setProject(const Project &project) {
         else {refreshRows();renderedModifiers_=visualState(project_);fitNames();}
     }
     if (selected) {
-        updating_=true;const int row=rowOf(project_.selectedModifier);if (row>=0 && row<tree_->topLevelItemCount()) tree_->setCurrentItem(tree_->topLevelItem(row));updating_=false;
+        // The selected modifier in sight: one just added shows even with the list scrolled away.
+        updating_=true;const int row=rowOf(project_.selectedModifier);
+        if (row>=0 && row<tree_->topLevelItemCount()) {tree_->setCurrentItem(tree_->topLevelItem(row));tree_->scrollToItem(tree_->topLevelItem(row));}
+        updating_=false;
     }
 }
 void ModifierPanel::rebuild() {
@@ -792,7 +796,7 @@ void ModifierPanel::rebuild() {
         for (int i:rows_[row]) if (project_.selectedModifier==project_.modifiers[i].id) selected=item;
     }
     refreshRows();updating_=true;
-    if (selected) tree_->setCurrentItem(selected);addModifier_->setEnabled(true);duplicate_->setEnabled(selected);remove_->setEnabled(selected);up_->setEnabled(selected);down_->setEnabled(selected);
+    if (selected) {tree_->setCurrentItem(selected);tree_->scrollToItem(selected);}addModifier_->setEnabled(true);duplicate_->setEnabled(selected);remove_->setEnabled(selected);up_->setEnabled(selected);down_->setEnabled(selected);
     renderedModifiers_=visualState(project_);updating_=false;clearCacheState();fitNames();placePlayhead();
 }
 // As wide as the longest name, and never narrower than the minimum asked for.
@@ -1048,21 +1052,36 @@ void ModifierPanel::addModifierOfType(ModifierType type) {
     }
     project_.modifiers.insert(at,m);project_.selectedModifier=m.id;emit stackChanged();if (m.type==ModifierType::Crop) emit cropAdded();
 }
+QStringList ModifierPanel::selectedIds() const {
+    QStringList ids;
+    for (auto *item:tree_->selectedItems()) if (const auto id=item->data(0,ModifierRole).toString();!id.isEmpty() && !ids.contains(id)) ids << id;
+    if (ids.isEmpty() && !project_.selectedModifier.isEmpty()) ids << project_.selectedModifier;
+    return ids;
+}
 void ModifierPanel::removeSelection() {
-    for (int i=0;i<project_.modifiers.size();++i) if (project_.modifiers[i].id==project_.selectedModifier) {
-        // Another clip of its track, if it had others; else the row that takes its place.
-        const QString track=project_.modifiers[i].trackId();project_.modifiers.removeAt(i);QString next;
-        for (int j=std::max(0,i-1);j<std::min(int(project_.modifiers.size()),i+1);++j) if (project_.modifiers[j].trackId()==track) next=project_.modifiers[j].id;
-        if (next.isEmpty() && !project_.modifiers.isEmpty()) next=project_.modifiers[std::min(i,int(project_.modifiers.size()-1))].id;
-        project_.selectedModifier=next;emit stackChanged();return;
-    }
+    // Every selected modifier at once (one step to undo); then the one that takes the first
+    // one's place: another clip of its track, else the row there now.
+    const auto ids=selectedIds();if (ids.isEmpty()) return;
+    int first=-1;QString track;
+    for (int i=0;i<project_.modifiers.size();++i) if (ids.contains(project_.modifiers[i].id)) {first=i;track=project_.modifiers[i].trackId();break;}
+    if (first<0) return;
+    project_.modifiers.erase(std::remove_if(project_.modifiers.begin(),project_.modifiers.end(),[&](const Modifier &m) {return ids.contains(m.id);}),project_.modifiers.end());
+    QString next;
+    for (int j=std::max(0,first-1);j<std::min(int(project_.modifiers.size()),first+1);++j) if (project_.modifiers[j].trackId()==track) next=project_.modifiers[j].id;
+    if (next.isEmpty() && !project_.modifiers.isEmpty()) next=project_.modifiers[std::min(first,int(project_.modifiers.size()-1))].id;
+    project_.selectedModifier=next;emit stackChanged();
 }
 void ModifierPanel::duplicateSelection() {
-    // A copy on a track of its own, right below the original's track.
-    const int line=rowOf(project_.selectedModifier);if (line<0) return;
-    for (int i:rows_[line]) if (project_.modifiers[i].id==project_.selectedModifier) {
-        auto m=project_.modifiers[i];m.id=Project::newId();m.track.clear();m.name+=tr(" copy");project_.modifiers.insert(rows_[line].last()+1,m);project_.selectedModifier=m.id;emit stackChanged();return;
+    // Each selected modifier copied onto a track of its own, right below its original's track.
+    const auto ids=selectedIds();QString last;
+    for (const auto &id:ids) {
+        computeRows();const int line=rowOf(id);if (line<0) continue;
+        for (int i:rows_[line]) if (project_.modifiers[i].id==id) {
+            auto m=project_.modifiers[i];m.id=Project::newId();m.track.clear();m.name+=tr(" copy");project_.modifiers.insert(rows_[line].last()+1,m);last=m.id;break;
+        }
     }
+    if (last.isEmpty()) return;
+    project_.selectedModifier=last;emit stackChanged();
 }
 void ModifierPanel::moveSelection(int direction) {
     // The whole track, past the next one up or down.

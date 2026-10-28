@@ -10,6 +10,7 @@
 
 #pragma once
 #include <QVector>
+#include <QIcon>
 #include <QWidget>
 // Adapted from Gracia Converter frame range control.
 class RangeSlider : public QWidget
@@ -27,13 +28,20 @@ public:
     // Small yellow ticks at internal chunk changes. Empty by default (the viewer).
     // Positions are in frames and may be fractional, just like the second ticks.
     void setChunkBoundaries(const QVector<double> &frames);
-    // Faint by default; bright when what is being edited depends on them (picks or sculpting
-    // that hold within a chunk).
-    void setChunkEmphasis(bool emphasis);
+    // Shown or hidden with the toggle before the timeline's clock.
+    void setChunksVisible(bool visible);
+    bool chunksVisible() const { return m_chunksVisible; }
+    // That toggle's icon: a line with three marks, yellow when on.
+    static QIcon chunkMarksIcon();
+    // What a chunk is called in the tooltip over its band ("Chunk", "Interval").
+    void setChunkName(const QString &name) { m_chunkName = name; }
     // The seconds labelled under the track: a regular step (1, 2, 5, 10, 15, 30 s, minutes...)
     // wide enough apart to read, none cut off at the track's ends; empty when the second
     // ticks themselves are too dense to draw.
     QVector<int> labelledSeconds() const;
+    // Seconds between labels, and between ticks: steps of 1, 2, 5, 10, 15, 30 s, 1 min... wide
+    // enough apart at this zoom (0: none fit).
+    int secondStep(double minimumPixels) const;
     QString secondLabel(int second) const;
     void setRangeValues(int start, int end);
     // Frames added after End that play with the range (a Loop morph's), drawn after it; the
@@ -75,6 +83,7 @@ protected:
     void mouseReleaseEvent(QMouseEvent* event) override;
     void mouseDoubleClickEvent(QMouseEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
+    bool event(QEvent* event) override; // the chunk under the mouse, as a tooltip
     QSize sizeHint() const override;
 
 private:
@@ -100,7 +109,8 @@ private:
     double m_viewFirst = 0, m_viewLast = 0;
     double m_frameRate = 0;
     QVector<double> m_chunkBoundaries;
-    bool m_chunkEmphasis = false;
+    bool m_chunksVisible = true;
+    QString m_chunkName = QStringLiteral("Chunk");
     bool m_labelsInSeconds = false;
     bool m_panning = false;
     double m_panX = 0;

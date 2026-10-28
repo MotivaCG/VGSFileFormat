@@ -10,6 +10,9 @@
 
 #include "rangeslider.h"
 #include <QPainter>
+#include <QPainterPath>
+#include <QHelpEvent>
+#include <QToolTip>
 #include <QMouseEvent>
 #include <QWheelEvent>
 #include <algorithm>
@@ -51,12 +54,36 @@ void RangeSlider::setLabelsInSeconds(bool seconds)
     update();
 }
 
-void RangeSlider::setChunkEmphasis(bool emphasis)
+void RangeSlider::setChunksVisible(bool visible)
 {
-    if (m_chunkEmphasis == emphasis)
+    if (m_chunksVisible == visible)
         return;
-    m_chunkEmphasis = emphasis;
+    m_chunksVisible = visible;
     update();
+}
+
+QIcon RangeSlider::chunkMarksIcon()
+{
+    QIcon icon;
+    for (auto mode : {QIcon::Normal, QIcon::Active, QIcon::Selected, QIcon::Disabled})
+        for (auto state : {QIcon::Off, QIcon::On}) {
+            QPixmap pixmap(96, 96);
+            pixmap.setDevicePixelRatio(4);
+            pixmap.fill(Qt::transparent);
+            QPainter p(&pixmap);
+            p.setRenderHint(QPainter::Antialiasing);
+            const bool disabled = mode == QIcon::Disabled, on = state == QIcon::On;
+            const QColor line = disabled ? QColor("#606060") : on ? QColor("#eeeeee") : QColor("#888888");
+            const QColor marks = disabled ? QColor("#606060") : on ? QColor(244, 197, 66) : QColor("#888888");
+            p.setPen(QPen(line, 2, Qt::SolidLine, Qt::RoundCap));
+            p.drawLine(QPointF(3, 12), QPointF(21, 12));
+            p.setPen(QPen(marks, 2, Qt::SolidLine, Qt::RoundCap));
+            for (double x : {6.0, 11.0, 18.0})
+                p.drawLine(QPointF(x, 7), QPointF(x, 17));
+            p.end();
+            icon.addPixmap(pixmap, mode, state);
+        }
+    return icon;
 }
 
 void RangeSlider::setChunkBoundaries(const QVector<double> &frames)
@@ -76,6 +103,19 @@ QString RangeSlider::secondLabel(int second) const
     return QString("%1:%2").arg(second / 60).arg(second % 60, 2, 10, QChar('0'));
 }
 
+int RangeSlider::secondStep(double minimumPixels) const
+{
+    const double span = m_viewLast - m_viewFirst;
+    if (m_frameRate <= 0 || span <= 0)
+        return 0;
+    const double perSecond = trackRect().width() / span * m_frameRate;
+    static const int steps[] = {1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200};
+    for (int candidate : steps)
+        if (candidate * perSecond >= minimumPixels)
+            return candidate;
+    return 0;
+}
+
 QVector<int> RangeSlider::labelledSeconds() const
 {
     QVector<int> seconds;
@@ -84,17 +124,12 @@ QVector<int> RangeSlider::labelledSeconds() const
     if (m_frameRate <= 0 || span <= 0)
         return seconds;
     const double perSecond = track.width() / span * m_frameRate;
-    if (perSecond < 8)
-        return seconds; // no second ticks to label
+    Q_UNUSED(perSecond); // however far out: the step grows to minutes
     QFont small = font(); small.setPointSizeF(std::max(6.0, small.pointSizeF() - 1));
     const QFontMetrics metrics(small);
     // As wide as the longest label in view, plus air on both sides.
     const int widest = metrics.horizontalAdvance(secondLabel(int(m_viewLast / m_frameRate) + 1));
-    const double wanted = widest + 36.0;
-    static const int steps[] = {1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200};
-    int step = 0;
-    for (int candidate : steps)
-        if (candidate * perSecond >= wanted) { step = candidate; break; }
+    const int step = secondStep(widest + 36.0);
     if (!step)
         return seconds;
     for (int second = int(std::ceil(m_viewFirst / m_frameRate / step)) * step; second * m_frameRate <= m_viewLast; second += step) {
@@ -323,12 +358,17 @@ void RangeSlider::paintEvent(QPaintEvent*)
             painter.drawRoundedRect(overlap, 2, 2);
     }
 
-    // A tick every second, in a much lighter green, and one per frame halfway between that and
-    // the track's green - each only while they stay apart; packed closer they would smear.
+    // Ticks in a much lighter green, every second or every few as the zoom lets them stay
+    // apart: long and bright where a label goes, short and faint between. Zoomed in, one per
+    // frame too, halfway between that and the track's green. Packed closer they would smear.
     const double span = m_viewLast - m_viewFirst;
     if (m_frameRate > 0 && span > 0) {
         const double perFrame = track.width() / span, perSecond = perFrame * m_frameRate;
-        const bool seconds = perSecond >= 8, frames = perFrame >= 6;
+        // The labels' step, measured as they are (the smaller font), so the long ticks fall on them.
+        QFont labelFont = font(); labelFont.setPointSizeF(std::max(6.0, labelFont.pointSizeF() - 1));
+        const int tickStep = secondStep(14), labelStep = secondStep(QFontMetrics(labelFont).horizontalAdvance(secondLabel(int(m_viewLast / m_frameRate) + 1)) + 36.0);
+        const bool seconds = tickStep == 1, frames = perFrame >= 6;
+        Q_UNUSED(perSecond);
         painter.save(); painter.setRenderHint(QPainter::Antialiasing, false);
         auto tick = [&](double frame, int reach, const QColor &colour) {
             const int x = qRound(frameX(frame));
@@ -342,10 +382,32 @@ void RangeSlider::paintEvent(QPaintEvent*)
                 tick(frame, 1, QColor(165, 222, 140)); // drawn alongside the seconds: a touch brighter
             }
         }
-        if (seconds)
-            for (int second = int(std::ceil(m_viewFirst / m_frameRate)); second * m_frameRate <= m_viewLast; ++second)
-                tick(second * m_frameRate, 2, QColor(198, 236, 180));
+        if (tickStep)
+            for (int second = int(std::ceil(m_viewFirst / m_frameRate / tickStep)) * tickStep; second * m_frameRate <= m_viewLast; second += tickStep) {
+                const bool major = labelStep && second % labelStep == 0;
+                tick(second * m_frameRate, major ? 2 : 1, major ? QColor(198, 236, 180) : QColor(150, 205, 128));
+            }
         painter.restore();
+        // Chunk changes, small and distinct from the frame/second ticks, unless hidden with the
+        // toggle. Packed changes share a pixel rather than accumulating brightness when the
+        // timeline is zoomed out.
+        if (!m_chunkBoundaries.isEmpty() && m_chunksVisible) {
+            painter.save();
+            painter.setRenderHint(QPainter::Antialiasing, false);
+            painter.setClipRect(track.adjusted(0, -2, 0, 2));
+            painter.setPen(QPen(QColor(244, 197, 66), 2));
+            int previousX = -1;
+            for (double frame : m_chunkBoundaries) {
+                if (!std::isfinite(frame) || frame < m_viewFirst || frame > m_viewLast)
+                    continue;
+                const int x = qRound(frameX(frame));
+                if (x == previousX)
+                    continue;
+                painter.drawLine(x, track.top() - 2, x, track.bottom() + 2);
+                previousX = x;
+            }
+            painter.restore();
+        }
         // Some of the seconds, named: time or frame, as the timeline counts.
         const auto labelled = labelledSeconds();
         if (!labelled.isEmpty()) {
@@ -361,29 +423,6 @@ void RangeSlider::paintEvent(QPaintEvent*)
         }
     }
 
-    // Chunk changes stay small and distinct from the frame/second ticks. Packed changes
-    // share a pixel rather than accumulating brightness when the timeline is zoomed out.
-    if (span > 0 && !m_chunkBoundaries.isEmpty()) {
-        painter.save();
-        painter.setRenderHint(QPainter::Antialiasing, false);
-        painter.setClipRect(track.adjusted(0, -2, 0, 2));
-        // Bright and over the track when they matter to the edit; a faint notch otherwise.
-        painter.setPen(m_chunkEmphasis ? QPen(QColor(244, 197, 66), 2) : QPen(QColor(244, 197, 66, 95), 1));
-        int previousX = -1;
-        for (double frame : m_chunkBoundaries) {
-            if (!std::isfinite(frame) || frame < m_viewFirst || frame > m_viewLast)
-                continue;
-            const int x = qRound(frameX(frame));
-            if (x == previousX)
-                continue;
-            if (m_chunkEmphasis)
-                painter.drawLine(x, track.top() - 2, x, track.bottom() + 2);
-            else
-                painter.drawLine(x, track.top(), x, track.bottom());
-            previousX = x;
-        }
-        painter.restore();
-    }
 
     // Only what lies in the view is drawn; the markers still reach just past the track ends.
     auto visible = [&](int value) { return value >= m_viewFirst - 1e-6 && value <= m_viewLast + 1e-6; };
@@ -497,3 +536,19 @@ void RangeSlider::setDraggedValue(int value)
     emit rangeChanged(m_start, m_end, previewFrame);
 }
 
+bool RangeSlider::event(QEvent* event)
+{
+    if (event->type() == QEvent::ToolTip && !m_chunkBoundaries.isEmpty()) {
+        auto* help = static_cast<QHelpEvent*>(event);
+        const QRect track = trackRect();
+        if (help->pos().x() >= track.left() && help->pos().x() <= track.right() && std::abs(help->pos().y() - track.center().y()) <= 8) {
+            const double frame = m_viewFirst + (help->pos().x() - track.left()) / std::max(1.0, double(track.width())) * (m_viewLast - m_viewFirst);
+            const int chunk = int(std::upper_bound(m_chunkBoundaries.begin(), m_chunkBoundaries.end(), frame + 0.5) - m_chunkBoundaries.begin());
+            const int first = chunk == 0 ? m_minimum : int(std::lround(m_chunkBoundaries[chunk - 1]));
+            const int last = chunk < m_chunkBoundaries.size() ? int(std::lround(m_chunkBoundaries[chunk])) - 1 : m_maximum;
+            QToolTip::showText(help->globalPos(), tr("%1 %2 \u00b7 frames %3\u2013%4").arg(m_chunkName).arg(chunk).arg(first).arg(last), this);
+            return true;
+        }
+    }
+    return QWidget::event(event);
+}
