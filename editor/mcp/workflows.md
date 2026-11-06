@@ -196,6 +196,36 @@ Only after the geometry is clean, and only when the user asks or a problem is vi
   helps faint, hazy areas that look thin from every angle, and thickens edges and haze;
   measure its effect before keeping it.
 
+## Making a loop
+
+When asked to make a capture loop, the goal is that playback runs from End back into Start
+without a visible jump. What counts is the motion, not two frames: an End almost equal to
+Start is not enough. Played through the seam, the animation must read as natural: the same
+speed and direction going in and coming out (no stop, start or sudden acceleration, no limb
+reversing for one frame), nothing doubled or ghosted (two hands, a smeared face, texture seen
+twice while blending), no limb cutting through the body, nothing appearing or vanishing.
+In order:
+
+1. Clean first, as above (crop, remove green, purge isolated, erase): the loop is built on the
+   cleaned subject, and junk left in would be morphed with it.
+2. Use the longest range that can loop: normally the whole capture. Keep Start and End unless
+   the last frames cannot be brought to the first; then take the latest End whose pose is
+   closest to Start's and moving the same way (same phase of a gesture or step, not only the
+   same pose), comparing images of both and of a few frames on each side.
+3. Keep the subject in place. When it walks or turns over the range, an animate-transform
+   modifier keyed with edit_modifier (`animation.keys`, each with frame, position, rotation,
+   scale) brings End roughly over Start; key also where the subject moves, so the correction
+   is spread smoothly rather than snapping at the end. Rough is fine: the morph does the rest.
+4. Close it with a Loop morph, as in the next section, with markers above all on the hands,
+   face and feet: a jump shows most there. A morph too short makes a jump of its own, and
+   parts that are not matched by markers show doubled while it blends.
+5. Check the seam as motion: play with loop on, then step frame by frame through about a
+   second before End and a second after Start, from several angles. Each step across the seam
+   should move as much, and the same way, as the steps around it; look closely at the hands
+   and face for jumps and doubles. Fix the markers, the morph length or the transform keys
+   until the seam cannot be noticed.
+6. Do not export unless the user asks. Save the project (save_project) when done.
+
 ## Loop morph: closing a loop without a jump
 
 When asked for a Loop morph (a seamless loop, closing the loop, joining the end to the

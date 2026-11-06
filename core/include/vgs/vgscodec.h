@@ -328,6 +328,11 @@ struct EncodeOptions {
   // plain model then codes as small steps (about 2% smaller). Readers see the same
   // splats in another order.
   bool spatialOrder = true;
+  // Lossy and off at 0: each splat keeps the lowest SH degree whose dropped bands
+  // differ from what it had by at most this much (RMS of the dropped coefficients,
+  // worst sample), pointing the rest at the book entries nearest zero. The syntax and
+  // the global degree do not change; the indices become cheaper to code.
+  float shPruneTolerance = 0;
   // Chunk workers: 0 selects up to eight hardware threads, 1 is serial.
   // Progress callbacks and sinks remain on the calling thread; so does the provider,
   // unless threadSafeProvider says otherwise.

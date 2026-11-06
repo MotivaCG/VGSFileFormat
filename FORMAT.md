@@ -63,6 +63,17 @@ The signed header is authoritative: a v5 reader rejects an inconsistent plane co
 `boxing.mint` the degrees measure 44.85, 38.40, 31.99 and 28.78 MB — degree 2 costs 14.4%
 less than degree 3, and it is a third of the shader's work in the viewer as well.
 
+The encoder can also lower the degree per splat, which the format does not need to know
+about (`--sh-prune <rms>`, `EncodeOptions::shPruneTolerance`, off by default). Each splat
+keeps the lowest degree whose dropped bands differ from what it had by at most that RMS,
+over the dropped coefficients and colour channels at its worst sample, and its dropped
+coefficients point at the static and temporal codebook entries nearest zero. Many splats
+then share one index, which the entropy coder stores in a few bits. It is lossy, saves
+bytes rather than decoding work, and every reader decodes the result unchanged. On
+`boxingfull.mint` at degree 2 (187.4 MB): 0.04 saves 2.1% (SH RMS error 0.014), 0.06
+7.2% (0.030), 0.08 11.6% (0.042); degree 1 saves 14.6% at 0.044, but every splat loses
+its second band, up to 0.51 for one coefficient against 0.19 at 0.08.
+
 ## Import profile and current limits
 
 The current importer accepts the observed SH degree 3 format-6 profile, at whatever frame rate the

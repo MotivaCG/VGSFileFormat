@@ -232,6 +232,27 @@ private slots:
             for (size_t i=0;i<frame.count;++i) for (int k=0;k<kept*3;++k) QCOMPARE(frame.shRest[i*kept*3+k],reference.shRest[i*45+k]);
         }
     }
+    void realMintShReductionIsBoundedAndSmaller() {
+        // SH reduction drops bands per splat: kept coefficients are exact, and what a
+        // splat loses stays within the tolerance (RMS over its coefficients, any instant).
+        const QString asset=qEnvironmentVariable("EDITOR_TEST_CAPTURE");if (asset.isEmpty()) QSKIP("Set EDITOR_TEST_CAPTURE to exercise a real MINT capture.");
+        QTemporaryDir dir;const auto full=dir.filePath("full.vgs"),reduced=dir.filePath("reduced.vgs");constexpr double tolerance=.06;
+        Project project;project.asset=asset;project.in=0;project.out=.5;project.captureSettings.shDegree=2;exportCaptureFile(project,full);
+        project.captureSettings.shPrune=tolerance;exportCaptureFile(project,reduced);
+        qInfo("SH reduction %.2f: %lld -> %lld bytes",tolerance,QFileInfo(full).size(),QFileInfo(reduced).size());
+        QVERIFY(QFileInfo(reduced).size()<QFileInfo(full).size());
+        auto a=vgsdec::Capture::openFile(full.toStdString()),b=vgsdec::Capture::openFile(reduced.toStdString());QCOMPARE(b.shDegree(),2u);
+        size_t changed=0;
+        for (double t:{.05,.25,.45}) {
+            const auto x=copy(a.setTime(t,true)),y=copy(b.setTime(t,true));QCOMPARE(y.count,x.count);QCOMPARE(y.shCoefficients,8);
+            for (size_t i=0;i<x.count;++i) {
+                double squares=0;for (int k=0;k<24;++k) squares+=std::pow(double(x.shRest[i*24+k])-y.shRest[i*24+k],2);
+                QVERIFY2(std::sqrt(squares/24)<=tolerance+1e-3,qPrintable(QString("splat %1 at %2").arg(i).arg(t)));changed+=squares>0;
+                for (int k=0;k<3;++k) QCOMPARE(y.position[i*3+k],x.position[i*3+k]);
+            }
+        }
+        QVERIFY(changed>0);
+    }
     void animatedMotionIsStoredAsSamples() {
         QTemporaryDir dir;const auto source=dir.filePath("source.pgs");sourceFile(source,5);
         Project project;project.asset=source;project.in=.08;project.out=.16;project.transform.position={1,2,3};project.transform.rotation={0,20,0};project.modifiers.clear();
@@ -508,6 +529,41 @@ private slots:
         Project project;project.asset=path;project.out=(source.frameCount()-1)/source.frameRate();project.modifiers.clear();
         try {exportCaptureFile(project,output);} catch (const std::exception &e) {QFAIL(e.what());}
         MintFile roundtrip;QVERIFY2(roundtrip.openReadOnly(output,&error),qPrintable(error));QCOMPARE(roundtrip.shDegree(),0);QCOMPARE(roundtrip.audio(),source.audio());QCOMPARE(roundtrip.frameCount(),source.frameCount());
+    }
+    // Diagnostic: two exports of one project, so their splats correspond row for row (only
+    // the encodings differ). Reports orientation error in degrees and the view-dependent
+    // colour change in 8-bit levels over fixed random directions, on every MINT_COMPARE_STEP-th frame.
+    void mintExportComparison() {
+        const auto a=qEnvironmentVariable("MINT_COMPARE_A"),b=qEnvironmentVariable("MINT_COMPARE_B");
+        if (a.isEmpty() || b.isEmpty()) QSKIP("Set MINT_COMPARE_A and MINT_COMPARE_B to two exports of the same project.");
+        MintFile x,y;QString error;QVERIFY2(x.openReadOnly(a,&error),qPrintable(error));QVERIFY2(y.openReadOnly(b,&error),qPrintable(error));QCOMPARE(x.frameCount(),y.frameCount());
+        const int step=std::max(1,qEnvironmentVariableIntValue("MINT_COMPARE_STEP"));
+        std::mt19937 random(7);std::normal_distribution<float> normal;std::vector<std::array<float,15>> bases;
+        for (int i=0;i<8;++i) {
+            float d[3]={normal(random),normal(random),normal(random)};const float l=std::sqrt(d[0]*d[0]+d[1]*d[1]+d[2]*d[2]),px=d[0]/l,py=d[1]/l,pz=d[2]/l,xx=px*px,yy=py*py,zz=pz*pz;
+            bases.push_back({-.48860251f*py,.48860251f*pz,-.48860251f*px,1.09254843f*px*py,-1.09254843f*py*pz,.31539157f*(2*zz-xx-yy),-1.09254843f*px*pz,.54627422f*(xx-yy),
+                -.59004359f*py*(3*xx-yy),2.89061144f*px*py*pz,-.45704580f*py*(4*zz-xx-yy),.37317633f*pz*(2*zz-3*xx-3*yy),-.45704580f*px*(4*zz-xx-yy),1.44530572f*pz*(xx-yy),-.59004359f*px*(xx-3*yy)});
+        }
+        // Histograms: 0.01 degree and 0.01 level bins, up to 180 degrees and 255 levels.
+        std::vector<uint64_t> angles(18001),colours(25501);double angleSum=0,colourSquares=0,positionMax=0,dcMax=0;uint64_t splats=0,samples=0;
+        auto percentile=[](const std::vector<uint64_t> &h,double p) {uint64_t total=std::accumulate(h.begin(),h.end(),uint64_t(0)),seen=0;for (size_t i=0;i<h.size();++i) if ((seen+=h[i])>=p*total) return i*.01;return (h.size()-1)*.01;};
+        MintFrame fa,fb;
+        for (int frame=0;frame<x.frameCount();frame+=step) {
+            QVERIFY2(x.decode(x.frameTime(frame),&fa,true,&error),qPrintable(error));QVERIFY2(y.decode(y.frameTime(frame),&fb,true,&error),qPrintable(error));
+            QCOMPARE(fa.count,fb.count);QCOMPARE(fa.shRest.size(),fb.shRest.size());const bool sh=!fa.shRest.isEmpty();
+            for (quint64 i=0;i<fa.count;++i) if (fa.active[i]) {
+                ++splats;double dot=0;for (int c=0;c<4;++c) dot+=double(fa.rotation[i*4+c])*fb.rotation[i*4+c];
+                const double angle=2*std::acos(std::min(1.,std::abs(dot)))*57.29577951308232;angleSum+=angle;++angles[std::min<size_t>(18000,size_t(angle*100))];
+                for (int c=0;c<3;++c) {positionMax=std::max(positionMax,double(std::abs(fa.position[i*3+c]-fb.position[i*3+c])));dcMax=std::max(dcMax,double(std::abs(fa.colorDc[i*3+c]-fb.colorDc[i*3+c])));}
+                if (sh) for (const auto &basis:bases) for (int c=0;c<3;++c) {
+                    double delta=0;for (int k=0;k<15;++k) delta+=basis[k]*(fa.shRest[(i*15+k)*3+c]-fb.shRest[(i*15+k)*3+c]);
+                    const double levels=std::abs(delta)*255;colourSquares+=levels*levels;++samples;++colours[std::min<size_t>(25500,size_t(levels*100))];
+                }
+            }
+        }
+        qInfo("%llu active splat-frames. Orientation: mean %.3f, p50 %.2f, p99 %.2f, max %.2f degrees.",splats,splats ? angleSum/splats : 0.,percentile(angles,.5),percentile(angles,.99),percentile(angles,1));
+        qInfo("View-dependent colour (8-bit levels): RMS %.3f, p50 %.2f, p99 %.2f, p99.9 %.2f, max %.2f.",samples ? std::sqrt(colourSquares/samples) : 0.,percentile(colours,.5),percentile(colours,.99),percentile(colours,.999),percentile(colours,1));
+        qInfo("Unchanged attributes: position max %.3g, DC max %.3g.",positionMax,dcMax);
     }
     void exportReusesOnlyMatchingPreviewVisibility() {
         QTemporaryDir dir;const auto source=dir.filePath("source.pgs");ballFile(source,2000);

@@ -766,9 +766,11 @@ private slots:
     }
     void metadataConfigurationAndBoxContainment() {
         CaptureSettings settings; settings.title = "Title"; settings.catalogueId = "catalogue"; settings.author = "Studio";
-        settings.plain = true; settings.despill = true; settings.despillStrength = 0.75; settings.shDegree = 2; settings.tags = {"scene","actor"};
+        settings.plain = true; settings.despill = true; settings.despillStrength = 0.75; settings.shDegree = 2; settings.shPrune = 0.06; settings.tags = {"scene","actor"};
         settings.extraJson = "{\"take\": 7}"; QString error; CaptureSettings restored;
         QVERIFY2(CaptureSettings::fromJson(settings.json(),&restored,&error),qPrintable(error)); QCOMPARE(restored.json(),settings.json());
+        auto older = settings.json(); older.remove("shPrune");
+        QVERIFY2(CaptureSettings::fromJson(older,&restored,&error),qPrintable(error)); QCOMPARE(restored.shPrune,0.);
         auto invalid = settings.json(); invalid["extraJson"] = "invalid JSON";
         QVERIFY(!CaptureSettings::fromJson(invalid,&restored,&error)); QCOMPARE(restored.title,settings.title);
         CropVolume crop; crop.enabled = true; crop.radius = crop.radiusZ = 0.4f; crop.height = 1; crop.width = crop.depth = 0.8f;

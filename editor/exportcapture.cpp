@@ -897,7 +897,7 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
     // through one reader and one baker, which are not shared.
     options.threadSafeProvider=native && !ply;
     if (ply) {options.chunkThreads=1;options.chunkMemoryBudget=512*previewmemory::MiB;options.preparedCacheBudget=0;}
-    options.shDegree=degree;options.signer=vgs::authoringSigner();options.compression=project.captureSettings.plain ? vgs::Compression::None : vgs::Compression::Auto;
+    options.shDegree=degree;options.shPruneTolerance=float(project.captureSettings.shPrune);options.signer=vgs::authoringSigner();options.compression=project.captureSettings.plain ? vgs::Compression::None : vgs::Compression::Auto;
     options.playbackMode=project.captureSettings.playbackMode<0 ? (capture ? vgs::PlaybackMode(capture->playbackMode()) : vgs::PlaybackMode::Loop) : vgs::PlaybackMode(project.captureSettings.playbackMode);
     options.motionType=header.motionType;options.movingSpeed=header.movingSpeed;
     // How the splats are meant to be drawn travels with them: Gracia trains with

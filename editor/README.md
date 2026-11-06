@@ -473,7 +473,10 @@ the saved crop preview. Export permanently excludes outside centres in each samp
 **Metadata & processing…** (Ctrl+M) is a main Tools button, independent of the
 export command. It follows the converter's metadata fields and adds tags, software
 information and extra JSON. Configure VGS/PGS, SH degree, playback and despill
-(strength, green gain, view chroma and skin recovery). Apply remembers the last
+(strength, green gain, view chroma and skin recovery). **SH reduction** (Off, Light,
+Medium, Strong: 0.04, 0.06, 0.08) drops spherical harmonic bands per splat where they
+barely show, at VGS/PGS export only; it is lossy and saves bytes, not decoding time
+(FORMAT.md, Spherical harmonic degree). Apply remembers the last
 configuration in QSettings and stores it in the current project. The panel uses
 its own metadata/processing preset scope, sharing the same folder as the editor.
 Loading a metadata preset does not modify capture or crop transforms.

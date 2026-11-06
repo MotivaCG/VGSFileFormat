@@ -133,7 +133,10 @@ int main(int argc, char **argv) {
       encoder.setSpatialOrder(false);
     else if (flag == "--quiet")
       quiet = true;
-    else if (flag == "--sh") {
+    else if (flag == "--sh-prune") {
+      value(&v);
+      encoder.setShPruneTolerance(float(std::atof(v)));
+    } else if (flag == "--sh") {
       value(&v);
       encoder.setSphericalHarmonicDegree(uint32_t(std::atoi(v)));
     } else if (flag == "--page-rows") {

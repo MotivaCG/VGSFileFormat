@@ -160,6 +160,7 @@ void Encoder::setPageRows(uint32_t rows) { state->options.pageRows = rows; }
 
 void Encoder::setTemporalShPageSplit(bool enabled) { state->options.splitTemporalShPages = enabled; }
 void Encoder::setSpatialOrder(bool enabled) { state->options.spatialOrder = enabled; }
+void Encoder::setShPruneTolerance(float tolerance) { state->options.shPruneTolerance = tolerance > 0 ? tolerance : 0; }
 void Encoder::setChunkThreads(uint32_t threads) { state->options.chunkThreads = threads; }
 void Encoder::setChunkMemoryBudget(uint64_t bytes) { state->options.chunkMemoryBudget = bytes; }
 

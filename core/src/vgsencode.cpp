@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <future>
@@ -695,6 +696,125 @@ void canonicalSh2(InputPage &p, const SourceChunk &c, uint32_t degree) {
                 p.data.begin() + size_t((end - first) * 6), uint8_t(0));
   }
 }
+// Opt-in and lossy: a spherical harmonic degree per splat. Each splat keeps the
+// lowest degree whose dropped bands stay within `tolerance` of what it had,
+// measured as the RMS over the dropped coefficients and colour channels at its
+// worst sample. A dropped coefficient is pointed at the static and temporal book
+// entries nearest zero, so many splats share one index and the entropy coder
+// stores them in a few bits. Nothing in the syntax changes: every reader decodes
+// the result as an ordinary capture with the same global degree.
+float sourceHalf(const uint8_t *p) {
+  uint16_t h;
+  std::memcpy(&h, p, 2);
+  const uint32_t sign = uint32_t(h & 0x8000u) << 16, e = (h >> 10) & 0x1Fu, m = h & 0x3FFu;
+  float v;
+  if (e == 0) v = std::ldexp(float(m), -24);
+  else if (e == 31) v = m ? std::numeric_limits<float>::quiet_NaN() : std::numeric_limits<float>::infinity();
+  else v = std::ldexp(float(m | 0x400u), int(e) - 25);
+  return sign ? -v : v;
+}
+SourceChunk pruneSh(const SourceChunk &c, const uint8_t *mint, uint32_t degree, float tolerance) {
+  const uint32_t planes = shPlanes(degree);
+  const int coefficients = degree >= 3 ? 15 : degree == 2 ? 8 : degree == 1 ? 3 : 0;
+  if (!(tolerance > 0) || !coefficients || c.groups.empty()) return c;
+  const uint64_t ns = c.groups[0].counts[0], nt = c.groups[0].counts[1];
+  const SourceArray *sBook = nullptr, *tBook = nullptr;
+  for (const auto &a : c.arrays)
+    if (a.group == 0 && a.attribute == ShStaticBook) sBook = &a;
+    else if (a.group == 0 && a.attribute == ShTemporalBook) tBook = &a;
+  if (!sBook || !tBook || !ns || !nt) return c;
+  // Book rows per sample: the degree's slots, as readers index them.
+  const uint64_t slots = uint64_t(planes) * 3;
+  // A layout this does not recognise is left as it is: pruning is only ever a saving.
+  if (sBook->size != slots * ns * 6 || !tBook->size || tBook->size % (slots * nt * 6))
+    return c;
+  const uint64_t samples = tBook->size / (slots * nt * 6);
+  auto bytesOf = [&](const SourceArray &a) { return a.data.empty() ? mint + a.offset : a.data.data(); };
+  std::vector<float> S(size_t(slots * ns * 3)), T(size_t(samples * slots * nt * 3));
+  for (size_t i = 0; i < S.size(); ++i) S[i] = sourceHalf(bytesOf(*sBook) + i * 2);
+  for (size_t i = 0; i < T.size(); ++i) T[i] = sourceHalf(bytesOf(*tBook) + i * 2);
+  // The entries nearest zero, per coefficient: static at its value, temporal at its
+  // largest over the samples.
+  std::vector<uint32_t> zs(static_cast<size_t>(coefficients)), zt(static_cast<size_t>(coefficients));
+  for (int k = 0; k < coefficients; ++k) {
+    float best = std::numeric_limits<float>::max();
+    for (uint64_t e = 0; e < ns; ++e) {
+      const float *v = &S[size_t((k * ns + e) * 3)];
+      const float d = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
+      if (d < best) best = d, zs[size_t(k)] = uint32_t(e);
+    }
+    best = std::numeric_limits<float>::max();
+    for (uint64_t e = 0; e < nt; ++e) {
+      float worst = 0;
+      for (uint64_t s = 0; s < samples; ++s) {
+        const float *v = &T[size_t(((s * slots + k) * nt + e) * 3)];
+        worst = std::max(worst, v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+      }
+      if (worst < best) best = worst, zt[size_t(k)] = uint32_t(e);
+    }
+  }
+  static const int bandStart[4] = {0, 0, 3, 8};
+  static const int kShift[3] = {20, 10, 0};
+  SourceChunk out = c;
+  for (uint32_t gi = 0; gi < out.groups.size(); ++gi) {
+    if (out.groups[gi].type != 1) continue;
+    SourceArray *si = nullptr, *ti = nullptr;
+    for (auto &a : out.arrays)
+      if (a.group == gi && a.attribute == ShStaticIndices) si = &a;
+      else if (a.group == gi && a.attribute == ShTemporalIndices) ti = &a;
+    if (!si || !ti) continue;
+    const uint64_t n = out.groups[gi].splats;
+    // The index arrays may still hold the source's planes; a lower degree only reads
+    // the first ones.
+    if (!n || si->size != ti->size || si->size % (n * 4) || si->size / (n * 4) < planes)
+      continue;
+    for (SourceArray *a : {si, ti})
+      if (a->data.empty()) a->data.assign(mint + a->offset, mint + a->offset + a->size);
+    uint8_t *sw = si->data.data(), *tw = ti->data.data();
+    auto word = [&](uint8_t *base, int k, uint64_t i) { return base + ((uint64_t(k / 3) * n + i) * 4); };
+    std::vector<float> err(static_cast<size_t>(samples));
+    for (uint64_t i = 0; i < n; ++i) {
+      std::fill(err.begin(), err.end(), 0.0f);
+      int keep = coefficients, count = 0;
+      // Drop bands from the top while the accumulated error stays inside the tolerance.
+      for (int band = int(degree); band >= 1; --band) {
+        const int from = bandStart[band], to = band == int(degree) ? coefficients : bandStart[band + 1];
+        std::vector<float> trial = err;
+        for (int k = from; k < to; ++k) {
+          uint32_t a, b;
+          std::memcpy(&a, word(sw, k, i), 4);
+          std::memcpy(&b, word(tw, k, i), 4);
+          const uint32_t sIdx = (a >> kShift[k % 3]) & 0x3FFu, tIdx = (b >> kShift[k % 3]) & 0x3FFu;
+          const float *s0 = &S[size_t((k * ns + sIdx) * 3)], *s1 = &S[size_t((k * ns + zs[size_t(k)]) * 3)];
+          for (uint64_t s = 0; s < samples; ++s) {
+            const float *t0 = &T[size_t(((s * slots + k) * nt + tIdx) * 3)];
+            const float *t1 = &T[size_t(((s * slots + k) * nt + zt[size_t(k)]) * 3)];
+            for (int ch = 0; ch < 3; ++ch) {
+              const float d = (s0[ch] + t0[ch]) - (s1[ch] + t1[ch]);
+              trial[size_t(s)] += d * d;
+            }
+          }
+        }
+        const int dropped = count + (to - from);
+        const float worst = *std::max_element(trial.begin(), trial.end());
+        if (std::sqrt(worst / float(dropped * 3)) > tolerance) break;
+        err = std::move(trial);
+        count = dropped;
+        keep = from;
+      }
+      for (int k = keep; k < coefficients; ++k) {
+        const uint32_t mask = ~(0x3FFu << kShift[k % 3]);
+        for (auto [base, z] : {std::make_pair(sw, zs[size_t(k)]), std::make_pair(tw, zt[size_t(k)])}) {
+          uint32_t w;
+          std::memcpy(&w, word(base, k, i), 4);
+          w = (w & mask) | (z << kShift[k % 3]);
+          std::memcpy(word(base, k, i), &w, 4);
+        }
+      }
+    }
+  }
+  return out;
+}
 std::vector<InputPage> pages(const SourceChunk &c, const uint8_t *mint,
                              uint32_t pageRows, uint32_t shDegree,
                              bool splitTemporalSh = false) {
@@ -1045,6 +1165,7 @@ static Bytes encodeSource(Source src, const uint8_t *mint, const EncodeOptions &
   parallelChunks(src.chunks.size(),options,getChunk,[&](SourceChunk sourceChunk,const std::atomic<bool> &stopped) {
     if (stopped) throw Error("cancelled");
     if (options.spatialOrder) sourceChunk=spatialOrder(sourceChunk,mint);
+    if (options.shPruneTolerance>0) sourceChunk=pruneSh(sourceChunk,mint,h.shDegree,options.shPruneTolerance);
     Measurement result;result.splats=sourceChunk.entry.splats;
     // Motion is checked here, before anything is written, rather than discovered by a
     // reader: a sample that does not validate, or a chunk without samples in a capture
@@ -1152,6 +1273,7 @@ static Bytes encodeSource(Source src, const uint8_t *mint, const EncodeOptions &
   parallelChunks(src.chunks.size(),options,getChunk,[&](SourceChunk sourceChunk,const std::atomic<bool> &stopped) {
     if (stopped) throw Error("cancelled");
     if (options.spatialOrder) sourceChunk=spatialOrder(sourceChunk,mint);
+    if (options.shPruneTolerance>0) sourceChunk=pruneSh(sourceChunk,mint,encodingHeader.shDegree,options.shPruneTolerance);
     auto inputs = pages(sourceChunk, mint, options.pageRows, encodingHeader.shDegree,
                         options.splitTemporalShPages);
     std::stable_sort(inputs.begin(), inputs.end(),

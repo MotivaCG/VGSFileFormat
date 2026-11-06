@@ -319,7 +319,7 @@ struct TrajectoryBook {
     std::vector<std::vector<float>> values;
     std::vector<uint16_t> indices;
 };
-TrajectoryBook fitBook(const std::vector<float> &features,size_t width,const ExportProgress &progress) {
+TrajectoryBook fitBook(const std::vector<float> &features,size_t width,size_t limit,const ExportProgress &progress) {
     const size_t n=features.size()/width;
     struct Cell {size_t begin,end,axis;double score;std::vector<float> mean;};
     std::vector<size_t> order(n);std::iota(order.begin(),order.end(),0);std::vector<Cell> cells;
@@ -334,12 +334,12 @@ TrajectoryBook fitBook(const std::vector<float> &features,size_t width,const Exp
         if (end-begin<2 || largest<1e-14) cell.score=0;return cell;
     };
     std::priority_queue<std::pair<double,size_t>> pending;cells.push_back(statistics(0,n));pending.push({cells[0].score,0});
-    while (cells.size()<std::min(size_t(1024),n) && !pending.empty() && pending.top().first>1e-14) {
+    while (cells.size()<std::min({size_t(1024),limit,n}) && !pending.empty() && pending.top().first>1e-14) {
         const auto index=pending.top().second;pending.pop();const Cell original=cells[index];const size_t mid=(original.begin+original.end)/2,axis=original.axis;
         std::nth_element(order.begin()+original.begin,order.begin()+mid,order.begin()+original.end,[&](size_t a,size_t b) {return features[a*width+axis]<features[b*width+axis];});
         cells[index]=statistics(original.begin,mid);const size_t next=cells.size();cells.push_back(statistics(mid,original.end));
         pending.push({cells[index].score,index});pending.push({cells[next].score,next});
-        if ((cells.size()%32)==0) report(progress,QStringLiteral("Fitting rotated SH trajectories: %1 / 1024 entries").arg(cells.size()));
+        if ((cells.size()%32)==0) report(progress,QStringLiteral("Fitting rotated SH trajectories: %1 / %2 entries").arg(cells.size()).arg(std::min({size_t(1024),limit,n})));
     }
     TrajectoryBook result;result.width=width;result.indices.resize(n);
     for (size_t index=0;index<cells.size();++index) {
@@ -386,7 +386,8 @@ void rotateSh(vgs::DecodedChunk &c,const Project &project,ExportResult *result,c
                     features[(row*S+sample)*3+channel]+=float(weight*temporalValues[((sample*stored+source)*nt+ti[source][row])*3+channel]);
             }
         }
-        auto staticBook=fitBook(base,3,progress);
+        // Refit within the source's entry counts, so turning the capture does not grow it.
+        auto staticBook=fitBook(base,3,ns,progress);
         for (auto &entry:staticBook.values) for (auto &v:entry) {uint8_t bytes[2];putHalf(bytes,v);v=half(bytes);}
         for (size_t row=0;row<n;++row) for (size_t sample=0;sample<S;++sample) for (size_t channel=0;channel<3;++channel)
             features[(row*S+sample)*3+channel]+=base[row*3+channel]-staticBook.values[staticBook.indices[row]][channel];
@@ -399,7 +400,7 @@ void rotateSh(vgs::DecodedChunk &c,const Project &project,ExportResult *result,c
                 for (size_t channel=0;channel<3;++channel) features[(row*S+sample)*3+channel]=last>first ? features[(row*S+closest)*3+channel] : 0;
             }
         }
-        auto temporalBook=fitBook(features,S*3,progress);
+        auto temporalBook=fitBook(features,S*3,nt,progress);
         for (auto &entry:temporalBook.values) for (auto &v:entry) {uint8_t bytes[2];putHalf(bytes,v);v=half(bytes);}
         for (size_t row=0;row<n;++row) for (size_t feature=lifetimes[row].first*3;feature<lifetimes[row].second*3;++feature) {
             const double error=features[row*S*3+feature]-temporalBook.values[temporalBook.indices[row]][feature];
@@ -431,23 +432,56 @@ uint32_t packQuaternion(const QQuaternion &rotation) {
     const double sign=q[largest]<0 ? -1 : 1;uint32_t result=uint32_t(largest)<<30;const int shifts[3]={20,10,1},limits[3]={1023,1023,511};
     for (int i=0,next=0;i<4;++i) if (i!=largest) {result|=uint32_t(std::clamp(std::round((q[i]*sign*std::sqrt(2.)+1)*.5*limits[next]),0.,double(limits[next])))<<shifts[next];++next;}return result;
 }
-void rotateOrientations(vgs::DecodedChunk &c,const Project &project,const ExportProgress &progress) {
-    normalizeSchemas(c);vgs::FrameDecoder decoder(c);const size_t T=c.groups[0].intervals,S=T+1;const auto model=project.transform.matrix();
+// The decoder's smallest-three layout. The sign bit negates the whole quaternion: the same rotation.
+QQuaternion unpackQuaternion(uint32_t word) {
+    const uint32_t limits[3]={1023,1023,511};const int shifts[3]={20,10,1};float kept[3],wxyz[4],squares=0;
+    for (int j=0;j<3;++j) {kept[j]=(2*float((word>>shifts[j])&limits[j])/float(limits[j])-1)*0.70710678118654752f;squares+=kept[j]*kept[j];}
+    for (int i=0,j=0;i<4;++i) wxyz[i]=i==int(word>>30) ? std::sqrt(std::max(0.f,1-squares)) : kept[j++];
+    return QQuaternion(wxyz[0],wxyz[1],wxyz[2],wxyz[3]);
+}
+// A constant world rotation G keeps the source's encoding, so the export does not grow.
+// Sampled groups turn each stored sample. Residual groups decode q = R*base, R summed from
+// shared trajectory rows, so G*q = (G R G^-1)*(G base): bases turn by G and every shared row
+// is conjugated - linear, so it commutes with the sum and the decoder's interpolation - then
+// re-quantised on the existing step table with error feedback, as the fitter does.
+void rotateOrientations(vgs::DecodedChunk &c,const Project &project,ExportResult *result) {
+    normalizeSchemas(c);const auto model=project.transform.matrix();
     const double scale=uniformScale(model),sign=model.determinant()<0 ? -1 : 1;QMatrix3x3 matrix;
     for (int i=0;i<3;++i) for (int j=0;j<3;++j) matrix(i,j)=float(sign*model(i,j)/scale);const auto global=QQuaternion::fromRotationMatrix(matrix).normalized();
-    std::vector<Bytes> rotations(c.groups.size());for (size_t group=1;group<c.groups.size();++group) rotations[group].resize(c.groups[group].splats*S*4);
-    vgs::Frame frame;
-    for (size_t sample=0;sample<S;++sample) {
-        report(progress,QStringLiteral("Baking native rotations %1 / %2").arg(sample+1).arg(S));decoder.evaluateInto(std::min(sample/double(T),1.-1e-9),false,&frame);
-        for (size_t group=1,offset=0;group<c.groups.size();offset+=c.groups[group++].splats) for (size_t row=0;row<c.groups[group].splats;++row) {
-            const auto *q=frame.rotation.data()+(offset+row)*4;const auto transformed=(global*QQuaternion(q[3],q[0],q[1],q[2])).normalized();
-            put32(rotations[group].data()+(row*S+sample)*4,packQuaternion(transformed));
+    bool residual=false;
+    for (uint32_t group=1;group<c.groups.size();++group) {
+        const bool sampled=(c.groups[group].flags&2)!=0;residual|=!sampled;
+        auto &words=get(c,sampled ? vgs::RotationSamples : vgs::RotationBase,group).bytes;
+        for (size_t at=0;at+4<=words.size();at+=4) put32(words.data()+at,packQuaternion((global*unpackQuaternion(u32(words.data()+at))).normalized()));
+    }
+    if (!residual) return;
+    auto &initial=get(c,vgs::RotationInitial).bytes,&deltas=get(c,vgs::RotationDeltas).bytes;const auto &table=get(c,vgs::RotationDeltaLut).bytes;
+    const size_t entries=c.groups[0].counts[4],T=c.groups[0].intervals;
+    if (initial.size()<entries*8 || deltas.size()<entries*T*4 || table.size()<1024) throw std::runtime_error("Invalid native rotation trajectories.");
+    std::vector<float> lut(256);std::vector<uint8_t> order(256);
+    for (size_t i=0;i<256;++i) {lut[i]=f32(table.data()+i*4);order[i]=uint8_t(i);}
+    std::sort(order.begin(),order.end(),[&](uint8_t a,uint8_t b) {return lut[a]<lut[b];});
+    auto nearest=[&](float step) {
+        const auto it=std::lower_bound(order.begin(),order.end(),step,[&](uint8_t i,float v) {return lut[i]<v;});
+        if (it==order.end()) return order.back();if (it==order.begin()) return *it;
+        return std::abs(lut[*it]-step)<std::abs(lut[*(it-1)]-step) ? *it : *(it-1);
+    };
+    auto rounded=[](float v) {return float(qfloat16(v));};
+    auto conjugate=[&](const float *wxyz,float *out) {const auto v=global.rotatedVector(QVector3D(wxyz[1],wxyz[2],wxyz[3]));out[0]=wxyz[0];out[1]=v.x();out[2]=v.y();out[3]=v.z();};
+    double worst=0;
+    for (size_t row=0;row<entries;++row) {
+        float source[4],target[4],stored[4],sample[4];
+        for (size_t ch=0;ch<4;++ch) source[ch]=half(initial.data()+(row*4+ch)*2);
+        conjugate(source,target);
+        for (size_t ch=0;ch<4;++ch) {putHalf(initial.data()+(row*4+ch)*2,target[ch]);stored[ch]=half(initial.data()+(row*4+ch)*2);}
+        for (size_t step=0;step<T;++step) {
+            uint8_t *d=deltas.data()+(row*T+step)*4;
+            for (size_t ch=0;ch<4;++ch) {source[ch]+=lut[d[ch]];sample[ch]=rounded(source[ch]);}
+            conjugate(sample,target);
+            for (size_t ch=0;ch<4;++ch) {d[ch]=nearest(target[ch]-stored[ch]);stored[ch]+=lut[d[ch]];worst=std::max(worst,double(std::abs(rounded(stored[ch])-target[ch])));}
         }
     }
-    const std::set<uint32_t> remove{vgs::RotationSamples,vgs::RotationBase,vgs::RotationTerms,vgs::RotationRanks,vgs::RotationInitial,vgs::RotationDeltas,vgs::RotationDeltaLut};
-    c.pages.erase(std::remove_if(c.pages.begin(),c.pages.end(),[&](const auto &page) {return remove.count(page.descriptor.attribute)!=0;}),c.pages.end());
-    for (uint32_t group=1;group<c.groups.size();++group) {c.groups[group].flags|=2;vgs::DecodedPage page;page.descriptor.attribute=vgs::RotationSamples;page.descriptor.group=group;page.bytes=std::move(rotations[group]);c.pages.push_back(std::move(page));}
-    c.groups[0].counts[4]=0;
+    if (result) result->notes << QStringLiteral("Rotated rotation trajectories: maximum component error %1.").arg(worst,0,'g',4);
 }
 // Bake anti-aliasing for plain renderers: every splat's covariance plus size^2 I, as in
 // Mip-Splatting's 3D filter, and its opacity lowered by the growth of its two largest axes
@@ -730,8 +764,7 @@ vgs::DecodedChunk editNativeChunk(vgs::DecodedChunk chunk,const NativeChunkPlan 
     convertTrimmedDirectPositions(chunk,plan);
     sliceTime(chunk,plan.first,plan.intervals);
     if (!axisUniform(project.transform.matrix())) {
-        rotateOrientations(chunk,project,progress);rotateSh(chunk,project,statistics,progress);
-        if (statistics) statistics->notes << QStringLiteral("Baked rotations are sampled at native frame times.");
+        rotateOrientations(chunk,project,statistics);rotateSh(chunk,project,statistics,progress);
     }
     transformPositions(chunk,project);
     if (const CompiledModifiers colour(project);colour.colourChanges) {

@@ -126,6 +126,11 @@ public:
   /** Store each group's splats in spatial (Morton) order, which makes the file about
    *  2% smaller. On by default; readers get the same splats in another order. */
   void setSpatialOrder(bool enabled);
+  /** Lossy, off by default (0): each splat keeps the lowest spherical harmonic degree
+   *  whose dropped bands stay within this RMS of what it had, and the dropped
+   *  coefficients are pointed at the book entries nearest zero. Every reader decodes the
+   *  result unchanged; the file is smaller. */
+  void setShPruneTolerance(float tolerance);
   /** Chunk workers: 0 selects up to eight hardware threads (default), 1 is
    *  serial, 2..64 sets a limit. Callbacks still run on the calling thread. */
   void setChunkThreads(uint32_t threads);

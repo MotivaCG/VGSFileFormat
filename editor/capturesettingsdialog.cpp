@@ -62,6 +62,13 @@ CaptureSettingsDialog::CaptureSettingsDialog(const Project &project,PresetStore 
     plyRowOffset_=new QSpinBox;plyRowOffset_->setObjectName("plyRowOffset");plyRowOffset_->setRange(0,10000000);
     plyRowOffset_->setToolTip(tr("Leading room rows not counted by birth_events.tsv. Use 0 for Spirula and Forge subject-only exports. Changing this reindexes the sequence and clears Erase picks; Undo restores both."));options->addRow(tr("Birth row offset"),plyRowOffset_);options->setRowVisible(plyRowOffset_,ply);
     shDegree_ = new QComboBox; shDegree_->addItem(tr("Keep source"),-1); for (int i=0; i<=3; ++i) shDegree_->addItem(tr("Degree %1").arg(i),i); options->addRow(tr("SH degree"),shDegree_);
+    shPrune_ = new QComboBox; shPrune_->setObjectName("shPrune");
+    shPrune_->addItem(tr("Off"),0.0); shPrune_->addItem(tr("Light"),0.04); shPrune_->addItem(tr("Medium"),0.06); shPrune_->addItem(tr("Strong"),0.08);
+    shPrune_->setToolTip(tr("Drops spherical harmonic bands per splat where they barely show, keeping the degree above for the splats that need it. "
+        "Lossy, VGS/PGS only. On boxing at degree 2: Light about 2% smaller, Medium 7%, Strong 12%; Degree 1 is 15% smaller but loses every splat's highlights. "
+        "Saves bytes, not decoding time."));
+    options->addRow(tr("SH reduction"),shPrune_);
+    connect(shDegree_,&QComboBox::currentIndexChanged,this,[this] {shPrune_->setEnabled(shDegree_->currentData().toInt()!=0);});
     playback_ = new QComboBox; playback_->addItem(tr("Keep source"),-1); playback_->addItem(tr("Once"),0); playback_->addItem(tr("Loop"),1); playback_->addItem(tr("Ping-pong"),2); options->addRow(tr("Playback"),playback_);
     normals_ = new QCheckBox(tr("Write normals"));
     normals_->setToolTip(tr("Store every splat's outward surface normal in the .vgs, or as nx ny nz in a .ply, for renderers that light splats. Computed at export from the cameras of the rig that captured it. About two bytes per splat before compression; MINT cannot hold them."));
@@ -103,7 +110,7 @@ CaptureSettings CaptureSettingsDialog::settings() const {
     CaptureSettings s; QString *values[] = {&s.title,&s.catalogueId,&s.author,&s.projectName,&s.takeName,&s.studio,&s.copyright,&s.softwareName,&s.softwareVersion};
     for (int i=0; i<9; ++i) *values[i] = fields_[i]->text().trimmed();
     for (const auto &tag : tags_->text().split(',',Qt::SkipEmptyParts)) if (!tag.trimmed().isEmpty()) s.tags.append(tag.trimmed());
-    s.extraJson = extraJson_->toPlainText(); s.shDegree = shDegree_->currentData().toInt(); s.playbackMode = playback_->currentData().toInt();
+    s.extraJson = extraJson_->toPlainText(); s.shDegree = shDegree_->currentData().toInt(); s.shPrune = shPrune_->currentData().toDouble(); s.playbackMode = playback_->currentData().toInt();
     s.despill = despill_->isChecked(); s.despillStrength = strength_->value(); s.greenGain = gain_->value(); s.viewChromaScale = chroma_->value(); s.recoverSkin = recoverSkin_->isChecked();
     s.despill = false; // a Colour modifier's setting now
     s.normals = normals_->isChecked(); s.normalRig = normalRig_->currentData().toInt();
@@ -113,7 +120,9 @@ CaptureSettings CaptureSettingsDialog::settings() const {
 void CaptureSettingsDialog::setSettings(const CaptureSettings &s) {
     const QString values[] = {s.title,s.catalogueId,s.author,s.projectName,s.takeName,s.studio,s.copyright,s.softwareName,s.softwareVersion};
     for (int i=0; i<9; ++i) fields_[i]->setText(values[i]); tags_->setText(s.tags.join(", ")); extraJson_->setPlainText(s.extraJson);
-    shDegree_->setCurrentIndex(shDegree_->findData(s.shDegree)); playback_->setCurrentIndex(playback_->findData(s.playbackMode));
+    shDegree_->setCurrentIndex(shDegree_->findData(s.shDegree));
+    {int at=shPrune_->findData(s.shPrune);if (at<0) {shPrune_->addItem(tr("Custom (%1)").arg(s.shPrune),s.shPrune);at=shPrune_->count()-1;}shPrune_->setCurrentIndex(at);}
+    shPrune_->setEnabled(s.shDegree!=0); playback_->setCurrentIndex(playback_->findData(s.playbackMode));
     plyFps_->setValue(s.plyFps);plyRowOffset_->setValue(s.plyRowOffset);
     despill_->setChecked(s.despill); strength_->setValue(s.despillStrength); gain_->setValue(s.greenGain); chroma_->setValue(s.viewChromaScale); recoverSkin_->setChecked(s.recoverSkin);
     for (auto *spin : {strength_,gain_,chroma_}) spin->setEnabled(s.despill); recoverSkin_->setEnabled(s.despill);

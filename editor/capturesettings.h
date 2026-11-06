@@ -24,6 +24,9 @@ struct CaptureSettings {
     bool normals = false;
     int normalRig = 0;
     int shDegree = -1,playbackMode = -1; // -1 preserves the source setting.
+    // Lossy SH reduction per splat at VGS/PGS export (EncodeOptions::shPruneTolerance):
+    // 0 off, otherwise the RMS a splat's dropped bands may differ by.
+    double shPrune = 0;
     double plyFps = 30;
     int plyRowOffset = 0;
     double despillStrength = 1,greenGain = 0.97,viewChromaScale = 0.5;
