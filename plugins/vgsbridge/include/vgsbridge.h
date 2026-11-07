@@ -2,19 +2,17 @@
 #define VGSBRIDGE_H
 
 /*
- * vgsbridge: playing VFGS captures inside a host that pulls frames.
+ * vgsbridge: playing VGS captures inside a host that pulls frames.
  *
  * It is the native component a host integration loads to play captures, and the boundary
  * between the closed VGS code and the integration's own: everything that reads the format
  * is in here, behind this small C interface, and the integration only calls it and copies
- * what it hands back. That is what lets an integration that must be free software - the
- * Blender add-on, GPL like everything written against Blender's API, or a plugin for any
- * other GPL host - stay entirely its own source while using a separately supplied library
- * under the VGS Decoder licence (see LICENSE.md beside this folder). Blender is the first
- * host; the frame layout below is shaped for it.
+ * what it hands back. An integration that must be free software, such as a plugin for a
+ * GPL host, stays entirely its own source while using this separately supplied library
+ * under the VGS Decoder licence (see LICENSE.md beside this folder).
  *
- * The decoder hands over one instant at a time and belongs to one thread. A host like
- * Blender asks for a frame on its main thread when the playhead moves and wants it at
+ * The decoder hands over one instant at a time and belongs to one thread. A host
+ * typically asks for a frame on its main thread when the playhead moves and wants it at
  * once; decoding it there would cost the whole frame budget, and a chunk boundary would
  * stall playback for a fifth of a second. So each player decodes on threads of its own:
  * two lanes, one for the even chunks and one for the odd, so that while one evaluates the
@@ -30,27 +28,26 @@
  *       vgsb_release(p);                     // the slot can be refilled now
  *     }
  *
- * What comes out is already shaped for Blender's Gaussian splat point clouds, so the
- * add-on only copies arrays into attributes:
+ * Frames come out in a plain, host-independent layout of flat float arrays, which an
+ * integration copies into its own attributes or reshapes as it copies:
  *
  *   - records that are not alive at the instant are left out, and `count` is what is
- *     left: Blender quantises attributes against their range over every point, and a dead
- *     record with a zero scale would stretch that range until nothing else resolved;
- *   - rotations are wxyz, the order of Blender's quaternion attribute;
- *   - `radiance` is the spherical harmonic DC term and the activated opacity, which is
- *     exactly the "radiance:base" attribute;
- *   - `sh` is one plane of 3 * count floats per coefficient, so plane k is the
- *     "radiance:sh_k" attribute as it stands.
+ *     left, so a dead record with a zero scale never stretches the range of a host that
+ *     quantises attributes over every point;
+ *   - rotations are unit quaternions in wxyz order;
+ *   - `radiance` is the spherical harmonic DC term followed by the activated opacity;
+ *   - `sh` is one plane of 3 * count floats per coefficient, plane k holding coefficient k
+ *     of every record.
  *
- * Scales and opacities are activated, as Blender stores them.
+ * Scales and opacities are activated, not stored as logarithms and logits.
  *
  * Several players run side by side: one per capture in the scene, each with its own
- * lanes. Every function is safe to call from any one thread at a time per player; the
- * add-on calls them all from Blender's main thread, or from the render thread while
- * rendering.
+ * lanes. Every function is safe to call from any one thread at a time per player, such as
+ * a host's main thread, or its render thread while rendering.
  *
- * The Houdini plugin compiles this same player into its SOP, with VGSBRIDGE_STATIC
- * defined, and reshapes each frame into Houdini's GSplat attributes as it copies it.
+ * Current integrations: the Blender add-on loads the shared library through this C
+ * interface; the Houdini plugin compiles the same player into its SOP with
+ * VGSBRIDGE_STATIC defined.
  */
 
 #include <stddef.h>
