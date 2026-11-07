@@ -30,6 +30,7 @@ int usage() {
                "\n"
                "  --plain                store pages without entropy coding (.pgs)\n"
                "  --sh <0..3>            highest spherical harmonic degree to keep (default 3)\n"
+               "  --sh-prune <rms>       lossy: drop SH bands per splat within this RMS (off; e.g. 0.06)\n"
                "  --page-rows <n>        target rows per page (1024..1048576, default 65536)\n"
                "  --threads <0..64>      chunk workers; 0: auto up to 8 (default), 1: serial\n"
                "  --chunk-memory-mib <n> estimated concurrent chunk working set (default 8192 MiB)\n"
