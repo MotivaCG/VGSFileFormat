@@ -11,6 +11,12 @@
 #include "viewport.h"
 #include "viewcube.h"
 #include "editortheme.h"
+#include "exportcapture.h"
+#include "vgsframe.h"
+#include "vgssign.h"
+#include <QFile>
+#include <QTemporaryDir>
+#include <random>
 #include <QApplication>
 #include <QImage>
 #include <QMouseEvent>
@@ -46,7 +52,85 @@ class ViewportTests : public QObject {
         }
         return point;
     }
+    // The viewer's packed playback against the floats path the editor uses: the same capture
+    // and instant drawn both ways must give the same image. Each packed frame is drawn as
+    // the first after a null one, which the viewport sorts at once rather than on its thread.
+    struct Played {CaptureInfo info;std::vector<FramePtr> frames;};
+    static Played play(const QString &path,const std::vector<double> &times,bool packed) {
+        CaptureWorker worker;worker.setPackedPlayback(packed);Played out;QString error;
+        QObject::connect(&worker,&CaptureWorker::opened,[&](CaptureInfo info,FramePtr,quint64) {out.info=info;});
+        QObject::connect(&worker,&CaptureWorker::decoded,[&](FramePtr frame,quint64) {out.frames.push_back(frame);});
+        QObject::connect(&worker,&CaptureWorker::failed,[&](QString message,quint64,bool) {error=message;});
+        worker.open(path,1,true);Project plain;plain.modifiers.clear();
+        for (double t:times) worker.decode(t,1,true,plain);
+        if (!error.isEmpty()) qWarning("%s",qPrintable(error));
+        return out;
+    }
+    static void comparePacked(const QString &path,const std::vector<double> &times,const char *what) {
+        const auto floats=play(path,times,false),packed=play(path,times,true);
+        QCOMPARE(floats.frames.size(),times.size());QCOMPARE(packed.frames.size(),times.size());
+        Viewport viewport;viewport.resize(480,360);viewport.setGrid(false);viewport.setFrontMarker(false);viewport.setAxes(false);
+        viewport.setSplatRendering(true);viewport.setSplatShDegree(-1);viewport.setSplatAntialiasing(floats.info.antialiased);
+        viewport.fit(floats.info.minimum,floats.info.maximum);
+        viewport.show();QVERIFY(QTest::qWaitForWindowExposed(&viewport));
+        for (size_t i=0;i<times.size();++i) {
+            QVERIFY2(packed.frames[i]->packed,qPrintable(QString("%1: frame at %2 s did not play packed").arg(what).arg(times[i])));
+            QVERIFY(!floats.frames[i]->packed);
+            viewport.setFrame(nullptr);viewport.setFrame(floats.frames[i]);const auto reference=viewport.grabFramebuffer();
+            viewport.setFrame(nullptr);viewport.setFrame(packed.frames[i]);const auto actual=viewport.grabFramebuffer();
+            QCOMPARE(actual.size(),reference.size());
+            int worst=0;size_t ink=0,off=0;double total=0;const auto background=reference.pixelColor(0,0);
+            auto difference=[](const QColor &a,const QColor &b) {return std::max({std::abs(a.red()-b.red()),std::abs(a.green()-b.green()),std::abs(a.blue()-b.blue())});};
+            for (int y=0;y<actual.height();++y) for (int x=0;x<actual.width();++x) {
+                const auto a=actual.pixelColor(x,y),b=reference.pixelColor(x,y);
+                const int d=difference(a,b);worst=std::max(worst,d);total+=d;off+=d>6;ink+=difference(b,background)>12;
+            }
+            const double mean=total/(double(actual.width())*actual.height());
+            qInfo("%s at %.3f s: %llu splats, %zu ink px, mean %.3f, worst %d, %zu px over 6",what,times[i],qulonglong(packed.frames[i]->total),ink,mean,worst,off);
+            QVERIFY2(ink>200,what);
+            QVERIFY2(mean<0.25 && off<=std::max<size_t>(3,ink/1000),qPrintable(QString("%1 at %2 s: mean %3, %4 pixels differ by more than 6 (worst %5)").arg(what).arg(times[i]).arg(mean).arg(off).arg(worst)));
+        }
+    }
 private slots:
+    void packedPlaybackDrawsWhatFloatsDraw() {
+        // Synthetic: one interval per chunk, so per-sample groups, SH books and lifetimes; at
+        // every SH degree, with splats moving, turning and dying from frame to frame.
+        QTemporaryDir dir;
+        for (int degree=0;degree<=3;++degree) {
+            const QString path=dir.filePath(QString("packed%1.vgs").arg(degree));
+            const int frames=4,count=3000;const int coefficients=degree==3 ? 15 : degree==2 ? 8 : degree*3;
+            vgs::Header h;h.frameCount=h.durationTicks=frames;h.timeDenominator=25;h.chunks.resize(frames);h.shDegree=uint32_t(degree);
+            for (int i=0;i<frames;++i) {h.chunks[i].startTick=i;h.chunks[i].intervals=1;}
+            vgs::EncodeOptions options;options.signer=vgs::authoringSigner();options.compression=vgs::Compression::None;options.shDegree=uint32_t(degree);
+            QFile file(path);QVERIFY(file.open(QIODevice::WriteOnly));
+            try {vgs::encodeSequence(h,[&](size_t frame) {
+                vgs::Frame f;f.count=count;std::mt19937 random(11);std::normal_distribution<float> gauss;std::uniform_real_distribution<float> unit(0,1);
+                for (int i=0;i<count;++i) {
+                    const float t=float(frame)*.05f;
+                    f.position.insert(f.position.end(),{.4f*gauss(random)+t,1+.4f*gauss(random),.4f*gauss(random)});
+                    QQuaternion q=QQuaternion::fromEulerAngles(360*unit(random)+40*float(frame),360*unit(random),360*unit(random));
+                    f.rotation.insert(f.rotation.end(),{q.x(),q.y(),q.z(),q.scalar()});
+                    f.scale.insert(f.scale.end(),{.01f+.03f*unit(random),.01f+.03f*unit(random),.003f+.01f*unit(random)});
+                    f.opacity.push_back(.3f+.7f*unit(random));f.colorDc.insert(f.colorDc.end(),{unit(random),unit(random),unit(random)});
+                    f.active.push_back((i+int(frame))%7!=0);
+                }
+                f.shCoefficients=15;f.shRest.resize(size_t(count)*45);
+                for (auto &v:f.shRest) v=.2f*gauss(random);
+                (void)coefficients;
+                return packExportFrame(f,degree);
+            },[&](uint64_t offset,const uint8_t *bytes,size_t n) {file.seek(qint64(offset));file.write(reinterpret_cast<const char *>(bytes),qint64(n));},options);}
+            catch (const std::exception &e) {QFAIL(e.what());}
+            file.close();
+            comparePacked(path,{0.,.05,.07,.13},qPrintable(QString("synthetic SH%1").arg(degree)));
+        }
+    }
+    void packedPlaybackDrawsWhatFloatsDrawOnACapture() {
+        // A real capture adds what only the fitter writes: trajectory groups, their residual
+        // terms and the integrated rotation deltas.
+        const QString path=qEnvironmentVariable("VGS_TEST_CAPTURE");
+        if (path.isEmpty()) QSKIP("Set VGS_TEST_CAPTURE to a .vgs to compare packed playback on a real capture.");
+        comparePacked(path,{0.,.5,.99,1.01,2.37},"capture");
+    }
     void morphShBlendMatchesMaterializedCoefficients() {
         Viewport viewport;viewport.resize(400,300);viewport.setGrid(false);viewport.setFrontMarker(false);viewport.setPointSize(9);
         Camera camera;camera.yaw=camera.pitch=0;camera.distance=3;viewport.setCamera(camera);

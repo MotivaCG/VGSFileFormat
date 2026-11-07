@@ -121,6 +121,12 @@ ViewerWindow::ViewerWindow() : worker_(new CaptureWorker) {
             else {setTime(rangeEnd);play(false);return;}
         }
         setTime(t);});
+    // Chunks go to the GPU once and the shader evaluates each frame (CaptureWorker::
+    // setPackedPlayback); VGS_VIEWER_FLOATS=1 plays the floats way, as the editor does.
+    worker_->setPackedPlayback(!qEnvironmentVariableIsSet("VGS_VIEWER_FLOATS"));
+    connect(viewport_,&Viewport::packedRenderingFailed,this,[this] {
+        QMetaObject::invokeMethod(worker_,[worker=worker_] {worker->setPackedPlayback(false);});
+        requestFrame();});
     worker_->moveToThread(&thread_);connect(&thread_,&QThread::finished,worker_,&QObject::deleteLater);
     connect(this,&ViewerWindow::openRequested,worker_,&CaptureWorker::open);
     connect(this,&ViewerWindow::decodeRequested,worker_,&CaptureWorker::decode);

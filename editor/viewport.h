@@ -141,9 +141,15 @@ public:
     size_t ghostPointCount() const {return ghostPoints_.size();}
     double ghostTime() const {return ghostTime_;}
     QString renderError() const { return error_; }
+    // Whether this context can draw the viewer's packed frames; true until it is known.
+    bool packedRenderingAvailable() const { return !initialized_ || bool(splatPackedShader_); }
+    // A packed frame was set whose order is still being sorted: the previous one is on screen.
+    bool packedFramePending() const { return frame_ && frame_->packed && drawnPacked_ && drawnPackedSerial_!=frameSerial_; }
 signals:
     void cameraChanged();
     void renderFailed(QString error);
+    // A packed frame arrived that this context cannot draw: the owner asks for floats instead.
+    void packedRenderingFailed();
     void transformEdited(Transform transform);
     void transformModeChanged(TransformMode mode);
     void cropEdited(CropVolume crop);
@@ -273,6 +279,27 @@ private:
     quint64 frameSerial_ = 0, sortedSerial_ = 0, requestedSerial_ = 0;
     bool orderComplete_ = false; // every splat of its frame, none filtered out
     std::unique_ptr<SplatSorter> sorter_;
+    // Packed playback: a newer frame waits until its order is sorted, then the two are drawn
+    // together, so no sort ever runs on this thread during playback.
+    std::unique_ptr<QOpenGLShaderProgram> splatPackedShader_;
+    std::array<GLuint,12> packedBuffers_{}, packedTextures_{};
+    FramePtr drawnPacked_;
+    quint64 drawnPackedSerial_ = 0;
+    // Frames whose order was asked for, newest last: a result for any of them newer than the
+    // one drawn goes on screen, so playback advances even when frames outrun the sorter.
+    std::deque<std::pair<quint64,FramePtr>> packedRequests_;
+    // What the packed buffers hold, compared by identity; weak, so they keep nothing alive.
+    std::weak_ptr<const PackedChunk> uploadedPackedChunk_;
+    std::weak_ptr<const PackedFrame> uploadedPackedBasis_;
+    bool packedFailureReported_ = false;
+    // The frame to draw this paint, sorted, with its textures and uniforms in place; null when
+    // there is none yet.
+    const PackedFrame *preparePacked(QOpenGLShaderProgram *shader, const QMatrix4x4 &modelView);
+    bool packedFits(const PackedChunk &chunk) const;
+    // Points for picking: the frame's, or a packed frame's positions, built when first asked.
+    const std::vector<PointVertex> &pickablePoints() const;
+    mutable std::vector<PointVertex> pickPoints_;
+    mutable quint64 pickPointsSerial_ = 0;
     QString error_;
     double uploadMs_ = 0;
     FrameTimings frameTimings_;

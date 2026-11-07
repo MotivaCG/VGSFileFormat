@@ -239,6 +239,95 @@ void main() {
     rgba=texelFetch(projectedData,base+2);uv=corner;
 }
 )GLSL";
+// Packed playback (the viewer): the record comes from the decoder's packed chunk instead of
+// the splatData buffer, evaluated here as the CPU evaluator does (vgsframe.cpp) and as the
+// web viewer's READ_GLSL does. The chunk's textures are uploaded once per chunk; per frame
+// only the shared tables' basis changes, computed on the worker (packedchunk.cpp). The SH
+// coefficients are summed from the static and temporal codebooks the same way.
+static const char *packedRecord = R"GLSL(
+uniform usamplerBuffer vgsSplatA, vgsSplatB, vgsSplatC, vgsPosSample, vgsRotSample, vgsPosTerms, vgsRotTerms, vgsShStaticIdx, vgsShTemporalIdx;
+uniform samplerBuffer vgsShBooks, vgsBasis, vgsLuts;
+uniform int vgsFrame, vgsSamples, vgsGroupCount, vgsSplats, vgsSh0Stride, vgsOpaStride;
+uniform int vgsEntriesStatic, vgsEntriesTemporal, vgsBooksTemporal, vgsShPlanes;
+uniform ivec4 vgsBasisOffset; // position, colour, opacity, rotation
+uniform float vgsAlpha, vgsNormalized;
+uniform vec4 vgsGroupA[8];    // end index, flags, position min, max
+uniform vec4 vgsGroupB[8];    // first per-sample position and rotation texel
+// 21 bits per axis over one range, x in the high bits and z in the low ones.
+vec3 vgsUnpackPos(uvec2 w, float lo, float hi) {
+    uint z=(w.x>>1)&0x1FFFFFu, y=(w.x>>22)|((w.y&0x7FFu)<<10), x=w.y>>11;
+    return vec3(x,y,z)*((hi-lo)/2097151.0)+lo;
+}
+// Smallest three, stored wxyz, returned xyzw; the low bit negates the whole quaternion.
+vec4 vgsUnpackQuat(uint w) {
+    uint largest=w>>30;
+    vec3 s=vec3(float((w>>20)&1023u)/1023.0*2.0-1.0, float((w>>10)&1023u)/1023.0*2.0-1.0, float((w>>1)&511u)/511.0*2.0-1.0)*0.70710678118654752;
+    float o=sqrt(max(0.0,1.0-dot(s,s)));
+    vec4 q=largest==0u ? vec4(o,s) : largest==1u ? vec4(s.x,o,s.y,s.z) : largest==2u ? vec4(s.x,s.y,o,s.z) : vec4(s,o);
+    q*=(w&1u)!=0u ? -1.0 : 1.0;
+    return vec4(q.yzw,q.x);
+}
+// One of five 12-bit residual codes in a 64-bit word; codes 3 and 4 straddle the halves.
+uint vgsRq(uvec2 w, int k) {
+    return k<2 ? (w.x>>uint(12*k))&4095u : k==2 ? ((w.x>>24)|((w.y&15u)<<8))&4095u : (w.y>>uint(12*k-32))&4095u;
+}
+vec4 vgsBasisAt(int band, int i) { return texelFetch(vgsBasis,vgsBasisOffset[band]+i); }
+// a: position, opacity; q: rotation xyzw; s: scale, record; c: colour, visibility.
+void fetchRecord(int index, out vec4 a, out vec4 q, out vec4 s, out vec4 c) {
+    uvec4 A=texelFetch(vgsSplatA,index), B=texelFetch(vgsSplatB,index), C=texelFetch(vgsSplatC,index);
+    s=vec4(0,0,0,float(index)); c=vec4(0,0,0,1); q=vec4(0,0,0,1); a=vec4(0);
+    if(index>=vgsSplats || vgsFrame<int(A.w>>24) || vgsFrame+1>int(C.w>>24)) return; // not alive: opacity 0, culled
+    int gi=vgsGroupCount-1;
+    for(int i=0;i<8;++i) if(i<vgsGroupCount && index<int(vgsGroupA[i].x)) {gi=i;break;}
+    int local=index-(gi==0 ? 0 : int(vgsGroupA[gi-1].x)), flags=int(vgsGroupA[gi].y);
+    float lo=vgsGroupA[gi].z, hi=vgsGroupA[gi].w;
+    vec3 p;
+    if((flags&1)!=0) {
+        int base=int(vgsGroupB[gi].x)+local*vgsSamples;
+        vec3 p0=vgsUnpackPos(texelFetch(vgsPosSample,base+vgsFrame).rg,lo,hi), p1=vgsUnpackPos(texelFetch(vgsPosSample,base+vgsFrame+1).rg,lo,hi);
+        p=p0+(p1-p0)*vgsNormalized; // normalised chunk time, as the runtime does
+    } else {
+        p=vgsUnpackPos(A.xy,lo,hi);
+        int terms=int(C.z&255u);
+        for(int k=0;k<4;++k) {
+            if(k>=terms) break;
+            uvec2 term=texelFetch(vgsPosTerms,int(C.x)+k).rg;
+            p+=vgsBasisAt(0,int(term.x)).xyz*uintBitsToFloat(term.y);
+        }
+    }
+    vec4 r;
+    if((flags&2)!=0) {
+        int base=int(vgsGroupB[gi].y)+local*vgsSamples;
+        vec4 q0=vgsUnpackQuat(texelFetch(vgsRotSample,base+vgsFrame).r), q1=vgsUnpackQuat(texelFetch(vgsRotSample,base+vgsFrame+1).r);
+        r=q0+(q1*(dot(q0,q1)<0.0 ? -1.0 : 1.0)-q0)*vgsAlpha;
+    } else {
+        vec4 base=vgsUnpackQuat(A.z), residual=vec4(0);
+        int terms=int((C.z>>8)&255u);
+        for(int k=0;k<5;++k) {if(k>=terms) break; residual+=vgsBasisAt(3,int(texelFetch(vgsRotTerms,int(C.y)+k).r));}
+        float n2=dot(residual,residual);
+        if(n2<1e-12) r=base;
+        else {residual*=inversesqrt(n2); r=vec4(residual.w*base.xyz+base.w*residual.xyz+cross(residual.xyz,base.xyz),residual.w*base.w-dot(residual.xyz,base.xyz));}
+    }
+    q=r/max(length(r),1e-20);
+    vec3 sh0=vec3(texelFetch(vgsLuts,int(C.w&255u)).g,texelFetch(vgsLuts,int((C.w>>8)&255u)).g,texelFetch(vgsLuts,int((C.w>>16)&255u)).g);
+    float opacity=0.0;
+    for(int k=0;k<5;++k) {
+        sh0+=vgsBasisAt(1,k*vgsSh0Stride+int(vgsRq(B.xy,k))).xyz;
+        opacity+=vgsBasisAt(2,k*vgsOpaStride+int(vgsRq(B.zw,k))).x;
+    }
+    // The optional per-splat opacity factor in the words' top nibbles: 2^(-code/16).
+    float factor=exp2(-float((B.w>>28)|((B.y>>28)<<4))/16.0);
+    a=vec4(p,clamp(opacity,0.0,1.0)*factor);
+    s.xyz=vec3(texelFetch(vgsLuts,int(A.w&255u)).r,texelFetch(vgsLuts,int((A.w>>8)&255u)).r,texelFetch(vgsLuts,int((A.w>>16)&255u)).r);
+    c.rgb=vec3(0.5)+0.28209479177387814*sh0;
+}
+// One word per plane carries three coefficients' codebook indices.
+vec3 recordSh(int index, int co) {
+    int word=(co/3)*vgsSplats+index; uint shift=uint(20-10*(co%3));
+    int si=int((texelFetch(vgsShStaticIdx,word).r>>shift)&1023u), ti=int((texelFetch(vgsShTemporalIdx,word).r>>shift)&1023u);
+    return texelFetch(vgsShBooks,co*vgsEntriesStatic+si).xyz+texelFetch(vgsShBooks,vgsBooksTemporal+vgsFrame*vgsShPlanes*3*vgsEntriesTemporal+co*vgsEntriesTemporal+ti).xyz;
+}
+)GLSL";
 static const char *splatFragment = R"GLSL(
 #version 330 core
 in vec4 rgba;
@@ -328,14 +417,14 @@ void main() {
 )GLSL";
 // Back to front by view depth: a 16-bit counting sort, linear in the splat count. Splats
 // that `keep` leaves out are not in the order at all.
-static void sortBackToFront(const std::vector<PointVertex> &points,const QMatrix4x4 &modelView,const std::vector<uint8_t> *keep,
+// Positions are `stride` floats apart: a PointVertex's, or a packed frame's bare xyz.
+static void sortBackToFront(const float *positions,size_t count,size_t stride,const QMatrix4x4 &modelView,const std::vector<uint8_t> *keep,
                             std::vector<float> &depths,std::vector<uint32_t> &order) {
-    const size_t count = points.size();
     const float r0 = modelView(2,0), r1 = modelView(2,1), r2 = modelView(2,2), r3 = modelView(2,3);
     depths.resize(count);
     float lowest = std::numeric_limits<float>::max(), highest = std::numeric_limits<float>::lowest();
     for (size_t i=0; i<count; ++i) {
-        const auto *p = points[i].position;
+        const auto *p = positions+i*stride;
         const float z = r0*p[0]+r1*p[1]+r2*p[2]+r3; depths[i] = z;
         lowest = std::min(lowest,z); highest = std::max(highest,z);
     }
@@ -351,6 +440,17 @@ static void sortBackToFront(const std::vector<PointVertex> &points,const QMatrix
     for (int b=0; b<bins; ++b) {const uint32_t c = counts[b]; counts[b] = total; total += c;}
     order.resize(total);
     for (size_t i=0; i<count; ++i) if (keys[i]<bins) order[counts[keys[i]]++] = uint32_t(i);
+}
+static_assert(offsetof(PointVertex,position)==0 && sizeof(PointVertex)%sizeof(float)==0);
+static void sortBackToFront(const std::vector<PointVertex> &points,const QMatrix4x4 &modelView,const std::vector<uint8_t> *keep,
+                            std::vector<float> &depths,std::vector<uint32_t> &order) {
+    sortBackToFront(points.empty() ? nullptr : points[0].position,points.size(),sizeof(PointVertex)/sizeof(float),modelView,keep,depths,order);
+}
+// A packed frame sorts its decoder positions and leaves out the splats not alive at it.
+static void sortBackToFront(const RenderFrame &frame,const QMatrix4x4 &modelView,std::vector<float> &depths,std::vector<uint32_t> &order) {
+    if (!frame.packed) {sortBackToFront(frame.points,modelView,nullptr,depths,order);return;}
+    const auto &p=*frame.packed;
+    sortBackToFront(p.positions.data(),p.positions.size()/3,3,modelView,&p.alive,depths,order);
 }
 // Sorts on its own thread so orbiting never waits for it: the viewport keeps drawing the last
 // order, which only lags the view by a frame or two. Only the latest request matters; one
@@ -385,7 +485,7 @@ private:
                 job = std::move(*pending_); pending_.reset();
             }
             Result done{job.serial,job.modelView,{}};
-            sortBackToFront(job.frame->points,job.modelView,nullptr,depths,done.order);
+            sortBackToFront(*job.frame,job.modelView,depths,done.order);
             job.frame.reset();
             {std::lock_guard<std::mutex> lock(mutex_); result_ = std::move(done);}
             ready_();
@@ -470,6 +570,8 @@ void Viewport::cleanup() {
     if (!initialized_) return;
     makeCurrent();
     pointShader_.reset(); gridShader_.reset(); splatShader_.reset();splatPrepareShader_.reset();
+    if (splatPackedShader_) {glDeleteBuffers(12,packedBuffers_.data());glDeleteTextures(12,packedTextures_.data());}
+    splatPackedShader_.reset();packedBuffers_={};packedTextures_={};uploadedPackedChunk_.reset();uploadedPackedBasis_.reset();drawnPacked_.reset();drawnPackedSerial_=0;
     glDeleteVertexArrays(1,&splatPrepareVao_);glDeleteBuffers(1,&projectedBuffer_);glDeleteTextures(1,&projectedTexture_);
     glDeleteBuffers(1,&blendSourceBuffer_);glDeleteTextures(1,&blendSourceTexture_);glDeleteBuffers(1,&blendIndexBuffer_);glDeleteTextures(1,&blendIndexTexture_);uploadedBlendSources_.reset();
     glDeleteVertexArrays(1,&splatVao_); glDeleteBuffers(1,&cornerBuffer_); glDeleteBuffers(1,&orderBuffer_);
@@ -512,6 +614,28 @@ void Viewport::initializeGL() {
     if (!build(pointShader_, pointVertex.constData(), pointFragment) || !build(gridShader_, gridVertex, gridFragment)) return;
     if (!build(splatPrepareShader_, splatVertex.constData(), nullptr,true) || !build(splatShader_,projectedSplatVertex,splatFragment)) return;
     glGenVertexArrays(1,&splatPrepareVao_);glGenBuffers(1,&projectedBuffer_);glGenTextures(1,&projectedTexture_);
+    {
+        // The same prepare pass, its record and SH read from a packed chunk. Optional: a context
+        // that cannot build it plays the floats way.
+        const QByteArray fetch="vec4 a=texelFetch(splatData,base), q=texelFetch(splatData,base+1), s=texelFetch(splatData,base+2), c=texelFetch(splatData,base+3);";
+        const QByteArray shFetch="result+=basis[k]*texelFetch(shData,int(sourceId)*shCoefficients+k).rgb;";
+        QByteArray packedVertex=prepareInputs+packedRecord+recordShading+splatMain;
+        if (packedVertex.contains(fetch) && packedVertex.contains(shFetch)) {
+            packedVertex.replace(fetch,"vec4 a,q,s,c; fetchRecord(int(record),a,q,s,c);");
+            packedVertex.replace(shFetch,"result+=basis[k]*recordSh(int(sourceId),k);");
+            auto program=std::make_unique<QOpenGLShaderProgram>();
+            const char *varyings[]={"gl_Position","projectedAxes","rgba"};
+            bool ok=program->addShaderFromSourceCode(QOpenGLShader::Vertex,packedVertex);
+            if (ok) {glTransformFeedbackVaryings(program->programId(),3,varyings,GL_INTERLEAVED_ATTRIBS);ok=program->link();}
+            if (ok) {
+                program->bind();
+                const char *samplers[]={"vgsSplatA","vgsSplatB","vgsSplatC","vgsPosSample","vgsRotSample","vgsPosTerms","vgsRotTerms","vgsShStaticIdx","vgsShTemporalIdx","vgsShBooks","vgsBasis","vgsLuts"};
+                for (int i=0;i<12;++i) program->setUniformValue(samplers[i],4+i);
+                program->release();splatPackedShader_=std::move(program);
+                glGenBuffers(12,packedBuffers_.data());glGenTextures(12,packedTextures_.data());
+            } else qWarning("Packed splat shader unavailable: %s",qPrintable(program->log()));
+        }
+    }
     glGenBuffers(1,&blendSourceBuffer_);glGenTextures(1,&blendSourceTexture_);glGenBuffers(1,&blendIndexBuffer_);glGenTextures(1,&blendIndexTexture_);
     gridShader_->bind(); gridShader_->setUniformValue("greyMap",QVector2D(1,0)); gridShader_->release();
     if (!build(ghostShader_,ghostVertex,pointFragment) || !build(ghostCompositeShader_,ghostCompositeVertex,ghostCompositeFragment)) return;
@@ -688,12 +812,17 @@ void Viewport::paintGL() {
         gridShader_->setUniformValue("greyMap",QVector2D(1,0)); // crop and gizmo lines share this shader
         gridShader_->release();
     }
-    if (frame_ && !frame_->points.empty()) {
+    const bool packedFrame = frame_ && frame_->packed;
+    if (packedFrame && (!splatPackedShader_ || !splats_ || !packedFits(*frame_->packed->chunk))) {
+        // Cannot be drawn here: the owner switches to floats and asks again.
+        if (!packedFailureReported_) {packedFailureReported_=true;QMetaObject::invokeMethod(this,[this] {emit packedRenderingFailed();},Qt::QueuedConnection);}
+    } else if (frame_ && (packedFrame || !frame_->points.empty())) {
         QElapsedTimer timer;
         timer.start();
         GLint maxTexels = 0; glGetIntegerv(GL_MAX_TEXTURE_BUFFER_SIZE, &maxTexels);
-        const bool splats = splats_ && frame_->points.size()*4 <= size_t(maxTexels);
+        const bool splats = packedFrame || (splats_ && frame_->points.size()*4 <= size_t(maxTexels));
         const auto &blend=frame_->shBlend;const bool blendSh=bool(blend.sources);
+        if (packedFrame) frameDirty_=splatsDirty_=false; // its buffers are the packed chunk's
         if (frameDirty_ && !splats) {
             glBindBuffer(GL_ARRAY_BUFFER, buffer_);
             glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(frame_->points.size()*sizeof(PointVertex)), frame_->points.data(), GL_STREAM_DRAW);
@@ -760,9 +889,13 @@ void Viewport::paintGL() {
         }
         glEnable(GL_DEPTH_TEST); glDepthMask(GL_TRUE);
         glDisable(GL_BLEND); glEnable(GL_PROGRAM_POINT_SIZE);
-        auto *shader = splats ? splatPrepareShader_.get() : pointShader_.get();
+        auto *shader = packedFrame ? splatPackedShader_.get() : splats ? splatPrepareShader_.get() : pointShader_.get();
         shader->bind();
-        shader->setUniformValue("model", model); shader->setUniformValue("view", view);
+        // A packed frame: the one whose order is ready, which may still be the previous one.
+        const PackedFrame *drawn = packedFrame ? preparePacked(shader, view*model) : nullptr;
+        // Packed splats are in the capture's own space; its motion is part of the model.
+        const QMatrix4x4 recordModel = drawn ? model*QMatrix4x4(drawn->motion).transposed() : model;
+        shader->setUniformValue("model", recordModel); shader->setUniformValue("view", view);
         shader->setUniformValue("projection", projection);
         shader->setUniformValue("pointSize", pointSize_*dpr);
         auto activeModifiers=modifiers_;
@@ -800,8 +933,8 @@ void Viewport::paintGL() {
         shader->setUniformValue("modifierData",1);shader->setUniformValue("cropCount",cpuFiltering ? 0 : int(modifiers.crops.size()));shader->setUniformValue("greenCount",cpuFiltering || frame_->greensApplied ? 0 : int(modifiers.greens.size()));shader->setUniformValue("editingCrop",cropEditing_ && !cleanCapture_ && !sheetCapture_);shader->setUniformValue("editShowsRed",crop_.showRemovedInRed);
         shader->setUniformValue("showRemoved",sheetCapture_ && sheetShowRemoved_);
         const auto eye = view.inverted().map(QVector3D(0,0,0));
-        shader->setUniformValue("eyeLocal", model.inverted().map(eye));
-        shader->setUniformValue("shCoefficients", shCoefficients_);
+        shader->setUniformValue("eyeLocal", recordModel.inverted().map(eye));
+        shader->setUniformValue("shCoefficients", drawn ? drawn->chunk->coefficients : shCoefficients_);
         shader->setUniformValue("shEvaluated", splats && splatShDegree_>=0 ? splatShDegree_*(splatShDegree_+2) : 15);
         shader->setUniformValue("shData", 0);
         shader->setUniformValue("blendSh",blendSh);shader->setUniformValue("blendIndices",3);
@@ -817,7 +950,9 @@ void Viewport::paintGL() {
             auto upload = [&] {
                 glBindBuffer(GL_ARRAY_BUFFER, orderBuffer_);
                 glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(splatOrder_.size()*sizeof(uint32_t)), splatOrder_.data(), GL_STREAM_DRAW); };
-            if (cpuFiltering || sheetCapture_) {
+            if (packedFrame) {
+                // preparePacked has the order in place.
+            } else if (cpuFiltering || sheetCapture_) {
                 // That order leaves the filtered splats out, so it is made here, for this paint;
                 // an inspection view's camera is used once, so it is sorted here too.
                 sortBackToFront(frame_->points, modelView, cpuFiltering ? &cpuKeep : nullptr, splatDepths_, splatOrder_); upload();
@@ -852,11 +987,12 @@ void Viewport::paintGL() {
             shader->setUniformValue("bakeSize", float(bake)/std::max(modelScale,1e-6f));
             const bool measureGpu=qEnvironmentVariableIsSet("PLAYBACK_GPU_TIMING");GLuint queries[2]={};
             if (measureGpu) {glGenQueries(2,queries);glBeginQuery(GL_TIME_ELAPSED,queries[0]);}
+            const size_t prepared = drawn ? size_t(drawn->chunk->splats) : frame_->points.size();
             glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER,projectedBuffer_);
-            glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER,GLsizeiptr(frame_->points.size()*12*sizeof(float)),nullptr,GL_STREAM_DRAW);
+            glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER,GLsizeiptr(std::max<size_t>(1,prepared)*12*sizeof(float)),nullptr,GL_STREAM_DRAW);
             glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER,0,projectedBuffer_);
             glBindVertexArray(splatPrepareVao_);glEnable(GL_RASTERIZER_DISCARD);
-            glBeginTransformFeedback(GL_POINTS);glDrawArrays(GL_POINTS,0,GLsizei(frame_->points.size()));glEndTransformFeedback();
+            glBeginTransformFeedback(GL_POINTS);glDrawArrays(GL_POINTS,0,GLsizei(prepared));glEndTransformFeedback();
             glDisable(GL_RASTERIZER_DISCARD);glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER,0,0);
             if (measureGpu) glEndQuery(GL_TIME_ELAPSED);
             shader->release();splatShader_->bind();
@@ -955,7 +1091,94 @@ void Viewport::setFrame(FramePtr frame) {
     ++frameRevision_;
     if (!frame) setGhost(false);
     if (!frame) setTransformMode(TransformMode::None);
-    frame_ = std::move(frame); ++frameSerial_; frameDirty_ = true; splatsDirty_ = true; update();
+    frame_ = std::move(frame); ++frameSerial_; frameDirty_ = true; splatsDirty_ = true;
+    if (!frame_ || !frame_->packed) {drawnPacked_.reset();drawnPackedSerial_=0;packedRequests_.clear();packedFailureReported_=false;pickPoints_.clear();}
+    update();
+}
+bool Viewport::packedFits(const PackedChunk &c) const {
+    GLint texels=0,units=0;
+    auto *gl=const_cast<Viewport *>(this);
+    gl->glGetIntegerv(GL_MAX_TEXTURE_BUFFER_SIZE,&texels);gl->glGetIntegerv(GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS,&units);
+    const size_t largest=std::max({size_t(c.splats),c.positionSamples.size()/2,c.positionTerms.size()/2,c.rotationTerms.size(),
+        c.rotationSamples.size(),c.shStatic.size(),c.books.size()/4,size_t(basisLayout(c).total)});
+    return units>=16 && largest<=size_t(texels) && c.splats<uint64_t(std::numeric_limits<int>::max());
+}
+const PackedFrame *Viewport::preparePacked(QOpenGLShaderProgram *shader,const QMatrix4x4 &modelView) {
+    auto depthAxisMoved=[&](const QMatrix4x4 &from) {
+        for (int c=0;c<4;++c) if (std::abs(modelView(2,c)-from(2,c))>1e-5f*(c==3 ? std::max(1.f,std::abs(modelView(2,3))) : 1.f)) return true;
+        return false;};
+    auto uploadOrder=[&] {glBindBuffer(GL_ARRAY_BUFFER,orderBuffer_);glBufferData(GL_ARRAY_BUFFER,GLsizeiptr(splatOrder_.size()*sizeof(uint32_t)),splatOrder_.data(),GL_STREAM_DRAW);};
+    QElapsedTimer timer;timer.start();
+    SplatSorter::Result result;
+    if (sorter_->take(result)) {
+        // A frame's order: it and its geometry go on screen together. The drawn frame's own
+        // (the view moved), or any newer frame's, even if a newer one still is on its way.
+        if (drawnPacked_ && result.serial==drawnPackedSerial_) {splatOrder_=std::move(result.order);uploadOrder();sortedView_=result.modelView;}
+        else if (result.serial>drawnPackedSerial_)
+            for (const auto &[serial,frame]:packedRequests_) if (serial==result.serial) {
+                splatOrder_=std::move(result.order);uploadOrder();drawnPacked_=frame;drawnPackedSerial_=serial;sortedView_=result.modelView;break;
+            }
+        while (!packedRequests_.empty() && packedRequests_.front().first<=drawnPackedSerial_) packedRequests_.pop_front();
+    }
+    if (!drawnPacked_) {
+        // The first frame has nothing to show meanwhile: sorted here, once.
+        sortBackToFront(*frame_,modelView,splatDepths_,splatOrder_);uploadOrder();
+        drawnPacked_=frame_;drawnPackedSerial_=frameSerial_;sortedView_=modelView;packedRequests_.clear();
+    }
+    sortedSerial_=drawnPackedSerial_;orderComplete_=true;
+    if ((drawnPackedSerial_!=frameSerial_ || depthAxisMoved(sortedView_)) && (requestedSerial_!=frameSerial_ || depthAxisMoved(requestedView_))) {
+        sorter_->request(frame_,frameSerial_,modelView);requestedSerial_=frameSerial_;requestedView_=modelView;
+        if (drawnPackedSerial_!=frameSerial_ && (packedRequests_.empty() || packedRequests_.back().first!=frameSerial_)) {
+            packedRequests_.emplace_back(frameSerial_,frame_);
+            if (packedRequests_.size()>3) packedRequests_.pop_front();
+        }
+    }
+    frameTimings_.sort=timer.nsecsElapsed()/1e6;timer.restart();
+
+    const auto &packed=drawnPacked_->packed;const PackedChunk &c=*packed->chunk;
+    auto buffer=[&](int slot,GLenum format,const void *data,size_t bytes) {
+        glBindBuffer(GL_TEXTURE_BUFFER,packedBuffers_[size_t(slot)]);glBufferData(GL_TEXTURE_BUFFER,GLsizeiptr(bytes),data,GL_STATIC_DRAW);
+        glBindTexture(GL_TEXTURE_BUFFER,packedTextures_[size_t(slot)]);glTexBuffer(GL_TEXTURE_BUFFER,format,packedBuffers_[size_t(slot)]);};
+    auto words=[&](int slot,GLenum format,const std::vector<uint32_t> &v) {buffer(slot,format,v.data(),v.size()*4);};
+    glActiveTexture(GL_TEXTURE4);
+    if (uploadedPackedChunk_.lock()!=packed->chunk) {
+        // Once per chunk: everything per splat and the codebooks.
+        words(0,GL_RGBA32UI,c.splatA);words(1,GL_RGBA32UI,c.splatB);words(2,GL_RGBA32UI,c.splatC);
+        words(3,GL_RG32UI,c.positionSamples);words(4,GL_R32UI,c.rotationSamples);
+        words(5,GL_RG32UI,c.positionTerms);words(6,GL_R32UI,c.rotationTerms);
+        words(7,GL_R32UI,c.shStatic);words(8,GL_R32UI,c.shTemporal);
+        buffer(9,GL_RGBA32F,c.books.data(),c.books.size()*4);buffer(11,GL_RG32F,c.luts.data(),c.luts.size()*4);
+        uploadedPackedChunk_=packed->chunk;
+    }
+    // Once per frame: the shared tables at its instant, a few hundred kilobytes.
+    if (uploadedPackedBasis_.lock()!=packed) {buffer(10,GL_RGBA32F,packed->basis.data(),packed->basis.size()*4);uploadedPackedBasis_=packed;}
+    for (int i=0;i<12;++i) {glActiveTexture(GLenum(GL_TEXTURE4+i));glBindTexture(GL_TEXTURE_BUFFER,packedTextures_[size_t(i)]);}
+    glActiveTexture(GL_TEXTURE0);
+    frameTimings_.upload+=timer.nsecsElapsed()/1e6;
+
+    const auto layout=basisLayout(c);
+    shader->setUniformValue("vgsFrame",int(packed->instant.frame));shader->setUniformValue("vgsSamples",int(c.samples));
+    shader->setUniformValue("vgsGroupCount",c.groupCount);shader->setUniformValue("vgsSplats",int(c.splats));
+    shader->setUniformValue("vgsSh0Stride",int(c.sh0Stride));shader->setUniformValue("vgsOpaStride",int(c.opacityStride));
+    shader->setUniformValue("vgsEntriesStatic",int(c.entriesStatic));shader->setUniformValue("vgsEntriesTemporal",int(c.entriesTemporal));
+    shader->setUniformValue("vgsBooksTemporal",int(uint64_t(c.planes)*3*c.entriesStatic));shader->setUniformValue("vgsShPlanes",c.planes);
+    glUniform4i(shader->uniformLocation("vgsBasisOffset"),layout.position,layout.sh0,layout.opacity,layout.rotation);
+    shader->setUniformValue("vgsAlpha",packed->instant.alpha);shader->setUniformValue("vgsNormalized",packed->instant.normalized);
+    shader->setUniformValueArray("vgsGroupA",c.groupA,PackedChunk::MaxGroups,4);shader->setUniformValueArray("vgsGroupB",c.groupB,PackedChunk::MaxGroups,4);
+    return packed.get();
+}
+const std::vector<PointVertex> &Viewport::pickablePoints() const {
+    static const std::vector<PointVertex> none;
+    if (!frame_) return none;
+    if (!frame_->packed) return frame_->points;
+    if (pickPointsSerial_!=frameSerial_) {
+        const auto &p=*frame_->packed;pickPoints_.clear();
+        for (size_t i=0;i<p.alive.size();++i) if (p.alive[i]) {
+            PointVertex v{};std::copy_n(p.positions.data()+i*3,3,v.position);v.id=float(i);pickPoints_.push_back(v);
+        }
+        pickPointsSerial_=frameSerial_;
+    }
+    return pickPoints_;
 }
 void Viewport::setPlaybackRate(bool playing,double targetFps) {
     if (playbackPlaying_ != playing || (playing && std::abs(targetPlaybackFps_-targetFps)>1e-6)) {
@@ -1191,7 +1414,7 @@ bool Viewport::nearestVisiblePoint(const QVector3D &near, QVector3D *found) cons
     const QVector3D world=near; // `found` may be `near` itself: keep where the search is from
     const auto model=transform_.matrix();auto stack=modifiers_;if (!modifierStack_) {Modifier m;m.crop=crop_;stack={m};}
     const CompiledModifiers modifiers(stack);float best=std::numeric_limits<float>::max();
-    for (const auto &point:frame_->points) {
+    for (const auto &point:pickablePoints()) {
         if (!keepsPreviewPoint(point,model,modifiers,frame_->greensApplied)) continue;
         if (splats_ && size_t(point.id)<frame_->records.size() && frame_->records[size_t(point.id)].color[3]<.2f) continue; // faint ones are no surface
         const QVector3D p=model.map({point.position[0],point.position[1],point.position[2]});const float d=(p-world).lengthSquared();
@@ -1273,7 +1496,7 @@ bool Viewport::pickPoint(const QPointF &screen, QVector3D *world) const {
     const float tangent = std::tan(qDegreesToRadians(22.5f)), pixelsAtUnitDepth = height()*0.5f/tangent;
     const float orthographicPixels = height()*0.5f/std::max(1e-6f,camera_.distance*tangent);
     struct Hit { float depth, alpha; }; std::vector<Hit> hits;
-    for (const auto &point : frame_->points) {
+    for (const auto &point : pickablePoints()) {
         const QVector3D p = model.map({point.position[0],point.position[1],point.position[2]});
         if (!std::isfinite(p.x()) || !std::isfinite(p.y()) || !std::isfinite(p.z())) continue;
         if (!keepsPreviewPoint(point,model,modifiers,frame_->greensApplied,cropEditing_ && crop_.showRemovedInRed)) continue;

@@ -40,6 +40,8 @@ int main(int argc, char **argv) {
         if (!changed) project.modifiers.append(colour);
     }
     if (qEnvironmentVariableIsSet("PLAYBACK_COLOUR_CACHE_BYTES")) worker.setColourCacheBudget(size_t(qEnvironmentVariable("PLAYBACK_COLOUR_CACHE_BYTES").toULongLong()));
+    // The viewer's packed playback; its sort runs on the viewport's thread, outside "render".
+    if (qEnvironmentVariableIsSet("PLAYBACK_PACKED")) worker.setPackedPlayback(true);
     worker.open(isProject ? project.asset : path,1,true);
     if (!error.isEmpty()) {std::fprintf(stderr,"%s\n",qPrintable(error));return 1;}
     Viewport viewport;viewport.resize(1280,720);viewport.setGrid(false);viewport.setFrontMarker(false);viewport.setSplatRendering(true);viewport.setSplatAntialiasing(info.antialiased);if (isProject) viewport.setCamera(project.camera);else viewport.fit(info.minimum,info.maximum);viewport.setFrame(frame);viewport.show();app.processEvents();viewport.repaint();
@@ -71,7 +73,9 @@ int main(int argc, char **argv) {
         const double decoded=clock.nsecsElapsed()/1e6;
         // grabFramebuffer forces a paint even if Qt would coalesce update/repaint
         // requests, and waits for the GPU. It also includes a small readback cost.
-        viewport.setFrame(frame);const auto rendered=viewport.grabFramebuffer();
+        viewport.setFrame(frame);auto rendered=viewport.grabFramebuffer();
+        // Packed: the frame shows once its order is back from the sorter's thread.
+        while (viewport.packedFramePending()) {app.processEvents(QEventLoop::WaitForMoreEvents,5);rendered=viewport.grabFramebuffer();}
         if (rendered.isNull()) {std::fprintf(stderr,"Viewport did not render\n");return 1;}
         const double elapsed=clock.nsecsElapsed()/1e6;
         decode.push_back(decoded);render.push_back(elapsed-decoded);total.push_back(elapsed);

@@ -124,7 +124,62 @@ void CaptureWorker::clear() {
     ply_.reset();
 #endif
     vgs_.reset(); source_.reset(); mint_.reset(); info_ = {}; generation_ = 0; pruneScores_.clear(); morph_.reset();morphScratch_={}; morphKey_.clear(); clearVisibility();framePool_={};
+    packedVgs_.reset();packedSource_.reset();packedCurrent_.reset();packedAhead_.reset();packedUnsupported_=false;
     dependencyRevision_=0;dependencyVisibilityKeys_={};dependencyMorphKey_.clear();dependencyColourKey_.clear();
+}
+// Packed playback opens the file a second time: the decoder's two modes keep different
+// things, and vgs_ stays in Floats for positionsAt, the sorter's positions.
+void CaptureWorker::openPacked() {
+    packedVgs_.reset();packedSource_.reset();packedCurrent_.reset();packedAhead_.reset();
+    packedSource_=std::make_unique<FileSource>(info_.path);
+    packedVgs_=std::make_unique<vgsdec::Capture>(vgsdec::Capture::openStream(*packedSource_));
+    packedVgs_->setOutput(vgsdec::Output::Packed);
+    // The packed copies below are what plays; the decoder only needs the chunk it is preparing.
+    packedVgs_->setCachePolicy(vgsdec::CachePolicy{0,1,0});
+    packedVgs_->setThreadCount(std::clamp(std::thread::hardware_concurrency(),1u,4u));
+}
+PackedChunkPtr CaptureWorker::packedChunk(size_t index) {
+    if (packedCurrent_ && packedCurrent_->chunkIndex==index) return packedCurrent_;
+    if (packedAhead_ && packedAhead_->chunkIndex==index) {std::swap(packedCurrent_,packedAhead_);return packedCurrent_;}
+    while (!packedVgs_->prepare(index,1e9,vgsdec::Detail::Full)) {}
+    packedAhead_=std::move(packedCurrent_);
+    packedCurrent_=packChunk(packedVgs_->chunkData(index),packedVgs_->shDegree());
+    return packedCurrent_;
+}
+void CaptureWorker::preparePackedAhead(size_t next,double budget) {
+    if (!packedVgs_ || next>=packedVgs_->chunkCount()) return;
+    if ((packedCurrent_ && packedCurrent_->chunkIndex==next) || (packedAhead_ && packedAhead_->chunkIndex==next)) return;
+    if (packedVgs_->prepare(next,budget,vgsdec::Detail::Full)) packedAhead_=packChunk(packedVgs_->chunkData(next),packedVgs_->shDegree());
+}
+FramePtr CaptureWorker::packedFrame(double time) {
+    if (!packedPlayback_ || !vgs_ || packedUnsupported_) return nullptr;
+    QElapsedTimer timer;timer.start();
+    try {
+        if (!packedVgs_) openPacked();
+        time=std::clamp(time,0.0,std::max(0.0,info_.duration-1e-7));
+        const auto instant=packedVgs_->instantAt(time);
+        const auto chunk=packedChunk(instant.chunkIndex);
+        auto packed=std::make_shared<PackedFrame>();
+        packed->chunk=chunk;packed->instant=packedInstant(*chunk,instant.sampleA,instant.alpha);
+        evaluateBasis(*chunk,packed->instant,&packed->basis);
+        uint64_t count=0;const float *positions=vgs_->positionsAt(time,&count);
+        if (count!=chunk->splats || (count && !positions)) throw std::runtime_error("packed chunk and positions disagree");
+        packed->positions.assign(positions,positions+count*3);
+        packed->alive.resize(size_t(count));
+        const uint32_t frame=packed->instant.frame;
+        for (size_t i=0;i<count;++i) packed->alive[i]=frame>=chunk->lifetimes[i*2] && frame+1<=chunk->lifetimes[i*2+1];
+        if (packedVgs_->hasMotion()) {const auto motion=packedVgs_->motionAt(time);std::copy_n(motion.matrix,16,packed->motion);}
+        auto out=std::make_shared<RenderFrame>();
+        out->seconds=time;out->total=count;out->chunkIndex=instant.chunkIndex;out->coefficients=chunk->coefficients;
+        out->packed=std::move(packed);
+        out->decodeMs=out->sourceMs=timer.nsecsElapsed()/1e6;
+        return out;
+    } catch (const std::exception &e) {
+        // Played the floats way from here on; only an unusual capture lands here.
+        qWarning("Packed playback unavailable, using floats: %s",e.what());
+        packedUnsupported_=true;packedVgs_.reset();packedSource_.reset();packedCurrent_.reset();packedAhead_.reset();
+        return nullptr;
+    }
 }
 void CaptureWorker::setCachingEnabled(bool enabled) {
     if (cachingEnabled_==enabled) return;cachingEnabled_=enabled;
@@ -439,6 +494,8 @@ void CaptureWorker::open(const QString &path, quint64 generation, bool sh) {
         framePool_={};clearColours();dependencyRevision_=0;dependencyMorphKey_.clear();info_ = candidate.info_; generation_ = generation; pruneScores_.clear(); morph_.reset();morphScratch_={}; morphKey_.clear(); clearVisibility();
         {const QFileInfo file(path);std::lock_guard<std::mutex> lock(exportStore_->mutex);exportStore_->asset=file.canonicalFilePath();exportStore_->fileSize=file.size();exportStore_->modified=file.lastModified().toMSecsSinceEpoch();}
         memoryTimer_->start();relieveMemoryPressure();
+        packedVgs_.reset();packedSource_.reset();packedCurrent_.reset();packedAhead_.reset();packedUnsupported_=false;
+        if (auto packed=packedFrame(0)) first=packed;
         emit opened(info_, first, generation);
         emit openedRequest(info_, first, generation, request_);
     } catch (const std::exception &e) {
@@ -463,9 +520,13 @@ void CaptureWorker::decode(double time, quint64 generation, bool sh,Project proj
             ply_->setFps(project.captureSettings.plyFps);info_.fps=ply_->fps();info_.duration=ply_->frames()/info_.fps;
         }
 #endif
-        preparePreview(project);
-        relieveMemoryPressure();
-        const auto out=evaluate(time,sh,project);
+        FramePtr out=packedFrame(time);
+        const bool packed=bool(out);
+        if (!packed) {
+            preparePreview(project);
+            relieveMemoryPressure();
+            out=evaluate(time,sh,project);
+        }
         emit decoded(out,generation);emit decodedRequest(out,generation,request_);
         // Decode the next VGS chunk in small pieces while this one is on screen.
         // Both the viewer and editor use this worker; doing it here keeps a chunk
@@ -475,7 +536,13 @@ void CaptureWorker::decode(double time, quint64 generation, bool sh,Project proj
             if (project.previewPlaying && project.loop && (next>=vgs_->chunkCount() ||
                 (project.out>project.in && vgs_->chunk(next).startSeconds>project.out))) next=vgs_->chunkAt(project.in);
             const double budget=std::clamp(1000/info_.fps-out->decodeMs-4.0,3.0,8.0);
-            try { if (next<vgs_->chunkCount() && next!=out->chunkIndex) vgs_->prepare(next,budget,sh ? vgsdec::Detail::Full : vgsdec::Detail::Base); }
+            try {
+                if (next<vgs_->chunkCount() && next!=out->chunkIndex) {
+                    // Packed: the sorter's positions and the packed chunk, each with half the time.
+                    if (packed) {vgs_->prepare(next,budget*.5,vgsdec::Detail::Positions);preparePackedAhead(next,budget*.5);}
+                    else vgs_->prepare(next,budget,sh ? vgsdec::Detail::Full : vgsdec::Detail::Base);
+                }
+            }
             catch (const std::exception &) { /* The normal frame request reports bad data. */ }
         }
         relieveMemoryPressure();

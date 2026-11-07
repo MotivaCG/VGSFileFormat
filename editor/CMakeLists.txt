@@ -33,7 +33,7 @@ add_library(editor_authoring STATIC ${VGS_ROOT}/core/src/vgsencode.cpp ${VGS_ROO
 target_compile_definitions(editor_authoring PRIVATE VGS_AUTHORING)
 target_include_directories(editor_authoring PUBLIC ${VGS_ROOT}/core/include/vgs ${VGS_ROOT}/core/crypto PRIVATE ${VGS_ROOT}/core/src)
 target_link_libraries(editor_authoring PUBLIC editor_decoder PRIVATE Threads::Threads)
-add_library(editor_support STATIC editortheme.cpp displayscaling.cpp previewmemory.cpp plysequencespec.cpp plysequence.cpp isolation.cpp loopmorph.cpp pruning.cpp audiomix.cpp mintwriter.cpp modifiers.cpp nativeexport.cpp gaussiannormals.cpp normalrigs.cpp exportcapture.cpp exporttask.cpp dependencies/mint/mintskinrecovery.cpp project.cpp capturesettings.cpp captureworker.cpp filehistory.cpp presetstore.cpp dependencies/mint/mintfile.cpp)
+add_library(editor_support STATIC editortheme.cpp displayscaling.cpp previewmemory.cpp plysequencespec.cpp plysequence.cpp isolation.cpp loopmorph.cpp pruning.cpp audiomix.cpp mintwriter.cpp modifiers.cpp nativeexport.cpp gaussiannormals.cpp normalrigs.cpp exportcapture.cpp exporttask.cpp dependencies/mint/mintskinrecovery.cpp project.cpp capturesettings.cpp captureworker.cpp packedchunk.cpp filehistory.cpp presetstore.cpp dependencies/mint/mintfile.cpp)
 target_include_directories(editor_support PUBLIC . dependencies/mint dependencies/eigen)
 target_sources(editor_support PRIVATE plyexport.cpp dependencies/plyseq/plyfit.cpp)
 find_package(OpenMP QUIET)

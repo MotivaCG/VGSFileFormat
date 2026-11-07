@@ -17,6 +17,7 @@
 #include "pruning.h"
 #include "loopmorph.h"
 #include "previewmemory.h"
+#include "packedchunk.h"
 #include "vgsdecoder/vgsdecoder.h"
 #include <QObject>
 #include <QTimer>
@@ -78,6 +79,9 @@ struct RenderFrame {
     // Remove green already decided into modifierVisibility, because the colours shown are
     // despilled and a filter above Color must test the source's: the viewport skips it.
     bool greensApplied = false;
+    // The viewer's packed playback: the chunk as the GPU reads it and where the instant falls
+    // in it. Records, points and sh stay empty; the viewport evaluates the splats itself.
+    std::shared_ptr<const PackedFrame> packed;
 };
 using FramePtr = std::shared_ptr<RenderFrame>;
 Q_DECLARE_METATYPE(FramePtr)
@@ -133,6 +137,10 @@ public slots:
 public:
     // Cancellation is safe from the GUI thread, including before the job starts.
     void cancelPrecalculate(quint64 request) {cancelCacheRequest_.store(request);}
+    // The viewer plays .vgs/.pgs in the decoder's Packed mode: chunks go to the GPU once and
+    // the shader evaluates every frame, so a frame costs positions for sorting and nothing
+    // else. Set before the first open; modifiers and the editor's processing do not apply.
+    void setPackedPlayback(bool enabled) {packedPlayback_=enabled;}
     // The visibility cache: frames held, and the memory they take.
     size_t visibilityFrames() const { return visibility_.size(); }
     size_t visibilityBytes() const { return visibilityBytes_; }
@@ -247,4 +255,14 @@ private:
     loopmorph::Cloud morphScratch_;
     QByteArray morphKey_;
     const std::vector<float> &pruneScores(size_t chunk);
+    // Packed playback: a second decoder in Packed mode beside vgs_, which answers positionsAt.
+    bool packedPlayback_=false,packedUnsupported_=false;
+    std::unique_ptr<FileSource> packedSource_;
+    std::unique_ptr<vgsdec::Capture> packedVgs_;
+    PackedChunkPtr packedCurrent_,packedAhead_;
+    void openPacked();
+    PackedChunkPtr packedChunk(size_t index);
+    // Null when the capture cannot play packed; the floats frame is used instead.
+    FramePtr packedFrame(double time);
+    void preparePackedAhead(size_t next,double budget);
 };
