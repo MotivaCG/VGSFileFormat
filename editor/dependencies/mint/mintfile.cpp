@@ -15,15 +15,7 @@
 #include <cstring>
 #include <future>
 #include <thread>
-#ifdef Q_OS_WIN
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#else
-#include <sys/mman.h>
-#include <unistd.h>
-#endif
+#include "prefetchrange.h"
 
 namespace {
 
@@ -313,11 +305,13 @@ QVector<const MintBlock*> MintChunk::splatGroups() const
 // ============================================================ MintFile
 
 MintFile::MintFile() = default;
-MintFile::~MintFile() = default;
+// Reads asked for later go first: they read the mapping.
+MintFile::~MintFile() { prefetchForget(this); }
 
 void MintFile::close()
 {
     m_path.clear();
+    prefetchForget(this);
     m_data.clear();
     m_mappedFile.reset();
     m_chunks.clear();
@@ -343,7 +337,7 @@ int MintFile::chunkIndexAt(double seconds) const
     const MintChunk* chunk = chunkAt(seconds, &normalized);
     return chunk ? chunk->index : -1;
 }
-void MintFile::prefetchChunk(int index) const
+void MintFile::prefetchChunk(int index, bool later) const
 {
     // Only a mapping reads lazily; a file read whole is already in memory.
     if (!m_mappedFile || index < 0 || index >= m_chunks.size()) return;
@@ -355,14 +349,8 @@ void MintFile::prefetchChunk(int index) const
     }
     end = std::min(end, quint64(m_data.size()));
     if (begin >= end) return;
-#ifdef Q_OS_WIN
-    WIN32_MEMORY_RANGE_ENTRY range{const_cast<char*>(m_data.constData()) + begin, SIZE_T(end - begin)};
-    PrefetchVirtualMemory(GetCurrentProcess(), 1, &range, 0);
-#else
-    const quintptr page = quintptr(sysconf(_SC_PAGESIZE));
-    const quintptr from = quintptr(m_data.constData() + begin) / page * page, to = quintptr(m_data.constData() + end);
-    posix_madvise(reinterpret_cast<void*>(from), size_t(to - from), POSIX_MADV_WILLNEED);
-#endif
+    if (later) prefetchMappedLater(this, m_data.constData() + begin, size_t(end - begin));
+    else prefetchMapped(m_data.constData() + begin, size_t(end - begin));
 }
 
 QByteArray MintFile::audio() const {

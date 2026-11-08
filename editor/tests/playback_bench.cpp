@@ -71,6 +71,9 @@ int main(int argc, char **argv) {
         QElapsedTimer clock;clock.start();worker.decode(time,1,true,project);
         if (!error.isEmpty()) {std::fprintf(stderr,"%s\n",qPrintable(error));return 1;}
         const double decoded=clock.nsecsElapsed()/1e6;
+        // PLAYBACK_SLOW_MS=n: each frame whose worker took longer, and its chunk.
+        if (qEnvironmentVariableIsSet("PLAYBACK_SLOW_MS") && decoded>qEnvironmentVariableIntValue("PLAYBACK_SLOW_MS"))
+            std::printf("slow frame %d (%.3f s, chunk %zu): %.1f ms\n",i,time,frame ? frame->chunkIndex : size_t(0),decoded);
         // grabFramebuffer forces a paint even if Qt would coalesce update/repaint
         // requests, and waits for the GPU. It also includes a small readback cost.
         viewport.setFrame(frame);auto rendered=viewport.grabFramebuffer();

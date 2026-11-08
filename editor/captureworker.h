@@ -183,7 +183,11 @@ private:
     std::unique_ptr<MintFile> mint_;
     // The last chunks asked of the system ahead of decoding (MintFile::prefetchChunk).
     std::array<int,2> mintPrefetched_{-1,-1};
-    void prefetchMint(int chunk);
+    // The chunk a frame is in now, waiting for it; or the next one, later, on another thread.
+    void prefetchMint(int chunk,bool later);
+    // The last VGS chunks asked of the system ahead of the decoder (FileSource::prefetch).
+    std::array<size_t,4> vgsPrefetched_{size_t(-1),size_t(-1),size_t(-1),size_t(-1)};
+    size_t followingChunk(size_t chunk,const Project &project) const;
 #ifndef VGS_VIEWER
     std::unique_ptr<PlySequence> ply_;
     PlySequenceSpec openingPly_;

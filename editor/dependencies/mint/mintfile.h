@@ -209,9 +209,10 @@ public:
     // The chunk the animation is in at that time (wrapping as decode() does), or -1.
     int chunkIndexAt(double seconds) const;
     // A read-only mapping is read on demand, page by page as decoding touches it: from a
-    // hard disk a 35 MB chunk then takes seconds. This asks the system to read the chunk's
-    // bytes in large sequential requests and returns without waiting for them.
-    void prefetchChunk(int index) const;
+    // hard disk a 35 MB chunk then takes seconds. This has the chunk's bytes read in large
+    // sequential requests: now, returning once they are in memory, or `later`, on another
+    // thread, returning at once.
+    void prefetchChunk(int index, bool later) const;
 
     static double sphericalHarmonicC0() { return 0.28209479177387814; }
 

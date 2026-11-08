@@ -9,6 +9,7 @@
 // Other uses require prior written authorisation, subject to mandatory law.
 
 #include "captureworker.h"
+#include "prefetchrange.h"
 #include "isolation.h"
 #include "pruning.h"
 #include "pointvisibility.h"
@@ -54,12 +55,26 @@ public:
     QFile file;
     explicit FileSource(const QString &path) : file(path) {
         if (!file.open(QIODevice::ReadOnly)) throw std::runtime_error(file.errorString().toStdString());
+        // Mapped only to have ranges read ahead (prefetch); reads go through the file. Mapped
+        // here, before the decoder's threads read from it.
+        view_ = file.size() > 0 ? file.map(0, file.size()) : nullptr;
     }
+    ~FileSource() override { prefetchForget(this); }
     bool read(uint64_t offset, size_t count, uint8_t *out) override {
         if (offset > uint64_t(file.size()) || count > uint64_t(file.size()) - offset) return false;
         return file.seek(qint64(offset)) && file.read(reinterpret_cast<char *>(out), qint64(count)) == qint64(count);
     }
     uint64_t size() const override { return uint64_t(file.size()); }
+    // The decoder reads a chunk whole when it starts on it, which from a hard disk not yet in
+    // the system's cache stalls the worker for a few hundred milliseconds. Read ahead on another
+    // thread, it comes from memory.
+    void prefetch(uint64_t offset, uint64_t count) const {
+        const uint64_t total = uint64_t(file.size());
+        if (!view_ || offset >= total) return;
+        prefetchMappedLater(this, view_ + offset, size_t(std::min(count, total - offset)));
+    }
+private:
+    uchar *view_ = nullptr;
 };
 CaptureWorker::CaptureWorker(QObject *parent,previewmemory::Probe memoryProbe) : QObject(parent),memory_(std::move(memoryProbe)) {
     exportStore_=std::make_shared<PreviewExportStore>();
@@ -123,7 +138,7 @@ void CaptureWorker::clear() {
 #ifndef VGS_VIEWER
     ply_.reset();
 #endif
-    vgs_.reset(); source_.reset(); mint_.reset();mintPrefetched_={-1,-1}; info_ = {}; generation_ = 0; pruneScores_.clear(); morph_.reset();morphScratch_={}; morphKey_.clear(); clearVisibility();framePool_={};
+    vgs_.reset(); source_.reset(); mint_.reset();mintPrefetched_={-1,-1};vgsPrefetched_.fill(size_t(-1)); info_ = {}; generation_ = 0; pruneScores_.clear(); morph_.reset();morphScratch_={}; morphKey_.clear(); clearVisibility();framePool_={};
     packedVgs_.reset();packedSource_.reset();packedCurrent_.reset();packedAhead_.reset();packedUnsupported_=false;
     dependencyRevision_=0;dependencyVisibilityKeys_={};dependencyMorphKey_.clear();dependencyColourKey_.clear();
 }
@@ -181,9 +196,16 @@ FramePtr CaptureWorker::packedFrame(double time) {
         return nullptr;
     }
 }
-void CaptureWorker::prefetchMint(int chunk) {
+// The VGS chunk that plays after this one: the next, or the In chunk where a loop wraps.
+size_t CaptureWorker::followingChunk(size_t chunk,const Project &project) const {
+    size_t next=chunk==RenderFrame::MorphChunk ? vgs_->chunkAt(project.in) : chunk+1;
+    if (project.previewPlaying && project.loop && (next>=vgs_->chunkCount() ||
+        (project.out>project.in && vgs_->chunk(next).startSeconds>project.out))) next=vgs_->chunkAt(project.in);
+    return next;
+}
+void CaptureWorker::prefetchMint(int chunk,bool later) {
     if (chunk<0 || chunk==mintPrefetched_[0] || chunk==mintPrefetched_[1]) return;
-    mint_->prefetchChunk(chunk);mintPrefetched_={mintPrefetched_[1],chunk};
+    mint_->prefetchChunk(chunk,later);mintPrefetched_={mintPrefetched_[1],chunk};
 }
 void CaptureWorker::setCachingEnabled(bool enabled) {
     if (cachingEnabled_==enabled) return;cachingEnabled_=enabled;
@@ -449,6 +471,8 @@ void CaptureWorker::open(const QString &path, quint64 generation, bool sh) {
             candidate.vgs_ = std::make_unique<vgsdec::Capture>(vgsdec::Capture::openStream(*candidate.source_));
             candidate.vgs_->setCachePolicy(cachingEnabled_ ? vgsdec::CachePolicy{1,1,512ull*1024*1024} : vgsdec::CachePolicy{0,0,1});
             candidate.vgs_->setThreadCount(std::clamp(std::thread::hardware_concurrency(), 1u, 4u));
+            // The first chunks are read from disk while the first frame decodes.
+            for (size_t i=0;i<std::min<size_t>(3,candidate.vgs_->chunkCount());++i) {const auto &c=candidate.vgs_->chunk(i);candidate.source_->prefetch(c.offset,c.size);}
             candidate.info_.duration = candidate.vgs_->duration(); candidate.info_.fps = candidate.vgs_->frameRate();
             candidate.info_.shDegree = int(candidate.vgs_->shDegree());
             if (!candidate.vgs_->metadata().title.empty()) candidate.info_.title = QString::fromStdString(candidate.vgs_->metadata().title);
@@ -490,7 +514,7 @@ void CaptureWorker::open(const QString &path, quint64 generation, bool sh) {
             candidate.info_.minimum[j] = float(bounds[j]); candidate.info_.maximum[j] = float(bounds[j+3]);
         }
         auto first = candidate.frame(0, sh);
-        vgs_.reset(); source_.reset(); mint_.reset();mintPrefetched_={-1,-1};
+        vgs_.reset(); source_.reset(); mint_.reset();mintPrefetched_={-1,-1};vgsPrefetched_.fill(size_t(-1));
         source_ = std::move(candidate.source_); vgs_ = std::move(candidate.vgs_); mint_ = std::move(candidate.mint_);
 #ifndef VGS_VIEWER
         ply_=std::move(candidate.ply_);
@@ -525,7 +549,7 @@ void CaptureWorker::decode(double time, quint64 generation, bool sh,Project proj
         }
 #endif
         // A chunk entered by a seek: the rest of it is read while this frame decodes.
-        if (mint_) prefetchMint(mint_->chunkIndexAt(time));
+        if (mint_) prefetchMint(mint_->chunkIndexAt(time),false);
         FramePtr out=packedFrame(time);
         const bool packed=bool(out);
         if (!packed) {
@@ -538,9 +562,7 @@ void CaptureWorker::decode(double time, quint64 generation, bool sh,Project proj
         // Both the viewer and editor use this worker; doing it here keeps a chunk
         // boundary from forcing the next frame to decompress the entire chunk.
         if (cachingEnabled_ && vgs_ && memory_.canRetain(8*previewmemory::MiB)) {
-            size_t next=out->chunkIndex==RenderFrame::MorphChunk ? vgs_->chunkAt(project.in) : out->chunkIndex+1;
-            if (project.previewPlaying && project.loop && (next>=vgs_->chunkCount() ||
-                (project.out>project.in && vgs_->chunk(next).startSeconds>project.out))) next=vgs_->chunkAt(project.in);
+            const size_t next=followingChunk(out->chunkIndex,project);
             const double budget=std::clamp(1000/info_.fps-out->decodeMs-4.0,3.0,8.0);
             try {
                 if (next<vgs_->chunkCount() && next!=out->chunkIndex) {
@@ -551,12 +573,22 @@ void CaptureWorker::decode(double time, quint64 generation, bool sh,Project proj
             }
             catch (const std::exception &) { /* The normal frame request reports bad data. */ }
         }
+        // The next two chunks are asked of the system while this one plays: the decoder reads the
+        // next whole when it starts preparing it, and that read then comes from memory.
+        if (vgs_ && source_) {
+            const size_t next=followingChunk(out->chunkIndex,project),after=next<vgs_->chunkCount() ? followingChunk(next,project) : next;
+            for (const size_t chunk:{next,after}) {
+                if (chunk>=vgs_->chunkCount() || chunk==out->chunkIndex || std::find(vgsPrefetched_.begin(),vgsPrefetched_.end(),chunk)!=vgsPrefetched_.end()) continue;
+                const auto &info=vgs_->chunk(chunk);source_->prefetch(info.offset,info.size);
+                std::rotate(vgsPrefetched_.begin(),vgsPrefetched_.begin()+1,vgsPrefetched_.end());vgsPrefetched_.back()=chunk;
+            }
+        }
         // The next chunk is read from disk while this one plays, as VGS prepares its next.
         if (mint_ && out->chunkIndex!=RenderFrame::MorphChunk) {
             const auto &chunks=mint_->chunks();int next=int(out->chunkIndex)+1;
             if (project.previewPlaying && project.loop && (next>=chunks.size() ||
                 (project.out>project.in && chunks[next].start>project.out))) next=mint_->chunkIndexAt(project.in);
-            if (next<chunks.size()) prefetchMint(next);
+            if (next<chunks.size()) prefetchMint(next,true);
         }
         relieveMemoryPressure();
     }
