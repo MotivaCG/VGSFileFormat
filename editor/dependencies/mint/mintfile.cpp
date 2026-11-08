@@ -15,6 +15,15 @@
 #include <cstring>
 #include <future>
 #include <thread>
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
 
 namespace {
 
@@ -327,6 +336,34 @@ bool MintFile::open(const QString& path, QString* error)
     return load(path, false, error);
 }
 bool MintFile::openReadOnly(const QString& path,QString* error) {return load(path,false,error,true);}
+int MintFile::chunkIndexAt(double seconds) const
+{
+    if (m_chunks.isEmpty() || m_headerOnly) return -1;
+    double normalized = 0.0;
+    const MintChunk* chunk = chunkAt(seconds, &normalized);
+    return chunk ? chunk->index : -1;
+}
+void MintFile::prefetchChunk(int index) const
+{
+    // Only a mapping reads lazily; a file read whole is already in memory.
+    if (!m_mappedFile || index < 0 || index >= m_chunks.size()) return;
+    quint64 begin = ~quint64(0), end = 0;
+    for (const MintBlock& block : m_chunks[index].blocks) {
+        if (!block.size) continue;
+        begin = std::min(begin, block.absolute);
+        end = std::max(end, block.absolute + block.size);
+    }
+    end = std::min(end, quint64(m_data.size()));
+    if (begin >= end) return;
+#ifdef Q_OS_WIN
+    WIN32_MEMORY_RANGE_ENTRY range{const_cast<char*>(m_data.constData()) + begin, SIZE_T(end - begin)};
+    PrefetchVirtualMemory(GetCurrentProcess(), 1, &range, 0);
+#else
+    const quintptr page = quintptr(sysconf(_SC_PAGESIZE));
+    const quintptr from = quintptr(m_data.constData() + begin) / page * page, to = quintptr(m_data.constData() + end);
+    posix_madvise(reinterpret_cast<void*>(from), size_t(to - from), POSIX_MADV_WILLNEED);
+#endif
+}
 
 QByteArray MintFile::audio() const {
     if (m_headerOnly || !m_audioSize) return {};

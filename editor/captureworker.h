@@ -181,6 +181,9 @@ private:
     std::unique_ptr<FileSource> source_;
     std::unique_ptr<vgsdec::Capture> vgs_;
     std::unique_ptr<MintFile> mint_;
+    // The last chunks asked of the system ahead of decoding (MintFile::prefetchChunk).
+    std::array<int,2> mintPrefetched_{-1,-1};
+    void prefetchMint(int chunk);
 #ifndef VGS_VIEWER
     std::unique_ptr<PlySequence> ply_;
     PlySequenceSpec openingPly_;

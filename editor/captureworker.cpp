@@ -123,7 +123,7 @@ void CaptureWorker::clear() {
 #ifndef VGS_VIEWER
     ply_.reset();
 #endif
-    vgs_.reset(); source_.reset(); mint_.reset(); info_ = {}; generation_ = 0; pruneScores_.clear(); morph_.reset();morphScratch_={}; morphKey_.clear(); clearVisibility();framePool_={};
+    vgs_.reset(); source_.reset(); mint_.reset();mintPrefetched_={-1,-1}; info_ = {}; generation_ = 0; pruneScores_.clear(); morph_.reset();morphScratch_={}; morphKey_.clear(); clearVisibility();framePool_={};
     packedVgs_.reset();packedSource_.reset();packedCurrent_.reset();packedAhead_.reset();packedUnsupported_=false;
     dependencyRevision_=0;dependencyVisibilityKeys_={};dependencyMorphKey_.clear();dependencyColourKey_.clear();
 }
@@ -180,6 +180,10 @@ FramePtr CaptureWorker::packedFrame(double time) {
         packedUnsupported_=true;packedVgs_.reset();packedSource_.reset();packedCurrent_.reset();packedAhead_.reset();
         return nullptr;
     }
+}
+void CaptureWorker::prefetchMint(int chunk) {
+    if (chunk<0 || chunk==mintPrefetched_[0] || chunk==mintPrefetched_[1]) return;
+    mint_->prefetchChunk(chunk);mintPrefetched_={mintPrefetched_[1],chunk};
 }
 void CaptureWorker::setCachingEnabled(bool enabled) {
     if (cachingEnabled_==enabled) return;cachingEnabled_=enabled;
@@ -486,7 +490,7 @@ void CaptureWorker::open(const QString &path, quint64 generation, bool sh) {
             candidate.info_.minimum[j] = float(bounds[j]); candidate.info_.maximum[j] = float(bounds[j+3]);
         }
         auto first = candidate.frame(0, sh);
-        vgs_.reset(); source_.reset(); mint_.reset();
+        vgs_.reset(); source_.reset(); mint_.reset();mintPrefetched_={-1,-1};
         source_ = std::move(candidate.source_); vgs_ = std::move(candidate.vgs_); mint_ = std::move(candidate.mint_);
 #ifndef VGS_VIEWER
         ply_=std::move(candidate.ply_);
@@ -520,6 +524,8 @@ void CaptureWorker::decode(double time, quint64 generation, bool sh,Project proj
             ply_->setFps(project.captureSettings.plyFps);info_.fps=ply_->fps();info_.duration=ply_->frames()/info_.fps;
         }
 #endif
+        // A chunk entered by a seek: the rest of it is read while this frame decodes.
+        if (mint_) prefetchMint(mint_->chunkIndexAt(time));
         FramePtr out=packedFrame(time);
         const bool packed=bool(out);
         if (!packed) {
@@ -544,6 +550,13 @@ void CaptureWorker::decode(double time, quint64 generation, bool sh,Project proj
                 }
             }
             catch (const std::exception &) { /* The normal frame request reports bad data. */ }
+        }
+        // The next chunk is read from disk while this one plays, as VGS prepares its next.
+        if (mint_ && out->chunkIndex!=RenderFrame::MorphChunk) {
+            const auto &chunks=mint_->chunks();int next=int(out->chunkIndex)+1;
+            if (project.previewPlaying && project.loop && (next>=chunks.size() ||
+                (project.out>project.in && chunks[next].start>project.out))) next=mint_->chunkIndexAt(project.in);
+            if (next<chunks.size()) prefetchMint(next);
         }
         relieveMemoryPressure();
     }
