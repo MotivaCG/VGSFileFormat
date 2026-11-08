@@ -83,6 +83,9 @@ struct RenderFrame {
     // SH coefficient by shDespill (row-major, linear): what a packed frame needs to match.
     bool despilled = false;
     std::array<float,9> shDespill{1,0,0, 0,1,0, 0,0,1};
+    // Decoded without its SH because it is drawn packed, whose SH the shader takes from the
+    // chunk: drawn from its floats it would lack them, so a paused editor asks for it again.
+    bool shOmitted = false;
     // The viewer's packed playback: the chunk as the GPU reads it and where the instant falls
     // in it. Records, points and sh stay empty; the viewport evaluates the splats itself.
     std::shared_ptr<const PackedFrame> packed;
@@ -201,6 +204,8 @@ private:
 #endif
     bool packedDisplay_=false,packedDisplayFailed_=false;
     void attachPacked(RenderFrame &out,const Project &project);
+    // Whether the frame at that time will be drawn packed: playing, and its chunk is packed.
+    bool displaysPacked(double time,const Project &project);
     void resetDisplaySource();
     // The last chunks asked of the system ahead of decoding (MintFile::prefetchChunk).
     std::array<int,2> mintPrefetched_{-1,-1};

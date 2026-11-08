@@ -94,14 +94,16 @@ class ViewportTests : public QObject {
             QVERIFY2(mean<0.25 && off<=std::max<size_t>(3,ink/1000),qPrintable(QString("%1 at %2 s: mean %3, %4 pixels differ by more than 6 (worst %5)").arg(what).arg(times[i]).arg(mean).arg(off).arg(worst)));
         }
     }
-    // The editor's packed display (CaptureWorker::setPackedDisplay) against its own floats: a
-    // frame decoded while playing carries both, and the viewport draws it packed while it plays
-    // and the floats way while it does not. The two must agree whatever the modifiers.
-    static FramePtr playingFrame(CaptureWorker &worker,FramePtr &latest,double time,const Project &project) {
-        // A chunk is packed on the worker's helper thread: until it is, frames come floats alone.
+    // The editor's packed display (CaptureWorker::setPackedDisplay) against the floats path: a
+    // frame decoded while playing, drawn packed - its CPU copy decoded without SH, which the
+    // shader takes from the chunk - and the same instant decoded paused, with every SH
+    // coefficient, drawn from floats. The two must agree whatever the modifiers.
+    static FramePtr playingFrame(CaptureWorker &worker,FramePtr &latest,double time,const Project &project,bool withoutSh) {
+        // A chunk is packed on the worker's helper thread: until it is, frames come floats alone,
+        // and the one decoded as it got packed still has its SH.
         for (int attempt=0;attempt<300;++attempt) {
             latest.reset();worker.decode(time,1,true,project);
-            if (latest && latest->packed) return latest;
+            if (latest && latest->packed && (latest->shOmitted || !withoutSh)) return latest;
             QTest::qWait(20);
         }
         return latest;
@@ -131,14 +133,33 @@ class ViewportTests : public QObject {
         Viewport viewport;viewport.resize(480,360);viewport.setGrid(false);viewport.setFrontMarker(false);viewport.setAxes(false);
         viewport.setSplatRendering(true);viewport.setSplatShDegree(-1);viewport.setSplatAntialiasing(info.antialiased);
         viewport.fit(info.minimum,info.maximum);viewport.show();QVERIFY(QTest::qWaitForWindowExposed(&viewport));
+        Project paused=project;paused.previewPlaying=false;
         for (double t:times) {
-            const auto frame=playingFrame(worker,latest,t,project);
+            const auto frame=playingFrame(worker,latest,t,project,info.shDegree>0);
             QVERIFY2(error.isEmpty(),qPrintable(error));
             QVERIFY2(frame && frame->packed,qPrintable(QString("%1 at %2 s: no packed display").arg(what).arg(t)));
             QVERIFY(!frame->records.empty());
+            if (info.shDegree>0) QVERIFY2(frame->shOmitted && frame->sh.empty(),qPrintable(what+": played frame decoded its SH"));
+            latest.reset();worker.decode(t,1,true,paused);const auto full=latest;
+            QVERIFY(full && !full->packed && !full->shOmitted);
+            if (info.shDegree>0) QVERIFY2(full->coefficients>0 && !full->sh.empty(),qPrintable(what+": paused frame without SH"));
             viewport.setModifiers(project.modifiersAtFrame(std::round(frame->seconds*info.fps)));
-            viewport.setPlaybackRate(false,30);viewport.setFrame(nullptr);viewport.setFrame(frame);
+            viewport.setPlaybackRate(false,30);viewport.setFrame(nullptr);viewport.setFrame(full);
             const auto reference=viewport.grabFramebuffer();QVERIFY(!viewport.lastPaintPacked());
+            if (info.shDegree>0) {
+                // The control: the same frame without its SH must differ well beyond the
+                // tolerance, or this comparison could not tell SH missing from the packed draw.
+                viewport.setSplatShDegree(0);viewport.setFrame(nullptr);viewport.setFrame(full);const auto baseOnly=viewport.grabFramebuffer();viewport.setSplatShDegree(-1);
+                size_t off=0,ink=0;const auto background=reference.pixelColor(0,0);
+                for (int y=0;y<baseOnly.height();++y) for (int x=0;x<baseOnly.width();++x) {
+                    const auto a=baseOnly.pixelColor(x,y),b=reference.pixelColor(x,y);
+                    off+=std::max({std::abs(a.red()-b.red()),std::abs(a.green()-b.green()),std::abs(a.blue()-b.blue())})>6;
+                    ink+=std::max({std::abs(b.red()-background.red()),std::abs(b.green()-background.green()),std::abs(b.blue()-background.blue())})>12;
+                }
+                const size_t allowed=std::max<size_t>(3,ink/1000);
+                qInfo("%s at %.3f s: without SH, %zu px over 6 (the comparison allows %zu)",qPrintable(what),t,off,allowed);
+                QVERIFY2(off>allowed*10,qPrintable(what+": SH too faint here to check them"));
+            }
             viewport.setPlaybackRate(true,30);viewport.setFrame(nullptr);viewport.setFrame(frame);
             const auto actual=viewport.grabFramebuffer();QVERIFY2(viewport.lastPaintPacked(),qPrintable(what+": not drawn packed"));
             compareImages(actual,reference,QString("%1 at %2 s").arg(what).arg(t));

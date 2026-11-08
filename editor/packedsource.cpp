@@ -75,6 +75,10 @@ void PackedChunkSource::want(const std::vector<size_t> &indices) {
     if (!queue_.empty()) work_.notify_all();
 }
 
+bool PackedChunkSource::holds(size_t index) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return held_.count(index) != 0;
+}
 bool PackedChunkSource::failed() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return failed_;

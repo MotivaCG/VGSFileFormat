@@ -42,12 +42,16 @@ int main(int argc, char **argv) {
     if (qEnvironmentVariableIsSet("PLAYBACK_COLOUR_CACHE_BYTES")) worker.setColourCacheBudget(size_t(qEnvironmentVariable("PLAYBACK_COLOUR_CACHE_BYTES").toULongLong()));
     // The viewer's packed playback; its sort runs on the viewport's thread, outside "render".
     if (qEnvironmentVariableIsSet("PLAYBACK_PACKED")) worker.setPackedPlayback(true);
+    // The editor's packed display: frames carry floats and packed data, drawn packed while playing.
+    const bool display=qEnvironmentVariableIsSet("PLAYBACK_DISPLAY");
+    worker.setPackedDisplay(display);
     worker.open(isProject ? project.asset : path,1,true);
     if (!error.isEmpty()) {std::fprintf(stderr,"%s\n",qPrintable(error));return 1;}
     Viewport viewport;viewport.resize(1280,720);viewport.setGrid(false);viewport.setFrontMarker(false);viewport.setSplatRendering(true);viewport.setSplatAntialiasing(info.antialiased);if (isProject) viewport.setCamera(project.camera);else viewport.fit(info.minimum,info.maximum);viewport.setFrame(frame);viewport.show();app.processEvents();viewport.repaint();
     if (!isProject) project.out=(info.frames-1)/info.fps;
     project.previewPlaying=true;
     if (qEnvironmentVariableIsSet("PLAYBACK_CPU_SH")) project.previewPlaying=false;
+    if (display) viewport.setPlaybackRate(true,info.fps);
 #ifdef EDITOR_PLAYBACK_TIMINGS
     project.previewRevision=1;
 #endif
@@ -57,7 +61,7 @@ int main(int argc, char **argv) {
     const bool verify=qEnvironmentVariableIsSet("PLAYBACK_VERIFY");
     for (int pass=0;pass<passes;++pass) {
     std::vector<double> decode,render,total,source,assembly,upload,pack,sort,gpuPrepare,gpuDraw;
-    int cacheHits=0,shapeHits=0,colourHits=0;
+    int cacheHits=0,shapeHits=0,colourHits=0,drawnPacked=0;
 #ifdef EDITOR_PLAYBACK_TIMINGS
     const size_t isolationBefore=worker.isolationEvaluations();
     const size_t despillBefore=worker.despillEvaluations();
@@ -81,7 +85,7 @@ int main(int argc, char **argv) {
         while (viewport.packedFramePending()) {app.processEvents(QEventLoop::WaitForMoreEvents,5);rendered=viewport.grabFramebuffer();}
         if (rendered.isNull()) {std::fprintf(stderr,"Viewport did not render\n");return 1;}
         const double elapsed=clock.nsecsElapsed()/1e6;
-        decode.push_back(decoded);render.push_back(elapsed-decoded);total.push_back(elapsed);
+        decode.push_back(decoded);render.push_back(elapsed-decoded);total.push_back(elapsed);drawnPacked+=viewport.lastPaintPacked();
 #ifdef EDITOR_PLAYBACK_TIMINGS
         cacheHits+=frame->visibilityFromCache;shapeHits+=frame->morphShapeFromCache;colourHits+=frame->colourFromCache;source.push_back(frame->sourceMs);assembly.push_back(frame->assemblyMs);
         const auto timings=viewport.frameTimings();upload.push_back(timings.upload);pack.push_back(timings.pack);sort.push_back(timings.sort);
@@ -108,6 +112,7 @@ int main(int argc, char **argv) {
     report("source",source);report("assembly",assembly);report("upload",upload);report("pack",pack);report("sort",sort);
     if (qEnvironmentVariableIsSet("PLAYBACK_GPU_TIMING")) {report("GPU prepare",gpuPrepare);report("GPU draw",gpuDraw);}
 #endif
+    if (display) std::printf("drawn_packed=%d of %zu\n",drawnPacked,total.size());
     report("worker",decode);report("render+upload+sort+GPU+readback",render);
     const double mean=report("total",total);std::printf("throughput=%.2f fps\n",1000/mean);
 #ifdef Q_OS_WIN

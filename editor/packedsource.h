@@ -36,6 +36,8 @@ public:
     // by the last chunk() call go.
     void want(const std::vector<size_t> &indices);
     bool failed() const;
+    // Whether the chunk is packed, without asking for it.
+    bool holds(size_t index) const;
 
 private:
     void run();

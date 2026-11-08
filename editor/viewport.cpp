@@ -822,11 +822,12 @@ void Viewport::paintGL() {
         gridShader_->release();
     }
     // The viewer's frames are packed alone. The editor's carry their floats as well, and are
-    // drawn packed only while playing, as Gaussians, outside the inspection sheet; else, or
+    // drawn packed only while playing (or, stopped, until the frame with its SH comes), as
+    // Gaussians, outside the inspection sheet; else, or
     // where this context cannot draw them packed, their floats are drawn.
     const bool hybridFrame = frame_ && frame_->packed && !frame_->records.empty();
     const bool packedFrame = frame_ && frame_->packed && (!hybridFrame ||
-        (playbackPlaying_ && splats_ && !sheetCapture_ && !frame_->shBlend.sources && splatPackedShader_ && packedFits(*frame_->packed->chunk)));
+        ((playbackPlaying_ || frame_->shOmitted) && splats_ && !sheetCapture_ && !frame_->shBlend.sources && splatPackedShader_ && packedFits(*frame_->packed->chunk)));
     lastPaintPacked_ = packedFrame;
     if (packedFrame && !hybridFrame && (!splatPackedShader_ || !splats_ || !packedFits(*frame_->packed->chunk))) {
         // Cannot be drawn here: the owner switches to floats and asks again.

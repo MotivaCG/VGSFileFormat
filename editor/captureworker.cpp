@@ -219,6 +219,16 @@ void CaptureWorker::prefetchMint(int chunk,bool later) {
     if (chunk<0 || chunk==mintPrefetched_[0] || chunk==mintPrefetched_[1]) return;
     mint_->prefetchChunk(chunk,later);mintPrefetched_={mintPrefetched_[1],chunk};
 }
+bool CaptureWorker::displaysPacked(double time,const Project &project) {
+#ifndef VGS_VIEWER
+    if (!packedDisplay_ || packedDisplayFailed_ || !displaySource_ || !project.previewPlaying || ply_ || project.inMorph(time,info_.fps)) return false;
+    const double t=std::clamp(time,0.0,std::max(0.0,info_.duration-1e-7));
+    const long long chunk=vgs_ ? (long long)vgs_->chunkAt(t) : mint_ ? (long long)mint_->chunkIndexAt(t) : -1;
+    return chunk>=0 && displaySource_->holds(size_t(chunk));
+#else
+    Q_UNUSED(time);Q_UNUSED(project);return false;
+#endif
+}
 void CaptureWorker::resetDisplaySource() {
 #ifndef VGS_VIEWER
     displaySource_.reset();packedDisplayFailed_=false;
@@ -480,7 +490,7 @@ FramePtr CaptureWorker::reusableFrame() {
     if (!out) out=std::make_shared<RenderFrame>();
     out->records.clear();out->active.clear();out->points.clear();out->morphMarkers.clear();out->prune.clear();out->greensApplied=false;out->visibilityFromCache=false;
     out->sourceMs=out->assemblyMs=0;out->morphShapeFromCache=false;out->colourFromCache=false;out->shBlend={};
-    out->packed.reset();out->despilled=false;out->shDespill={1,0,0, 0,1,0, 0,0,1};
+    out->packed.reset();out->despilled=false;out->shDespill={1,0,0, 0,1,0, 0,0,1};out->shOmitted=false;
     out->cache={};
     return out;
 }
@@ -501,6 +511,7 @@ FramePtr CaptureWorker::frame(double time, bool includeSh) {
 #endif
     if (mint_) {
         QString error;
+        if (!includeSh) out->sh.clear(); // a reused frame's are not this one's
         if (!mint_->decode(time, &mintFrame, includeSh, &error, &out->sh)) throw std::runtime_error(error.toStdString());
         p = mintFrame.position.constData(); r = mintFrame.rotation.constData();
         s = mintFrame.scale.constData(); c = mintFrame.colorDc.constData();
@@ -673,8 +684,13 @@ void CaptureWorker::decode(double time, quint64 generation, bool sh,Project proj
         if (!packed) {
             preparePreview(project);
             relieveMemoryPressure();
-            out=evaluate(time,sh,project);
+            // Drawn packed, a frame's SH come from its chunk: its floats need none, which is
+            // most of what decoding it costs. Should it not get packed after all, it is decoded
+            // again with them.
+            const bool omitSh=sh && displaysPacked(time,project);
+            out=evaluate(time,sh && !omitSh,project);out->shOmitted=omitSh;
             attachPacked(*out,project);
+            if (omitSh && !out->packed) {out=evaluate(time,sh,project);attachPacked(*out,project);}
         }
         emit decoded(out,generation);emit decodedRequest(out,generation,request_);
         // Decode the next VGS chunk in small pieces while this one is on screen.
@@ -687,7 +703,8 @@ void CaptureWorker::decode(double time, quint64 generation, bool sh,Project proj
                 if (next<vgs_->chunkCount() && next!=out->chunkIndex) {
                     // Packed: the sorter's positions and the packed chunk, each with half the time.
                     if (packed) {vgs_->prepare(next,budget*.5,vgsdec::Detail::Positions);preparePackedAhead(next,budget*.5);}
-                    else vgs_->prepare(next,budget,sh ? vgsdec::Detail::Full : vgsdec::Detail::Base);
+                    // Played packed, the floats decoder needs no SH: they are the packed chunk's.
+                    else vgs_->prepare(next,budget,sh && !out->shOmitted ? vgsdec::Detail::Full : vgsdec::Detail::Base);
                 }
             }
             catch (const std::exception &) { /* The normal frame request reports bad data. */ }

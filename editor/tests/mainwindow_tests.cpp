@@ -72,11 +72,11 @@ struct PlaybackFixture {
     std::unique_ptr<MainWindow> window;
     Viewport *viewport=nullptr;RangeSlider *slider=nullptr;
     // A capture of `frames` frames; with `purge`, opened as a project with a Purge isolated.
-    bool open(int frames,bool purge=false) {
+    bool open(int frames,bool purge=false,int degree=0) {
         if (!dir.isValid()) return false;
         QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());
         QString path=dir.filePath("play.vgs");
-        if (!playbackcheck::writeCapture(path,frames).isEmpty()) return false;
+        if (!playbackcheck::writeCapture(path,frames,degree).isEmpty()) return false;
         if (purge) {
             Project project;project.asset=path;project.out=(frames-1)/playbackcheck::Fps;Modifier m;m.type=ModifierType::PurgeIsolated;m.id=Project::newId();m.name="Purge";project.modifiers={m};
             path=dir.filePath("play.vgsproj");QString error;if (!project.write(path,&error)) return false;
@@ -399,6 +399,21 @@ private slots:
                 QTRY_COMPARE_WITH_TIMEOUT(f.shown(),f.slider->playheadValue(),3000);
                 QTest::qWait(150);QCOMPARE(f.shown(),f.slider->playheadValue());
             }
+        }
+    }
+    void stoppingRestoresTheFrameWithItsSh() {
+        // Played packed, a frame's CPU copy is decoded without its SH: the shader takes them from
+        // the chunk. Stopped, the frame left on screen is the one with them, drawn from floats,
+        // as picking and editing read it.
+        PlaybackFixture f;QVERIFY(f.open(120,false,3));
+        for (int i=0;i<4;++i) {
+            playbackcheck::Watch watch(f.viewport,f.slider);
+            f.play();QTest::qWait(400+150*i);
+            if (!qEnvironmentVariableIsSet("VGS_EDITOR_FLOATS")) QVERIFY2(watch.packed>0,"Nothing drawn packed.");
+            f.play();
+            QTRY_VERIFY_WITH_TIMEOUT(f.viewport->frame() && !f.viewport->frame()->shOmitted && !f.viewport->lastPaintPacked(),3000);
+            QCOMPARE(f.shown(),f.slider->playheadValue());
+            QVERIFY(f.viewport->frame()->coefficients>0);QVERIFY(!f.viewport->frame()->sh.empty());
         }
     }
     void seekingWhilePlayingShowsTheFrameAskedFor() {

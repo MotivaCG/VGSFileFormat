@@ -2082,8 +2082,10 @@ void MainWindow::play(bool playing) {
     } else {
         // Frames decoded ahead go. The frame on screen stays; when the clock had reached one
         // still being decoded, it is asked for again.
-        // What is on screen, not the frame it stood in for.
-        const bool onScreen=shownFrame_==currentFrame() && shownEpoch_==ahead_.epoch();
+        // What is on screen, not the frame it stood in for; and all of it: a frame played packed
+        // may have been decoded without its SH, which its floats, drawn paused, need.
+        const auto onScreenFrame=viewport_->frame();
+        const bool onScreen=shownFrame_==currentFrame() && shownEpoch_==ahead_.epoch() && !(onScreenFrame && onScreenFrame->shOmitted);
         playback_.stop();dropAhead();
         if (onScreen) shown(shownFrame_,ahead_.epoch());
         else if (wasPlaying) showOrDecodeFrame();

@@ -22,18 +22,19 @@ namespace playbackcheck {
 
 constexpr double Fps = 30;
 
-// `frames` frames at 30 fps, one chunk each, a splat moving along x.
-inline QString writeCapture(const QString &path, int frames) {
-    vgs::Header h; h.shDegree = 0; h.frameCount = h.durationTicks = uint64_t(frames); h.chunks.resize(size_t(frames));
+// `frames` frames at 30 fps, one chunk each, a splat moving along x; with SH up to `degree`.
+inline QString writeCapture(const QString &path, int frames, int degree = 0) {
+    vgs::Header h; h.shDegree = uint32_t(degree); h.frameCount = h.durationTicks = uint64_t(frames); h.chunks.resize(size_t(frames));
     for (size_t i = 0; i < h.chunks.size(); ++i) { h.chunks[i].startTick = i; h.chunks[i].intervals = 1; }
-    vgs::EncodeOptions options; options.signer = vgs::authoringSigner(); options.shDegree = 0; options.compression = vgs::Compression::None;
+    vgs::EncodeOptions options; options.signer = vgs::authoringSigner(); options.shDegree = uint32_t(degree); options.compression = vgs::Compression::None;
     QFile file(path);
     if (!file.open(QIODevice::WriteOnly)) return file.errorString();
     try {
         vgs::encodeSequence(h, [&](size_t chunk) {
             vgs::Frame f; f.count = 1; f.active = {1}; f.position = {float(chunk) * 0.01f, 1, 0}; f.rotation = {0, 0, 0, 1};
             f.scale = {.05f, .05f, .05f}; f.colorDc = {.5f, .5f, .5f}; f.opacity = {1};
-            return packExportFrame(f, 0);
+            if (degree) { f.shCoefficients = 15; f.shRest.assign(45, 0); for (size_t k = 0; k < 45; ++k) f.shRest[k] = .1f * float((k * 7 + chunk) % 5) - .2f; }
+            return packExportFrame(f, degree);
         }, [&](uint64_t offset, const uint8_t *data, size_t count) {
             if (!file.seek(qint64(offset)) || file.write(reinterpret_cast<const char *>(data), qint64(count)) != qint64(count))
                 throw std::runtime_error("Cannot write the test capture.");
