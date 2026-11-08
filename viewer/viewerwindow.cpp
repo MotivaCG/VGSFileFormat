@@ -158,6 +158,7 @@ ViewerWindow::ViewerWindow() : worker_(new CaptureWorker) {
             // Shown now if the clock has reached it, held if it is still to come. One that comes
             // late is shown only over a frame from before an edit, which it is newer than.
             if (answered.frame==currentFrame() || (!ahead_.store(answered.frame,answered.epoch,frame,upcomingFrames()) && shownEpoch_!=ahead_.epoch())) {
+                if (answered.frame==currentFrame()) ahead_.shownAt(tickSeconds_);
                 shown(answered.frame,answered.epoch);viewport_->setFrame(frame);
             }
         }

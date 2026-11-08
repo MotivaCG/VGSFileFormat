@@ -1053,6 +1053,11 @@ private slots:
         QVERIFY(ahead.store(9,ahead.epoch(),aheadFrame(),upcoming));
         ahead.next(PlaybackAhead::upcoming(10,10/120.,1/120.,clockFrames(120,0,1000,true),20),10/120.,true);
         QVERIFY(ahead.holds(9));QVERIFY(ahead.take(10,10/120.));
+        // A frame shown as it arrives, not taken: one due before it is older, and never shown
+        // after it.
+        for (int frame:{11,13}) QVERIFY(ahead.store(frame,ahead.epoch(),aheadFrame(),PlaybackAhead::upcoming(10,10/120.,1/120.,clockFrames(120,0,1000,true),20)));
+        ahead.shownAt(12/120.);QVERIFY(!ahead.holds(11));QVERIFY(ahead.holds(13));
+        QVERIFY(!ahead.take(12,12/120.));
     }
     void playbackAheadStaysWithinItsMemory() {
         // A budget of about two small frames.

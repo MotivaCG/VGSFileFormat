@@ -95,6 +95,9 @@ bool PlaybackAhead::store(int frame, quint64 epoch, FramePtr data, const std::ve
     frames_.push_back({frame, it->at, std::move(data)});
     return true;
 }
+void PlaybackAhead::shownAt(double now) {
+    frames_.erase(std::remove_if(frames_.begin(), frames_.end(), [&](const Held &held) { return held.at <= now; }), frames_.end());
+}
 FramePtr PlaybackAhead::take(int frame, double now, int *taken) {
     auto it = std::find_if(frames_.begin(), frames_.end(), [&](const Held &held) { return held.frame == frame; });
     if (it == frames_.end())

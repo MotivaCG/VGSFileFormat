@@ -71,6 +71,9 @@ public:
     // latest held one whose time has come - the clock's ticks need not land on every frame. It
     // leaves, and so do frames held for before it. Null when there is none, which drops nothing.
     FramePtr take(int frame, double now, int *taken = nullptr);
+    // A frame went on screen without take() (it arrived as the clock reached it): held frames
+    // whose time had come by `now` are older than it and go.
+    void shownAt(double now);
     // How long a held frame whose time has passed is still worth showing.
     static constexpr double DueSeconds = 0.05;
 
