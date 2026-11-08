@@ -54,13 +54,16 @@ public:
             const auto frame = viewport_->frame();
             if (!frame || viewport_->frameRevision() == revision_) return;
             revision_ = viewport_->frameRevision();
+            packed += viewport_->lastPaintPacked();
             shown.push_back({int(std::lround(frame->seconds * Fps)), slider_->playheadValue(), frame->cache.revision, clock_.elapsed()});
         });
     }
     ~Watch() { QObject::disconnect(connection_); }
-    void clear() { shown.clear(); }
+    void clear() { shown.clear(); packed = 0; }
     qint64 now() const { return clock_.elapsed(); }
     std::vector<Shown> shown;
+    // How many of them were drawn packed.
+    size_t packed = 0;
 private:
     Viewport *viewport_;
     const RangeSlider *slider_;

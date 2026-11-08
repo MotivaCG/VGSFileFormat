@@ -229,7 +229,7 @@ private:
     // Playback decodes ahead of the clock (PlaybackAhead); one request is with the worker at a
     // time, for the frame on screen or one ahead of it.
     PlaybackAhead ahead_;
-    bool playbackTick_ = false;
+    bool playbackTick_ = false, packedDisplayOff_ = false;
     // The frame on screen; and the clock's frame it stands for, which is another when the
     // clock's tick fell past a frame decoded for it. Both of the epoch shownEpoch_.
     int shownFrame_ = -1, coveredFrame_ = -1;

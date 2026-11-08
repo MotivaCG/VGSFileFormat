@@ -245,8 +245,12 @@ void main() {
 // only the shared tables' basis changes, computed on the worker (packedchunk.cpp). The SH
 // coefficients are summed from the static and temporal codebooks the same way.
 static const char *packedRecord = R"GLSL(
-uniform usamplerBuffer vgsSplatA, vgsSplatB, vgsSplatC, vgsPosSample, vgsRotSample, vgsPosTerms, vgsRotTerms, vgsShStaticIdx, vgsShTemporalIdx;
-uniform samplerBuffer vgsShBooks, vgsBasis, vgsLuts;
+uniform usamplerBuffer vgsSplatA, vgsSplatB, vgsSplatC, vgsPosSample, vgsRotSample, vgsPosTerms, vgsRotTerms, vgsShStaticIdx, vgsShTemporalIdx, vgsVisibility;
+uniform samplerBuffer vgsShBooks, vgsBasis, vgsLuts, vgsColours;
+// The editor's frames: what its modifiers made of each splat (0 none, else 1 + 254 x the
+// visibility), a despill's base colours, and its transform of the SH coefficients.
+uniform int vgsHasVisibility, vgsHasColours;
+uniform mat3 vgsShMatrix;
 uniform int vgsFrame, vgsSamples, vgsGroupCount, vgsSplats, vgsSh0Stride, vgsOpaStride;
 uniform int vgsEntriesStatic, vgsEntriesTemporal, vgsBooksTemporal, vgsShPlanes;
 uniform ivec4 vgsBasisOffset; // position, colour, opacity, rotation
@@ -277,6 +281,11 @@ void fetchRecord(int index, out vec4 a, out vec4 q, out vec4 s, out vec4 c) {
     uvec4 A=texelFetch(vgsSplatA,index), B=texelFetch(vgsSplatB,index), C=texelFetch(vgsSplatC,index);
     s=vec4(0,0,0,float(index)); c=vec4(0,0,0,1); q=vec4(0,0,0,1); a=vec4(0);
     if(index>=vgsSplats || vgsFrame<int(A.w>>24) || vgsFrame+1>int(C.w>>24)) return; // not alive: opacity 0, culled
+    if(vgsHasVisibility!=0) {
+        uint v=texelFetch(vgsVisibility,index).r;
+        if(v==0u) return; // not among the frame's points
+        c.a=float(v-1u)/254.0;
+    }
     int gi=vgsGroupCount-1;
     for(int i=0;i<8;++i) if(i<vgsGroupCount && index<int(vgsGroupA[i].x)) {gi=i;break;}
     int local=index-(gi==0 ? 0 : int(vgsGroupA[gi-1].x)), flags=int(vgsGroupA[gi].y);
@@ -319,13 +328,13 @@ void fetchRecord(int index, out vec4 a, out vec4 q, out vec4 s, out vec4 c) {
     float factor=exp2(-float((B.w>>28)|((B.y>>28)<<4))/16.0);
     a=vec4(p,clamp(opacity,0.0,1.0)*factor);
     s.xyz=vec3(texelFetch(vgsLuts,int(A.w&255u)).r,texelFetch(vgsLuts,int((A.w>>8)&255u)).r,texelFetch(vgsLuts,int((A.w>>16)&255u)).r);
-    c.rgb=vec3(0.5)+0.28209479177387814*sh0;
+    c.rgb=vgsHasColours!=0 ? texelFetch(vgsColours,index).rgb : vec3(0.5)+0.28209479177387814*sh0;
 }
 // One word per plane carries three coefficients' codebook indices.
 vec3 recordSh(int index, int co) {
     int word=(co/3)*vgsSplats+index; uint shift=uint(20-10*(co%3));
     int si=int((texelFetch(vgsShStaticIdx,word).r>>shift)&1023u), ti=int((texelFetch(vgsShTemporalIdx,word).r>>shift)&1023u);
-    return texelFetch(vgsShBooks,co*vgsEntriesStatic+si).xyz+texelFetch(vgsShBooks,vgsBooksTemporal+vgsFrame*vgsShPlanes*3*vgsEntriesTemporal+co*vgsEntriesTemporal+ti).xyz;
+    return vgsShMatrix*(texelFetch(vgsShBooks,co*vgsEntriesStatic+si).xyz+texelFetch(vgsShBooks,vgsBooksTemporal+vgsFrame*vgsShPlanes*3*vgsEntriesTemporal+co*vgsEntriesTemporal+ti).xyz);
 }
 )GLSL";
 static const char *splatFragment = R"GLSL(
@@ -570,8 +579,8 @@ void Viewport::cleanup() {
     if (!initialized_) return;
     makeCurrent();
     pointShader_.reset(); gridShader_.reset(); splatShader_.reset();splatPrepareShader_.reset();
-    if (splatPackedShader_) {glDeleteBuffers(12,packedBuffers_.data());glDeleteTextures(12,packedTextures_.data());}
-    splatPackedShader_.reset();packedBuffers_={};packedTextures_={};uploadedPackedChunk_.reset();uploadedPackedBasis_.reset();drawnPacked_.reset();drawnPackedSerial_=0;
+    if (splatPackedShader_) {glDeleteBuffers(GLsizei(packedBuffers_.size()),packedBuffers_.data());glDeleteTextures(GLsizei(packedTextures_.size()),packedTextures_.data());}
+    splatPackedShader_.reset();packedBuffers_={};packedTextures_={};uploadedPackedChunk_.reset();uploadedPackedBasis_.reset();uploadedPackedExtras_.reset();drawnPacked_.reset();drawnPackedSerial_=0;
     glDeleteVertexArrays(1,&splatPrepareVao_);glDeleteBuffers(1,&projectedBuffer_);glDeleteTextures(1,&projectedTexture_);
     glDeleteBuffers(1,&blendSourceBuffer_);glDeleteTextures(1,&blendSourceTexture_);glDeleteBuffers(1,&blendIndexBuffer_);glDeleteTextures(1,&blendIndexTexture_);uploadedBlendSources_.reset();
     glDeleteVertexArrays(1,&splatVao_); glDeleteBuffers(1,&cornerBuffer_); glDeleteBuffers(1,&orderBuffer_);
@@ -629,10 +638,10 @@ void Viewport::initializeGL() {
             if (ok) {glTransformFeedbackVaryings(program->programId(),3,varyings,GL_INTERLEAVED_ATTRIBS);ok=program->link();}
             if (ok) {
                 program->bind();
-                const char *samplers[]={"vgsSplatA","vgsSplatB","vgsSplatC","vgsPosSample","vgsRotSample","vgsPosTerms","vgsRotTerms","vgsShStaticIdx","vgsShTemporalIdx","vgsShBooks","vgsBasis","vgsLuts"};
-                for (int i=0;i<12;++i) program->setUniformValue(samplers[i],4+i);
+                const char *samplers[]={"vgsSplatA","vgsSplatB","vgsSplatC","vgsPosSample","vgsRotSample","vgsPosTerms","vgsRotTerms","vgsShStaticIdx","vgsShTemporalIdx","vgsShBooks","vgsBasis","vgsLuts","vgsVisibility","vgsColours"};
+                for (int i=0;i<14;++i) program->setUniformValue(samplers[i],4+i);
                 program->release();splatPackedShader_=std::move(program);
-                glGenBuffers(12,packedBuffers_.data());glGenTextures(12,packedTextures_.data());
+                glGenBuffers(GLsizei(packedBuffers_.size()),packedBuffers_.data());glGenTextures(GLsizei(packedTextures_.size()),packedTextures_.data());
             } else qWarning("Packed splat shader unavailable: %s",qPrintable(program->log()));
         }
     }
@@ -812,8 +821,14 @@ void Viewport::paintGL() {
         gridShader_->setUniformValue("greyMap",QVector2D(1,0)); // crop and gizmo lines share this shader
         gridShader_->release();
     }
-    const bool packedFrame = frame_ && frame_->packed;
-    if (packedFrame && (!splatPackedShader_ || !splats_ || !packedFits(*frame_->packed->chunk))) {
+    // The viewer's frames are packed alone. The editor's carry their floats as well, and are
+    // drawn packed only while playing, as Gaussians, outside the inspection sheet; else, or
+    // where this context cannot draw them packed, their floats are drawn.
+    const bool hybridFrame = frame_ && frame_->packed && !frame_->records.empty();
+    const bool packedFrame = frame_ && frame_->packed && (!hybridFrame ||
+        (playbackPlaying_ && splats_ && !sheetCapture_ && !frame_->shBlend.sources && splatPackedShader_ && packedFits(*frame_->packed->chunk)));
+    lastPaintPacked_ = packedFrame;
+    if (packedFrame && !hybridFrame && (!splatPackedShader_ || !splats_ || !packedFits(*frame_->packed->chunk))) {
         // Cannot be drawn here: the owner switches to floats and asks again.
         if (!packedFailureReported_) {packedFailureReported_=true;QMetaObject::invokeMethod(this,[this] {emit packedRenderingFailed();},Qt::QueuedConnection);}
     } else if (frame_ && (packedFrame || !frame_->points.empty())) {
@@ -822,12 +837,16 @@ void Viewport::paintGL() {
         GLint maxTexels = 0; glGetIntegerv(GL_MAX_TEXTURE_BUFFER_SIZE, &maxTexels);
         const bool splats = packedFrame || (splats_ && frame_->points.size()*4 <= size_t(maxTexels));
         const auto &blend=frame_->shBlend;const bool blendSh=bool(blend.sources);
-        if (packedFrame) frameDirty_=splatsDirty_=false; // its buffers are the packed chunk's
-        if (frameDirty_ && !splats) {
+        // A packed frame's buffers are its chunk's. An editor frame keeps its floats to upload
+        // should it be drawn that way later; one drawn that way ends the packed sequence, so
+        // the next packed frame is sorted at once rather than after an old one.
+        if (packedFrame && !hybridFrame) frameDirty_=splatsDirty_=false;
+        if (!packedFrame && drawnPacked_) {drawnPacked_.reset();drawnPackedSerial_=0;packedRequests_.clear();}
+        if (frameDirty_ && !splats && !packedFrame) {
             glBindBuffer(GL_ARRAY_BUFFER, buffer_);
             glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(frame_->points.size()*sizeof(PointVertex)), frame_->points.data(), GL_STREAM_DRAW);
         }
-        if (frameDirty_) {
+        if (frameDirty_ && !packedFrame) {
             shCoefficients_ = frame_->coefficients;
             GLint maxTexels = 0; glGetIntegerv(GL_MAX_TEXTURE_BUFFER_SIZE, &maxTexels);
             const auto &sh=blendSh ? blend.sources->values : frame_->sh;
@@ -865,7 +884,7 @@ void Viewport::paintGL() {
             splatLimitReported_ = true;
             emit renderFailed(tr("This GPU cannot hold this many splats; showing points."));
         }
-        if (splats && splatsDirty_) {
+        if (splats && splatsDirty_ && !packedFrame) {
             timer.restart();
             // Four texels per record: position+opacity, rotation, scale+source, colour+visibility.
             auto &data=splatUpload_;data.resize(frame_->points.size()*16);
@@ -1101,7 +1120,7 @@ bool Viewport::packedFits(const PackedChunk &c) const {
     gl->glGetIntegerv(GL_MAX_TEXTURE_BUFFER_SIZE,&texels);gl->glGetIntegerv(GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS,&units);
     const size_t largest=std::max({size_t(c.splats),c.positionSamples.size()/2,c.positionTerms.size()/2,c.rotationTerms.size(),
         c.rotationSamples.size(),c.shStatic.size(),c.books.size()/4,size_t(basisLayout(c).total)});
-    return units>=16 && largest<=size_t(texels) && c.splats<uint64_t(std::numeric_limits<int>::max());
+    return units>=18 && largest<=size_t(texels) && c.splats<uint64_t(std::numeric_limits<int>::max());
 }
 const PackedFrame *Viewport::preparePacked(QOpenGLShaderProgram *shader,const QMatrix4x4 &modelView) {
     auto depthAxisMoved=[&](const QMatrix4x4 &from) {
@@ -1152,9 +1171,16 @@ const PackedFrame *Viewport::preparePacked(QOpenGLShaderProgram *shader,const QM
     }
     // Once per frame: the shared tables at its instant, a few hundred kilobytes.
     if (uploadedPackedBasis_.lock()!=packed) {buffer(10,GL_RGBA32F,packed->basis.data(),packed->basis.size()*4);uploadedPackedBasis_=packed;}
-    for (int i=0;i<12;++i) {glActiveTexture(GLenum(GL_TEXTURE4+i));glBindTexture(GL_TEXTURE_BUFFER,packedTextures_[size_t(i)]);}
+    // The editor's per frame, or a texel standing in for them.
+    if (uploadedPackedExtras_.lock()!=packed) {
+        static const uint8_t noVisibility[1]={};static const uint16_t noColour[4]={};
+        if (packed->visibility.empty()) buffer(12,GL_R8UI,noVisibility,sizeof noVisibility);else buffer(12,GL_R8UI,packed->visibility.data(),packed->visibility.size());
+        if (packed->colours.empty()) buffer(13,GL_RGBA16F,noColour,sizeof noColour);else buffer(13,GL_RGBA16F,packed->colours.data(),packed->colours.size()*sizeof(uint16_t));
+        uploadedPackedExtras_=packed;
+    }
+    for (int i=0;i<14;++i) {glActiveTexture(GLenum(GL_TEXTURE4+i));glBindTexture(GL_TEXTURE_BUFFER,packedTextures_[size_t(i)]);}
     glActiveTexture(GL_TEXTURE0);
-    frameTimings_.upload+=timer.nsecsElapsed()/1e6;
+    frameTimings_.upload+=timer.nsecsElapsed()/1e6;uploadMs_=frameTimings_.upload; // what the overlay reports
 
     const auto layout=basisLayout(c);
     shader->setUniformValue("vgsFrame",int(packed->instant.frame));shader->setUniformValue("vgsSamples",int(c.samples));
@@ -1164,13 +1190,16 @@ const PackedFrame *Viewport::preparePacked(QOpenGLShaderProgram *shader,const QM
     shader->setUniformValue("vgsBooksTemporal",int(uint64_t(c.planes)*3*c.entriesStatic));shader->setUniformValue("vgsShPlanes",c.planes);
     glUniform4i(shader->uniformLocation("vgsBasisOffset"),layout.position,layout.sh0,layout.opacity,layout.rotation);
     shader->setUniformValue("vgsAlpha",packed->instant.alpha);shader->setUniformValue("vgsNormalized",packed->instant.normalized);
+    shader->setUniformValue("vgsHasVisibility",int(!packed->visibility.empty()));shader->setUniformValue("vgsHasColours",int(!packed->colours.empty()));
+    shader->setUniformValue("vgsShMatrix",QMatrix3x3(packed->shMatrix));
     shader->setUniformValueArray("vgsGroupA",c.groupA,PackedChunk::MaxGroups,4);shader->setUniformValueArray("vgsGroupB",c.groupB,PackedChunk::MaxGroups,4);
     return packed.get();
 }
 const std::vector<PointVertex> &Viewport::pickablePoints() const {
     static const std::vector<PointVertex> none;
     if (!frame_) return none;
-    if (!frame_->packed) return frame_->points;
+    // The editor's frames carry their floats too.
+    if (!frame_->packed || !frame_->records.empty()) return frame_->points;
     if (pickPointsSerial_!=frameSerial_) {
         const auto &p=*frame_->packed;pickPoints_.clear();
         for (size_t i=0;i<p.alive.size();++i) if (p.alive[i]) {

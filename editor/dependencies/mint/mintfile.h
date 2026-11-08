@@ -208,6 +208,9 @@ public:
     const QByteArray &bytes() const { return m_data; }
     // The chunk the animation is in at that time (wrapping as decode() does), or -1.
     int chunkIndexAt(double seconds) const;
+    // Where decode() reads that time: its chunk, the sample before it and how far towards the
+    // next. False when there is nothing to decode.
+    bool sampleAt(double seconds, int* chunkIndex, quint64* sample, float* alpha) const;
     // A read-only mapping is read on demand, page by page as decoding touches it: from a
     // hard disk a 35 MB chunk then takes seconds. This has the chunk's bytes read in large
     // sequential requests: now, returning once they are in memory, or `later`, on another

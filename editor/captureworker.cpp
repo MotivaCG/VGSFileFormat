@@ -10,6 +10,11 @@
 
 #include "captureworker.h"
 #include "prefetchrange.h"
+#ifndef VGS_VIEWER
+#include "packedsource.h"
+#include "vgscodec.h"
+#endif
+#include <QFloat16>
 #include <QThread>
 #include "isolation.h"
 #include "pruning.h"
@@ -145,7 +150,7 @@ void CaptureWorker::clear() {
 #ifndef VGS_VIEWER
     ply_.reset();
 #endif
-    vgs_.reset(); source_.reset(); mint_.reset();mintPrefetched_={-1,-1};vgsPrefetched_.fill(size_t(-1)); info_ = {}; generation_ = 0; pruneScores_.clear(); morph_.reset();morphScratch_={}; morphKey_.clear(); clearVisibility();framePool_={};
+    resetDisplaySource();vgs_.reset(); source_.reset(); mint_.reset();mintPrefetched_={-1,-1};vgsPrefetched_.fill(size_t(-1)); info_ = {}; generation_ = 0; pruneScores_.clear(); morph_.reset();morphScratch_={}; morphKey_.clear(); clearVisibility();framePool_={};
     packedVgs_.reset();packedSource_.reset();packedCurrent_.reset();packedAhead_.reset();packedUnsupported_=false;
     dependencyRevision_=0;dependencyVisibilityKeys_={};dependencyMorphKey_.clear();dependencyColourKey_.clear();
 }
@@ -214,6 +219,96 @@ void CaptureWorker::prefetchMint(int chunk,bool later) {
     if (chunk<0 || chunk==mintPrefetched_[0] || chunk==mintPrefetched_[1]) return;
     mint_->prefetchChunk(chunk,later);mintPrefetched_={mintPrefetched_[1],chunk};
 }
+void CaptureWorker::resetDisplaySource() {
+#ifndef VGS_VIEWER
+    displaySource_.reset();packedDisplayFailed_=false;
+#endif
+}
+// A frame of setPackedDisplay: its chunk packed (if it is by now; never waited for), the shared
+// tables at its instant, and what the modifiers left of it.
+void CaptureWorker::attachPacked(RenderFrame &out,const Project &project) {
+#ifndef VGS_VIEWER
+    if (!packedDisplay_ || packedDisplayFailed_ || !project.previewPlaying || out.chunkIndex==RenderFrame::MorphChunk || out.shBlend.sources || ply_ || (!vgs_ && !mint_)) return;
+    try {
+        if (!displaySource_) {
+            if (vgs_) {
+                // A decoder of its own in Packed mode, used on the source's thread alone.
+                struct State {std::unique_ptr<FileSource> source;std::unique_ptr<vgsdec::Capture> capture;};
+                auto state=std::make_shared<State>();const QString path=info_.path;
+                displaySource_=std::make_unique<PackedChunkSource>([state,path](size_t index)->PackedChunkPtr {
+                    if (!state->capture) {
+                        state->source=std::make_unique<FileSource>(path);
+                        state->capture=std::make_unique<vgsdec::Capture>(vgsdec::Capture::openStream(*state->source));
+                        state->capture->setOutput(vgsdec::Output::Packed);state->capture->setCachePolicy(vgsdec::CachePolicy{0,1,0});
+                        state->capture->setThreadCount(2);
+                    }
+                    while (!state->capture->prepare(index,1e9,vgsdec::Detail::Full)) {}
+                    return packChunk(state->capture->chunkData(index),state->capture->shDegree());
+                });
+            } else {
+                // The .mint's own arrays, read from its mapping: the same a .vgs made of it holds.
+                const auto &bytes=mint_->bytes();const auto *data=reinterpret_cast<const uint8_t *>(bytes.constData());
+                const size_t size=size_t(bytes.size());const unsigned degree=unsigned(std::clamp(mint_->shDegree(),0,3));
+                auto source=std::make_shared<std::unique_ptr<vgs::MintLogicalSource>>();
+                displaySource_=std::make_unique<PackedChunkSource>([source,data,size,degree](size_t index)->PackedChunkPtr {
+                    if (!*source) *source=std::make_unique<vgs::MintLogicalSource>(data,size,degree);
+                    return packLogicalChunk((*source)->chunk(index),index,degree);
+                });
+            }
+        }
+        if (displaySource_->failed()) {qWarning("Packed display unavailable for this capture: drawn the floats way.");packedDisplayFailed_=true;displaySource_.reset();return;}
+        const auto chunk=displaySource_->chunk(out.chunkIndex);
+        // The chunk after this one is packed while it plays.
+        std::vector<size_t> ahead;
+        if (vgs_) {const size_t next=followingChunk(out.chunkIndex,project);if (next<vgs_->chunkCount() && next!=out.chunkIndex) ahead.push_back(next);}
+        else {
+            const auto &chunks=mint_->chunks();int next=int(out.chunkIndex)+1;
+            if (project.previewPlaying && project.loop && (next>=chunks.size() || (project.out>project.in && chunks[next].start>project.out))) next=mint_->chunkIndexAt(project.in);
+            if (next>=0 && next<chunks.size() && size_t(next)!=out.chunkIndex) ahead.push_back(size_t(next));
+        }
+        displaySource_->want(ahead);
+        if (!chunk) return;
+        const size_t count=out.records.size();
+        if (chunk->splats!=count) {qWarning("Packed display: chunk %zu holds %llu splats, the frame %zu; drawn the floats way.",out.chunkIndex,qulonglong(chunk->splats),count);packedDisplayFailed_=true;displaySource_.reset();return;}
+        uint32_t sample=0;float alpha=0;
+        if (vgs_) {
+            const auto instant=vgs_->instantAt(out.seconds);
+            if (instant.chunkIndex!=out.chunkIndex) return;
+            sample=uint32_t(instant.sampleA);alpha=float(instant.alpha);
+        } else {
+            int index=-1;quint64 at=0;
+            if (!mint_->sampleAt(out.seconds,&index,&at,&alpha) || size_t(index)!=out.chunkIndex) return;
+            sample=uint32_t(at);
+        }
+        auto packed=std::make_shared<PackedFrame>();
+        packed->chunk=chunk;packed->instant=packedInstant(*chunk,sample,alpha);evaluateBasis(*chunk,packed->instant,&packed->basis);
+        packed->positions.resize(count*3);
+        for (size_t i=0;i<count;++i) std::copy_n(out.records[i].position,3,packed->positions.data()+i*3);
+        packed->visibility.assign(count,0);
+        for (const auto &p:out.points) {
+            const size_t id=size_t(p.id);
+            if (id<count) packed->visibility[id]=uint8_t(1+std::lround(std::clamp(p.modifierVisibility,0.f,1.f)*254));
+        }
+        packed->alive.resize(count);
+        for (size_t i=0;i<count;++i) packed->alive[i]=packed->visibility[i]!=0;
+        if (out.despilled) {
+            packed->colours.resize(count*4);
+            for (size_t i=0;i<count;++i) {
+                const auto *c=out.records[i].color;
+                for (int k=0;k<3;++k) {const qfloat16 half(c[k]);std::memcpy(&packed->colours[i*4+size_t(k)],&half,sizeof half);}
+                packed->colours[i*4+3]=0;
+            }
+            std::copy(out.shDespill.begin(),out.shDespill.end(),packed->shMatrix);
+        }
+        if (vgs_ && vgs_->hasMotion()) {const auto motion=vgs_->motionAt(out.seconds);std::copy_n(motion.matrix,16,packed->motion);}
+        out.packed=std::move(packed);
+    } catch (const std::exception &e) {
+        qWarning("Packed display unavailable: %s",e.what());packedDisplayFailed_=true;displaySource_.reset();
+    }
+#else
+    Q_UNUSED(out);Q_UNUSED(project);
+#endif
+}
 void CaptureWorker::setCachingEnabled(bool enabled) {
     if (cachingEnabled_==enabled) return;cachingEnabled_=enabled;
     clearVisibility();clearColours();framePool_={};morphScratch_={};pruneScores_.clear();
@@ -262,6 +357,17 @@ void CaptureWorker::relieveMemoryPressure() {
     if (remaining) {const auto bytes=reusableFrameBytes();framePool_={};morphScratch_={};released(bytes);}
     if (remaining) {pruneScores_.clear();if (vgs_) vgs_->releaseCache();}
 }
+#ifndef VGS_VIEWER
+namespace {
+// What despillSh does to one coefficient's RGB, as a matrix: it is linear, the same for every
+// splat and every coefficient.
+void markDespilled(RenderFrame &out,const CaptureSettings &settings) {
+    std::vector<float> columns{1,0,0, 0,1,0, 0,0,1};despillSh(columns,settings);
+    for (int row=0;row<3;++row) for (int column=0;column<3;++column) out.shDespill[size_t(row*3+column)]=columns[size_t(column*3+row)];
+    out.despilled=true;
+}
+}
+#endif
 void CaptureWorker::applyDespill(RenderFrame &out,const CompiledModifiers &modifiers,bool keep) {
 #ifndef VGS_VIEWER
     CaptureSettings settings;settings.despillStrength=modifiers.despillStrength;settings.greenGain=modifiers.greenGain;
@@ -275,7 +381,7 @@ void CaptureWorker::applyDespill(RenderFrame &out,const CompiledModifiers &modif
         const auto &rgb=hit->second.rgb;
         for (size_t i=0;i<out.records.size();++i) std::copy_n(rgb.data()+3*i,3,out.records[i].color);
         for (auto &p:out.points) std::copy_n(rgb.data()+size_t(p.id)*3,3,p.color);
-        despillSh(out.sh,settings);out.colourFromCache=true;
+        despillSh(out.sh,settings);out.colourFromCache=true;markDespilled(out,settings);
         colourOrder_.splice(colourOrder_.end(),colourOrder_,hit->second.order);
         return;
     }
@@ -288,7 +394,7 @@ void CaptureWorker::applyDespill(RenderFrame &out,const CompiledModifiers &modif
     despillFrame(f,settings);
     for (size_t i=0;i<out.records.size();++i) std::copy_n(f.colorDc.data()+i*3,3,out.records[i].color);
     for (auto &p:out.points) std::copy_n(f.colorDc.data()+size_t(p.id)*3,3,p.color);
-    out.sh.swap(f.shRest);
+    out.sh.swap(f.shRest);markDespilled(out,settings);
     // Move the computed RGB into retention: no extra full-frame copy. SH stays
     // in the reusable render frame and is transformed afresh on a colour hit.
     Colour colour;colour.rgb=std::move(f.colorDc);const size_t bytes=colour.bytes();
@@ -374,6 +480,7 @@ FramePtr CaptureWorker::reusableFrame() {
     if (!out) out=std::make_shared<RenderFrame>();
     out->records.clear();out->active.clear();out->points.clear();out->morphMarkers.clear();out->prune.clear();out->greensApplied=false;out->visibilityFromCache=false;
     out->sourceMs=out->assemblyMs=0;out->morphShapeFromCache=false;out->colourFromCache=false;out->shBlend={};
+    out->packed.reset();out->despilled=false;out->shDespill={1,0,0, 0,1,0, 0,0,1};
     out->cache={};
     return out;
 }
@@ -521,7 +628,7 @@ void CaptureWorker::open(const QString &path, quint64 generation, bool sh) {
             candidate.info_.minimum[j] = float(bounds[j]); candidate.info_.maximum[j] = float(bounds[j+3]);
         }
         auto first = candidate.frame(0, sh);
-        vgs_.reset(); source_.reset(); mint_.reset();mintPrefetched_={-1,-1};vgsPrefetched_.fill(size_t(-1));
+        resetDisplaySource();vgs_.reset(); source_.reset(); mint_.reset();mintPrefetched_={-1,-1};vgsPrefetched_.fill(size_t(-1));
         source_ = std::move(candidate.source_); vgs_ = std::move(candidate.vgs_); mint_ = std::move(candidate.mint_);
 #ifndef VGS_VIEWER
         ply_=std::move(candidate.ply_);
@@ -567,6 +674,7 @@ void CaptureWorker::decode(double time, quint64 generation, bool sh,Project proj
             preparePreview(project);
             relieveMemoryPressure();
             out=evaluate(time,sh,project);
+            attachPacked(*out,project);
         }
         emit decoded(out,generation);emit decodedRequest(out,generation,request_);
         // Decode the next VGS chunk in small pieces while this one is on screen.

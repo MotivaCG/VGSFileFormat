@@ -366,8 +366,12 @@ private slots:
         const auto shown=watch.shown;f.play();
         playbackcheck::checkOnTime(shown,0,119,2,1,0.9);
         QVERIFY2(shown.size()>=60,qPrintable(QString("%1 frames in 2.5 s").arg(shown.size())));
-        // Stopped: the frame at the playhead is the one on screen, and stays.
+        // Played packed, but for frames whose chunk was not packed yet.
+        if (!qEnvironmentVariableIsSet("VGS_EDITOR_FLOATS")) QVERIFY2(watch.packed*10>=shown.size()*8,qPrintable(QString("%1 of %2 frames drawn packed").arg(watch.packed).arg(shown.size())));
+        // Stopped: the frame at the playhead is the one on screen, and stays; drawn from its
+        // floats, which picking and editing read.
         QTRY_COMPARE(f.shown(),f.slider->playheadValue());
+        QTRY_VERIFY(!f.viewport->lastPaintPacked());
         QTest::qWait(200);QCOMPARE(f.shown(),f.slider->playheadValue());
     }
     void playbackAimsAheadWhenDecodingIsSlow() {
@@ -457,6 +461,8 @@ private slots:
             QTRY_VERIFY_WITH_TIMEOUT(bake->isEnabled(),30000);
         }
         auto *style=window.findChild<QComboBox *>("displayRenderStyle");QVERIFY(style);style->setCurrentIndex(1);
+        // EDITOR_PLAYBACK_SPEED=2: twice the frames to show, to see how much room is left.
+        if (qEnvironmentVariableIsSet("EDITOR_PLAYBACK_SPEED")) {auto *speed=window.findChild<QDoubleSpinBox *>("playbackSpeed");QVERIFY(speed);speed->setValue(qEnvironmentVariable("EDITOR_PLAYBACK_SPEED").toDouble());}
         viewport->setSplatShDegree(-1);viewport->setFocus();
         quint64 serial=viewport->frameRevision();int presented=0;double workerMs=0;
         connect(viewport,&QOpenGLWidget::frameSwapped,&window,[&] {

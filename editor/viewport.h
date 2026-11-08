@@ -144,6 +144,8 @@ public:
     // Whether this context can draw the viewer's packed frames; true until it is known.
     bool packedRenderingAvailable() const { return !initialized_ || bool(splatPackedShader_); }
     // A packed frame was set whose order is still being sorted: the previous one is on screen.
+    // Whether the last paint drew a packed frame (tests).
+    bool lastPaintPacked() const { return lastPaintPacked_; }
     bool packedFramePending() const { return frame_ && frame_->packed && drawnPacked_ && drawnPackedSerial_!=frameSerial_; }
 signals:
     void cameraChanged();
@@ -282,7 +284,8 @@ private:
     // Packed playback: a newer frame waits until its order is sorted, then the two are drawn
     // together, so no sort ever runs on this thread during playback.
     std::unique_ptr<QOpenGLShaderProgram> splatPackedShader_;
-    std::array<GLuint,12> packedBuffers_{}, packedTextures_{};
+    // The packed chunk's twelve arrays, then the editor's per-frame visibility and colours.
+    std::array<GLuint,14> packedBuffers_{}, packedTextures_{};
     FramePtr drawnPacked_;
     quint64 drawnPackedSerial_ = 0;
     // Frames whose order was asked for, newest last: a result for any of them newer than the
@@ -291,7 +294,8 @@ private:
     // What the packed buffers hold, compared by identity; weak, so they keep nothing alive.
     std::weak_ptr<const PackedChunk> uploadedPackedChunk_;
     std::weak_ptr<const PackedFrame> uploadedPackedBasis_;
-    bool packedFailureReported_ = false;
+    std::weak_ptr<const PackedFrame> uploadedPackedExtras_;
+    bool packedFailureReported_ = false, lastPaintPacked_ = false;
     // The frame to draw this paint, sorted, with its textures and uniforms in place; null when
     // there is none yet.
     const PackedFrame *preparePacked(QOpenGLShaderProgram *shader, const QMatrix4x4 &modelView);

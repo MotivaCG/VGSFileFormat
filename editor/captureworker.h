@@ -79,6 +79,10 @@ struct RenderFrame {
     // Remove green already decided into modifierVisibility, because the colours shown are
     // despilled and a filter above Color must test the source's: the viewport skips it.
     bool greensApplied = false;
+    // A Colour modifier's despill changed the base colours in records and points, and every
+    // SH coefficient by shDespill (row-major, linear): what a packed frame needs to match.
+    bool despilled = false;
+    std::array<float,9> shDespill{1,0,0, 0,1,0, 0,0,1};
     // The viewer's packed playback: the chunk as the GPU reads it and where the instant falls
     // in it. Records, points and sh stay empty; the viewport evaluates the splats itself.
     std::shared_ptr<const PackedFrame> packed;
@@ -143,6 +147,10 @@ public:
     // the shader evaluates every frame, so a frame costs positions for sorting and nothing
     // else. Set before the first open; modifiers and the editor's processing do not apply.
     void setPackedPlayback(bool enabled) {packedPlayback_=enabled;}
+    // The editor's: while playing, each frame also carries its chunk as the GPU reads it, with
+    // what the modifiers made of it (PackedFrame's visibility, colours, shMatrix), and the
+    // viewport draws that rather than uploading the frame. Paused, frames are floats alone.
+    void setPackedDisplay(bool enabled) {packedDisplay_=enabled;}
     // The visibility cache: frames held, and the memory they take.
     size_t visibilityFrames() const { return visibility_.size(); }
     size_t visibilityBytes() const { return visibilityBytes_; }
@@ -186,6 +194,14 @@ private:
     std::unique_ptr<FileSource> source_;
     std::unique_ptr<vgsdec::Capture> vgs_;
     std::unique_ptr<MintFile> mint_;
+    // Packs chunks for setPackedDisplay on its own thread. Declared after mint_, whose mapped
+    // bytes it reads, so that it goes first.
+#ifndef VGS_VIEWER
+    std::unique_ptr<class PackedChunkSource> displaySource_;
+#endif
+    bool packedDisplay_=false,packedDisplayFailed_=false;
+    void attachPacked(RenderFrame &out,const Project &project);
+    void resetDisplaySource();
     // The last chunks asked of the system ahead of decoding (MintFile::prefetchChunk).
     std::array<int,2> mintPrefetched_{-1,-1};
     // The chunk a frame is in now, waiting for it; or the next one, later, on another thread.

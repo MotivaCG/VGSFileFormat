@@ -41,7 +41,7 @@ include($$VGS_ROOT/cmake/VGSEntropy.pri)
 DEPENDPATH += $$PWD
 INCLUDEPATH += $$PWD/dependencies/eigen $$PWD $$PWD/dependencies/mint $$VGS_ROOT/decoder/include \
     $$VGS_ROOT/core/include/vgs $$VGS_ROOT/core/crypto $$VGS_ROOT/core/src
-SOURCES += $$PWD/main.cpp $$PWD/mainwindow.cpp $$PWD/inspection.cpp $$PWD/viewport.cpp $$PWD/viewcube.cpp $$PWD/captureworker.cpp $$PWD/packedchunk.cpp $$PWD/playbackahead.cpp $$PWD/project.cpp $$PWD/filehistory.cpp $$PWD/presetstore.cpp $$PWD/capturesettings.cpp $$PWD/capturesettingsdialog.cpp \
+SOURCES += $$PWD/main.cpp $$PWD/mainwindow.cpp $$PWD/inspection.cpp $$PWD/viewport.cpp $$PWD/viewcube.cpp $$PWD/captureworker.cpp $$PWD/packedchunk.cpp $$PWD/packedsource.cpp $$PWD/playbackahead.cpp $$PWD/project.cpp $$PWD/filehistory.cpp $$PWD/presetstore.cpp $$PWD/capturesettings.cpp $$PWD/capturesettingsdialog.cpp \
     $$PWD/dependencies/mint/mintfile.cpp \
     $$VGS_ROOT/decoder/src/vgsdecoder.cpp \
     $$VGS_ROOT/core/src/vgscontainer.cpp $$VGS_ROOT/core/src/vgsframe.cpp \

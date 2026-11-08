@@ -337,6 +337,25 @@ int MintFile::chunkIndexAt(double seconds) const
     const MintChunk* chunk = chunkAt(seconds, &normalized);
     return chunk ? chunk->index : -1;
 }
+bool MintFile::sampleAt(double seconds, int* chunkIndex, quint64* sample, float* alpha) const
+{
+    if (!isOpen() || m_headerOnly || m_chunks.isEmpty()) return false;
+    double normalized = 0.0;
+    const MintChunk* chunk = chunkAt(seconds, &normalized);
+    const QVector<const MintBlock*> groups = chunk->splatGroups();
+    if (groups.isEmpty() || !groups.first()->intervals) return false;
+    // decode()'s arithmetic, step for step.
+    const quint64 intervals = groups.first()->intervals;
+    const float sampleTime = float(normalized) * float(intervals);
+    float at = std::floor(sampleTime);
+    if (sampleTime - at > 0.999f)
+        at += 1.0f;
+    const quint64 frame = std::min<quint64>(quint64(at), intervals - 1);
+    *chunkIndex = chunk->index;
+    *sample = frame;
+    *alpha = std::max(0.0f, sampleTime - float(frame));
+    return true;
+}
 void MintFile::prefetchChunk(int index, bool later) const
 {
     // Only a mapping reads lazily; a file read whole is already in memory.

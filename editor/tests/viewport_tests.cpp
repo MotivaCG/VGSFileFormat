@@ -14,6 +14,9 @@
 #include "exportcapture.h"
 #include "vgsframe.h"
 #include "vgssign.h"
+#include "mintwriter.h"
+#include "project.h"
+#include <QFileInfo>
 #include <QFile>
 #include <QTemporaryDir>
 #include <random>
@@ -91,7 +94,134 @@ class ViewportTests : public QObject {
             QVERIFY2(mean<0.25 && off<=std::max<size_t>(3,ink/1000),qPrintable(QString("%1 at %2 s: mean %3, %4 pixels differ by more than 6 (worst %5)").arg(what).arg(times[i]).arg(mean).arg(off).arg(worst)));
         }
     }
+    // The editor's packed display (CaptureWorker::setPackedDisplay) against its own floats: a
+    // frame decoded while playing carries both, and the viewport draws it packed while it plays
+    // and the floats way while it does not. The two must agree whatever the modifiers.
+    static FramePtr playingFrame(CaptureWorker &worker,FramePtr &latest,double time,const Project &project) {
+        // A chunk is packed on the worker's helper thread: until it is, frames come floats alone.
+        for (int attempt=0;attempt<300;++attempt) {
+            latest.reset();worker.decode(time,1,true,project);
+            if (latest && latest->packed) return latest;
+            QTest::qWait(20);
+        }
+        return latest;
+    }
+    static double compareImages(const QImage &actual,const QImage &reference,const QString &what) {
+        if (actual.size()!=reference.size()) {QTest::qFail(qPrintable(what+": sizes differ"),__FILE__,__LINE__);return 0;}
+        int worst=0;size_t ink=0,off=0;double total=0;const auto background=reference.pixelColor(0,0);
+        auto difference=[](const QColor &a,const QColor &b) {return std::max({std::abs(a.red()-b.red()),std::abs(a.green()-b.green()),std::abs(a.blue()-b.blue())});};
+        for (int y=0;y<actual.height();++y) for (int x=0;x<actual.width();++x) {
+            const auto a=actual.pixelColor(x,y),b=reference.pixelColor(x,y);
+            const int d=difference(a,b);worst=std::max(worst,d);total+=d;off+=d>6;ink+=difference(b,background)>12;
+        }
+        const double mean=total/(double(actual.width())*actual.height());
+        qInfo("%s: %zu ink px, mean %.3f, worst %d, %zu px over 6",qPrintable(what),ink,mean,worst,off);
+        if (ink<=200) QTest::qFail(qPrintable(what+": nothing drawn"),__FILE__,__LINE__);
+        else if (!(mean<0.25 && off<=std::max<size_t>(3,ink/1000)))
+            QTest::qFail(qPrintable(QString("%1: mean %2, %3 pixels differ by more than 6 (worst %4)").arg(what).arg(mean).arg(off).arg(worst)),__FILE__,__LINE__);
+        return mean;
+    }
+    static void compareDisplay(const QString &path,const std::vector<double> &times,const QVector<Modifier> &stack,const QString &what) {
+        CaptureWorker worker;worker.setPackedDisplay(true);CaptureInfo info;FramePtr latest;QString error;
+        QObject::connect(&worker,&CaptureWorker::opened,[&](CaptureInfo i,FramePtr,quint64) {info=i;});
+        QObject::connect(&worker,&CaptureWorker::decoded,[&](FramePtr frame,quint64) {latest=frame;});
+        QObject::connect(&worker,&CaptureWorker::failed,[&](QString message,quint64,bool) {error=message;});
+        worker.open(path,1,true);QVERIFY2(error.isEmpty(),qPrintable(error));
+        Project project;project.modifiers=stack;project.previewPlaying=true;project.out=info.duration;
+        Viewport viewport;viewport.resize(480,360);viewport.setGrid(false);viewport.setFrontMarker(false);viewport.setAxes(false);
+        viewport.setSplatRendering(true);viewport.setSplatShDegree(-1);viewport.setSplatAntialiasing(info.antialiased);
+        viewport.fit(info.minimum,info.maximum);viewport.show();QVERIFY(QTest::qWaitForWindowExposed(&viewport));
+        for (double t:times) {
+            const auto frame=playingFrame(worker,latest,t,project);
+            QVERIFY2(error.isEmpty(),qPrintable(error));
+            QVERIFY2(frame && frame->packed,qPrintable(QString("%1 at %2 s: no packed display").arg(what).arg(t)));
+            QVERIFY(!frame->records.empty());
+            viewport.setModifiers(project.modifiersAtFrame(std::round(frame->seconds*info.fps)));
+            viewport.setPlaybackRate(false,30);viewport.setFrame(nullptr);viewport.setFrame(frame);
+            const auto reference=viewport.grabFramebuffer();QVERIFY(!viewport.lastPaintPacked());
+            viewport.setPlaybackRate(true,30);viewport.setFrame(nullptr);viewport.setFrame(frame);
+            const auto actual=viewport.grabFramebuffer();QVERIFY2(viewport.lastPaintPacked(),qPrintable(what+": not drawn packed"));
+            compareImages(actual,reference,QString("%1 at %2 s").arg(what).arg(t));
+            if (QTest::currentTestFailed()) return;
+        }
+        viewport.setPlaybackRate(false,30);
+    }
+    // A capture both ways, .vgs and .mint, from the same frames: four one-interval chunks of
+    // 3000 splats at SH3 with some green ones, moving, turning and dying.
+    static QStringList writeDisplayCaptures(const QString &dir) {
+        const int frames=4,count=3000;
+        vgs::Header h;h.frameCount=h.durationTicks=frames;h.timeDenominator=25;h.chunks.resize(frames);h.shDegree=3;
+        for (int i=0;i<frames;++i) {h.chunks[i].startTick=i;h.chunks[i].intervals=1;}
+        auto frameAt=[&](size_t frame) {
+            vgs::Frame f;f.count=count;std::mt19937 random(23);std::normal_distribution<float> gauss;std::uniform_real_distribution<float> unit(0,1);
+            for (int i=0;i<count;++i) {
+                const float t=float(frame)*.05f;
+                // A few far from the rest, for Purge isolated to find.
+                const float spread=i%97==0 ? 3.f : .4f;
+                f.position.insert(f.position.end(),{spread*gauss(random)+t,1+spread*gauss(random),spread*gauss(random)});
+                QQuaternion q=QQuaternion::fromEulerAngles(360*unit(random)+40*float(frame),360*unit(random),360*unit(random));
+                f.rotation.insert(f.rotation.end(),{q.x(),q.y(),q.z(),q.scalar()});
+                f.scale.insert(f.scale.end(),{.01f+.03f*unit(random),.01f+.03f*unit(random),.003f+.01f*unit(random)});
+                f.opacity.push_back(.3f+.7f*unit(random));
+                // A third green-tinted, for Remove green and the despill.
+                if (i%3==0) f.colorDc.insert(f.colorDc.end(),{.2f*unit(random),.5f+.5f*unit(random),.2f*unit(random)});
+                else f.colorDc.insert(f.colorDc.end(),{unit(random),unit(random),unit(random)});
+                f.active.push_back((i+int(frame))%7!=0);
+            }
+            f.shCoefficients=15;f.shRest.resize(size_t(count)*45);
+            for (auto &v:f.shRest) v=.2f*gauss(random);
+            return packExportFrame(f,3);
+        };
+        QStringList paths;
+        for (const char *suffix:{"vgs","mint"}) {
+            const QString path=dir+"/display."+suffix;QFile file(path);
+            if (!file.open(QIODevice::WriteOnly)) return {};
+            auto sink=[&](uint64_t offset,const uint8_t *bytes,size_t n) {file.seek(qint64(offset));file.write(reinterpret_cast<const char *>(bytes),qint64(n));};
+            if (QString(suffix)=="mint") writeMintSequence(h,frameAt,sink);
+            else {vgs::EncodeOptions options;options.signer=vgs::authoringSigner();options.compression=vgs::Compression::None;options.shDegree=3;vgs::encodeSequence(h,frameAt,sink,options);}
+            file.close();paths << path;
+        }
+        return paths;
+    }
+    // The modifier stacks the display is checked with.
+    static std::vector<std::pair<QString,QVector<Modifier>>> displayStacks() {
+        auto make=[](ModifierType type) {Modifier m;m.type=type;m.id=Project::newId();return m;};
+        std::vector<std::pair<QString,QVector<Modifier>>> stacks;
+        stacks.push_back({"no modifiers",{}});
+        stacks.push_back({"purge isolated",{make(ModifierType::PurgeIsolated)}});
+        stacks.push_back({"prune",{make(ModifierType::PruneLowContribution)}});
+        Modifier erase=make(ModifierType::Erase);
+        for (int chunk=0;chunk<4;++chunk) {auto &ids=erase.erased[chunk];for (uint32_t i=0;i<3000;i+=4) ids.push_back(i);}
+        stacks.push_back({"erase",{erase}});
+        Modifier despill=make(ModifierType::Colour);despill.colourDespill=Modifier::DespillAlways;despill.colourRecoverSkin=true;
+        stacks.push_back({"despill",{despill}});
+        stacks.push_back({"remove green over a despill",{make(ModifierType::RemoveGreen),despill}});
+        Modifier crop=make(ModifierType::Crop);crop.crop.enabled=true;crop.crop.shape=CropShape::Box;crop.crop.width=crop.crop.depth=1.2f;crop.crop.height=3;
+        stacks.push_back({"everything",{crop,make(ModifierType::RemoveGreen),make(ModifierType::PruneLowContribution),make(ModifierType::PurgeIsolated),erase,despill}});
+        return stacks;
+    }
 private slots:
+    void editorPackedDisplayDrawsWhatFloatsDraw() {
+        // The same frames as a .vgs and as a .mint, under each modifier: what the worker decides
+        // per splat (purge, prune, erase, Remove green over a despill) reaches the packed shader
+        // as visibility, a despill as colours and an SH transform; crops stay on the GPU.
+        QTemporaryDir dir;const auto paths=writeDisplayCaptures(dir.path());QCOMPARE(paths.size(),2);
+        for (const auto &path:paths) for (const auto &[name,stack]:displayStacks()) {
+            compareDisplay(path,{0.,.05,.07,.13},stack,QFileInfo(path).suffix()+", "+name);
+            if (QTest::currentTestFailed()) return;
+        }
+    }
+    void editorPackedDisplayDrawsWhatFloatsDrawOnACapture() {
+        // A real capture adds what only the fitter writes; a .mint is packed from its own arrays.
+        const QString path=qEnvironmentVariable("EDITOR_DISPLAY_CAPTURE");
+        if (path.isEmpty()) QSKIP("Set EDITOR_DISPLAY_CAPTURE to a .vgs or .mint to compare the editor's packed display on it.");
+        for (const auto &[name,stack]:displayStacks()) {
+            if (!stack.isEmpty() && stack.front().type==ModifierType::Erase) continue; // its picks are the synthetic capture's
+            compareDisplay(path,{0.,.5,.99,1.01,2.37},stack,"capture, "+name);
+            if (QTest::currentTestFailed()) return;
+        }
+    }
+
     void packedPlaybackDrawsWhatFloatsDraw() {
         // Synthetic: one interval per chunk, so per-sample groups, SH books and lifetimes; at
         // every SH degree, with splats moving, turning and dying from frame to frame.

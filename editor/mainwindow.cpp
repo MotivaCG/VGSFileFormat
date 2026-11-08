@@ -433,6 +433,9 @@ MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory,const QStr
     // every key: "0.355" is not applied as 0, 0.3 and 0.35 on the way, each a recompute and
     // a reformatting of what is being typed. Arrows, the wheel and scrubbing still apply at once.
     for (auto *spin:findChildren<QAbstractSpinBox *>()) spin->setKeyboardTracking(false);
+    // While playing, frames go to the GPU packed, with what the modifiers made of them, rather
+    // than uploaded whole (CaptureWorker::setPackedDisplay). VGS_EDITOR_FLOATS=1 turns it off.
+    worker_->setPackedDisplay(!qEnvironmentVariableIsSet("VGS_EDITOR_FLOATS"));
     worker_->moveToThread(&thread_);
     connect(&thread_, &QThread::finished, worker_, &QObject::deleteLater);
     connect(this, &MainWindow::openRequested, worker_, &CaptureWorker::openSourceRequest);
@@ -2348,6 +2351,10 @@ void MainWindow::syncMorphMarkers() {
     viewport_->setPointPicking(morph && morphPlacing_!=MorphSide::None,hint);
 }
 void MainWindow::receiveFrame(FramePtr frame) {
+    // A context that cannot draw packed frames draws their floats: packing them is then wasted.
+    if (frame && frame->packed && !viewport_->packedRenderingAvailable() && !packedDisplayOff_) {
+        packedDisplayOff_=true;QMetaObject::invokeMethod(worker_,[worker=worker_] {worker->setPackedDisplay(false);});
+    }
     viewport_->setFrame(frame);
     syncViewportPose();
     syncMorphMarkers(); // the markers of the frame now shown

@@ -95,4 +95,13 @@ struct PackedFrame {
     std::vector<uint8_t> alive;
     // The capture's motion at the instant, column-major; the identity without one.
     float motion[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+
+    // What the editor's modifiers made of the frame, when it plays packed (the viewer's frames
+    // leave these empty). Per splat, the floats frame's modifierVisibility: 0 for a splat it
+    // does not draw at all, else 1 + 254 x the visibility.
+    std::vector<uint8_t> visibility;
+    // A despill's base colours, per splat RGBA as half floats (alpha unused), replacing the
+    // chunk's; and its linear transform of every SH coefficient's RGB, row-major.
+    std::vector<uint16_t> colours;
+    float shMatrix[9] = {1,0,0, 0,1,0, 0,0,1};
 };
