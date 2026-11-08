@@ -9,6 +9,7 @@
 // Other uses require prior written authorisation, subject to mandatory law.
 
 #include "mainwindow.h"
+#include "playbackcheck.h"
 #include "viewport.h"
 #include "viewcube.h"
 #include "rangeslider.h"
@@ -28,6 +29,9 @@
 #include <QAudioBufferOutput>
 #include <QAudioBuffer>
 #endif
+#include <random>
+#include <optional>
+#include <QAbstractButton>
 #include <QApplication>
 #include <QSurfaceFormat>
 #include <QTemporaryDir>
@@ -60,6 +64,42 @@
 #include <QWheelEvent>
 #include <QPainter>
 #include <QtTest>
+
+// Playback decodes ahead of the clock (PlaybackAhead). These play a small capture and
+// check every frame put on screen against the playhead at that moment.
+struct PlaybackFixture {
+    QTemporaryDir dir;
+    std::unique_ptr<MainWindow> window;
+    Viewport *viewport=nullptr;RangeSlider *slider=nullptr;
+    // A capture of `frames` frames; with `purge`, opened as a project with a Purge isolated.
+    bool open(int frames,bool purge=false) {
+        if (!dir.isValid()) return false;
+        QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());
+        QString path=dir.filePath("play.vgs");
+        if (!playbackcheck::writeCapture(path,frames).isEmpty()) return false;
+        if (purge) {
+            Project project;project.asset=path;project.out=(frames-1)/playbackcheck::Fps;Modifier m;m.type=ModifierType::PurgeIsolated;m.id=Project::newId();m.name="Purge";project.modifiers={m};
+            path=dir.filePath("play.vgsproj");QString error;if (!project.write(path,&error)) return false;
+        }
+        window=std::make_unique<MainWindow>(nullptr,dir.filePath("presets"));window->resize(1200,800);window->show();
+        if (!QTest::qWaitForWindowExposed(window.get())) return false;
+        viewport=window->findChild<Viewport *>();slider=window->findChild<RangeSlider *>();
+        if (!viewport || !slider) return false;
+        window->openPath(path);
+        if (!QTest::qWaitFor([&] {return viewport->frame()!=nullptr;},30000)) return false;
+        // Opening settles first: a project puts its playhead back, which stops playback.
+        QTest::qWait(500);return true;
+    }
+    int shown() const {return viewport->frame() ? int(std::lround(viewport->frame()->seconds*playbackcheck::Fps)) : -1;}
+    // The button: a shortcut depends on where the focus is.
+    void play() {if (auto *button=window->findChild<QAbstractButton *>("playPause")) button->click();else QFAIL("No play button.");}
+    ~PlaybackFixture() {if (window) window->setWindowModified(false);}
+};
+// A slow decode for the scope: the worker falls behind the clock.
+struct DecodeDelay {
+    explicit DecodeDelay(int ms) {qputenv("VGS_TEST_DECODE_DELAY_MS",QByteArray::number(ms));}
+    ~DecodeDelay() {qunsetenv("VGS_TEST_DECODE_DELAY_MS");}
+};
 
 class MainWindowTests : public QObject {
     Q_OBJECT
@@ -319,16 +359,103 @@ private slots:
         QCOMPARE(tree->topLevelItem(3)->data(0,Qt::UserRole+20).toInt(),6);QCOMPARE(tree->topLevelItem(5)->data(0,Qt::UserRole+20).toInt(),4);
         state.colourFrames=10;panel.setCacheState(state);QCOMPARE(tree->topLevelItem(5)->data(0,Qt::UserRole+20).toInt(),2);
     }
+    void playbackShowsEachFrameOnTime() {
+        PlaybackFixture f;QVERIFY(f.open(120));
+        playbackcheck::Watch watch(f.viewport,f.slider);
+        f.play();QTest::qWait(300);watch.clear();QTest::qWait(2500);
+        const auto shown=watch.shown;f.play();
+        playbackcheck::checkOnTime(shown,0,119,2,1,0.9);
+        QVERIFY2(shown.size()>=60,qPrintable(QString("%1 frames in 2.5 s").arg(shown.size())));
+        // Stopped: the frame at the playhead is the one on screen, and stays.
+        QTRY_COMPARE(f.shown(),f.slider->playheadValue());
+        QTest::qWait(200);QCOMPARE(f.shown(),f.slider->playheadValue());
+    }
+    void playbackAimsAheadWhenDecodingIsSlow() {
+        PlaybackFixture f;QVERIFY(f.open(200));
+        DecodeDelay delay(70); // a frame lasts 33 ms
+        playbackcheck::Watch watch(f.viewport,f.slider);
+        f.play();QTest::qWait(600);watch.clear();QTest::qWait(3000);
+        const auto shown=watch.shown;f.play();
+        // Fewer frames, each in time: decoded for when the clock gets there, not after.
+        playbackcheck::checkOnTime(shown,0,199,2,3,0.0);
+        QVERIFY2(shown.size()>=18 && shown.size()<=50,qPrintable(QString("%1 frames in 3 s").arg(shown.size())));
+        int onTime=0;for (const auto &s:shown) if (s.frame==s.playhead) ++onTime;
+        QVERIFY2(onTime*10>=int(shown.size())*6,qPrintable(QString("%1 of %2 frames on time").arg(onTime).arg(shown.size())));
+        QTRY_COMPARE_WITH_TIMEOUT(f.shown(),f.slider->playheadValue(),3000);
+    }
+    void stoppingShowsTheFrameAtThePlayhead() {
+        PlaybackFixture f;QVERIFY(f.open(300));
+        std::mt19937 random(7);
+        for (int delay:{0,70}) {
+            std::optional<DecodeDelay> slow;if (delay) slow.emplace(delay);
+            for (int i=0;i<8;++i) {
+                // Stopped at any moment, a frame decoded ahead or one still with the worker
+                // included: what remains on screen is the playhead's frame.
+                f.play();QTest::qWait(40+int(random()%400));f.play();
+                QTRY_COMPARE_WITH_TIMEOUT(f.shown(),f.slider->playheadValue(),3000);
+                QTest::qWait(150);QCOMPARE(f.shown(),f.slider->playheadValue());
+            }
+        }
+    }
+    void seekingWhilePlayingShowsTheFrameAskedFor() {
+        PlaybackFixture f;QVERIFY(f.open(120));
+        for (int target:{45,3,100}) {
+            f.play();QTest::qWait(500);
+            emit f.slider->playheadChanged(target);
+            QTRY_COMPARE_WITH_TIMEOUT(f.shown(),target,3000);
+            QTest::qWait(200);QCOMPARE(f.shown(),target);QCOMPARE(f.slider->playheadValue(),target);
+        }
+    }
+    void fastAndLoopedPlaybackKeepsToTheRange() {
+        PlaybackFixture f;QVERIFY(f.open(120));
+        auto *loop=f.window->findChild<QCheckBox *>("playbackLoop");auto *speed=f.window->findChild<QDoubleSpinBox *>("playbackSpeed");QVERIFY(loop && speed);
+        loop->setChecked(true);emit f.slider->rangeChanged(20,40,20);
+        for (double rate:{1.0,2.0,4.0}) {
+            speed->setValue(rate);
+            playbackcheck::Watch watch(f.viewport,f.slider);
+            f.play();QTest::qWait(300);watch.clear();QTest::qWait(2000);
+            const auto shown=watch.shown;f.play();
+            // Each frame in turn up to twice the speed; at four, one a refresh of the display.
+            playbackcheck::checkOnTime(shown,20,40,rate>2 ? 4 : 2,rate>2 ? 2 : 1,rate>2 ? 0.5 : 0.8);
+            int wraps=0;for (size_t i=1;i<shown.size();++i) if (shown[i].frame<shown[i-1].frame) ++wraps;
+            QVERIFY2(wraps>=int(rate*2)-1,qPrintable(QString("%1 loops at %2x").arg(wraps).arg(rate)));
+            QTRY_COMPARE(f.shown(),f.slider->playheadValue());
+        }
+    }
+    void editingWhilePlayingDropsFramesDecodedAhead() {
+        PlaybackFixture f;QVERIFY(f.open(200,true));
+        auto *tree=f.window->findChild<QTreeWidget *>("modifierTree");QVERIFY(tree && tree->topLevelItemCount()==1);
+        playbackcheck::Watch watch(f.viewport,f.slider);
+        f.play();QTest::qWait(800);
+        QVERIFY(!watch.shown.empty());const quint64 before=watch.shown.back().revision;
+        // Turning the modifier off while frames are held ahead: from the next frame on, every
+        // one shown is the new state's, never one decoded before.
+        const qint64 edited=watch.now();tree->topLevelItem(0)->setCheckState(0,Qt::Unchecked);
+        QTest::qWait(1000);const auto shown=watch.shown;f.play();
+        std::vector<playbackcheck::Shown> after;for (const auto &s:shown) if (s.ms>edited+50) after.push_back(s);
+        QVERIFY(after.size()>=15);
+        const quint64 now=after.back().revision;QVERIFY(now>before);
+        for (const auto &s:after) QVERIFY2(s.revision==now,qPrintable(QString("Frame %1 from before the edit shown after it.").arg(s.frame)));
+        QTRY_COMPARE(f.shown(),f.slider->playheadValue());
+    }
     void playbackTimingOnARealCapture() {
         const QString capture=qEnvironmentVariable("EDITOR_PLAYBACK_CAPTURE");
         if (capture.isEmpty()) QSKIP("Set EDITOR_PLAYBACK_CAPTURE to measure presented playback frames.");
         QTemporaryDir dir;QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());
-        MainWindow window(nullptr,dir.filePath("presets"));window.resize(1400,900);window.show();QVERIFY(QTest::qWaitForWindowExposed(&window));
+        // EDITOR_PLAYBACK_WINDOW=WIDTHxHEIGHT measures a larger viewport.
+        const auto size=qEnvironmentVariable("EDITOR_PLAYBACK_WINDOW","1400x900").split('x');
+        MainWindow window(nullptr,dir.filePath("presets"));window.resize(size.value(0).toInt(),size.value(1).toInt());window.show();QVERIFY(QTest::qWaitForWindowExposed(&window));
         auto *viewport=window.findChild<Viewport *>();auto *tree=window.findChild<QTreeWidget *>("modifierTree");
         auto *remove=window.findChild<QToolButton *>("removeModifier");QVERIFY(viewport && tree && remove);
         window.openPath(capture);QTRY_VERIFY_WITH_TIMEOUT(viewport->frame()!=nullptr,30000);
         const bool keepModifiers=qEnvironmentVariableIsSet("EDITOR_PLAYBACK_KEEP_MODIFIERS");
         if (!keepModifiers) while (tree->topLevelItemCount()) {tree->setCurrentItem(tree->topLevelItem(0));remove->click();}
+        if (qEnvironmentVariableIsSet("EDITOR_PLAYBACK_BAKE")) {
+            // Plays a baked cache: modifiers come from it rather than being evaluated.
+            auto *bake=window.findChild<QAction *>("precalculateCache");QVERIFY(bake);QTRY_VERIFY_WITH_TIMEOUT(bake->isEnabled(),30000);
+            bake->trigger();QTRY_VERIFY_WITH_TIMEOUT(!window.findChild<QProgressDialog *>("precalculateCacheProgress"),900000);
+            QTRY_VERIFY_WITH_TIMEOUT(bake->isEnabled(),30000);
+        }
         auto *style=window.findChild<QComboBox *>("displayRenderStyle");QVERIFY(style);style->setCurrentIndex(1);
         viewport->setSplatShDegree(-1);viewport->setFocus();
         quint64 serial=viewport->frameRevision();int presented=0;double workerMs=0;

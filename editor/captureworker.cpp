@@ -10,6 +10,7 @@
 
 #include "captureworker.h"
 #include "prefetchrange.h"
+#include <QThread>
 #include "isolation.h"
 #include "pruning.h"
 #include "pointvisibility.h"
@@ -120,18 +121,24 @@ size_t frameBufferBytes(const RenderFrame &f) {
     return sizeof(RenderFrame)+f.records.capacity()*sizeof(Splat)+f.active.capacity()+f.points.capacity()*sizeof(PointVertex)+f.sh.capacity()*sizeof(float);
 }
 }
+size_t renderFrameBytes(const RenderFrame &frame) {
+    size_t bytes=frameBufferBytes(frame);
+    if (const auto &p=frame.packed) bytes+=(p->basis.capacity()+p->positions.capacity())*sizeof(float)+p->alive.capacity();
+    return bytes;
+}
 size_t CaptureWorker::reusableFrameBytes() const {
     size_t bytes=(morphScratch_.position.capacity()+morphScratch_.rotation.capacity()+morphScratch_.scale.capacity()+morphScratch_.colour.capacity()+morphScratch_.opacity.capacity()+morphScratch_.sh.capacity())*sizeof(float);for (const auto &f:framePool_) if (f) bytes+=frameBufferBytes(*f);return bytes;}
 void CaptureWorker::trimFramePool() {
     if (!cachingEnabled_ || !memory_.canRetain(0)) {framePool_={};morphScratch_={};return;}
     size_t bytes=reusableFrameBytes();
+    const size_t budget=previewPlaying_ ? PlayingFrameBudget : FrameBudget;
     // This is only the spare SH block left by a swap. Prefer releasing it to
     // evicting either in-flight frame's reusable storage during the crossfade.
-    if (bytes>FrameBudget && morphScratch_.sh.capacity()) {
+    if (bytes>budget && morphScratch_.sh.capacity()) {
         bytes-=morphScratch_.sh.capacity()*sizeof(float);std::vector<float>().swap(morphScratch_.sh);
     }
-    for (auto &slot:framePool_) if (slot && bytes>FrameBudget) {bytes-=frameBufferBytes(*slot);slot.reset();}
-    if (bytes>FrameBudget) morphScratch_={};
+    for (auto &slot:framePool_) if (slot && bytes>budget) {bytes-=frameBufferBytes(*slot);slot.reset();}
+    if (bytes>budget) morphScratch_={};
 }
 void CaptureWorker::clear() {
     memoryTimer_->stop();clearColours();
@@ -533,6 +540,9 @@ void CaptureWorker::open(const QString &path, quint64 generation, bool sh) {
 }
 void CaptureWorker::decode(double time, quint64 generation, bool sh,Project project) {
     if (generation != generation_) { emit failed("Capture replaced.", generation, false);emit failedRequest("Capture replaced.",generation,false,request_);return; }
+    // Tests only: a slow decode, to play a capture that the worker cannot keep up with.
+    const int testDelay=qEnvironmentVariableIntValue("VGS_TEST_DECODE_DELAY_MS");
+    if (testDelay>0) QThread::msleep(ulong(testDelay));
     try {
 #ifndef VGS_VIEWER
         if (ply_) {
@@ -548,6 +558,7 @@ void CaptureWorker::decode(double time, quint64 generation, bool sh,Project proj
             ply_->setFps(project.captureSettings.plyFps);info_.fps=ply_->fps();info_.duration=ply_->frames()/info_.fps;
         }
 #endif
+        previewPlaying_=project.previewPlaying;
         // A chunk entered by a seek: the rest of it is read while this frame decodes.
         if (mint_) prefetchMint(mint_->chunkIndexAt(time),false);
         FramePtr out=packedFrame(time);

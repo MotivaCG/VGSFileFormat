@@ -83,6 +83,7 @@
 #include <QShortcut>
 #include <QSignalBlocker>
 #include <QScopedValueRollback>
+#include <QScreen>
 #include "rangeslider.h"
 #include <QSpinBox>
 #include <functional>
@@ -447,7 +448,7 @@ MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory,const QStr
         if (gen != openingGeneration_ || request!=openingRequest_) return;
         const QScopedValueRollback<bool> origin(remoteCommand_,openingRemote_);
         loadingOverlay_->stop();
-        loading_ = false; loaded_ = true; decoding_ = pendingDecode_ = false;
+        loading_ = false; loaded_ = true; decoding_ = pendingDecode_ = false;requests_.clear();
         generation_ = gen; info_ = info;
         QVector<double> chunkFrames;
         chunkFrames.reserve(info.chunkBoundaries.size());
@@ -495,15 +496,28 @@ MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory,const QStr
         viewport_->setPlaybackRate(false,info_.fps*project_.speed);
         viewport_->setFrame(frame);
         if (project_.time > 0) requestFrame();
-        else receiveFrame(frame);
+        else {shown(currentFrame(),ahead_.epoch());receiveFrame(frame);}
         statusBar()->showMessage(tr("Capture ready: %1").arg(info.title), 5000);
     });
     connect(worker_, &CaptureWorker::decodedRequest, this, [this](FramePtr frame, quint64 gen, quint64 request) {
-        if (gen != generation_ || request!=decodeRequest_) return;
-        decoding_ = false; receiveFrame(frame);
-        if (pendingDecode_ && !loading_) {
-            pendingDecode_ = false;const QScopedValueRollback<bool> origin(remoteCommand_,pendingDecodeRemote_);requestFrame();
+        // The worker answers in order, so this is the oldest request; one not listed is from
+        // before a reset.
+        const auto found=std::find_if(requests_.begin(),requests_.end(),[&](const Request &r) {return r.id==request;});
+        if (gen != generation_ || found==requests_.end()) return;
+        const auto answered=*found;requests_.erase(requests_.begin(),found+1);decoding_=!requests_.empty();
+        if (playback_.isActive()) ahead_.decoded(answered.clock.nsecsElapsed()/1e9);
+        if (!answered.ahead) {shown(answered.frame,answered.epoch);receiveFrame(frame);}
+        else if (playback_.isActive() && answered.epoch==ahead_.epoch()) {
+            // Shown now if the clock has reached it, held if it is still to come. One that comes
+            // late is shown only over a frame from before an edit, which it is newer than.
+            if (answered.frame==currentFrame() || (!ahead_.store(answered.frame,answered.epoch,frame,upcomingFrames()) && shownEpoch_!=ahead_.epoch())) {
+                shown(answered.frame,answered.epoch);receiveFrame(frame);
+            }
         }
+        if (pendingDecode_ && !loading_ && !decoding_) {
+            pendingDecode_ = false;const QScopedValueRollback<bool> origin(remoteCommand_,pendingDecodeRemote_);showOrDecodeFrame();
+        }
+        scheduleAhead();
     });
     connect(worker_,&CaptureWorker::cacheReduced,this,[this](quint64 gen) {if (gen==generation_) modifierPanel_->clearCacheState();});
     connect(worker_,&CaptureWorker::cacheComputing,this,[this](int groups,quint64 gen,quint64 revision) {
@@ -537,8 +551,10 @@ MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory,const QStr
             loadingOverlay_->stop();recovering_=false;
             loading_ = false; pendingProject_.reset(); pendingProjectPath_.clear();
         } else {
-            if (gen != generation_ || request!=decodeRequest_) return;
-            decoding_ = pendingDecode_ = false;
+            if (gen != generation_ || std::none_of(requests_.begin(),requests_.end(),[&](const Request &r) {return r.id==request;})) return;
+            requests_.clear();decoding_ = pendingDecode_ = false;
+            // That frame cannot be shown: stopping does not ask for it again.
+            shown(currentFrame(),ahead_.epoch());
         }
         play(false); syncUi(); reportOperationError(message,remote);
     });
@@ -563,24 +579,10 @@ MainWindow::MainWindow(QWidget *parent,const QString &presetDirectory,const QStr
     connect(viewport_,&Viewport::frameRequested,this,&MainWindow::fitCurrentTarget);
     playback_.setInterval(8); playback_.setTimerType(Qt::PreciseTimer);
     connect(&playback_, &QTimer::timeout, this, [this] {
-        double t = playStart_ + double(clock_.elapsed())/1000.0 * project_.speed;
-        // A Loop morph's frames play after End, before the loop comes back to Start.
-        const double end = project_.playbackEnd(info_.fps);
-        if (morphPlaying_!=MorphPlay::None) {
-            // The morph's frames alone; or a second before End, through the morph, then a
-            // second after Start.
-            const double frame=1.0/info_.fps,u=morphPhase_+double(clock_.elapsed())/1000.0*project_.speed;
-            if (morphPlaying_==MorphPlay::Morph) {const double first=project_.morphStart(info_.fps);setTime(first+std::fmod(u,end-first+frame),false);return;}
-            const double before=std::max(project_.in,project_.morphStart(info_.fps)-frame-1.0),after=std::min(project_.out,project_.in+1.0);
-            const double first=end-before+frame,second=after-project_.in+frame,v=std::fmod(u,first+second);
-            setTime(v<first ? before+v : project_.in+(v-first),false);return;
-        }
-        if (t > end) {
-            if (project_.loop && end > project_.in)
-                t = project_.in + std::fmod(t-project_.in, end-project_.in+1.0/info_.fps);
-            else { setTime(end, false); play(false); return; }
-        }
-        setTime(t, false);
+        bool finished=false;tickSeconds_=clock_.nsecsElapsed()/1e9;const double t=playbackTime(tickSeconds_,&finished);
+        {const QScopedValueRollback<bool> tick(playbackTick_,true);setTime(t,false);}
+        if (finished) {play(false);return;}
+        scheduleAhead();
     });
     autosaveDirectory_=QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)+"/autosave";
     autosave_.setInterval(2*60*1000);connect(&autosave_,&QTimer::timeout,this,&MainWindow::autosaveNow);autosave_.start();
@@ -740,7 +742,7 @@ void MainWindow::buildUi() {
     };
     button(QStyle::SP_MediaSkipBackward, tr("Go to the playback range start (Home)."), [this] { play(false); setTime(project_.in, true); });
     button(QStyle::SP_MediaSeekBackward, tr("Pause and step back one frame (Left Arrow)."), [this] { play(false); setTime(project_.time-1.0/info_.fps, true); })->setIcon(frameStepIcon(false));
-    playButton_ = button(QStyle::SP_MediaPlay, tr("Play / pause (Space)"), [this] { play(!playback_.isActive()); });
+    playButton_ = button(QStyle::SP_MediaPlay, tr("Play / pause (Space)"), [this] { play(!playback_.isActive()); });playButton_->setObjectName("playPause");
     button(QStyle::SP_MediaSeekForward, tr("Pause and step forward one frame (Right Arrow)."), [this] { play(false); setTime(project_.time+1.0/info_.fps, true); })->setIcon(frameStepIcon(true));
     button(QStyle::SP_MediaSkipForward, tr("Go to the playback range end (End)."), [this] { play(false); setTime(project_.out, true); });
     transport->addSpacing(15); // 20 px including the group's normal 5 px gap.
@@ -749,8 +751,8 @@ void MainWindow::buildUi() {
     controls->addWidget(playbackControls);controls->addStretch();
     auto *speedControls=new QWidget;speedControls->setObjectName("timelineSpeedControls");speedControls->setSizePolicy(QSizePolicy::Maximum,QSizePolicy::Fixed);
     auto *speedLayout=new QHBoxLayout(speedControls);speedLayout->setContentsMargins(0,0,0,0);speedLayout->setSpacing(5);
-    loop_ = new QCheckBox(tr("Loop"));speedLayout->addWidget(loop_);speedLayout->addWidget(new QLabel(tr("Speed")));
-    speed_ = new QDoubleSpinBox; speed_->setRange(0.1,4); speed_->setSingleStep(0.25); speed_->setSuffix(" ×"); speedLayout->addWidget(speed_);
+    loop_ = new QCheckBox(tr("Loop"));loop_->setObjectName("playbackLoop");speedLayout->addWidget(loop_);speedLayout->addWidget(new QLabel(tr("Speed")));
+    speed_ = new QDoubleSpinBox; speed_->setObjectName("playbackSpeed"); speed_->setRange(0.1,4); speed_->setSingleStep(0.25); speed_->setSuffix(" ×"); speedLayout->addWidget(speed_);
     controls->addWidget(speedControls);tl->addLayout(controls);tl->addWidget(slider_);
     loop_->setToolTip(tr("Toggle looping within the playback range (L)."));
     modifierPanel_=new ModifierPanel;modifierPanel_->setCacheEnabled(cacheEnabledAction_->isChecked());tl->addWidget(modifierPanel_,1);
@@ -1812,7 +1814,7 @@ bool MainWindow::saveTo(const QString &path, QString *error) {
 }
 void MainWindow::newProject() {
     if (loading_ || !canDiscard()) return;
-    play(false); loaded_ = decoding_ = pendingDecode_ = false; generation_ = ++serial_;
+    play(false); loaded_ = decoding_ = pendingDecode_ = false; requests_.clear(); generation_ = ++serial_;
     viewport_->setTransformMode(TransformMode::None);
     viewport_->setCropEditing(false); viewport_->setCrop({});
     project_ = defaultProject(); info_ = {}; projectPath_.clear(); slider_->setChunkBoundaries({}); modifierPanel_->setChunks({}); viewport_->setFrame({}); viewport_->setTransform({});
@@ -1923,9 +1925,81 @@ void MainWindow::syncAudio() {
     }
 }
 void MainWindow::requestFrame() {
+    if (!playbackTick_) dropAhead();
+    showOrDecodeFrame();
+}
+double MainWindow::playbackTime(double elapsed,bool *finished) const {
+    if (finished) *finished=false;
+    // A Loop morph's frames play after End, before the loop comes back to Start.
+    const double end=project_.playbackEnd(info_.fps);
+    if (morphPlaying_!=MorphPlay::None) {
+        // The morph's frames alone; or a second before End, through the morph, then a
+        // second after Start.
+        const double frame=1.0/info_.fps,u=morphPhase_+elapsed*project_.speed;
+        if (morphPlaying_==MorphPlay::Morph) {const double first=project_.morphStart(info_.fps);return first+std::fmod(u,end-first+frame);}
+        const double before=std::max(project_.in,project_.morphStart(info_.fps)-frame-1.0),after=std::min(project_.out,project_.in+1.0);
+        const double first=end-before+frame,second=after-project_.in+frame,v=std::fmod(u,first+second);
+        return v<first ? before+v : project_.in+(v-first);
+    }
+    double t=playStart_+elapsed*project_.speed;
+    if (t>end) {
+        if (project_.loop && end>project_.in) t=project_.in+std::fmod(t-project_.in,end-project_.in+1.0/info_.fps);
+        else {if (finished) *finished=true;return end;}
+    }
+    return t;
+}
+// The frame setTime() lands on for that time.
+int MainWindow::timelineFrameAt(double seconds) const {
+    return int(std::lround(std::clamp(std::round(seconds*info_.fps)/info_.fps,project_.in,project_.timelineEnd(info_.fps))*info_.fps));
+}
+std::vector<PlaybackAhead::Upcoming> MainWindow::upcomingFrames() const {
+    const double now=clock_.nsecsElapsed()/1e9;
+    if (!playback_.isActive() || !(info_.fps>0) || !(project_.speed>0)) return {{currentFrame(),now}};
+    const double frameSeconds=1.0/(info_.fps*project_.speed);
+    return PlaybackAhead::upcoming(currentFrame(),now,frameSeconds,[this](double elapsed)->std::optional<int> {
+        bool finished=false;const double t=playbackTime(elapsed,&finished);
+        if (finished) return std::nullopt;
+        return timelineFrameAt(t);
+    },ahead_.lookahead(frameSeconds,PlaybackAhead::spacing(frameSeconds,displaySeconds())));
+}
+// One refresh of the screen the viewport is on.
+double MainWindow::displaySeconds() const {
+    const QScreen *screen=viewport_->screen();
+    return screen && screen->refreshRate()>1 ? 1.0/screen->refreshRate() : 1.0/60;
+}
+bool MainWindow::currentFrameShown() const {return coveredFrame_==currentFrame() && shownEpoch_==ahead_.epoch();}
+void MainWindow::dropAhead() {ahead_.invalidate();}
+void MainWindow::showOrDecodeFrame() {
     if (!loaded_ || loading_) return;
+    const int frame=currentFrame();
+    if (playback_.isActive()) {
+        // Playing, what to decode is the scheduler's: the frame the clock will be at when it is
+        // decoded, which is this one only when decoding keeps up.
+        if (currentFrameShown()) return;
+        int taken=frame;
+        if (auto held=ahead_.take(frame,tickSeconds_,&taken)) {shown(taken,ahead_.epoch(),frame);receiveFrame(std::move(held));return;}
+        scheduleAhead();return;
+    }
     if (cachePreparing_) {pendingDecode_=true;return;}
-    if (decoding_) { pendingDecode_ = true;pendingDecodeRemote_=remoteCommand_;return; }
+    if (decoding_) {pendingDecode_ = true;pendingDecodeRemote_=remoteCommand_;return;}
+    issueDecode(frame,false);
+}
+// While playing: the next frames the clock will show, up to two requests with the worker.
+void MainWindow::scheduleAhead() {
+    if (!playback_.isActive() || !loaded_ || loading_ || cachePreparing_) return;
+    // A request left from before playing is the scheduler's now.
+    pendingDecode_=false;
+    const double frameSeconds=info_.fps>0 && project_.speed>0 ? 1.0/(info_.fps*project_.speed) : 0;
+    const double spacing=PlaybackAhead::spacing(frameSeconds,displaySeconds());
+    while (int(requests_.size())<PlaybackAhead::MaxRequests) {
+        std::vector<int> decoding;for (const auto &r:requests_) if (r.epoch==ahead_.epoch()) decoding.push_back(r.frame);
+        const auto list=upcomingFrames();
+        const auto next=ahead_.next(list,clock_.nsecsElapsed()/1e9,currentFrameShown(),decoding,spacing);
+        if (!next) break;
+        issueDecode(*next,true);
+    }
+}
+void MainWindow::issueDecode(int frame,bool ahead) {
     Project snapshot=project_;if (viewport_->cropEditing()) for (auto &m:snapshot.modifiers) if (m.type==ModifierType::Crop) m.enabled=false;
     for (qsizetype i=0;i<std::as_const(snapshot.modifiers).size();++i) {
         const auto &m=std::as_const(snapshot.modifiers)[i];
@@ -1935,8 +2009,11 @@ void MainWindow::requestFrame() {
     snapshot.previewPlaying=playback_.isActive();
     snapshot.previewRevision=previewRevision_;
     snapshot.previewCacheEnabled=cacheEnabledAction_->isChecked();
-    decoding_ = true;decodeRemote_=remoteCommand_;decodeRequest_=++requestSerial_;
-    emit decodeRequested(project_.time, generation_, true,snapshot,decodeRequest_);
+    const double time=ahead ? frame/info_.fps : project_.time;snapshot.time=time;
+    decodeRemote_=!ahead && remoteCommand_;decodeRequest_=++requestSerial_;
+    Request request{decodeRequest_,frame,ahead_.epoch(),ahead,{}};request.clock.start();
+    requests_.push_back(request);decoding_=true;
+    emit decodeRequested(time, generation_, true,snapshot,decodeRequest_);
 }
 void MainWindow::precalculateCache() {
     if (!loaded_ || loading_ || cachePreparing_ || !cacheEnabledAction_->isChecked()) return;
@@ -1997,9 +2074,15 @@ void MainWindow::play(bool playing) {
     if (playing && (!loaded_ || loading_)) return;
     if (playing) {
         if (morphPlaying_==MorphPlay::None && project_.time >= project_.playbackEnd(info_.fps)) setTime(project_.in,false);
-        playStart_ = project_.time; clock_.restart(); playback_.start();
+        playStart_ = project_.time; clock_.restart(); tickSeconds_=0; playback_.start();
     } else {
-        playback_.stop();
+        // Frames decoded ahead go. The frame on screen stays; when the clock had reached one
+        // still being decoded, it is asked for again.
+        // What is on screen, not the frame it stood in for.
+        const bool onScreen=shownFrame_==currentFrame() && shownEpoch_==ahead_.epoch();
+        playback_.stop();dropAhead();
+        if (onScreen) shown(shownFrame_,ahead_.epoch());
+        else if (wasPlaying) showOrDecodeFrame();
         morphPlaying_=MorphPlay::None;
         morphPhase_=0;
     }

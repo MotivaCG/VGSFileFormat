@@ -9,6 +9,7 @@
 // Other uses require prior written authorisation, subject to mandatory law.
 
 #include "captureworker.h"
+#include "playbackahead.h"
 #include "project.h"
 #include "filehistory.h"
 #include "presetstore.h"
@@ -928,6 +929,143 @@ private slots:
         worker.open(path+".missing",2,false); QCOMPARE(failed.size(),1);
         worker.decode(0,1,false); QCOMPARE(decoded.size(),3); // Failed opens preserve the old capture.
         worker.clear(); worker.decode(0,1,false); QCOMPARE(failed.size(),2);
+    }
+    // The playback clock as PlaybackAhead samples it: `first`..`last` at `fps` frames a
+    // second of playback, wrapping when looping, nothing after `last` otherwise.
+    static std::function<std::optional<int>(double)> clockFrames(double fps,int first,int last,bool loop) {
+        return [=](double seconds)->std::optional<int> {
+            int frame=first+int(std::floor(seconds*fps+1e-9));
+            if (frame>last) {if (!loop) return std::nullopt;frame=first+(frame-first)%(last-first+1);}
+            return frame;
+        };
+    }
+    static std::vector<int> framesOf(const std::vector<PlaybackAhead::Upcoming> &upcoming) {
+        std::vector<int> frames;for (const auto &u:upcoming) frames.push_back(u.frame);return frames;
+    }
+    static FramePtr aheadFrame(size_t splats=1) {auto f=std::make_shared<RenderFrame>();f->points.resize(splats);return f;}
+    void playbackAheadListsTheFramesTheClockShows() {
+        // Speed 1, 30 fps: each frame in turn, from the one on screen; when each comes.
+        auto upcoming=PlaybackAhead::upcoming(0,0.0,1/30.,clockFrames(30,0,100,true),6);
+        QCOMPARE(framesOf(upcoming),(std::vector<int>{0,1,2,3,4,5}));
+        for (size_t i=1;i<upcoming.size();++i) QVERIFY(std::abs(upcoming[i].at-i/30.)<1/60.+1e-9);
+        // From the middle of a frame the next one is still listed: none is missed.
+        QCOMPARE(framesOf(PlaybackAhead::upcoming(7,0.031,1/30.,[](double s)->std::optional<int> {return 7+int(std::floor(s*30));},4)),(std::vector<int>{7,8,9,10}));
+        // A loop wraps back to its start, once round: each frame is held for its next turn only.
+        QCOMPARE(framesOf(PlaybackAhead::upcoming(9,0.0,1/30.,clockFrames(30,9,12,true),6)),(std::vector<int>{9,10,11,12}));
+        QCOMPARE(framesOf(PlaybackAhead::upcoming(11,0.0,1/30.,[](double s)->std::optional<int> {return 9+(2+int(std::floor(s*30)))%4;},6)),(std::vector<int>{11,12,9,10}));
+        // Without a loop, nothing after the end.
+        QCOMPARE(framesOf(PlaybackAhead::upcoming(8,0.0,1/30.,clockFrames(30,8,10,false),6)),(std::vector<int>{8,9,10}));
+        // Faster speeds list every frame too: which are worth decoding is next()'s choice.
+        QCOMPARE(framesOf(PlaybackAhead::upcoming(0,0.0,1/120.,clockFrames(120,0,1000,true),6)),(std::vector<int>{0,1,2,3,4,5}));
+        // A stopped clock lists the frame on screen alone.
+        QCOMPARE(framesOf(PlaybackAhead::upcoming(3,0.0,0,clockFrames(30,0,9,true),6)),(std::vector<int>{3}));
+    }
+    void playbackAheadAsksForTheFramesInTurn() {
+        PlaybackAhead ahead;
+        const auto upcoming=PlaybackAhead::upcoming(0,0.0,1/30.,clockFrames(30,0,100,true),ahead.lookahead(1/30.));
+        // The frame on screen is not asked for again; the next ones are, one at a time.
+        QCOMPARE(ahead.next(upcoming,0.0,true),std::optional<int>(1));
+        QCOMPARE(ahead.next(upcoming,0.0,true,{1}),std::optional<int>(2));
+        // Frames held and being decoded count together.
+        QCOMPARE(ahead.next(upcoming,0.0,true,{1,2,3,4,5}),std::nullopt);
+        // Not on screen yet: the current frame first.
+        QCOMPARE(ahead.next(upcoming,0.0,false),std::optional<int>(0));
+        const auto epoch=ahead.epoch();
+        for (int frame=1;frame<=PlaybackAhead::MaxFrames;++frame) {
+            QCOMPARE(ahead.next(upcoming,0.0,true),std::optional<int>(frame));
+            QVERIFY(ahead.store(frame,epoch,aheadFrame(),upcoming));
+        }
+        // Enough held: nothing more until one is shown.
+        QCOMPARE(ahead.count(),size_t(PlaybackAhead::MaxFrames));
+        QCOMPARE(ahead.next(upcoming,0.0,true),std::nullopt);
+        // Taking a frame drops those before it, and makes room.
+        QVERIFY(ahead.take(2,2/30.));QCOMPARE(ahead.count(),size_t(PlaybackAhead::MaxFrames-2));QVERIFY(!ahead.holds(1));
+        const auto later=PlaybackAhead::upcoming(2,2/30.,1/30.,clockFrames(30,0,100,true),ahead.lookahead(1/30.));
+        QCOMPARE(ahead.next(later,2/30.,true),std::optional<int>(PlaybackAhead::MaxFrames+1));
+        // A frame not held is not taken, and drops nothing.
+        QVERIFY(!ahead.take(40,2/30.));QCOMPARE(ahead.count(),size_t(PlaybackAhead::MaxFrames-2));
+    }
+    void playbackAheadKeepsOnlyWhatTheClockWillShow() {
+        PlaybackAhead ahead;
+        const auto upcoming=PlaybackAhead::upcoming(0,0.0,1/30.,clockFrames(30,0,100,true),ahead.lookahead(1/30.));
+        auto epoch=ahead.epoch();
+        QVERIFY(ahead.store(1,epoch,aheadFrame(),upcoming));
+        // The same frame twice, one the clock will not show, or none at all: not kept.
+        QVERIFY(!ahead.store(1,epoch,aheadFrame(),upcoming));
+        QVERIFY(!ahead.store(60,epoch,aheadFrame(),upcoming));
+        QVERIFY(!ahead.store(2,epoch,nullptr,upcoming));
+        // An edit, a seek or a stop: what is held goes, and what was asked for before is refused.
+        ahead.invalidate();QCOMPARE(ahead.count(),size_t(0));QVERIFY(ahead.epoch()!=epoch);
+        QVERIFY(!ahead.store(2,epoch,aheadFrame(),upcoming));
+        epoch=ahead.epoch();
+        // The clock moved past held frames (a speed change, say): they go when it asks again.
+        QVERIFY(ahead.store(2,epoch,aheadFrame(),upcoming));QVERIFY(ahead.store(3,epoch,aheadFrame(),upcoming));
+        const auto moved=PlaybackAhead::upcoming(30,1.0,1/30.,clockFrames(30,0,100,true),ahead.lookahead(1/30.));
+        QCOMPARE(ahead.next(moved,1.0,true),std::optional<int>(31));QCOMPARE(ahead.count(),size_t(0));
+    }
+    void playbackAheadAimsWhereTheClockWillBe() {
+        PlaybackAhead ahead;QCOMPARE(ahead.latency(),0.0);
+        // Requests take 90 ms, near three frames: asking for the next one would have it arrive
+        // after its turn, so the one the clock will be at is asked for instead.
+        for (int i=0;i<8;++i) ahead.decoded(0.09);
+        QCOMPARE(ahead.latency(),0.09);
+        const auto upcoming=PlaybackAhead::upcoming(0,0.0,1/30.,clockFrames(30,0,1000,true),ahead.lookahead(1/30.));
+        QVERIFY(int(upcoming.size())>=PlaybackAhead::MaxFrames+4);
+        // With a frame on screen: the first that will be ready by its turn (3, due at 0.1 s).
+        QCOMPARE(ahead.next(upcoming,0.0,true),std::optional<int>(3));
+        // With none, the soonest that is still on screen when it comes (2, until 0.1 s); the
+        // current one would be over by then.
+        QCOMPARE(ahead.next(upcoming,0.0,false),std::optional<int>(2));
+        // One slow decode, a chunk boundary say, does not move the aim.
+        ahead.decoded(2.0);QCOMPARE(ahead.latency(),0.09);
+        // Decoding that keeps up asks for the very next frame.
+        PlaybackAhead quick;for (int i=0;i<8;++i) quick.decoded(0.012);
+        QCOMPARE(quick.next(PlaybackAhead::upcoming(0,0.0,1/30.,clockFrames(30,0,1000,true),quick.lookahead(1/30.)),0.0,true),std::optional<int>(1));
+    }
+    void playbackAheadDecodesOneFrameARefresh() {
+        // Twice the speed on a 60 Hz display: every frame can be shown, so every one is decoded.
+        const double display=1/60.;
+        QCOMPARE(PlaybackAhead::spacing(1/60.,display),0.0);
+        auto chosen=[&](double fps) {
+            PlaybackAhead ahead;const double spacing=PlaybackAhead::spacing(1/fps,display);
+            const auto upcoming=PlaybackAhead::upcoming(0,0.0,1/fps,clockFrames(fps,0,1000,true),ahead.lookahead(1/fps,spacing));
+            std::vector<int> frames;
+            while (const auto next=ahead.next(upcoming,0.0,true,{},spacing)) {frames.push_back(*next);if (!ahead.store(*next,ahead.epoch(),aheadFrame(),upcoming)) break;}
+            return frames;
+        };
+        QCOMPARE(chosen(60),(std::vector<int>{1,2,3,4,5}));
+        // Four times: the display shows one frame in two, and only those are decoded.
+        QCOMPARE(chosen(120),(std::vector<int>{2,4,6,8,10}));
+    }
+    void playbackAheadShowsAFrameWhoseTimeHasCome() {
+        // The clock's ticks need not land on every frame: at four times the speed a GUI thread
+        // held by a 60 Hz display sees about one in two.
+        PlaybackAhead ahead;
+        const auto upcoming=PlaybackAhead::upcoming(0,0.0,1/120.,clockFrames(120,0,1000,true),20);
+        for (int frame:{3,5,7}) QVERIFY(ahead.store(frame,ahead.epoch(),aheadFrame(),upcoming));
+        // The tick lands on 4: 3, whose time has come, is shown; 5 and 7 stay.
+        QVERIFY(ahead.take(4,4/120.));QCOMPARE(ahead.count(),size_t(2));QVERIFY(!ahead.holds(3));
+        // None due yet: nothing is shown, nothing dropped.
+        QVERIFY(!ahead.take(4,4/120.));QCOMPARE(ahead.count(),size_t(2));
+        // Landing past two at once: the later is shown, the earlier goes too.
+        QVERIFY(ahead.take(8,8/120.));QCOMPARE(ahead.count(),size_t(0));
+        // A frame whose time has come stays for the next tick although it is no longer listed.
+        QVERIFY(ahead.store(9,ahead.epoch(),aheadFrame(),upcoming));
+        ahead.next(PlaybackAhead::upcoming(10,10/120.,1/120.,clockFrames(120,0,1000,true),20),10/120.,true);
+        QVERIFY(ahead.holds(9));QVERIFY(ahead.take(10,10/120.));
+    }
+    void playbackAheadStaysWithinItsMemory() {
+        // A budget of about two small frames.
+        const size_t frameBytes=renderFrameBytes(*aheadFrame(1000));
+        PlaybackAhead ahead(frameBytes*2);
+        const auto upcoming=PlaybackAhead::upcoming(0,0.0,1/30.,clockFrames(30,0,100,true),ahead.lookahead(1/30.));
+        QVERIFY(ahead.store(1,ahead.epoch(),aheadFrame(1000),upcoming));QCOMPARE(ahead.next(upcoming,0.0,true),std::optional<int>(2));
+        QVERIFY(ahead.store(2,ahead.epoch(),aheadFrame(1000),upcoming));QCOMPARE(ahead.next(upcoming,0.0,true),std::nullopt);
+        // A frame larger than the whole budget is still held, alone.
+        QVERIFY(ahead.take(2,2/30.));QCOMPARE(ahead.bytes(),size_t(0));
+        const auto later=PlaybackAhead::upcoming(2,2/30.,1/30.,clockFrames(30,0,100,true),ahead.lookahead(1/30.));
+        QCOMPARE(ahead.next(later,2/30.,true),std::optional<int>(3));
+        QVERIFY(ahead.store(3,ahead.epoch(),aheadFrame(10000),later));QCOMPARE(ahead.next(later,2/30.,true),std::nullopt);
     }
 };
 QTEST_GUILESS_MAIN(EditorTests)

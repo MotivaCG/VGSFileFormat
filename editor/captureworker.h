@@ -85,6 +85,8 @@ struct RenderFrame {
 };
 using FramePtr = std::shared_ptr<RenderFrame>;
 Q_DECLARE_METATYPE(FramePtr)
+// The memory a frame's buffers take, a packed frame's per-frame arrays included.
+size_t renderFrameBytes(const RenderFrame &frame);
 struct CaptureInfo {
     QString path, title, format;
     PlySequenceSpec plySequence;
@@ -157,6 +159,9 @@ public:
     // Combined retention limit: visibility + reusable source buffers + morph shapes.
     static constexpr size_t PreviewBudget = 4ull * 1024 * 1024 * 1024;
     static constexpr size_t FrameBudget = 256ull * 1024 * 1024;
+    // While playing, the GUI keeps frames decoded ahead (PlaybackAhead): the pool keeps theirs
+    // for reuse too, so a frame's buffers are not allocated afresh each time.
+    static constexpr size_t PlayingFrameBudget = 1024ull * 1024 * 1024;
     static constexpr size_t VisibilityBudget = 256ull * 1024 * 1024;
     static constexpr size_t ColourBudget = 6ull * 1024 * 1024 * 1024;
 public slots:
@@ -213,7 +218,8 @@ private:
     std::map<size_t, std::vector<float>> pruneScores_;
     // Reuse only frames no consumer holds (viewport, sorter, queued signal or caller).
     // At most three retained buffers; extra frames held by inspections remain independent.
-    std::array<FramePtr,3> framePool_;
+    std::array<FramePtr,9> framePool_;
+    bool previewPlaying_=false;
     void trimFramePool();
     FramePtr frame(double time, bool sh);
     FramePtr reusableFrame();

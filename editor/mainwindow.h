@@ -10,6 +10,7 @@
 
 #pragma once
 #include "captureworker.h"
+#include "playbackahead.h"
 #include "project.h"
 #include "filehistory.h"
 #include "presetstore.h"
@@ -149,6 +150,9 @@ private:
     void setTime(double seconds, bool edited);
     // A frame from a timeline field; `tail` lets it reach the Loop morph's frames after End.
     int timelineFrame(double displayedValue, bool tail = false) const;
+    // Shows the frame at project_.time with the project as it is now. From the playback clock
+    // it only moves on; called from anywhere else it means what a frame shows has changed, so
+    // frames decoded ahead are dropped.
     void requestFrame();
     void play(bool playing);
     void receiveFrame(FramePtr frame);
@@ -218,7 +222,33 @@ private:
     bool recovering_ = false;
     void discardAutosave();
     QElapsedTimer clock_;
+    // When the playback clock last ticked, in seconds of playback: what the playhead shows. A
+    // held frame is due by that, not by the clock, which may be a frame further on.
+    double tickSeconds_ = 0;
     double playStart_ = 0;
+    // Playback decodes ahead of the clock (PlaybackAhead); one request is with the worker at a
+    // time, for the frame on screen or one ahead of it.
+    PlaybackAhead ahead_;
+    bool playbackTick_ = false;
+    // The frame on screen; and the clock's frame it stands for, which is another when the
+    // clock's tick fell past a frame decoded for it. Both of the epoch shownEpoch_.
+    int shownFrame_ = -1, coveredFrame_ = -1;
+    quint64 shownEpoch_ = 0;
+    void shown(int frame, quint64 epoch, int covered = -1) {shownFrame_=frame;coveredFrame_=covered<0 ? frame : covered;shownEpoch_=epoch;}
+    // Requests with the worker, oldest first; it answers them in order.
+    struct Request { quint64 id; int frame; quint64 epoch; bool ahead; QElapsedTimer clock; };
+    std::deque<Request> requests_;
+    // Where the playback clock is, `elapsed` seconds after it started; finished once a playback
+    // without loop has reached its end, which is then the time.
+    double playbackTime(double elapsed, bool *finished = nullptr) const;
+    int timelineFrameAt(double seconds) const;
+    std::vector<PlaybackAhead::Upcoming> upcomingFrames() const;
+    double displaySeconds() const;
+    bool currentFrameShown() const;
+    void showOrDecodeFrame();
+    void issueDecode(int frame, bool ahead);
+    void scheduleAhead();
+    void dropAhead();
     Viewport *viewport_;
     ModifierPanel *modifierPanel_;
     AnimationPanel *animationProperties_;

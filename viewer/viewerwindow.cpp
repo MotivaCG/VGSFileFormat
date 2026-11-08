@@ -26,8 +26,12 @@
 #include <QStyle>
 #include <QPainter>
 #include <QPushButton>
+#include <QScopedValueRollback>
+#include <QScreen>
 #include <QVBoxLayout>
+#include <algorithm>
 #include <cmath>
+#include <utility>
 
 namespace {
 // The editor's transport icons: the style's symbols tinted light, grey when disabled.
@@ -57,12 +61,12 @@ ViewerWindow::ViewerWindow() : worker_(new CaptureWorker) {
         auto *b=new QPushButton;b->setIcon(transportIcon(style(),icon));b->setToolTip(tip);b->setFixedSize(34,30);connect(b,&QPushButton::clicked,this,action);row->addWidget(b);return b;};
     button(QStyle::SP_MediaSkipBackward,tr("Playback range start (Home)"),[this] {play(false);setTime(slider_->startValue()/info_.fps);});
     button(QStyle::SP_MediaSeekBackward,tr("Previous frame (Left)"),[this] {play(false);setTime(time_s_-1/info_.fps);});
-    playButton_=button(QStyle::SP_MediaPlay,tr("Play / pause (Space)"),[this] {play(!playback_.isActive());});
+    playButton_=button(QStyle::SP_MediaPlay,tr("Play / pause (Space)"),[this] {play(!playback_.isActive());});playButton_->setObjectName("playPause");
     button(QStyle::SP_MediaSeekForward,tr("Next frame (Right)"),[this] {play(false);setTime(time_s_+1/info_.fps);});
     button(QStyle::SP_MediaSkipForward,tr("Playback range end (End)"),[this] {play(false);setTime(slider_->endValue()/info_.fps);});
     time_=new QLabel;row->addSpacing(12);row->addWidget(time_);row->addStretch();
-    loop_=new QCheckBox(tr("Loop"));loop_->setChecked(true);row->addWidget(loop_);row->addWidget(new QLabel(tr("Speed")));
-    speed_=new QDoubleSpinBox;speed_->setRange(0.1,4);speed_->setSingleStep(0.25);speed_->setValue(1);speed_->setSuffix(" ×");row->addWidget(speed_);
+    loop_=new QCheckBox(tr("Loop"));loop_->setObjectName("playbackLoop");loop_->setChecked(true);row->addWidget(loop_);row->addWidget(new QLabel(tr("Speed")));
+    speed_=new QDoubleSpinBox;speed_->setObjectName("playbackSpeed");speed_->setRange(0.1,4);speed_->setSingleStep(0.25);speed_->setValue(1);speed_->setSuffix(" ×");row->addWidget(speed_);
     tl->addLayout(row);
     slider_=new RangeSlider;slider_->setObjectName("captureRangeSlider");slider_->setLabelsInSeconds(true);tl->addWidget(slider_);
     layout->addWidget(timeline);setCentralWidget(center);
@@ -72,7 +76,11 @@ ViewerWindow::ViewerWindow() : worker_(new CaptureWorker) {
         play(false);setTime(preview/info_.fps);
     });
     connect(speed_,&QDoubleSpinBox::valueChanged,this,[this](double) {
-        if (playback_.isActive()) {playStart_=time_s_;clock_.restart();}
+        if (playback_.isActive()) {
+            // A new clock: held frames were timed by the old one. The frame on screen stays.
+            const bool covered=currentFrameShown();ahead_.invalidate();if (covered) shown(shownFrame_,ahead_.epoch(),coveredFrame_);
+            playStart_=time_s_;clock_.restart();tickSeconds_=0;
+        }
         viewport_->setPlaybackRate(playback_.isActive(),info_.fps*speed_->value());
     });
     // Menus: open and recent files; the floor aids; the capture's information.
@@ -112,15 +120,10 @@ ViewerWindow::ViewerWindow() : worker_(new CaptureWorker) {
     playback_.setInterval(8);
     playback_.setTimerType(Qt::PreciseTimer);
     connect(&playback_,&QTimer::timeout,this,[this] {
-        double t=playStart_+clock_.elapsed()/1000.0*speed_->value();
-        const double rangeStart=slider_->startValue()/info_.fps;
-        const double rangeEnd=slider_->endValue()/info_.fps;
-        if (t>rangeEnd) {
-            if (loop_->isChecked() && rangeEnd>rangeStart)
-                t=rangeStart+std::fmod(t-rangeStart,rangeEnd-rangeStart+1.0/info_.fps);
-            else {setTime(rangeEnd);play(false);return;}
-        }
-        setTime(t);});
+        bool finished=false;tickSeconds_=clock_.nsecsElapsed()/1e9;const double t=playbackTime(tickSeconds_,&finished);
+        {const QScopedValueRollback<bool> tick(playbackTick_,true);setTime(t);}
+        if (finished) {play(false);return;}
+        scheduleAhead();});
     // Chunks go to the GPU once and the shader evaluates each frame (CaptureWorker::
     // setPackedPlayback); VGS_VIEWER_FLOATS=1 plays the floats way, as the editor does.
     worker_->setPackedPlayback(!qEnvironmentVariableIsSet("VGS_VIEWER_FLOATS"));
@@ -132,7 +135,8 @@ ViewerWindow::ViewerWindow() : worker_(new CaptureWorker) {
     connect(this,&ViewerWindow::decodeRequested,worker_,&CaptureWorker::decode);
     connect(worker_,&CaptureWorker::opened,this,[this](CaptureInfo info,FramePtr frame,quint64 gen) {
         if (gen!=generation_) return;
-        info_=info;loaded_=true;decoding_=pending_=false;time_s_=0;
+        info_=info;loaded_=true;decoding_=pending_=false;requests_.clear();time_s_=0;
+        ahead_.invalidate();shown(0,ahead_.epoch());
         QSettings().setValue("Viewer/LastFile",info.path);
         viewport_->setSplatAntialiasing(info.antialiased);viewport_->fit(info.minimum,info.maximum);viewport_->setFrame(frame);
         {
@@ -145,13 +149,27 @@ ViewerWindow::ViewerWindow() : worker_(new CaptureWorker) {
         setWindowTitle(tr("%1 — VGS Viewer %2").arg(info.title.isEmpty() ? QFileInfo(info.path).fileName() : info.title,VIEWER_VERSION_NAME));
         syncTime();play(false);});
     connect(worker_,&CaptureWorker::decoded,this,[this](FramePtr frame,quint64 gen) {
-        if (gen!=generation_) return;
-        decoding_=false;viewport_->setFrame(frame);if (pending_) {pending_=false;requestFrame();}});
+        // The worker answers in order: this is the oldest request.
+        if (gen!=generation_ || requests_.empty()) return;
+        const auto answered=requests_.front();requests_.pop_front();decoding_=!requests_.empty();
+        if (playback_.isActive()) ahead_.decoded(answered.clock.nsecsElapsed()/1e9);
+        if (!answered.ahead) {shown(answered.frame,answered.epoch);viewport_->setFrame(frame);}
+        else if (playback_.isActive() && answered.epoch==ahead_.epoch()) {
+            // Shown now if the clock has reached it, held if it is still to come. One that comes
+            // late is shown only over a frame from before an edit, which it is newer than.
+            if (answered.frame==currentFrame() || (!ahead_.store(answered.frame,answered.epoch,frame,upcomingFrames()) && shownEpoch_!=ahead_.epoch())) {
+                shown(answered.frame,answered.epoch);viewport_->setFrame(frame);
+            }
+        }
+        if (pending_ && !decoding_) {pending_=false;showOrDecodeFrame();}
+        scheduleAhead();});
     connect(worker_,&CaptureWorker::failed,this,[this](QString,quint64 gen,bool) {
         if (gen!=generation_) return;
         // One message for every reason - not authentic, damaged, unreadable - so it says
         // nothing about which check failed.
-        play(false);decoding_=false;QMessageBox::warning(this,tr("VGS Viewer"),tr("This file cannot be opened."));});
+        // That frame cannot be shown: stopping does not ask for it again.
+        decoding_=pending_=false;requests_.clear();shown(currentFrame(),ahead_.epoch());
+        play(false);QMessageBox::warning(this,tr("VGS Viewer"),tr("This file cannot be opened."));});
     thread_.start();
 }
 ViewerWindow::~ViewerWindow() {play(false);thread_.quit();thread_.wait();}
@@ -174,8 +192,16 @@ void ViewerWindow::play(bool playing) {
         const double rangeStart=slider_->startValue()/info_.fps;
         const double rangeEnd=slider_->endValue()/info_.fps;
         if (time_s_<rangeStart || time_s_>=rangeEnd) setTime(rangeStart);
-        playStart_=time_s_;clock_.restart();playback_.start();
-    } else playback_.stop();
+        playStart_=time_s_;clock_.restart();tickSeconds_=0;playback_.start();
+    } else {
+        // Frames decoded ahead go. The frame on screen stays; when the clock had reached one
+        // still being decoded, it is asked for again.
+        // What is on screen, not the frame it stood in for.
+        const bool wasPlaying=playback_.isActive(),onScreen=shownFrame_==currentFrame() && shownEpoch_==ahead_.epoch();
+        playback_.stop();ahead_.invalidate();
+        if (onScreen) shown(shownFrame_,ahead_.epoch());
+        else if (wasPlaying) showOrDecodeFrame();
+    }
     viewport_->setPlaybackRate(playing,info_.fps*speed_->value());
     playButton_->setIcon(transportIcon(style(),playing ? QStyle::SP_MediaPause : QStyle::SP_MediaPlay));
     syncTime();
@@ -189,11 +215,78 @@ void ViewerWindow::setTime(double seconds) {
     else if (!playback_.isActive()) syncTime();
 }
 void ViewerWindow::requestFrame() {
+    if (!playbackTick_) ahead_.invalidate();
+    showOrDecodeFrame();
+}
+double ViewerWindow::playbackTime(double elapsed,bool *finished) const {
+    if (finished) *finished=false;
+    double t=playStart_+elapsed*speed_->value();
+    const double rangeStart=slider_->startValue()/info_.fps;
+    const double rangeEnd=slider_->endValue()/info_.fps;
+    if (t>rangeEnd) {
+        if (loop_->isChecked() && rangeEnd>rangeStart) t=rangeStart+std::fmod(t-rangeStart,rangeEnd-rangeStart+1.0/info_.fps);
+        else {if (finished) *finished=true;return rangeEnd;}
+    }
+    return t;
+}
+int ViewerWindow::currentFrame() const {return int(std::lround(time_s_*info_.fps));}
+// The frame setTime() shows for that time.
+int ViewerWindow::frameAt(double seconds) const {
+    return int(std::lround(std::clamp(seconds,slider_->startValue()/info_.fps,slider_->endValue()/info_.fps)*info_.fps));
+}
+std::vector<PlaybackAhead::Upcoming> ViewerWindow::upcomingFrames() const {
+    const double now=clock_.nsecsElapsed()/1e9;
+    if (!playback_.isActive() || !(info_.fps>0) || !(speed_->value()>0)) return {{currentFrame(),now}};
+    const double frameSeconds=1.0/(info_.fps*speed_->value());
+    return PlaybackAhead::upcoming(currentFrame(),now,frameSeconds,[this](double elapsed)->std::optional<int> {
+        bool finished=false;const double t=playbackTime(elapsed,&finished);
+        if (finished) return std::nullopt;
+        return frameAt(t);
+    },ahead_.lookahead(frameSeconds,PlaybackAhead::spacing(frameSeconds,displaySeconds())));
+}
+// One refresh of the screen the viewport is on.
+double ViewerWindow::displaySeconds() const {
+    const QScreen *screen=viewport_->screen();
+    return screen && screen->refreshRate()>1 ? 1.0/screen->refreshRate() : 1.0/60;
+}
+bool ViewerWindow::currentFrameShown() const {return coveredFrame_==currentFrame() && shownEpoch_==ahead_.epoch();}
+void ViewerWindow::showOrDecodeFrame() {
     if (!loaded_) return;
+    const int frame=currentFrame();
+    if (playback_.isActive()) {
+        // Playing, what to decode is the scheduler's: the frame the clock will be at when it is
+        // decoded, which is this one only when decoding keeps up.
+        if (currentFrameShown()) return;
+        int taken=frame;
+        if (auto held=ahead_.take(frame,tickSeconds_,&taken)) {shown(taken,ahead_.epoch(),frame);viewport_->setFrame(std::move(held));return;}
+        scheduleAhead();return;
+    }
     if (decoding_) {pending_=true;return;}
-    // No modifiers: the capture as it is, at its full SH.
-    Project plain;plain.modifiers.clear();decoding_=true;
-    emit decodeRequested(std::round(time_s_*info_.fps)/info_.fps,generation_,true,plain);
+    issueDecode(frame,false);
+}
+// While playing: the next frames the clock will show, up to two requests with the worker.
+void ViewerWindow::scheduleAhead() {
+    if (!playback_.isActive() || !loaded_) return;
+    // A request left from before playing is the scheduler's now.
+    pending_=false;
+    const double frameSeconds=info_.fps>0 && speed_->value()>0 ? 1.0/(info_.fps*speed_->value()) : 0;
+    const double spacing=PlaybackAhead::spacing(frameSeconds,displaySeconds());
+    while (int(requests_.size())<PlaybackAhead::MaxRequests) {
+        std::vector<int> decoding;for (const auto &r:requests_) if (r.epoch==ahead_.epoch()) decoding.push_back(r.frame);
+        const auto next=ahead_.next(upcomingFrames(),clock_.nsecsElapsed()/1e9,currentFrameShown(),decoding,spacing);
+        if (!next) break;
+        issueDecode(*next,true);
+    }
+}
+void ViewerWindow::issueDecode(int frame,bool ahead) {
+    // No modifiers: the capture as it is, at its full SH. The range and loop let the worker
+    // read the right chunk ahead at a loop's wrap.
+    Project plain;plain.modifiers.clear();
+    plain.previewPlaying=playback_.isActive();plain.loop=loop_->isChecked();
+    plain.in=slider_->startValue()/info_.fps;plain.out=slider_->endValue()/info_.fps;
+    Request request{frame,ahead_.epoch(),ahead,{}};request.clock.start();
+    requests_.push_back(request);decoding_=true;
+    emit decodeRequested(frame/info_.fps,generation_,true,plain);
 }
 void ViewerWindow::syncTime() {
     const int frame=int(std::lround(time_s_*info_.fps));
