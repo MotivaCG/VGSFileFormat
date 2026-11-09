@@ -1,0 +1,32 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.1.0",
+	"FriendlyName": "VGS 4D Gaussian Splatting Player",
+	"Description": "Plays VGS 4D Gaussian splatting captures through Epic's Gaussian Splat renderer.",
+	"Category": "Rendering",
+	"CreatedBy": "Víctor M. Feliz",
+	"CreatedByURL": "",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"EnabledByDefault": false,
+	"CanContainContent": false,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": true,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "VGSRuntime",
+			"Type": "Runtime",
+			"LoadingPhase": "Default",
+			"PlatformAllowList": [ "Win64" ]
+		}
+	],
+	"Plugins": [
+		{
+			"Name": "GaussianSplat",
+			"Enabled": true
+		}
+	]
+}

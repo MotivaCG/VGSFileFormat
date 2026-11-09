@@ -26,6 +26,22 @@ target_link_libraries(vgs_framepack PRIVATE ${VGS_DECODER_LINK})
 vgs_apply_settings(vgs_framepack)
 add_test(NAME plugin_framepack COMMAND vgs_framepack)
 
+# The Unreal plugin's splat buffers, read back through a transcription of Epic's renderer.
+# The plugin needs Unreal to build; its layouts do not. Given a .vgs it also packs real
+# frames through vgsbridge and times them: vgs_unreal_layout D:/captures/boxing.vgs
+add_executable(vgs_unreal_layout unreal_layout.cpp)
+target_include_directories(vgs_unreal_layout PRIVATE
+    ${CMAKE_SOURCE_DIR}/plugins/unreal/VGS/Source/VGSRuntime/Private)
+vgs_apply_settings(vgs_unreal_layout)
+if(TARGET vgsbridge)
+  target_compile_definitions(vgs_unreal_layout PRIVATE VGS_UNREAL_LAYOUT_WITH_BRIDGE)
+  target_link_libraries(vgs_unreal_layout PRIVATE vgsbridge)
+  add_custom_command(TARGET vgs_unreal_layout POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+              $<TARGET_FILE:vgsbridge> $<TARGET_FILE_DIR:vgs_unreal_layout>)
+endif()
+add_test(NAME plugin_unreal_layout COMMAND vgs_unreal_layout)
+
 add_executable(vgs_entropy entropy.cpp)
 target_include_directories(vgs_entropy PRIVATE ${VGS_CORE_INCLUDE_DIRS})
 target_link_libraries(vgs_entropy PRIVATE ${VGS_DECODER_LINK})

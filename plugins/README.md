@@ -14,6 +14,10 @@ houdini/        the Houdini plugin: an HDK object and SOP with the same player i
   package/                the Houdini package around it: menu entry, help, icon
   INSTALL.txt             how a user installs it, in English; installed beside the zip
   README.md               using it, what it writes, how it was tested, what is left
+unreal/         the Unreal Engine 5.9 plugin: plays captures through Epic's Gaussian Splat
+                renderer, loading the same bridge; CMake assembles it, Unreal builds it
+  VGS/                    the plugin's sources
+  README.md               how it works, building and installing, tests, what is left
 ```
 
 Built with everything else (`VGS_BUILD_PLUGINS`, on by default, native builds only):

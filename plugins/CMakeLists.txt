@@ -5,6 +5,8 @@
 #   blender/      the Blender add-on that loads it, and the .zip that installs both
 #   houdini/      the Houdini plugin: an HDK object and SOP with the same player inside,
 #                 built when a Houdini installation is found
+#   unreal/       the Unreal Engine plugin, assembled with the bridge beside it; Unreal
+#                 itself builds it, inside the project that uses it
 #
 # The line between the two is the licence line. The add-on is Python written against
 # Blender's API and is GPL, as everything written against that API is; the library holds
@@ -13,3 +15,4 @@
 add_subdirectory(vgsbridge)
 add_subdirectory(blender)
 add_subdirectory(houdini)
+add_subdirectory(unreal)
