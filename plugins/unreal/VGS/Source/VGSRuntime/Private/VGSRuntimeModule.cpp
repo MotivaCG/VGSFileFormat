@@ -1,4 +1,4 @@
-#include "VGSBridge.h"
+#include "VGSPlayer.h"
 
 #include "Interfaces/IPluginManager.h"
 #include "Misc/Paths.h"

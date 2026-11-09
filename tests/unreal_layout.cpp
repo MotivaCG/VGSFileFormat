@@ -349,6 +349,73 @@ void layouts() {
   std::printf("layouts: %zu frames read back as the renderer reads them\n", cases + 1);
 }
 
+// ---- intensity ----------------------------------------------------------------------------
+
+// CalculateColor's last steps in GaussianSplatShading.usf: + 0.5, then sRGB to linear.
+double shaderLinear(double e) {
+  const double s = std::max(e + 0.5, 6.10352e-5);
+  return s > 0.04045 ? std::pow(s * (1.0 / 1.055) + 0.0521327, 2.4) : s * (1.0 / 12.92);
+}
+
+void intensity() {
+  std::mt19937 random(11);
+  std::uniform_real_distribution<double> unit(-1.0, 1.0);
+  require(gainFor(1.0f).identity() && gainFor(0.0f).identity() && gainFor(-3.0f).identity(),
+          "an intensity of 1, or none, must leave the colours alone");
+
+  // The drawn colour, linear, is k times brighter wherever both are above sRGB's toe.
+  size_t checked = 0;
+  double worst = 0;
+  for (float k : {0.25f, 0.5f, 2.0f, 16.0f, 1000.0f, 30000.0f}) {
+    const Gain g = gainFor(k);
+    for (int trial = 0; trial < 5000; ++trial) {
+      // DC and three further coefficients, with basis values as a view direction gives them.
+      const double dc = unit(random) * 1.8;
+      double e = SHC0 * dc, scaled = SHC0 * (dc * g.m + g.dcOffset);
+      for (int i = 0; i < 3; ++i) {
+        const double coefficient = unit(random) * 0.4, basis = unit(random) * 0.5;
+        e += basis * coefficient;
+        scaled += basis * coefficient * g.m;
+      }
+      if (e + 0.5 <= 0.04045 || scaled + 0.5 <= 0.04045)
+        continue;
+      const double relative = std::abs(shaderLinear(scaled) - k * shaderLinear(e)) / (k * shaderLinear(e));
+      require(relative < 2e-4, "intensity " + std::to_string(k) + " is off by " + std::to_string(relative));
+      worst = std::max(worst, relative);
+      ++checked;
+    }
+  }
+  require(checked > 20000, "too few colours above the toe to say anything");
+
+  // Both layouts carry the gain: float in the values, quantized in its scales and biases.
+  Synthetic f = makeFrame(random, 3000, 8);
+  const Gain g = gainFor(5000.0f);
+  const int k = f.view.shCoefficients;
+  std::vector<uint8_t> floats(f.view.count * floatStride(k));
+  packFloat(f.view, 0, f.view.count, floats.data(), g);
+  std::vector<uint8_t> quantized(f.view.count * quantizedStride(k));
+  Quantization q = quantization(measure(f.view, 0, f.view.count));
+  packQuantized(f.view, q, 0, f.view.count, quantized.data());
+  applyGain(q, g);
+  for (size_t i = 0; i < f.view.count; ++i) {
+    const Splat a = readFloat(floats.data() + i * floatStride(k), k);
+    const Splat b = readQuantized(quantized.data() + i * quantizedStride(k), k, q);
+    for (int c = 0; c < 3; ++c) {
+      const float want = f.radiance[i * 4 + c] * g.m + g.dcOffset;
+      require(a.color[c] == want, "float colour does not carry the gain");
+      require(std::abs(b.color[c] - want) <= 0.5f * q.colorScale[c] * 1.0001f + 1e-5f, "quantized colour does not carry the gain");
+    }
+    require(a.opacity == f.radiance[i * 4 + 3], "the gain touched opacity");
+    for (int j = 0; j < k; ++j)
+      for (int c = 0; c < 3; ++c) {
+        const float want = f.sh[(size_t(j) * f.view.count + i) * 3 + c] * g.m;
+        require(a.sh[j * 3 + c] == want, "float harmonics do not carry the gain");
+        require(std::abs(b.sh[j * 3 + c] - want) <= 0.5f * q.shScale[c] * 1.0001f + 1e-5f, "quantized harmonics do not carry the gain");
+      }
+  }
+  std::printf("intensity: %zu colours k times brighter in linear light (worst %.1e)\n", checked, worst);
+}
+
 // ---- 3: the axes ------------------------------------------------------------------------
 
 void axes() {
@@ -451,6 +518,7 @@ void capture(const char *path) {
 int main(int argc, char **argv) {
   try {
     layouts();
+    intensity();
     axes();
     if (argc > 1) {
 #if defined(VGS_UNREAL_LAYOUT_WITH_BRIDGE)

@@ -108,12 +108,52 @@ inline void captureToUnreal(UpAxis up, float unitScale, float rows[3][3]) {
   }
 }
 
+// ---- intensity --------------------------------------------------------------------------
+
+/*
+ * Brightness without touching the renderer, which has no intensity of its own: splats are
+ * an emissive of fixed radiance, a white of 1, and a scene lit with physical units exposes
+ * them to black.
+ *
+ * The shader evaluates the harmonics to E, takes s = E + 0.5 as sRGB and makes it linear,
+ * ((s + 0.055) / 1.055)^2.4 above s = 0.04045 (GaussianSplatShading.usf, CalculateColor).
+ * Scaling that linear value by k is scaling s + 0.055 by m = k^(1/2.4). E is linear in
+ * the coefficients, so it is done on them:
+ *
+ *     every coefficient past DC  * m
+ *     DC                         * m  +  (m - 1) * 0.555 / C0
+ *
+ * Exact wherever both the original and the scaled colour are above sRGB 0.04045, which
+ * leaves out only the deepest blacks. The working-colour-space matrix after it is linear and
+ * commutes with the scale. Opacity is not touched.
+ */
+struct Gain {
+  float m = 1.0f;        // on every coefficient
+  float dcOffset = 0.0f; // added to DC after the scale
+
+  bool identity() const { return m == 1.0f && dcOffset == 0.0f; }
+};
+
+constexpr float SHC0 = 0.28209479177387814f;
+
+/* The gain that makes the drawn colour `k` times brighter in linear light. */
+inline Gain gainFor(float k) {
+  Gain g;
+  if (!(k > 0.0f) || k == 1.0f)
+    return g;
+  g.m = std::pow(k, 1.0f / 2.4f);
+  g.dcOffset = (g.m - 1.0f) * 0.555f / SHC0;
+  return g;
+}
+
 // ---- float layout ---------------------------------------------------------------------
 
 /* Writes records [begin, end) into `buffer`, which holds count * floatStride records. */
-inline void packFloat(const FrameView &frame, size_t begin, size_t end, uint8_t *buffer) {
+inline void packFloat(const FrameView &frame, size_t begin, size_t end, uint8_t *buffer,
+                      const Gain &gain = Gain()) {
   const int coefficients = frame.sh ? frame.shCoefficients : 0;
   const size_t stride = floatStride(coefficients);
+  const bool scaled = !gain.identity();
   for (size_t i = begin; i < end; ++i) {
     uint8_t *record = buffer + i * stride;
     const float *r = frame.rotations + i * 4; // wxyz
@@ -121,11 +161,18 @@ inline void packFloat(const FrameView &frame, size_t begin, size_t end, uint8_t 
     std::memcpy(record + FloatPositionOffset, frame.positions + i * 3, 12);
     std::memcpy(record + FloatScaleOffset, frame.scales + i * 3, 12);
     std::memcpy(record + FloatRotationOffset, rotation, 16);
-    std::memcpy(record + FloatColorOpacityOffset, frame.radiance + i * 4, 16);
+    if (scaled) {
+      const float *c = frame.radiance + i * 4;
+      const float color[4] = {c[0] * gain.m + gain.dcOffset, c[1] * gain.m + gain.dcOffset,
+                              c[2] * gain.m + gain.dcOffset, c[3]};
+      std::memcpy(record + FloatColorOpacityOffset, color, 16);
+    } else {
+      std::memcpy(record + FloatColorOpacityOffset, frame.radiance + i * 4, 16);
+    }
     float *sh = reinterpret_cast<float *>(record + FloatBaseStride);
     for (int k = 0; k < coefficients; ++k) {
       const float *plane = frame.sh + (size_t(k) * frame.count + i) * 3;
-      float value[3] = {plane[0], plane[1], plane[2]};
+      float value[3] = {plane[0] * gain.m, plane[1] * gain.m, plane[2] * gain.m};
       std::memcpy(sh + k * 3, value, 12);
     }
   }
@@ -230,6 +277,17 @@ inline Quantization quantization(const Ranges &r) {
   for (int c = 0; c < 4; ++c)
     step(r.colorMin[c], r.colorMax[c], 255.0f, q.colorScale[c], q.colorBias[c]);
   return q;
+}
+
+/* The quantized layout takes a gain for free: the packed bytes stay as they are, and the
+ * scales and biases the renderer reads them with take it instead. */
+inline void applyGain(Quantization &q, const Gain &gain) {
+  for (int c = 0; c < 3; ++c) {
+    q.colorScale[c] *= gain.m;
+    q.colorBias[c] = q.colorBias[c] * gain.m + gain.dcOffset;
+    q.shScale[c] *= gain.m;
+    q.shBias[c] *= gain.m;
+  }
 }
 
 // Mirrors FGaussianSplatShared::Quantize.

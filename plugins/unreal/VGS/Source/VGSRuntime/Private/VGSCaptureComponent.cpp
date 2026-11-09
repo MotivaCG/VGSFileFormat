@@ -1,6 +1,6 @@
 #include "VGSCaptureComponent.h"
 
-#include "VGSBridge.h"
+#include "VGSPlayer.h"
 #include "VGSSplatLayout.h"
 #include "VGSSplatSource.h"
 
@@ -298,6 +298,11 @@ void UVGSCaptureComponent::UpdateFrame(bool bAdvancing, double AdvancePerTick)
 		LastSchedule = ScheduleScratch;
 	}
 
+	// Settings that need the instant packed again, wherever they were changed from.
+	if (IntensityEV != PackedIntensityEV || GpuLayout != PackedLayout)
+	{
+		bFrameDirty = true;
+	}
 	if (!bFrameDirty && Now == ShownSeconds)
 	{
 		return;
@@ -367,6 +372,7 @@ void UVGSCaptureComponent::PackAndSend(const vgsb_frame& Frame)
 	}
 
 	const bool bQuantized = GpuLayout == EVGSGpuLayout::Quantized;
+	const vgsunreal::Gain Gain = vgsunreal::gainFor(FMath::Exp2(IntensityEV));
 	const uint32 Stride = bQuantized ? vgsunreal::quantizedStride(View.shCoefficients) : vgsunreal::floatStride(View.shCoefficients);
 	const uint64 Bytes = uint64(View.count) * Stride;
 	if (Bytes > uint64(MAX_int32))
@@ -422,9 +428,17 @@ void UVGSCaptureComponent::PackAndSend(const vgsb_frame& Frame)
 		{
 			size_t Begin, End;
 			Span(Task, Begin, End);
-			vgsunreal::packFloat(View, Begin, End, Destination);
+			vgsunreal::packFloat(View, Begin, End, Destination, Gain);
 		});
 	}
+
+	if (bQuantized)
+	{
+		// The bytes are packed as decoded; the renderer's scales and biases carry the gain.
+		vgsunreal::applyGain(Packed->Quantization, Gain);
+	}
+	PackedIntensityEV = IntensityEV;
+	PackedLayout = GpuLayout;
 
 	ShownFrame = Packed;
 	ShownSplats = int64(View.count);

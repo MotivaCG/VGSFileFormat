@@ -11,7 +11,7 @@ VGS/                         the plugin as it goes into a project's Plugins fold
     VGSRuntime.Build.cs      why it is treated as an engine module; where the bridge comes from
     Public/VGSCaptureComponent.h   the component: file, playback, splat and rendering settings
     Public/VGSCaptureActor.h       the placeable actor, with an editor sprite to select it by
-    Private/VGSBridge.*            vgsbridge.dll loaded at run time, and a player around it
+    Private/VGSPlayer.*            vgsbridge.dll loaded at run time, and a player around it
     Private/VGSSplatLayout.h       plain C++: a frame into the renderer's buffer layouts
     Private/VGSSplatSource.*       render thread: upload, and the proxy handed to the renderer
     Private/VGSCaptureComponent.cpp time, scheduling, packing
@@ -69,6 +69,14 @@ Epic's plugin is copied or modified.
   for the harmonics, so the capture's space stays the local space and the turn from the
   capture's axes and metres to Unreal's is one matrix in front of the component transform.
   The harmonics are therefore evaluated in the space they were fitted in.
+- **Exposure**: the renderer draws splats as an emissive of fixed brightness - DC + 0.5 as
+  sRGB, made linear, times `View.PreExposure` - exactly as it draws Epic's own splat
+  assets. A white of the capture is 1 in Unreal's units whatever the lights, so a scene
+  exposed for physical light units (EV100 around 14 under a sun) shows it nearly black,
+  and the renderer has no intensity control. *Intensity (EV)* is ours: k = 2^EV applied
+  to the coefficients as they are packed (each one past DC times k^(1/2.4), DC also
+  offset), which makes the linear colour exactly k times brighter above sRGB's toe. In
+  the quantized layout it costs nothing: the bytes stay, the scales and biases carry it.
 
 ## Tests
 
@@ -78,6 +86,9 @@ renderer's shader code:
 
 - the float layout returns every value bit for bit;
 - the quantized layout returns every value within half a quantization step;
+- *Intensity*: 27k random colours at gains from 1/4 to 30000 come out k times brighter in
+  linear light through the shader's colour conversion (worst 5.5e-7 relative), and both
+  layouts carry the gain;
 - the axes: 2000 random splats, converted one by one as Epic's importer converts an SPZ
   file, against ours (capture space plus the matrix) — same centres, covariances equal to
   1e-15, same view direction for the harmonics.
@@ -114,6 +125,8 @@ so the Unreal side has **not been compiled**. Every engine call was checked agai
 4. Playback is smooth at 30 fps and at the game's own rate; `stat unit` with one and four
    captures.
 5. *Spherical Harmonics* off and on, *Density*, *GPU Layout* switched while playing.
+   *Intensity (EV)* against a lit scene with auto exposure: near the scene's EV100 the
+   capture should look as it does at EV100 0.
 6. Editor: moving the actor, undo, changing the file, *Play In Editor* on and off, PIE.
 
 ## Known limits

@@ -126,6 +126,15 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Rendering", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float OpacityScale = 1.0f;
 
+	/**
+	 * Brightness in stops: each +1 doubles the light the splats give off. Splats are an
+	 * emissive of fixed brightness and do not respond to lights, so a scene exposed for
+	 * physical light units (a sun of 100,000 lux meters around EV100 14) shows them nearly
+	 * black. Set this near the scene's EV100 to see the capture as it looks at EV100 0.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Rendering", meta = (DisplayName = "Intensity (EV)", UIMin = "-4.0", UIMax = "18.0"))
+	float IntensityEV = 0.0f;
+
 	/** Keep the capture's colours under Unreal's filmic tone curve by inverting it (an approximation, as Epic's component does). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Rendering", meta = (DisplayName = "Invert UE Tone Curve"))
 	bool bInvertToneCurve = false;
@@ -241,4 +250,8 @@ private:
 	FString FailedPath; // a capture that failed to open is not retried every tick
 	TArray<double> ScheduleScratch;
 	TArray<double> LastSchedule;
+
+	/** What the instant on screen was packed with, so a change from Blueprint repacks it. */
+	float PackedIntensityEV = 0.0f;
+	EVGSGpuLayout PackedLayout = EVGSGpuLayout::Float;
 };
