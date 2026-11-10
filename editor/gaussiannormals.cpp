@@ -31,6 +31,15 @@ constexpr int kNormalSmoothingPasses = 4;
 constexpr float kAxisTrustCos = 0.8660254f;        // cos 30
 constexpr float kAxisDistrustCos = 0.5f;           // cos 60
 constexpr float kSmoothingMaxAngleCos = 0.8191520f; // cos 35
+// Not SMNForge's: outlier correction before the smoothing (see computeNormals), over the
+// nearest neighbours only, and smoothing over a wider neighbourhood than the estimate's. On
+// maria_simbo_carrito (THE4DSCANNER rig) splats more than 60 degrees from their neighbours'
+// consensus went from 14 % to 8 %, beyond 30 degrees from 30 % to 18.5 %; export 15 % slower.
+constexpr int kNormalOutlierPasses = 2;
+constexpr int kOutlierNeighbors = 12;   // the nearest of the kNormalNeighbors, itself included
+constexpr int kSmoothingNeighbors = 48;
+constexpr float kOutlierMaxAngleCos = 0.6427876f;   // cos 50
+constexpr float kOutlierConsensus = 0.7f;           // neighbours' mean resultant length
 
 struct Cloud {
     std::vector<Eigen::Vector3f> pts;
@@ -128,6 +137,16 @@ Result computeNormals(const Splats &s, const std::vector<View> &views, float *no
         found.init(neighborhood(i), distances);
         tree.findNeighbors(found, cloud.pts[size_t(i)].data(), nanoflann::SearchParameters());
     });
+    // The smoothing's wider neighbourhood (all of them, in a frame with fewer splats).
+    const int smoothingNeighbors = std::min(kSmoothingNeighbors, count);
+    std::vector<size_t> wideNeighbors(ids.size() * size_t(smoothingNeighbors));
+    parallelFor(count, [&](int i) {
+        float distances[kSmoothingNeighbors];
+        nanoflann::KNNResultSet<float> found{size_t(smoothingNeighbors)};
+        found.init(wideNeighbors.data() + size_t(i) * smoothingNeighbors, distances);
+        tree.findNeighbors(found, cloud.pts[size_t(i)].data(), nanoflann::SearchParameters());
+    });
+    const auto smoothHood = [&](int i) { return wideNeighbors.data() + size_t(i) * smoothingNeighbors; };
 
     // Direction: own shortest axis on flat splats, local surface plane on round ones - and
     // on flat splats whose axis disagrees with a well-defined plane.
@@ -243,13 +262,35 @@ Result computeNormals(const Splats &s, const std::vector<View> &views, float *no
         }
         if (changed == 0) break;
     }
+    // Outliers first: the smoothing below only listens to neighbours within 35 degrees, so a
+    // splat whose normal is far off - its axis across the surface, or its side turned - is
+    // never corrected by it and shows lit as a dark speck. Where the neighbours agree among
+    // themselves and the splat disagrees with them, it takes theirs.
+    for (int pass = 0; pass < kNormalOutlierPasses; ++pass) {
+        const std::vector<Eigen::Vector3f> previous = normal;
+        parallelFor(count, [&](int i) {
+            Eigen::Vector3f sum = Eigen::Vector3f::Zero();
+            float weight = 0.0f;
+            const size_t *hood = neighborhood(i);
+            for (int j = 0; j < kOutlierNeighbors; ++j) {
+                if (hood[j] == size_t(i)) continue;
+                sum += alpha[hood[j]] * previous[hood[j]];
+                weight += alpha[hood[j]];
+            }
+            if (weight <= 1e-6f) return;
+            const float agreement = sum.norm() / weight; // 1 when the neighbours all agree
+            if (agreement < kOutlierConsensus) return;
+            const Eigen::Vector3f consensus = sum.normalized();
+            if (consensus.dot(previous[size_t(i)]) < kOutlierMaxAngleCos) normal[size_t(i)] = consensus;
+        });
+    }
     // Smoothing among neighbours already facing within 35 degrees, so creases stay sharp.
     for (int pass = 0; pass < kNormalSmoothingPasses; ++pass) {
         const std::vector<Eigen::Vector3f> previous = normal;
         parallelFor(count, [&](int i) {
             Eigen::Vector3f average = Eigen::Vector3f::Zero();
-            const size_t *hood = neighborhood(i);
-            for (int j = 0; j < kNormalNeighbors; ++j)
+            const size_t *hood = smoothHood(i);
+            for (int j = 0; j < smoothingNeighbors; ++j)
                 if (previous[hood[j]].dot(previous[size_t(i)]) >= kSmoothingMaxAngleCos)
                     average += alpha[hood[j]] * previous[hood[j]];
             if (average.squaredNorm() <= 1e-12f) return;

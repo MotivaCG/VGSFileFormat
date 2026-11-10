@@ -42,8 +42,9 @@ void word64(uint8_t *p,uint64_t v) {for (int i=0;i<8;++i) p[i]=uint8_t(v>>(i*8))
 uint64_t positionWord(float x,float y,float z,double maximum) {
     const auto q=[&](float v) {return uint64_t(std::llround(v/maximum*2097151));};return (q(x)<<43)|(q(y)<<22)|(q(z)<<1);
 }
-vgs::DecodedChunk temporalFixture(bool residual) {
-    const size_t n=600,T=6,S=T+1;vgs::Frame f;f.count=n;f.shCoefficients=15;
+// `born`, when not 0: the one interval the second half of the splats lives in.
+vgs::DecodedChunk temporalFixture(bool residual,size_t T=6,uint8_t born=0) {
+    const size_t n=600,S=T+1;vgs::Frame f;f.count=n;f.shCoefficients=15;
     f.active.assign(n,1);f.opacity.assign(n,.7f);f.shRest.resize(n*45);
     for (size_t i=0;i<n;++i) {
         f.position.insert(f.position.end(),{i<300 ? 0.f : 3.f,1,0});f.rotation.insert(f.rotation.end(),{0,0,0,1});f.scale.insert(f.scale.end(),{.1f,.2f,.3f});f.colorDc.insert(f.colorDc.end(),{.8f,.9f,.3f});
@@ -63,7 +64,7 @@ vgs::DecodedChunk temporalFixture(bool residual) {
         const size_t stride=p.bytes.size()/2;vgs::Bytes expanded(S*stride);
         for (size_t sample=0;sample<S;++sample) std::memcpy(expanded.data()+sample*stride,p.bytes.data(),stride);p.bytes=std::move(expanded);break;
     }
-    case vgs::Lifetimes:for (size_t row=0;row<n;++row) p.bytes[2*row+1]=uint8_t(T);break;
+    case vgs::Lifetimes:for (size_t row=0;row<n;++row) {p.bytes[2*row]=row<300 ? 0 : born;p.bytes[2*row+1]=uint8_t(row<300 || !born ? T : born+1u);}break;
     default:break;
     }
     for (auto &g:chunk.groups) g.intervals=T;
@@ -1021,6 +1022,15 @@ private slots:
             const auto mint=exportCaptureFile(project,dir.filePath("normals.mint"));QVERIFY(mint.notes.join(' ').contains("MINT cannot hold normals"));
             qInfo("normals add %lld bytes to %lld",qlonglong(QFileInfo(path).size()-QFileInfo(without).size()),qlonglong(QFileInfo(without).size()));
         }
+    }
+    void normalsReachSplatsBornWhereFloatTimeFallsShort() {
+        // Over 41 intervals, sample 1 as float time is 0.99999...: taken there, the splats
+        // born at 1 were never alive and normals went round for ever.
+        auto chunk=temporalFixture(false,41,1);
+        const auto views=gaussiannormals::rigViews(gaussiannormals::Rig::SmnV1);
+        addNormals(chunk,views,{});
+        size_t pages=0;for (const auto &p:chunk.pages) pages+=p.descriptor.attribute==vgs::Normals;
+        QVERIFY(pages>0);
     }
     void normalsOnARealCapture() {
         // EDITOR_NORMALS_CAPTURE=<capture>;<SMNV1|THE4DSCANNER>[;<out.vgs>]: what normals cost.

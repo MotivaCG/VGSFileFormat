@@ -609,7 +609,9 @@ gaussiannormals::Result addNormals(vgs::DecodedChunk &c,const std::vector<gaussi
             if (!most) break;s=best;
         }
         report(progress,QStringLiteral("Computing normals at sample %1 / %2").arg(s+1).arg(T));
-        decoder.evaluateInto(std::min(s/double(T),1.-1e-9),false,&frame);
+        // Halfway into interval s: s/T itself can come back from the decoder's float time as
+        // interval s-1, where the splats born at s are not alive yet.
+        decoder.evaluateInto(std::min((s+0.5)/double(T),1.-1e-9),false,&frame);
         if (frame.count!=records) throw std::runtime_error("Normals: the decoded frame does not match the chunk.");
         gaussiannormals::Splats splats;splats.count=records;splats.position=frame.position.data();splats.rotation=frame.rotation.data();
         splats.scale=frame.scale.data();splats.opacity=frame.opacity.data();splats.use=frame.active.data();
@@ -626,6 +628,9 @@ gaussiannormals::Result addNormals(vgs::DecodedChunk &c,const std::vector<gaussi
                 vgs::encodeNormal(n,indices.data()+row*3,codes.data()+record*2);pending[record]=0;
             }
         }
+        // Every record alive at s has had its turn: one the decoder still left out keeps the
+        // shortest axis rather than pick the same instant again for ever.
+        for (size_t i=0;i<records;++i) if (alive(i,s)) pending[i]=0;
     }
     for (uint32_t group=1;group<c.groups.size();++group) {
         vgs::DecodedPage page;page.descriptor.attribute=vgs::Normals;page.descriptor.group=group;
