@@ -46,8 +46,9 @@
  * a host's main thread, or its render thread while rendering.
  *
  * Current integrations: the Blender add-on loads the shared library through this C
- * interface; the Houdini plugin compiles the same player into its SOP with
- * VGSBRIDGE_STATIC defined.
+ * interface, and so does the Unreal plugin, which plays packed (below) and evaluates on the
+ * GPU; the Houdini plugin compiles the same player into its SOP with VGSBRIDGE_STATIC
+ * defined.
  */
 
 #include <stddef.h>
@@ -138,6 +139,20 @@ VGSB_API void vgsb_schedule(vgsb_player *, const double *seconds, int count);
  */
 VGSB_API int vgsb_acquire(vgsb_player *, double seconds, double timeout_ms, vgsb_frame *out);
 
+/*
+ * As vgsb_acquire, but when `seconds` is not ready by the timeout, settles for the ready
+ * frame nearest it among those past `after` - the frame on screen, excluded - on the way
+ * to `seconds`, in either direction of play; `out->seconds` says which. VGSB_TIMEOUT only
+ * when there is none of those either.
+ *
+ * For a machine that cannot decode every frame in time, which with several captures
+ * playing is any machine sooner or later. Asking for the exact frame, such a capture
+ * decodes each frame just after the playhead has left it, and shows almost none; settling
+ * for a late one shows every frame it manages to decode, at a lower rate.
+ */
+VGSB_API int vgsb_acquire_between(vgsb_player *, double seconds, double after, double timeout_ms,
+                                  vgsb_frame *out);
+
 /* Done with the acquired frame: its slot may be refilled. */
 VGSB_API void vgsb_release(vgsb_player *);
 
@@ -165,6 +180,108 @@ VGSB_API void vgsb_set_density(vgsb_player *, float density);
  * all, or it would decode a chunk again on every frame.
  */
 VGSB_API void vgsb_set_cache(vgsb_player *, int chunks, uint64_t max_bytes);
+
+/*
+ * Where players decode. By default each player's lanes split their work over threads of
+ * their own, `threads` of them per lane, made for each batch and joined after it. That is
+ * right for one capture in a host that leaves the cores alone; with several captures, or
+ * in a host that keeps a worker on every core as game engines do, those threads fight
+ * the host's for the same cores and every capture slows down.
+ *
+ * A host with a task system of its own hands it over here, and from then on players run
+ * that work on it instead: every capture in the scene shares the host's workers, and the
+ * host decides who gets the cores. `threads` in vgsb_open is then how many pieces a batch
+ * is cut into, not how many threads run them.
+ *
+ * `run` must call `task(context, i)` once for every i from 0 to count - 1, on any threads
+ * it likes, the calling one included, and return when all have finished. Tasks do not
+ * throw and do not wait on each other, so a scheduler that runs them inline is fine. The
+ * calling thread is one of the bridge's lanes, never a thread of the host's.
+ *
+ * Applies to players opened after the call; open ones keep what they had. NULL goes back
+ * to the bridge's own threads. `run` and `host` must stay valid while any player opened
+ * with them is open.
+ */
+typedef void (*vgsb_task)(void *context, size_t index);
+typedef void (*vgsb_parallel_for)(void *host, size_t count, vgsb_task task, void *context);
+VGSB_API void vgsb_set_parallel_for(vgsb_parallel_for run, void *host);
+
+/*
+ * ---- packed playback ------------------------------------------------------------------
+ *
+ * Evaluating a frame - turning a chunk's compressed attributes into the position,
+ * rotation, scale, colour and harmonics of every splat at one instant - is most of what
+ * playing costs on the CPU: about 22 ms of a 26 ms frame for a quarter of a million
+ * splats, and the memory traffic of writing every splat out. A host that draws on a GPU
+ * with compute can do that part in a shader instead, where it costs next to nothing, and
+ * then the CPU only decompresses each chunk once, whatever the frame rate and however
+ * many captures play.
+ *
+ * A player opened with vgsb_open_packed hands over chunks instead of frames: the arrays
+ * the shader reads, built once per chunk on the lanes, and per frame only where the
+ * instant falls in its chunk and the chunk's shared tables evaluated at it (the basis, a
+ * few hundred kilobytes at most). How a shader reads them is the layout of the VGS
+ * editor's packed viewport and the web viewer; the Unreal plugin's VGSPacked.usf is one.
+ */
+typedef struct vgsb_packed_chunk {
+  /* Different for every chunk this library packs, in any player: a host that keeps the
+   * chunk it uploaded last uploads again only when this changes. */
+  uint64_t serial;
+  uint64_t chunk_index;
+  uint64_t splats;          /* every record of the chunk, alive or not at a given instant */
+  uint64_t samples, intervals;
+  int32_t sh_planes;        /* 0, 1, 3 or 5 words of three coefficients' indices */
+  int32_t sh_coefficients;  /* 0, 3, 8 or 15 */
+  int32_t group_count;      /* up to 8 */
+  int32_t basis_texels;     /* RGBA texels in a frame's basis */
+  int32_t basis_offset[4];  /* where each table starts in it: position, colour, opacity, rotation */
+  uint64_t entries_static, entries_temporal, sh0_stride, opacity_stride;
+  float group_a[32];        /* per group: end index, flags, position min, max */
+  float group_b[32];        /* per group: first per-sample position and rotation word */
+
+  const uint32_t *splat_a, *splat_b, *splat_c; /* 4 words per splat each */
+  const uint32_t *sh_static, *sh_temporal;     /* sh_planes * splats words, plane-major */
+  const uint32_t *position_terms;   /* pairs: dictionary entry, float weight bits */
+  const uint32_t *rotation_terms;   /* dictionary entries */
+  const uint32_t *position_samples; /* pairs: one packed 64-bit position per sample */
+  const uint32_t *rotation_samples; /* one packed quaternion per sample */
+  const float *books;               /* RGBA per codebook entry: static, then temporal */
+  const float *luts;                /* 256 pairs: scale, base colour */
+  uint64_t sh_words, position_term_words, rotation_term_words, position_sample_words,
+      rotation_sample_words, book_floats, lut_floats;
+  uint64_t bytes;                   /* all of the above together, what uploading it costs */
+} vgsb_packed_chunk;
+
+typedef struct vgsb_packed_frame {
+  double seconds;
+  const vgsb_packed_chunk *chunk;
+  uint32_t frame;   /* the sample the instant starts from */
+  float alpha;      /* how far it is towards the next one, 0 to 1 */
+  float normalized; /* the instant as a fraction of the chunk, for per-sample positions */
+  int32_t reserved;
+  const float *basis; /* chunk->basis_texels RGBA texels */
+} vgsb_packed_frame;
+
+/*
+ * Opens a capture to play packed. The same lanes and threads as vgsb_open, and the same
+ * vgsb_schedule; frames come from vgsb_acquire_packed, and vgsb_acquire is refused.
+ * vgsb_set_density does nothing here: a shader thins splats itself.
+ */
+VGSB_API vgsb_player *vgsb_open_packed(const char *path_utf8, int include_sh, int threads);
+
+/*
+ * The instant at `seconds`, waiting up to `timeout_ms` (negative: as long as it takes)
+ * for its chunk to be packed. The chunk and the basis stay valid until the next
+ * vgsb_acquire_packed, vgsb_release or vgsb_close on the player; to keep the chunk longer,
+ * as a renderer that uploads it later on another thread does, retain it.
+ */
+VGSB_API int vgsb_acquire_packed(vgsb_player *, double seconds, double timeout_ms,
+                                 vgsb_packed_frame *out);
+
+/* Keep a chunk past what vgsb_acquire_packed promises, and let it go. Any thread; a
+ * retained chunk outlives the player that packed it. */
+VGSB_API void vgsb_retain_chunk(const vgsb_packed_chunk *);
+VGSB_API void vgsb_release_chunk(const vgsb_packed_chunk *);
 
 #ifdef __cplusplus
 }

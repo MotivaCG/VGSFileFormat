@@ -17,11 +17,14 @@ add_library(vgsbridge SHARED
     ${CMAKE_SOURCE_DIR}/decoder/src/vgsdecoder.cpp
     ${CMAKE_SOURCE_DIR}/decoder/include/vgsdecoder/vgsdecoder.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/vgsbridge.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/vgsbridge.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/vgsbridge.cpp
+    # The packed layout of the editor's viewport, for players opened with vgsb_open_packed.
+    ${CMAKE_SOURCE_DIR}/editor/packedchunk.cpp
+    ${CMAKE_SOURCE_DIR}/editor/packedchunk.h)
 
 target_include_directories(vgsbridge
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
-    PRIVATE ${CMAKE_SOURCE_DIR}/decoder/include ${VGS_CORE_INCLUDE_DIRS})
+    PRIVATE ${CMAKE_SOURCE_DIR}/decoder/include ${CMAKE_SOURCE_DIR}/editor ${VGS_CORE_INCLUDE_DIRS})
 target_compile_definitions(vgsbridge PRIVATE VGSBRIDGE_BUILD)
 
 # vgsbridge.dll, not libvgsbridge.so: integrations look for one name on every platform.

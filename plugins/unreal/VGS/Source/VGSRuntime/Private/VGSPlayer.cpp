@@ -1,5 +1,6 @@
 #include "VGSPlayer.h"
 
+#include "Async/ParallelFor.h"
 #include "HAL/PlatformProcess.h"
 #include "Misc/Paths.h"
 
@@ -15,6 +16,19 @@ namespace VGS
 		FBridgeApi GApi;
 		bool GLoaded = false;
 		FString GError = TEXT("vgsbridge has not been loaded");
+
+		/**
+		 * The bridge's batches, on the engine's workers. The calling thread is one of the
+		 * bridge's lanes and works through the batch too, so it finishes even with every
+		 * worker busy. Background priority: decoding runs ahead of playback by a chunk and
+		 * a few frames, and should give way to the work of the frame being drawn.
+		 */
+		void RunOnTaskGraph(void* /*Host*/, size_t Count, vgsb_task Task, void* Context)
+		{
+			ParallelFor(TEXT("VGS.Decode"), int32(Count), 1,
+				[Task, Context](int32 Index) { Task(Context, size_t(Index)); },
+				EParallelForFlags::BackgroundPriority | EParallelForFlags::Unbalanced);
+		}
 	}
 
 	FString FromUtf8(const char* Text)
@@ -62,9 +76,15 @@ namespace VGS
 		Resolve(Api.GetInfo, TEXT("vgsb_get_info"));
 		Resolve(Api.Schedule, TEXT("vgsb_schedule"));
 		Resolve(Api.Acquire, TEXT("vgsb_acquire"));
+		Resolve(Api.AcquireBetween, TEXT("vgsb_acquire_between"));
 		Resolve(Api.Release, TEXT("vgsb_release"));
 		Resolve(Api.SetIncludeSH, TEXT("vgsb_set_include_sh"));
 		Resolve(Api.SetDensity, TEXT("vgsb_set_density"));
+		Resolve(Api.SetParallelFor, TEXT("vgsb_set_parallel_for"));
+		Resolve(Api.OpenPacked, TEXT("vgsb_open_packed"));
+		Resolve(Api.AcquirePacked, TEXT("vgsb_acquire_packed"));
+		Resolve(Api.RetainChunk, TEXT("vgsb_retain_chunk"));
+		Resolve(Api.ReleaseChunk, TEXT("vgsb_release_chunk"));
 
 		// A bridge built against other structs would be read wrongly, so refuse it outright.
 		if (bComplete && Api.ApiVersion() != VGSB_API_VERSION)
@@ -115,7 +135,24 @@ namespace VGS
 		return GError;
 	}
 
-	TSharedPtr<FPlayer> FPlayer::Open(const FString& Path, bool bIncludeSH, int32 Slots, int32 Threads, FString& OutError)
+	FPackedChunk::FPackedChunk(const vgsb_packed_chunk* InChunk)
+		: Chunk(InChunk)
+	{
+		const FBridgeApi* Api = GetBridge();
+		check(Api && Chunk);
+		Api->RetainChunk(Chunk);
+	}
+
+	FPackedChunk::~FPackedChunk()
+	{
+		// A chunk outlives its player in the bridge, but not the bridge itself.
+		if (const FBridgeApi* Api = GetBridge())
+		{
+			Api->ReleaseChunk(Chunk);
+		}
+	}
+
+	TSharedPtr<FPlayer> FPlayer::OpenPacked(const FString& Path, bool bIncludeSH, int32 Threads, bool bOnTaskGraph, FString& OutError)
 	{
 		const FBridgeApi* Api = GetBridge();
 		if (!Api)
@@ -123,6 +160,38 @@ namespace VGS
 			OutError = GetBridgeError();
 			return nullptr;
 		}
+		Api->SetParallelFor(bOnTaskGraph ? &RunOnTaskGraph : nullptr, nullptr);
+		const auto Utf8Path = StringCast<UTF8CHAR>(*Path);
+		vgsb_player* Player = Api->OpenPacked(reinterpret_cast<const char*>(Utf8Path.Get()), bIncludeSH ? 1 : 0, FMath::Max(Threads, 0));
+		if (!Player)
+		{
+			OutError = FromUtf8(Api->LastError());
+			return nullptr;
+		}
+
+		TSharedPtr<FPlayer> Result(new FPlayer());
+		Result->Player = Player;
+		Result->Path = Path;
+		Result->bIncludeSH = bIncludeSH;
+		Result->Threads = FMath::Max(Threads, 0);
+		Result->bOnTaskGraph = bOnTaskGraph;
+		Result->bPacked = true;
+		Api->GetInfo(Player, &Result->Info);
+		return Result;
+	}
+
+	TSharedPtr<FPlayer> FPlayer::Open(const FString& Path, bool bIncludeSH, int32 Slots, int32 Threads, bool bOnTaskGraph, FString& OutError)
+	{
+		const FBridgeApi* Api = GetBridge();
+		if (!Api)
+		{
+			OutError = GetBridgeError();
+			return nullptr;
+		}
+
+		// Taken by the player when it opens; only the game thread opens players, so setting
+		// it just before is enough.
+		Api->SetParallelFor(bOnTaskGraph ? &RunOnTaskGraph : nullptr, nullptr);
 
 		// The bridge maps the file itself and takes UTF-8, so accented paths work.
 		const auto Utf8Path = StringCast<UTF8CHAR>(*Path);
@@ -138,6 +207,7 @@ namespace VGS
 		Result->Path = Path;
 		Result->bIncludeSH = bIncludeSH;
 		Result->Threads = FMath::Max(Threads, 0);
+		Result->bOnTaskGraph = bOnTaskGraph;
 		Api->GetInfo(Player, &Result->Info);
 		return Result;
 	}
@@ -166,6 +236,18 @@ namespace VGS
 	{
 		const FBridgeApi* Api = GetBridge();
 		return Api ? Api->Acquire(Player, Seconds, TimeoutMs, &OutFrame) : VGSB_ERROR;
+	}
+
+	int32 FPlayer::AcquireBetween(double Seconds, double After, double TimeoutMs, vgsb_frame& OutFrame)
+	{
+		const FBridgeApi* Api = GetBridge();
+		return Api ? Api->AcquireBetween(Player, Seconds, After, TimeoutMs, &OutFrame) : VGSB_ERROR;
+	}
+
+	int32 FPlayer::AcquirePacked(double Seconds, double TimeoutMs, vgsb_packed_frame& OutFrame)
+	{
+		const FBridgeApi* Api = GetBridge();
+		return Api ? Api->AcquirePacked(Player, Seconds, TimeoutMs, &OutFrame) : VGSB_ERROR;
 	}
 
 	void FPlayer::Release()

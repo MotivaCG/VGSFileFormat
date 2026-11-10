@@ -1,0 +1,237 @@
+// Evaluates a packed VGS chunk at one instant into the float splat records Epic's Gaussian
+// Splat renderer reads: one thread per record of the chunk, alive or not.
+//
+// The chunk's arrays (vgsbridge.h, vgsb_packed_chunk) are uploaded once per chunk; per frame
+// only the basis changes - the chunk's shared tables evaluated at the instant on the CPU,
+// a few hundred kilobytes at most - and the instant itself. Records that are not alive at
+// the instant, or that Density thins out, are written with no size and no opacity.
+//
+// A port of the VGS editor's packed viewport (editor/viewport.cpp, packedRecord), which
+// reads the same arrays. tests/unreal_packed_reference.h is its C++ twin, line for line,
+// and is what tests/unreal_packed.cpp checks against the CPU evaluation: change both.
+
+#include "/Engine/Private/Common.ush"
+#include "/Engine/Private/ComputeShaderUtils.ush"
+// GaussianSplatShared.h is shared with C++; this picks its shader half, as Niagara's splat
+// builder does.
+#define GPU_SIMULATION 1
+#include "/Plugin/GaussianSplat/Shared/GaussianSplatShared.h"
+
+StructuredBuffer<uint4> SplatA;          // position base (2), rotation base, scale indices + birth
+StructuredBuffer<uint4> SplatB;          // colour and opacity residual words; opacity factor nibbles
+StructuredBuffer<uint4> SplatC;          // first position term, first rotation term, counts, colour base + death
+StructuredBuffer<uint> ShStatic;         // plane-major, three 10-bit indices per word
+StructuredBuffer<uint> ShTemporal;
+StructuredBuffer<uint2> PositionTerms;   // dictionary entry, float weight bits
+StructuredBuffer<uint> RotationTerms;    // dictionary entries
+StructuredBuffer<uint2> PositionSamples; // a packed 64-bit position per sample
+StructuredBuffer<uint> RotationSamples;  // a packed quaternion per sample
+StructuredBuffer<float4> Books;          // SH codebooks, static then temporal
+StructuredBuffer<float2> Luts;           // scale, base colour
+StructuredBuffer<float4> Basis;          // the shared tables at this instant
+
+uint Splats;
+uint Samples;
+uint Frame;
+uint GroupCount;
+uint ShPlanes;
+uint ShCoefficients;
+uint EntriesStatic;
+uint EntriesTemporal;
+uint Sh0Stride;
+uint OpacityStride;
+uint BooksTemporal;
+int4 BasisOffset; // position, colour, opacity, rotation
+float Alpha;
+float Normalized;
+float4 GroupA[8]; // end index, flags, position min, max
+float4 GroupB[8]; // first per-sample position and rotation word
+
+float Gain;     // on every coefficient (VGSSplatLayout.h, Gain)
+float DcOffset; // added to the DC term after it
+uint Thinned;
+uint DensityThreshold;
+float DensityExponent;
+
+uint SplatStride;
+RWByteAddressBuffer RWSplatBuffer;
+
+// 21 bits per axis over one range, x in the high bits and z in the low ones.
+float3 UnpackPosition(uint2 W, float Lo, float Hi)
+{
+	const uint Z = (W.x >> 1) & 0x1FFFFFu;
+	const uint Y = (W.x >> 22) | ((W.y & 0x7FFu) << 10);
+	const uint X = W.y >> 11;
+	return float3(X, Y, Z) * ((Hi - Lo) / 2097151.0f) + Lo;
+}
+
+// Smallest three, stored wxyz, returned xyzw; the low bit negates the whole quaternion.
+float4 UnpackQuat(uint W)
+{
+	const uint Largest = W >> 30;
+	const float3 S = float3(
+		float((W >> 20) & 1023u) / 1023.0f * 2.0f - 1.0f,
+		float((W >> 10) & 1023u) / 1023.0f * 2.0f - 1.0f,
+		float((W >> 1) & 511u) / 511.0f * 2.0f - 1.0f) * 0.70710678118654752f;
+	const float O = sqrt(max(0.0f, 1.0f - dot(S, S)));
+	float4 Q = Largest == 0u ? float4(O, S) : Largest == 1u ? float4(S.x, O, S.y, S.z) : Largest == 2u ? float4(S.x, S.y, O, S.z) : float4(S, O);
+	Q *= (W & 1u) != 0u ? -1.0f : 1.0f;
+	return float4(Q.yzw, Q.x);
+}
+
+// One of five 12-bit residual codes in a 64-bit word; codes 3 and 4 straddle the halves.
+uint ResidualCode(uint2 W, uint K)
+{
+	return K < 2u ? (W.x >> (12u * K)) & 4095u : K == 2u ? ((W.x >> 24) | ((W.y & 15u) << 8)) & 4095u : (W.y >> (12u * K - 32u)) & 4095u;
+}
+
+float4 BasisAt(uint Table, uint I)
+{
+	return Basis[uint(BasisOffset[Table]) + I];
+}
+
+// vgsbridge's framepack.h, keeps: the same records stay as on the CPU.
+uint DensityHash(uint Record)
+{
+	uint X = Record * 0x9E3779B1u;
+	X ^= X >> 16;
+	X *= 0x85EBCA6Bu;
+	X ^= X >> 13;
+	X *= 0xC2B2AE35u;
+	X ^= X >> 16;
+	return X;
+}
+
+void WriteInactive(uint Offset)
+{
+	RWSplatBuffer.Store3(Offset + FGaussianSplatShared::EFloat_PositionOffset, asuint(float3(0, 0, 0)));
+	RWSplatBuffer.Store3(Offset + FGaussianSplatShared::EFloat_ScaleOffset, asuint(float3(0, 0, 0)));
+	RWSplatBuffer.Store4(Offset + FGaussianSplatShared::EFloat_RotationOffset, asuint(float4(0, 0, 0, 1)));
+	RWSplatBuffer.Store4(Offset + FGaussianSplatShared::EFloat_ColorOpacityOffset, asuint(float4(0, 0, 0, 0)));
+}
+
+[numthreads(THREADGROUP_SIZE, 1, 1)]
+void MainCS(uint3 GroupId : SV_GroupID, uint GroupThreadIndex : SV_GroupIndex)
+{
+	const uint Index = GetUnWrappedDispatchThreadId(GroupId, GroupThreadIndex, THREADGROUP_SIZE);
+	if (Index >= Splats)
+	{
+		return;
+	}
+	const uint Offset = Index * SplatStride;
+	const uint4 A = SplatA[Index];
+	const uint4 B = SplatB[Index];
+	const uint4 C = SplatC[Index];
+	if (int(Frame) < int(A.w >> 24) || int(Frame) + 1 > int(C.w >> 24) || (Thinned != 0u && DensityHash(Index) >= DensityThreshold))
+	{
+		WriteInactive(Offset);
+		return;
+	}
+
+	uint Group = GroupCount - 1u;
+	for (uint G = 0u; G < 8u; ++G)
+	{
+		if (G < GroupCount && float(Index) < GroupA[G].x)
+		{
+			Group = G;
+			break;
+		}
+	}
+	const uint Local = Index - (Group == 0u ? 0u : uint(GroupA[Group - 1u].x));
+	const uint Flags = uint(GroupA[Group].y);
+	const float Lo = GroupA[Group].z;
+	const float Hi = GroupA[Group].w;
+
+	float3 P;
+	if ((Flags & 1u) != 0u)
+	{
+		const uint Base = uint(GroupB[Group].x) + Local * Samples;
+		const float3 P0 = UnpackPosition(PositionSamples[Base + Frame], Lo, Hi);
+		const float3 P1 = UnpackPosition(PositionSamples[Base + Frame + 1u], Lo, Hi);
+		P = P0 + (P1 - P0) * Normalized; // normalised chunk time, as the runtime does
+	}
+	else
+	{
+		P = UnpackPosition(A.xy, Lo, Hi);
+		const uint Terms = C.z & 255u;
+		for (uint K = 0u; K < 4u; ++K)
+		{
+			if (K >= Terms)
+			{
+				break;
+			}
+			const uint2 Term = PositionTerms[C.x + K];
+			P += BasisAt(0u, Term.x).xyz * asfloat(Term.y);
+		}
+	}
+
+	float4 Q;
+	if ((Flags & 2u) != 0u)
+	{
+		const uint Base = uint(GroupB[Group].y) + Local * Samples;
+		const float4 Q0 = UnpackQuat(RotationSamples[Base + Frame]);
+		const float4 Q1 = UnpackQuat(RotationSamples[Base + Frame + 1u]);
+		Q = Q0 + (Q1 * (dot(Q0, Q1) < 0.0f ? -1.0f : 1.0f) - Q0) * Alpha;
+	}
+	else
+	{
+		const float4 Base = UnpackQuat(A.z);
+		float4 Residual = 0;
+		const uint Terms = (C.z >> 8) & 255u;
+		for (uint K = 0u; K < 5u; ++K)
+		{
+			if (K >= Terms)
+			{
+				break;
+			}
+			Residual += BasisAt(3u, RotationTerms[C.y + K]);
+		}
+		const float N2 = dot(Residual, Residual);
+		if (N2 < 1e-12f)
+		{
+			Q = Base;
+		}
+		else
+		{
+			Residual *= rsqrt(N2);
+			Q = float4(Residual.w * Base.xyz + Base.w * Residual.xyz + cross(Residual.xyz, Base.xyz), Residual.w * Base.w - dot(Residual.xyz, Base.xyz));
+		}
+	}
+	Q = Q / max(length(Q), 1e-20f);
+
+	float3 Sh0 = float3(Luts[C.w & 255u].y, Luts[(C.w >> 8) & 255u].y, Luts[(C.w >> 16) & 255u].y);
+	float Opacity = 0.0f;
+	for (uint K = 0u; K < 5u; ++K)
+	{
+		Sh0 += BasisAt(1u, K * Sh0Stride + ResidualCode(B.xy, K)).xyz;
+		Opacity += BasisAt(2u, K * OpacityStride + ResidualCode(B.zw, K)).x;
+	}
+	// The optional per-splat opacity factor in the words' top nibbles: 2^(-code/16).
+	const float Factor = exp2(-float((B.w >> 28) | ((B.y >> 28) << 4)) / 16.0f);
+	Opacity = saturate(Opacity) * Factor;
+	if (Thinned != 0u)
+	{
+		// A thinned capture keeps its total opacity where splats overlap (vgsb_set_density).
+		Opacity = 1.0f - pow(max(0.0f, 1.0f - Opacity), DensityExponent);
+	}
+
+	const float SmallestScale = 1e-6f;
+	const float3 Scale = max(float3(Luts[A.w & 255u].x, Luts[(A.w >> 8) & 255u].x, Luts[(A.w >> 16) & 255u].x), SmallestScale);
+
+	RWSplatBuffer.Store3(Offset + FGaussianSplatShared::EFloat_PositionOffset, asuint(P));
+	RWSplatBuffer.Store3(Offset + FGaussianSplatShared::EFloat_ScaleOffset, asuint(Scale));
+	RWSplatBuffer.Store4(Offset + FGaussianSplatShared::EFloat_RotationOffset, asuint(Q));
+	RWSplatBuffer.Store4(Offset + FGaussianSplatShared::EFloat_ColorOpacityOffset, asuint(float4(Sh0 * Gain + DcOffset, Opacity)));
+
+	// One word per plane carries three coefficients' codebook indices.
+	const uint TemporalBase = BooksTemporal + Frame * ShPlanes * 3u * EntriesTemporal;
+	for (uint Co = 0u; Co < ShCoefficients; ++Co)
+	{
+		const uint Word = (Co / 3u) * Splats + Index;
+		const uint Shift = 20u - 10u * (Co % 3u);
+		const uint Si = (ShStatic[Word] >> Shift) & 1023u;
+		const uint Ti = (ShTemporal[Word] >> Shift) & 1023u;
+		const float3 Coefficient = (Books[Co * EntriesStatic + Si].xyz + Books[TemporalBase + Co * EntriesTemporal + Ti].xyz) * Gain;
+		RWSplatBuffer.Store3(Offset + FGaussianSplatShared::EFloat_Stride + Co * 12u, asuint(Coefficient));
+	}
+}

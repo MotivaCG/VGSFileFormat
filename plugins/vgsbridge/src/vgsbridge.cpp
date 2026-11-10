@@ -2,14 +2,17 @@
 
 #include "vgsbridge.h"
 #include "framepack.h"
+#include "packedchunk.h"
 
 #include "vgsdecoder/vgsdecoder.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <exception>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -149,6 +152,8 @@ struct Slot : vgsbdetail::FrameBuffers {
   uint64_t generation = 0;
   /** Handed to the host and not to be touched until it lets go. */
   bool pinned = false;
+  /** When it became Ready, counting up: of the frames nobody wants, the oldest goes first. */
+  uint64_t readyOrder = 0;
 };
 
 int coefficientsForDegree(uint32_t degree) {
@@ -165,6 +170,40 @@ int coefficientsForDegree(uint32_t degree) {
 }
 
 bool sameTime(double a, double b) { return std::fabs(a - b) < SameTime; }
+
+/** The host's parallel-for, from vgsb_set_parallel_for; players take it when they open. */
+std::mutex hostGuard;
+vgsb_parallel_for hostRun = nullptr;
+void *hostData = nullptr;
+
+/**
+ * The decoder's parallel-for, run through the host's. The body may throw, and an
+ * exception must not unwind through the host's scheduler, so each task catches its own
+ * and the first one is rethrown here, on the lane, where the decoder expects it.
+ */
+vgsdec::ParallelFor throughHost(vgsb_parallel_for run, void *host) {
+  return [run, host](size_t count, const std::function<void(size_t)> &body) {
+    struct Job {
+      const std::function<void(size_t)> *body;
+      std::mutex guard;
+      std::exception_ptr failure;
+    } job{&body, {}, {}};
+    run(host, count,
+        [](void *context, size_t index) {
+          Job &job = *static_cast<Job *>(context);
+          try {
+            (*job.body)(index);
+          } catch (...) {
+            std::lock_guard<std::mutex> lock(job.guard);
+            if (!job.failure)
+              job.failure = std::current_exception();
+          }
+        },
+        &job);
+    if (job.failure)
+      std::rethrow_exception(job.failure);
+  };
+}
 
 /** The least density accepted: below it a capture is a scattering of dots. */
 constexpr float SmallestDensity = 0.01f;
@@ -190,6 +229,75 @@ struct Lane {
   std::thread thread;
 };
 
+/**
+ * A packed chunk as the host sees it. The arrays are the VGS editor's PackedChunk
+ * (editor/packedchunk.cpp), the layout its viewport and the web viewer read; this only
+ * points the C struct at them and counts who holds it.
+ */
+struct ChunkHolder : vgsb_packed_chunk {
+  std::shared_ptr<const PackedChunk> data;
+  mutable std::atomic<int> references{1};
+};
+
+std::atomic<uint64_t> nextSerial{1};
+
+ChunkHolder *makeHolder(std::shared_ptr<const PackedChunk> data) {
+  auto *h = new ChunkHolder();
+  const PackedChunk &c = *data;
+  h->serial = nextSerial++;
+  h->chunk_index = c.chunkIndex;
+  h->splats = c.splats;
+  h->samples = c.samples;
+  h->intervals = c.intervals;
+  h->sh_planes = c.planes;
+  h->sh_coefficients = c.coefficients;
+  h->group_count = c.groupCount;
+  const PackedBasisLayout layout = basisLayout(c);
+  h->basis_texels = std::max(1, layout.total);
+  h->basis_offset[0] = layout.position;
+  h->basis_offset[1] = layout.sh0;
+  h->basis_offset[2] = layout.opacity;
+  h->basis_offset[3] = layout.rotation;
+  h->entries_static = c.entriesStatic;
+  h->entries_temporal = c.entriesTemporal;
+  h->sh0_stride = c.sh0Stride;
+  h->opacity_stride = c.opacityStride;
+  static_assert(sizeof(h->group_a) == sizeof(c.groupA) && sizeof(h->group_b) == sizeof(c.groupB),
+                "group tables differ");
+  std::copy(std::begin(c.groupA), std::end(c.groupA), h->group_a);
+  std::copy(std::begin(c.groupB), std::end(c.groupB), h->group_b);
+  h->splat_a = c.splatA.data();
+  h->splat_b = c.splatB.data();
+  h->splat_c = c.splatC.data();
+  h->sh_static = c.shStatic.data();
+  h->sh_temporal = c.shTemporal.data();
+  h->sh_words = c.shStatic.size();
+  h->position_terms = c.positionTerms.data();
+  h->position_term_words = c.positionTerms.size();
+  h->rotation_terms = c.rotationTerms.data();
+  h->rotation_term_words = c.rotationTerms.size();
+  h->position_samples = c.positionSamples.data();
+  h->position_sample_words = c.positionSamples.size();
+  h->rotation_samples = c.rotationSamples.data();
+  h->rotation_sample_words = c.rotationSamples.size();
+  h->books = c.books.data();
+  h->book_floats = c.books.size();
+  h->luts = c.luts.data();
+  h->lut_floats = c.luts.size();
+  h->bytes = c.bytes();
+  h->data = std::move(data);
+  return h;
+}
+
+void dropReference(const vgsb_packed_chunk *chunk) {
+  const auto *holder = static_cast<const ChunkHolder *>(chunk);
+  if (holder->references.fetch_sub(1, std::memory_order_acq_rel) == 1)
+    delete holder;
+}
+
+/** Distinct chunks a packed player holds at most: the schedule's first few. */
+constexpr size_t HeldChunks = 3;
+
 } // namespace
 
 struct vgsb_player {
@@ -212,6 +320,7 @@ struct vgsb_player {
   bool includeSh = true;
   float density = 1.0f;
   uint64_t generation = 1;
+  uint64_t readyCount = 0;
   // The cache each lane should keep, applied by the lane itself on its own thread: a
   // Capture belongs to one thread, so the host cannot set it directly.
   size_t cacheChunks = 0;
@@ -219,6 +328,16 @@ struct vgsb_player {
   uint64_t cacheGeneration = 0;
   std::string failure;
   bool quit = false;
+
+  // Packed playback, vgsb_open_packed: the chunks packed so far, each holding one
+  // reference; the one the host acquired last, holding another; and the host's own
+  // capture, for instantAt, and basis, which only the host's thread touches.
+  bool packed = false;
+  unsigned shDegree = 0;
+  std::map<size_t, ChunkHolder *> chunks;
+  ChunkHolder *acquired = nullptr;
+  std::unique_ptr<vgsdec::Capture> clock;
+  std::vector<float> basis;
 };
 
 namespace {
@@ -249,11 +368,18 @@ size_t slotted(const vgsb_player &player) {
 }
 
 /**
- * A slot that may be overwritten: empty, stale, or holding a frame nobody has asked for.
- * Never the one the host is holding, and never one being filled.
+ * A slot that may be overwritten: empty or stale first, then the frame nobody has asked
+ * for that was decoded longest ago. Never the one the host is holding, and never one
+ * being filled.
+ *
+ * Oldest first because the newest unwanted frame is usually one that came out late: the
+ * playhead passed it while it was decoding. vgsb_acquire_between can still show it, and
+ * that is what keeps a capture the machine cannot keep up with playing at a lower rate
+ * instead of throwing away every frame it decodes.
  */
 int pickVictim(const vgsb_player &player) {
   const size_t considered = slotted(player);
+  int unwanted = -1;
   for (size_t i = 0; i < player.slots.size(); ++i) {
     const Slot &slot = player.slots[i];
     if (slot.pinned || slot.state == Slot::State::Filling)
@@ -263,10 +389,33 @@ int pickVictim(const vgsb_player &player) {
     bool needed = false;
     for (size_t w = 0; w < considered && !needed; ++w)
       needed = sameTime(slot.seconds, player.wanted[w]);
-    if (!needed)
-      return int(i);
+    if (!needed && (unwanted < 0 || slot.readyOrder < player.slots[size_t(unwanted)].readyOrder))
+      unwanted = int(i);
   }
-  return -1;
+  return unwanted;
+}
+
+/**
+ * The ready frame nearest `seconds` that lies past `after` on the way to it: `after`
+ * itself excluded, `seconds` included, in either direction. -1 if there is none.
+ */
+int findBetween(const vgsb_player &player, double seconds, double after) {
+  const double low = std::min(seconds, after), high = std::max(seconds, after);
+  int best = -1;
+  double bestDistance = 0;
+  for (size_t i = 0; i < player.slots.size(); ++i) {
+    const Slot &slot = player.slots[i];
+    if (slot.state != Slot::State::Ready || slot.generation != player.generation)
+      continue;
+    if (slot.seconds < low - SameTime || slot.seconds > high + SameTime || sameTime(slot.seconds, after))
+      continue;
+    const double distance = std::fabs(slot.seconds - seconds);
+    if (best < 0 || distance < bestDistance) {
+      best = int(i);
+      bestDistance = distance;
+    }
+  }
+  return best;
 }
 
 /**
@@ -367,6 +516,7 @@ void run(vgsb_player &player, size_t lane) {
           slot.state = Slot::State::Empty;
         } else {
           slot.state = generation == player.generation ? Slot::State::Ready : Slot::State::Empty;
+          slot.readyOrder = ++player.readyCount;
         }
         player.slotChanged.notify_all();
         continue;
@@ -397,6 +547,103 @@ void run(vgsb_player &player, size_t lane) {
   }
 }
 
+/** The distinct chunks the schedule reaches first, at most HeldChunks of them. */
+std::vector<size_t> chunksWanted(const vgsb_player &player, vgsdec::Capture &capture) {
+  std::vector<size_t> out;
+  for (double seconds : player.wanted) {
+    const size_t chunk = capture.chunkAt(seconds);
+    if (chunk >= player.chunkCount || std::find(out.begin(), out.end(), chunk) != out.end())
+      continue;
+    out.push_back(chunk);
+    if (out.size() == HeldChunks)
+      break;
+  }
+  return out;
+}
+
+void dropChunks(vgsb_player &player) {
+  for (auto &entry : player.chunks)
+    dropReference(entry.second);
+  player.chunks.clear();
+}
+
+/**
+ * A packed lane: decompresses the first of its chunks the schedule reaches that is not
+ * packed yet, a few milliseconds at a time, and packs it; then lets go of the chunks the
+ * schedule has left behind. The same split by parity as run(), so one lane packs the
+ * next chunk while the host plays the current one.
+ */
+void runPacked(vgsb_player &player, size_t lane) {
+  vgsdec::Capture &capture = *player.lanes[lane].capture;
+  std::unique_lock<std::mutex> lock(player.mutex);
+  while (!player.quit) {
+    if (!player.failure.empty()) {
+      player.workChanged.wait(lock);
+      continue;
+    }
+    size_t target = player.chunkCount;
+    for (size_t chunk : chunksWanted(player, capture))
+      if (chunk % player.laneCount == lane && !player.chunks.count(chunk)) {
+        target = chunk;
+        break;
+      }
+    if (target == player.chunkCount) {
+      player.workChanged.wait(lock);
+      continue;
+    }
+
+    const bool includeSh = player.includeSh;
+    const uint64_t generation = player.generation;
+    lock.unlock();
+    std::string error;
+    std::shared_ptr<const PackedChunk> packedChunk;
+    try {
+      // A few milliseconds at a time, so that a new schedule, or a close, is noticed.
+      if (capture.prepare(target, 8.0, includeSh ? vgsdec::Detail::Full : vgsdec::Detail::Base))
+        packedChunk = packChunk(capture.chunkData(target), includeSh ? player.shDegree : 0);
+    } catch (const std::exception &e) {
+      error = e.what();
+    }
+    lock.lock();
+    if (!error.empty()) {
+      player.failure = error;
+      player.slotChanged.notify_all();
+      continue;
+    }
+    if (!packedChunk || generation != player.generation)
+      continue;
+
+    const std::vector<size_t> still = chunksWanted(player, capture);
+    for (auto it = player.chunks.begin(); it != player.chunks.end();) {
+      if (std::find(still.begin(), still.end(), it->first) == still.end()) {
+        dropReference(it->second);
+        it = player.chunks.erase(it);
+      } else {
+        ++it;
+      }
+    }
+    player.chunks[target] = makeHolder(std::move(packedChunk));
+    player.slotChanged.notify_all();
+  }
+}
+
+void releaseAcquired(vgsb_player &player) {
+  if (player.acquired)
+    dropReference(player.acquired);
+  player.acquired = nullptr;
+}
+
+/** Whatever the schedule said, the time being waited for comes first. */
+void wantFirst(vgsb_player &player, double t) {
+  if (player.wanted.empty() || !sameTime(player.wanted.front(), t)) {
+    player.wanted.erase(std::remove_if(player.wanted.begin(), player.wanted.end(),
+                                       [t](double w) { return sameTime(w, t); }),
+                        player.wanted.end());
+    player.wanted.insert(player.wanted.begin(), t);
+  }
+  player.workChanged.notify_all();
+}
+
 void unpin(vgsb_player &player) {
   for (Slot &slot : player.slots)
     slot.pinned = false;
@@ -410,7 +657,11 @@ int vgsb_api_version(void) { return VGSB_API_VERSION; }
 
 const char *vgsb_last_error(void) { return lastError.c_str(); }
 
-vgsb_player *vgsb_open(const char *path, int includeSh, int slots, int threads) {
+} // extern "C"
+
+namespace {
+
+vgsb_player *openPlayer(const char *path, int includeSh, int slots, int threads, bool packed) {
   if (!path) {
     lastError = "no path";
     return nullptr;
@@ -425,10 +676,21 @@ vgsb_player *vgsb_open(const char *path, int includeSh, int slots, int threads) 
     // Every lane authenticates the file for itself; it reads a kilobyte and checks one
     // signature, which is nothing next to decoding a chunk.
     const unsigned cores = std::max(1u, std::thread::hardware_concurrency());
+    vgsb_parallel_for parallelFor;
+    void *host;
+    {
+      std::lock_guard<std::mutex> lock(hostGuard);
+      parallelFor = hostRun;
+      host = hostData;
+    }
     for (Lane &lane : player->lanes) {
       lane.capture = std::make_unique<vgsdec::Capture>(
           vgsdec::Capture::openMemory(player->file.data(), player->file.size()));
       lane.capture->setThreadCount(threads > 0 ? unsigned(threads) : std::max(1u, cores / 2));
+      if (parallelFor)
+        lane.capture->setParallelFor(throughHost(parallelFor, host));
+      if (packed)
+        lane.capture->setOutput(vgsdec::Output::Packed);
       // The chunk the lane is on and nothing else: the other lane holds the neighbour.
       vgsdec::CachePolicy policy;
       policy.behind = 0;
@@ -471,13 +733,106 @@ vgsb_player *vgsb_open(const char *path, int includeSh, int slots, int threads) 
 
     player->slots.resize(size_t(std::clamp(slots, 2, 64)));
     player->includeSh = includeSh != 0;
+    player->packed = packed;
+    player->shDegree = capture.shDegree();
+    if (packed)
+      player->clock = std::make_unique<vgsdec::Capture>(
+          vgsdec::Capture::openMemory(player->file.data(), player->file.size()));
     for (size_t lane = 0; lane < player->laneCount; ++lane)
-      player->lanes[lane].thread = std::thread(run, std::ref(*player), lane);
+      player->lanes[lane].thread = std::thread(packed ? runPacked : run, std::ref(*player), lane);
     return player.release();
   } catch (const std::exception &e) {
     lastError = e.what();
     return nullptr;
   }
+}
+
+} // namespace
+
+extern "C" {
+
+vgsb_player *vgsb_open(const char *path, int includeSh, int slots, int threads) {
+  return openPlayer(path, includeSh, slots, threads, false);
+}
+
+vgsb_player *vgsb_open_packed(const char *path, int includeSh, int threads) {
+  return openPlayer(path, includeSh, 2, threads, true);
+}
+
+int vgsb_acquire_packed(vgsb_player *player, double seconds, double timeoutMs,
+                        vgsb_packed_frame *out) {
+  if (!player || !out) {
+    lastError = "no player";
+    return VGSB_ERROR;
+  }
+  if (!player->packed) {
+    lastError = "the player was opened with vgsb_open, not vgsb_open_packed";
+    return VGSB_ERROR;
+  }
+  const double t = clampTime(*player, seconds);
+  vgsdec::Instant instant;
+  try {
+    instant = player->clock->instantAt(t);
+  } catch (const std::exception &e) {
+    lastError = e.what();
+    return VGSB_ERROR;
+  }
+
+  ChunkHolder *holder = nullptr;
+  {
+    std::unique_lock<std::mutex> lock(player->mutex);
+    releaseAcquired(*player);
+    wantFirst(*player, t);
+    const auto deadline =
+        std::chrono::steady_clock::now() +
+        std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            std::chrono::duration<double, std::milli>(std::max(0.0, timeoutMs)));
+    for (;;) {
+      if (!player->failure.empty()) {
+        lastError = player->failure;
+        return VGSB_ERROR;
+      }
+      const auto found = player->chunks.find(instant.chunkIndex);
+      if (found != player->chunks.end()) {
+        holder = found->second;
+        break;
+      }
+      if (timeoutMs < 0)
+        player->slotChanged.wait(lock);
+      else if (player->slotChanged.wait_until(lock, deadline) == std::cv_status::timeout &&
+               !player->chunks.count(instant.chunkIndex))
+        return VGSB_TIMEOUT;
+    }
+    holder->references.fetch_add(1, std::memory_order_relaxed);
+    player->acquired = holder;
+  }
+
+  // The basis outside the lock: the lanes never touch it, and the chunk is held.
+  try {
+    const PackedInstant at = packedInstant(*holder->data, instant.sampleA, instant.alpha);
+    evaluateBasis(*holder->data, at, &player->basis);
+    out->seconds = t;
+    out->chunk = holder;
+    out->frame = at.frame;
+    out->alpha = at.alpha;
+    out->normalized = at.normalized;
+    out->reserved = 0;
+    out->basis = player->basis.data();
+  } catch (const std::exception &e) {
+    lastError = e.what();
+    return VGSB_ERROR;
+  }
+  return VGSB_OK;
+}
+
+void vgsb_retain_chunk(const vgsb_packed_chunk *chunk) {
+  if (chunk)
+    static_cast<const ChunkHolder *>(chunk)->references.fetch_add(1, std::memory_order_relaxed);
+}
+
+void vgsb_release_chunk(const vgsb_packed_chunk *chunk) {
+  if (chunk)
+    dropReference(chunk);
 }
 
 void vgsb_close(vgsb_player *player) {
@@ -491,6 +846,8 @@ void vgsb_close(vgsb_player *player) {
   for (Lane &lane : player->lanes)
     if (lane.thread.joinable())
       lane.thread.join();
+  dropChunks(*player);
+  releaseAcquired(*player);
   delete player;
 }
 
@@ -515,23 +872,24 @@ void vgsb_schedule(vgsb_player *player, const double *seconds, int count) {
   player->workChanged.notify_all();
 }
 
-int vgsb_acquire(vgsb_player *player, double seconds, double timeoutMs, vgsb_frame *out) {
+} // extern "C"
+
+namespace {
+
+int acquire(vgsb_player *player, double seconds, double timeoutMs, const double *after,
+            vgsb_frame *out) {
   if (!player || !out) {
     lastError = "no player";
     return VGSB_ERROR;
   }
+  if (player->packed) {
+    lastError = "the player was opened with vgsb_open_packed: use vgsb_acquire_packed";
+    return VGSB_ERROR;
+  }
   std::unique_lock<std::mutex> lock(player->mutex);
   unpin(*player);
-
-  // Whatever the schedule said, the frame being waited for comes first.
   const double t = clampTime(*player, seconds);
-  if (player->wanted.empty() || !sameTime(player->wanted.front(), t)) {
-    player->wanted.erase(std::remove_if(player->wanted.begin(), player->wanted.end(),
-                                        [t](double w) { return sameTime(w, t); }),
-                         player->wanted.end());
-    player->wanted.insert(player->wanted.begin(), t);
-  }
-  player->workChanged.notify_all();
+  wantFirst(*player, t);
 
   const auto deadline =
       std::chrono::steady_clock::now() +
@@ -550,6 +908,8 @@ int vgsb_acquire(vgsb_player *player, double seconds, double timeoutMs, vgsb_fra
       player->slotChanged.wait(lock);
     } else if (player->slotChanged.wait_until(lock, deadline) == std::cv_status::timeout) {
       index = findSlot(*player, t, true);
+      if (index < 0 && after)
+        index = findBetween(*player, t, clampTime(*player, *after));
       if (index < 0)
         return VGSB_TIMEOUT;
       break;
@@ -571,12 +931,26 @@ int vgsb_acquire(vgsb_player *player, double seconds, double timeoutMs, vgsb_fra
   return VGSB_OK;
 }
 
+} // namespace
+
+extern "C" {
+
+int vgsb_acquire(vgsb_player *player, double seconds, double timeoutMs, vgsb_frame *out) {
+  return acquire(player, seconds, timeoutMs, nullptr, out);
+}
+
+int vgsb_acquire_between(vgsb_player *player, double seconds, double after, double timeoutMs,
+                         vgsb_frame *out) {
+  return acquire(player, seconds, timeoutMs, &after, out);
+}
+
 void vgsb_release(vgsb_player *player) {
   if (!player)
     return;
   {
     std::lock_guard<std::mutex> lock(player->mutex);
     unpin(*player);
+    releaseAcquired(*player);
   }
   player->workChanged.notify_all();
 }
@@ -590,6 +964,7 @@ void vgsb_set_include_sh(vgsb_player *player, int includeSh) {
       return;
     player->includeSh = includeSh != 0;
     ++player->generation;
+    dropChunks(*player);
   }
   player->workChanged.notify_all();
 }
@@ -607,6 +982,12 @@ void vgsb_set_cache(vgsb_player *player, int chunks, uint64_t maxBytes) {
     ++player->cacheGeneration;
   }
   player->workChanged.notify_all();
+}
+
+void vgsb_set_parallel_for(vgsb_parallel_for run, void *host) {
+  std::lock_guard<std::mutex> lock(hostGuard);
+  hostRun = run;
+  hostData = run ? host : nullptr;
 }
 
 void vgsb_set_density(vgsb_player *player, float density) {

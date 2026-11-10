@@ -30,6 +30,36 @@ static TAutoConsoleVariable<int32> CVarVGSDecodeThreads(
 	TEXT("Open captures reopen when it changes."),
 	ECVF_Default);
 
+// Each capture bringing threads of its own does not add up: two lanes of 2 is 4 per
+// capture, and a handful of captures is back to fighting the engine. On the task graph
+// every capture shares the engine's workers instead, and the engine decides who runs.
+static TAutoConsoleVariable<bool> CVarVGSDecodeOnTaskGraph(
+	TEXT("vgs.DecodeOnTaskGraph"),
+	true,
+	TEXT("Decode VGS captures on the engine's task workers, shared by every capture (default), rather than") LINE_TERMINATOR
+	TEXT("on threads of each capture's own. vgs.DecodeThreads is then how many pieces a batch is cut into.") LINE_TERMINATOR
+	TEXT("Open captures reopen when it changes."),
+	ECVF_Default);
+
+// A capture's MaxWaitMs is fine alone, but every capture waiting its own on the same game
+// frame adds up: four that are late cost 40 ms a frame, and the game drops to 25 fps.
+// Their waits share this instead, first come first served; one that finds it spent shows
+// its previous frame and asks again next tick.
+static TAutoConsoleVariable<float> CVarVGSWaitBudgetMs(
+	TEXT("vgs.WaitBudgetMs"),
+	10.0f,
+	TEXT("Milliseconds of one game frame that all playing VGS captures together may spend waiting for") LINE_TERMINATOR
+	TEXT("decoded frames. Each capture also waits no longer than its own Max Wait Ms. Default 10."),
+	ECVF_Default);
+
+// For comparing the two in a running game without touching the components.
+static TAutoConsoleVariable<int32> CVarVGSEvaluateOn(
+	TEXT("vgs.EvaluateOn"),
+	-1,
+	TEXT("Where VGS captures work out each instant: -1 as each component's Evaluate On says (default), 0 the CPU,") LINE_TERMINATOR
+	TEXT("1 the GPU. Open captures reopen when it changes."),
+	ECVF_Default);
+
 DECLARE_CYCLE_STAT(TEXT("Wait for decoded frame"), STAT_VGS_Wait, STATGROUP_VGS);
 DECLARE_CYCLE_STAT(TEXT("Pack frame"), STAT_VGS_Pack, STATGROUP_VGS);
 DECLARE_DWORD_COUNTER_STAT(TEXT("Splats on screen"), STAT_VGS_Splats, STATGROUP_VGS);
@@ -54,6 +84,20 @@ namespace
 
 	/** How often, playing, the log gets a summary of what playback cost. */
 	constexpr double SummarySeconds = 5.0;
+
+	/** What is left of vgs.WaitBudgetMs on the game frame GWaitFrame. Game thread only. */
+	uint64 GWaitFrame = MAX_uint64;
+	double GWaitLeftMs = 0.0;
+
+	double WaitBudgetLeftMs()
+	{
+		if (GWaitFrame != GFrameCounter)
+		{
+			GWaitFrame = GFrameCounter;
+			GWaitLeftMs = FMath::Max(double(CVarVGSWaitBudgetMs.GetValueOnGameThread()), 0.0);
+		}
+		return GWaitLeftMs;
+	}
 }
 
 UVGSCaptureComponent::UVGSCaptureComponent()
@@ -90,15 +134,23 @@ FString UVGSCaptureComponent::ResolvePath() const
 	return FPaths::ConvertRelativePathToFull(Raw);
 }
 
+bool UVGSCaptureComponent::WantsGpu() const
+{
+	const int32 Override = CVarVGSEvaluateOn.GetValueOnGameThread();
+	return Override >= 0 ? Override == 1 : EvaluateOn == EVGSEvaluateOn::GPU;
+}
+
 bool UVGSCaptureComponent::EnsurePlayer()
 {
 	if (Player.IsValid())
 	{
-		if (Player->GetThreads() == FMath::Max(CVarVGSDecodeThreads.GetValueOnGameThread(), 0))
+		if (Player->GetThreads() == FMath::Max(CVarVGSDecodeThreads.GetValueOnGameThread(), 0)
+			&& Player->IsOnTaskGraph() == CVarVGSDecodeOnTaskGraph.GetValueOnGameThread()
+			&& Player->IsPacked() == WantsGpu())
 		{
 			return true;
 		}
-		ClosePlayer(TEXT("Reopening with other decode threads"));
+		ClosePlayer(TEXT("Reopening to decode elsewhere"));
 	}
 
 	const FString Path = ResolvePath();
@@ -113,7 +165,11 @@ bool UVGSCaptureComponent::EnsurePlayer()
 	}
 
 	FString Error;
-	Player = VGS::FPlayer::Open(Path, bSphericalHarmonics, Slots, CVarVGSDecodeThreads.GetValueOnGameThread(), Error);
+	const int32 Threads = CVarVGSDecodeThreads.GetValueOnGameThread();
+	const bool bOnTaskGraph = CVarVGSDecodeOnTaskGraph.GetValueOnGameThread();
+	Player = WantsGpu()
+		? VGS::FPlayer::OpenPacked(Path, bSphericalHarmonics, Threads, bOnTaskGraph, Error)
+		: VGS::FPlayer::Open(Path, bSphericalHarmonics, Slots, Threads, bOnTaskGraph, Error);
 	if (!Player.IsValid())
 	{
 		FailedPath = Path;
@@ -135,8 +191,9 @@ bool UVGSCaptureComponent::EnsurePlayer()
 	bFrameDirty = true;
 	Status = TEXT("Opened");
 	UpdateBounds();
-	UE_LOG(LogVGS, Log, TEXT("Opened %s: %lld frames at %.3f fps, up to %lld splats, SH degree %d, decode threads %d"),
-		*Path, FrameCount, FrameRate, MaxSplats, SHDegree, Player->GetThreads());
+	UE_LOG(LogVGS, Log, TEXT("Opened %s: %lld frames at %.3f fps, up to %lld splats, SH degree %d, evaluated on the %s, decoding %s, %d per batch"),
+		*Path, FrameCount, FrameRate, MaxSplats, SHDegree, Player->IsPacked() ? TEXT("GPU") : TEXT("CPU"),
+		Player->IsOnTaskGraph() ? TEXT("on the task graph") : TEXT("on its own threads"), Player->GetThreads());
 	return true;
 }
 
@@ -150,6 +207,7 @@ void UVGSCaptureComponent::ClosePlayer(const FString& Why)
 
 	// Whatever the renderer still shows of the old capture goes with it.
 	ShownFrame.Reset();
+	ShownChunk.Reset();
 	if (Source.IsValid())
 	{
 		FVGSPackedFrameRef Empty = MakeShared<FVGSPackedFrame, ESPMode::ThreadSafe>();
@@ -314,7 +372,7 @@ void UVGSCaptureComponent::LogSummary(bool bAdvancing, float DeltaTime)
 		GetOwner() ? *GetOwner()->GetActorNameOrLabel() : *GetName(), Span, Summary.Ticks / FMath::Max(Summary.TickMs / 1000.0, 1e-6),
 		Due, Summary.Shown, Summary.Late, Summary.WaitMs / Asked, Summary.WaitMaxMs,
 		Summary.PackMs / FMath::Max(Summary.Shown, 1), Summary.PackMaxMs, ShownSplats,
-		GpuLayout == EVGSGpuLayout::Quantized ? TEXT("quantized") : TEXT("float"));
+		Player->IsPacked() ? TEXT("evaluated on the GPU") : GpuLayout == EVGSGpuLayout::Quantized ? TEXT("quantized") : TEXT("float"));
 	Summary = FPlaybackSummary();
 	Summary.Start = Now;
 }
@@ -364,7 +422,7 @@ void UVGSCaptureComponent::UpdateFrame(bool bAdvancing, double AdvancePerTick)
 	}
 
 	// Settings that need the instant packed again, wherever they were changed from.
-	if (IntensityEV != PackedIntensityEV || GpuLayout != PackedLayout)
+	if (IntensityEV != PackedIntensityEV || (!Player->IsPacked() && GpuLayout != PackedLayout) || (Player->IsPacked() && Density != PackedDensity))
 	{
 		bFrameDirty = true;
 	}
@@ -373,14 +431,81 @@ void UVGSCaptureComponent::UpdateFrame(bool bAdvancing, double AdvancePerTick)
 		return;
 	}
 
+	if (Player->IsPacked())
+	{
+		// Packed: once its chunk is on hand any instant is ready, so the wait is only ever
+		// for a chunk, and the per-frame work is the basis and a compute pass.
+		vgsb_packed_frame Packed = {};
+		const double WaitStart = FPlatformTime::Seconds();
+		int32 Result;
+		{
+			SCOPE_CYCLE_COUNTER(STAT_VGS_Wait);
+			const double TimeoutMs = bAdvancing ? FMath::Min(double(MaxWaitMs), WaitBudgetLeftMs()) : ExactWaitMs;
+			Result = Player->AcquirePacked(Now, TimeoutMs, Packed);
+		}
+		const double WaitMs = (FPlatformTime::Seconds() - WaitStart) * 1000.0;
+		if (bAdvancing)
+		{
+			GWaitLeftMs = FMath::Max(GWaitLeftMs - WaitMs, 0.0);
+		}
+		Summary.WaitMs += WaitMs;
+		Summary.WaitMaxMs = FMath::Max(Summary.WaitMaxMs, WaitMs);
+		if (Result == VGSB_TIMEOUT)
+		{
+			INC_DWORD_STAT(STAT_VGS_Late);
+			++Summary.Late;
+			return;
+		}
+		if (Result != VGSB_OK)
+		{
+			const FString Error = Player->LastError();
+			const FString Path = Player->GetPath();
+			UE_LOG(LogVGS, Error, TEXT("%s: %s"), *Path, *Error);
+			ClosePlayer(FString::Printf(TEXT("Failed: %s"), *Error));
+			FailedPath = Path;
+			return;
+		}
+		const double PackStart = FPlatformTime::Seconds();
+		{
+			SCOPE_CYCLE_COUNTER(STAT_VGS_Pack);
+			SendPacked(Packed);
+		}
+		const double PackMs = (FPlatformTime::Seconds() - PackStart) * 1000.0;
+		Summary.PackMs += PackMs;
+		Summary.PackMaxMs = FMath::Max(Summary.PackMaxMs, PackMs);
+		++Summary.Shown;
+		Player->Release();
+		ShownSeconds = Packed.seconds;
+		bFrameDirty = false;
+		Status = FString::Printf(TEXT("%lld splats at %.3f s, on the GPU"), ShownSplats, Packed.seconds);
+		return;
+	}
+
 	vgsb_frame Frame = {};
 	const double WaitStart = FPlatformTime::Seconds();
 	int32 Result;
 	{
 		SCOPE_CYCLE_COUNTER(STAT_VGS_Wait);
-		Result = Player->Acquire(Now, bAdvancing ? double(MaxWaitMs) : ExactWaitMs, Frame);
+		// Paused or scrubbed waits for the exact frame. Playing waits within the shared budget
+		// and then takes a late frame if one is ready: a capture the machine cannot keep up
+		// with plays at a lower rate rather than decoding every frame just too late to show.
+		if (bAdvancing)
+		{
+			const double TimeoutMs = FMath::Min(double(MaxWaitMs), WaitBudgetLeftMs());
+			Result = ShownSeconds >= 0.0 && !bFrameDirty
+				? Player->AcquireBetween(Now, ShownSeconds, TimeoutMs, Frame)
+				: Player->Acquire(Now, TimeoutMs, Frame);
+		}
+		else
+		{
+			Result = Player->Acquire(Now, ExactWaitMs, Frame);
+		}
 	}
 	const double WaitMs = (FPlatformTime::Seconds() - WaitStart) * 1000.0;
+	if (bAdvancing)
+	{
+		GWaitLeftMs = FMath::Max(GWaitLeftMs - WaitMs, 0.0);
+	}
 	Summary.WaitMs += WaitMs;
 	Summary.WaitMaxMs = FMath::Max(Summary.WaitMaxMs, WaitMs);
 	if (Result == VGSB_TIMEOUT)
@@ -411,9 +536,9 @@ void UVGSCaptureComponent::UpdateFrame(bool bAdvancing, double AdvancePerTick)
 	++Summary.Shown;
 	Player->Release();
 
-	ShownSeconds = Now;
+	ShownSeconds = Frame.seconds;
 	bFrameDirty = false;
-	Status = FString::Printf(TEXT("%lld splats at %.3f s"), ShownSplats, Now);
+	Status = FString::Printf(TEXT("%lld splats at %.3f s"), ShownSplats, Frame.seconds);
 }
 
 TSharedPtr<FVGSPackedFrame, ESPMode::ThreadSafe> UVGSCaptureComponent::TakeFrameBuffer()
@@ -530,6 +655,48 @@ void UVGSCaptureComponent::PackAndSend(const vgsb_frame& Frame)
 		ENQUEUE_RENDER_COMMAND(VGSSetFrame)([Target = Source, Frame = FVGSPackedFrameRef(Packed)](FRHICommandList&)
 		{
 			Target->SetFrame_RenderThread(Frame);
+		});
+	}
+}
+
+void UVGSCaptureComponent::SendPacked(const vgsb_packed_frame& Frame)
+{
+	const vgsb_packed_chunk& Chunk = *Frame.chunk;
+	if (!ShownChunk.IsValid() || ShownChunk->Get().serial != Chunk.serial)
+	{
+		// Retained past this acquire, for as long as the render thread needs it.
+		ShownChunk = MakeShared<const VGS::FPackedChunk, ESPMode::ThreadSafe>(Frame.chunk);
+	}
+
+	TSharedRef<FVGSGpuFrame, ESPMode::ThreadSafe> Gpu = MakeShared<FVGSGpuFrame, ESPMode::ThreadSafe>();
+	Gpu->Chunk = ShownChunk;
+	Gpu->Frame = Frame.frame;
+	Gpu->Alpha = Frame.alpha;
+	Gpu->Normalized = Frame.normalized;
+	Gpu->Seconds = Frame.seconds;
+	const int32 Texels = FMath::Max(Chunk.basis_texels, 0);
+	Gpu->Basis.SetNumUninitialized(Texels);
+	FMemory::Memcpy(Gpu->Basis.GetData(), Frame.basis, size_t(Texels) * sizeof(FVector4f));
+
+	const vgsunreal::Gain Gain = vgsunreal::gainFor(FMath::Exp2(IntensityEV));
+	Gpu->Gain = Gain.m;
+	Gpu->DcOffset = Gain.dcOffset;
+	// As vgsbridge thins a CPU frame (vgsb_set_density): the same records, the same opacity.
+	const float Kept = FMath::Clamp(Density, 0.01f, 1.0f);
+	Gpu->bThinned = Kept < 1.0f;
+	Gpu->DensityThreshold = Gpu->bThinned ? uint32(FMath::Min(double(Kept) * 4294967296.0, 4294967295.0)) : MAX_uint32;
+	Gpu->DensityExponent = Gpu->bThinned ? 1.0f / Kept : 1.0f;
+
+	PackedIntensityEV = IntensityEV;
+	PackedDensity = Density;
+	ShownFrame.Reset();
+	// Every record of the chunk is drawn; those not alive at the instant have no size.
+	ShownSplats = int64(Chunk.splats);
+	if (Source.IsValid())
+	{
+		ENQUEUE_RENDER_COMMAND(VGSSetGpuFrame)([Target = Source, Frame = FVGSGpuFrameRef(Gpu)](FRHICommandList&)
+		{
+			Target->SetGpuFrame_RenderThread(Frame);
 		});
 	}
 }

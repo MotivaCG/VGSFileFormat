@@ -6,10 +6,11 @@
 
 #include "VGSCaptureComponent.generated.h"
 
-namespace VGS { class FPlayer; }
+namespace VGS { class FPlayer; class FPackedChunk; }
 class FVGSSplatSource;
 struct FVGSPackedFrame;
 struct vgsb_frame;
+struct vgsb_packed_frame;
 
 /** How the capture's time runs past its ends. */
 UENUM(BlueprintType)
@@ -34,7 +35,21 @@ enum class EVGSUpAxis : uint8
 	Z UMETA(DisplayName = "Z Up"),
 };
 
-/** The layout each decoded instant is uploaded to the GPU in. */
+/** Where each instant of the capture is worked out. */
+UENUM(BlueprintType)
+enum class EVGSEvaluateOn : uint8
+{
+	/**
+	 * The GPU: the CPU only decompresses each chunk of the capture, about once a second,
+	 * and a compute shader works out every frame from it. A tenth of the CPU time and a
+	 * fraction of the upload; what lets many captures play at once.
+	 */
+	GPU,
+	/** The CPU, which then uploads every splat of every frame: 20 ms or more a frame. */
+	CPU,
+};
+
+/** The layout each decoded instant is uploaded to the GPU in, when the CPU evaluates it. */
 UENUM(BlueprintType)
 enum class EVGSGpuLayout : uint8
 {
@@ -116,7 +131,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Splats", AdvancedDisplay, meta = (ClampMin = "0.0001"))
 	float UnitScale = 100.0f;
 
+	/** Where each instant is worked out. Changing it reopens the capture. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Splats", AdvancedDisplay)
+	EVGSEvaluateOn EvaluateOn = EVGSEvaluateOn::GPU;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Splats", AdvancedDisplay,
+		meta = (EditCondition = "EvaluateOn == EVGSEvaluateOn::CPU", EditConditionHides))
 	EVGSGpuLayout GpuLayout = EVGSGpuLayout::Float;
 
 	/** Scales every splat about its centre. */
@@ -230,6 +250,8 @@ private:
 	void UpdateFrame(bool bAdvancing, double AdvancePerTick);
 	void LogSummary(bool bAdvancing, float DeltaTime);
 	void PackAndSend(const vgsb_frame& Frame);
+	void SendPacked(const vgsb_packed_frame& Frame);
+	bool WantsGpu() const;
 	TSharedPtr<FVGSPackedFrame, ESPMode::ThreadSafe> TakeFrameBuffer();
 	void PushRenderState();
 	void RegisterSource();
@@ -243,6 +265,9 @@ private:
 	/** Packed instants: the one on screen, and spares the next one is packed into once the render thread lets go. */
 	TArray<TSharedPtr<FVGSPackedFrame, ESPMode::ThreadSafe>> FrameBuffers;
 	TSharedPtr<FVGSPackedFrame, ESPMode::ThreadSafe> ShownFrame;
+
+	/** Evaluating on the GPU: the chunk the frame on screen came from, kept for the render thread. */
+	TSharedPtr<const VGS::FPackedChunk, ESPMode::ThreadSafe> ShownChunk;
 
 	double Elapsed = 0.0;
 	double ShownSeconds = -1.0;
@@ -268,4 +293,5 @@ private:
 	/** What the instant on screen was packed with, so a change from Blueprint repacks it. */
 	float PackedIntensityEV = 0.0f;
 	EVGSGpuLayout PackedLayout = EVGSGpuLayout::Float;
+	float PackedDensity = 1.0f;
 };

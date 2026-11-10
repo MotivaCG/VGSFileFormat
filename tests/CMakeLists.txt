@@ -42,6 +42,22 @@ if(TARGET vgsbridge)
 endif()
 add_test(NAME plugin_unreal_layout COMMAND vgs_unreal_layout)
 
+# The plugin's packed playback: vgsbridge's packed chunks evaluated by a C++ twin of the
+# plugin's compute shader, against the frames vgsbridge evaluates itself. It needs a
+# capture, so ctest runs it only when VGS_TEST_CAPTURE names one.
+if(TARGET vgsbridge)
+  add_executable(vgs_unreal_packed unreal_packed.cpp unreal_packed_reference.h)
+  vgs_apply_settings(vgs_unreal_packed)
+  target_link_libraries(vgs_unreal_packed PRIVATE vgsbridge)
+  add_custom_command(TARGET vgs_unreal_packed POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+              $<TARGET_FILE:vgsbridge> $<TARGET_FILE_DIR:vgs_unreal_packed>)
+  set(VGS_TEST_CAPTURE "" CACHE FILEPATH "A .vgs capture for the tests that need a real one")
+  if(VGS_TEST_CAPTURE AND EXISTS "${VGS_TEST_CAPTURE}")
+    add_test(NAME plugin_unreal_packed COMMAND vgs_unreal_packed "${VGS_TEST_CAPTURE}")
+  endif()
+endif()
+
 add_executable(vgs_entropy entropy.cpp)
 target_include_directories(vgs_entropy PRIVATE ${VGS_CORE_INCLUDE_DIRS})
 target_link_libraries(vgs_entropy PRIVATE ${VGS_DECODER_LINK})
