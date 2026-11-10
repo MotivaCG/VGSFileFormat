@@ -1,17 +1,27 @@
-# plugins/unreal — the Unreal Engine plugin
+# plugins/unreal — the Unreal Engine plugins
 
-Plays VGS captures in Unreal Engine 5.9 through a copy of Epic's Gaussian Splat renderer
-(`Engine/Plugins/GaussianSplat`, experimental in 5.9), changed to blend splats as they were
-trained. **The copy is Epic's code and has to be taken again for every engine version:
-[EPIC_RENDERER_COPY.md](EPIC_RENDERER_COPY.md).** Plays, and can be lit by the scene
-(*Lighting* Shaded); casts no shadows. Sixteen captures at once keep their 30 fps — see
-*State* below.
+Two plugins sharing one renderer:
+
+- **VGS** plays VGS captures (4D, from `.vgs` files).
+- **VGSStatic** shows static Gaussian splat characters, imported from PLY files as assets
+  ([VGSStatic](#vgsstatic-static-characters-from-ply) below).
+
+Both draw through a copy of Epic's Gaussian Splat renderer (`Engine/Plugins/GaussianSplat`,
+experimental in 5.9), changed to blend splats as they were trained, with exposure, a grade
+and lighting by the scene, which Epic's own lacks. **The copy is Epic's code and has to be
+taken again for every engine version: [EPIC_RENDERER_COPY.md](EPIC_RENDERER_COPY.md).** It
+no longer needs Epic's GaussianSplat plugin (which only 5.9 has): both plugins build against
+Unreal 5.8 and 5.9 (run and tested in 5.9; 5.6 and 5.7 still to be built). Captures play,
+and can be lit by the scene (*Lighting* Shaded); they cast no shadows. Sixteen captures at
+once keep their 30 fps — see *State* below.
 
 ```
 VGS/                         the plugin as it goes into a project's Plugins folder
-  VGS.uplugin                depends on Epic's GaussianSplat plugin, Win64 only
+  VGS.uplugin                Win64 only; needs no other plugin
   Shaders/Private/VGSPacked.usf  evaluates a packed chunk at an instant, on the GPU
   Shaders/Private/SplatRenderer/ Epic's renderer shaders, copied (EPIC_RENDERER_COPY.md)
+  Shaders/Shared/            Epic's record layout and constants, copied (C++ and HLSL)
+  Resources/InverseToneCurve Epic's inverse tone curve LUTs, as data the copy builds textures from
   Source/VGSShaders/         the shader's C++ side; loads at PostConfigInit, as global shaders must
   Source/VGSSplatRenderer/   Epic's renderer module, copied and renamed (EPIC_RENDERER_COPY.md)
   Source/VGSRuntime/
@@ -22,9 +32,15 @@ VGS/                         the plugin as it goes into a project's Plugins fold
     Private/VGSSplatLayout.h       plain C++: a frame into the renderer's buffer layouts
     Private/VGSSplatSource.*       render thread: uploads, the evaluation pass, the proxy
     Private/VGSCaptureComponent.cpp time, scheduling, acquiring, packing (CPU)
-CMakeLists.txt               assembles the plugin with the bridge beside it, and its zip
+VGSStatic/                   the static plugin's own files (the shared ones are added when assembled)
+  Source/VGSStaticRuntime/   the asset, its GPU copy, the component and actor; VGSStaticPly.h
+                             (plain C++: reading a PLY, clusters, normal words)
+  Source/VGSStaticEditor/    the PLY importer and its dialog, reimport, placing the asset;
+                             VGSStaticNormals.h/.inl (normals for PLYs without them)
+CMakeLists.txt               assembles both plugins (VGS with the bridge beside it) and their zips
 EPIC_RENDERER_COPY.md        what of Epic's is copied, what changed, how to update it
-tools/                       the copy script and the patch of VGS's changes to the copy
+tools/                       the copy script, the patch of VGS's changes to the copy, the
+                             LUT packer, assemble_vgsstatic.cmake
 ```
 
 ## Building and installing
@@ -38,7 +54,9 @@ cmake --build build_win64 --config Release --target vgs_unreal_plugin
 which gives `build_win64/plugins/unreal/Release/VGS/` (sources, `vgsbridge.h`,
 `vgsbridge.dll` and its licence, icon) and `vgs-unreal-<version>.zip` of the same. Copy or
 link that `VGS` folder into `<Project>/Plugins/`, or unzip the zip there, and open the
-project: Unreal builds the module. The plugin enables Epic's GaussianSplat plugin itself.
+project: Unreal builds the module. Target `vgs_static_unreal_plugin` does the same for
+VGSStatic (`VGSStatic/`, `vgsstatic-unreal-<version>.zip`). Both can be enabled in one
+project, with Epic's GaussianSplat plugin or without it.
 Use the assembled folder, not `plugins/unreal/VGS` from the tree — the bridge's header and
 DLL are only in the assembled one. `cmake --install ... --component unreal` copies the zip
 to `INSTALL/unreal`.
@@ -58,8 +76,8 @@ add passes to the graph and append render proxies (a GPU buffer in its layout, a
 a few settings). Niagara's splat renderer uses that hook, and so does this plugin - with
 `VGSSplatRenderer`, a renamed copy of that renderer that blends splats in sRGB values, as
 captures are trained, instead of in linear light (*Blend Space*; see
-[EPIC_RENDERER_COPY.md](EPIC_RENDERER_COPY.md) for why and what changed). Epic's own plugin
-stays enabled beside it, untouched.
+[EPIC_RENDERER_COPY.md](EPIC_RENDERER_COPY.md) for why and what changed). The copy draws
+only its own sources; Epic's plugin, where it is enabled, draws its assets untouched.
 
 - **Decoding** is vgsbridge's, as in Blender and Houdini: two lanes per capture decode
   ahead of the times the component schedules, on Unreal's task workers (the bridge's
@@ -115,8 +133,10 @@ stays enabled beside it, untouched.
   and opacity-weighted view-space normal; `VGSSplatGBuffer.usf` turns that into base colour
   (the graded colour made linear), normal, depth, *Roughness* and *Specular*, and writes
   *Self-illumination Amount* of the colour as emissive. Pixels the splats only partly cover
-  are written at random in proportion (`r.VGSSplat.Lit.Dither`), for TSR to smooth; below
-  `r.VGSSplat.Lit.MinCoverage` (2 %) never. Normals are the capture's when it has them
+  are written where they cover half or more; `r.VGSSplat.Lit.Dither 1` writes them at random
+  in proportion instead, for TSR to smooth, but TSR leaves it speckled along edges (seen
+  2026-11-11 on a static character's trousers and shoes, with and without TSR history), so it
+  is off by default; below `r.VGSSplat.Lit.MinCoverage` (2 %) never. Normals are the capture's when it has them
   (*Normals* in the VGS editor's export settings, attribute 48: `VGSPacked.usf` turns each
   into world space with its splat's rotation), otherwise each splat's shortest axis turned
   towards the camera, which is much noisier. Either way a splat's normal is noisy (a splat
@@ -129,6 +149,59 @@ stays enabled beside it, untouched.
   Substrate's blendable GBuffer through `EncodeGBuffer`. Lighting costs about 0.55 ms a frame at
   1920x1080 on an RTX 4070 (one paused capture of 535k splats: 5.65 ms self-illuminated, 6.20
   ms shaded).
+
+- **Normals in the details panel**: *Normals* (under *Capture*) says whether the capture has
+  them (on the GPU path), or not, or that they are not used on the CPU path.
+
+## VGSStatic: static characters from PLY
+
+A Gaussian splat PLY (the 3DGS trainer's layout: x y z, f_dc, f_rest, opacity, scale, rot,
+optionally nx ny nz; binary or ASCII) dropped in the Content Browser becomes a **VGS Static
+Splat** asset; dropped in a level, an actor showing it, with the capture's controls
+(*Intensity (EV)*, *Blend Space*, the grade, *Invert UE Tone Curve*, *Lighting* and the
+lighting settings, *Up Axis*: Y up, Y down as COLMAP, Z up). Its details panel says how
+many splats, the SH degree, and whether it has normals and where they come from.
+
+- **Importer.** `UVGSStaticSplatFactory`, before Epic's `.ply` importer: Unreal picks the
+  highest priority and shows no choice, so its dialog has *Import as Epic's Gaussian Splat*
+  where Epic's plugin is enabled (5.9), which hands the file to Epic's importer. Only PLYs
+  with f_dc_0 and rot_0 are taken; meshes and point clouds are left to others. A script
+  imports with an `AssetImportTask` whose `options` is a `VGSStaticImportOptions`.
+  Reimport repeats the import with the asset's *Import Settings*.
+- **Normals**, worked out once, at import, never per frame:
+  - the PLY's own when it has them (SMNForge's and the VGS editor's, from the capture's own
+    cameras), as they are;
+  - without them, the VGS editor's estimate with a studio rig's cameras, when the PLY names
+    its rig (SMNForge writes `comment capture_rig SMNV1` or `THE4DSCANNER`, and `comment
+    normals SMNForge` beside the normals it writes) or the import is told one; if that rig's
+    cameras see less than half of the splats the PLY is not in its frame, and
+  - otherwise (a PLY from anywhere else): **shortest axes**, as PGSR takes a splat's normal
+    (Chen et al. 2024), replaced where the splat is round or disagrees with its neighbours
+    by their consensus (16 nearest within 1 % of the size, opacity- and flatness-weighted,
+    sign aside), then smoothed among neighbours within 35 degrees as the editor smooths.
+    Their side is decided on screen, facing the camera, as PGSR does
+    (`FVGSSplatRenderProxy::bNormalsFaceCamera`). On andreavictor (221k splats) against the
+    file's normals: PGSR alone mean |cos| 0.78 (60 % within 30 degrees), with the consensus
+    0.885 (78 %), smoothed 0.91 (84 %), about as close as the editor's estimate with the
+    other rig's cameras (0.91); about a second.
+- **Static, so:** uploaded once per asset and shared by every actor showing it; the splats
+  are ordered along a Morton curve and cut into clusters of 64 that the renderer culls
+  against each view (Epic's cluster record, one level of detail); no tick work beyond
+  noticing a setting changed from Blueprint; *GPU Layout* Quantized keeps a third of the
+  memory (Epic's compressed layout, packed once).
+- **Shared code.** The renderer copy, its shaders, the shared headers, the LUTs and
+  `VGSSplatLayout.h` are the VGS plugin's, copied when VGSStatic is assembled and renamed
+  (`VGSSplat` to `VGSStaticSplat`, `/Plugin/VGS/` to `/Plugin/VGSStatic/`, the shaders
+  module) by `tools/assemble_vgsstatic.cmake`, which fails if a name that would collide is
+  left: edit them in `VGS/`, never in the assembled copy. The normals estimate is the VGS
+  editor's (`editor/gaussiannormals.cpp`, `normalrigs.cpp`, nanoflann), copied in as
+  `.inl` files and built with the engine's Eigen; it ships as source with the plugin.
+- **Test.** `tests/unreal_static.cpp` (ctest `plugin_unreal_static`): synthetic PLYs, binary
+  and ASCII, every value read and packed as the renderer reads it, header comments, clusters
+  covering every splat, normal words within 0.0007 rad, shortest-axis normals on a sphere
+  with round and turned splats; given a `.ply` it also times reading, building and both
+  estimates. In the host project, `/Game/Static/Static_Self`, `Static_Neon`,
+  `Static_Neon_File`, `Static_Neon_Axes` and `Static_Rim` show `andreavictor`.
 
 ## Scaling
 
@@ -229,8 +302,8 @@ From Epic's renderer, which the copy keeps (`VGSSplatRenderPipeline.cpp`,
 - Self-illuminated (the default), no lighting and no shadows, cast or received; no fog,
   Lumen or ray tracing. Splats are composited over translucency, occluded only by opaque
   depth.
-- Shaded: lit as an opaque surface, so faint splats, hair and edges are dithered rather
-  than blended, and the capture casts no shadow (it is not in shadow depth passes). The
+- Shaded: lit as an opaque surface, so faint splats, hair and edges are cut where they
+  cover half a pixel rather than blended, and the capture casts no shadow (it is not in shadow depth passes). The
   studio's light is already in its colours, so it shows lit twice. Needs the deferred
   renderer (with or without Substrate), hardware rasterization and vertex shaders that read buffers
   (`r.VGSSplat.*` defaults on desktop GPUs); elsewhere a Shaded capture is drawn
@@ -255,9 +328,13 @@ From Epic's renderer, which the copy keeps (`VGSSplatRenderPipeline.cpp`,
   own `r.VGSSplat.*` console variables; Epic's `r.GaussianSplat.*` no longer affect captures).
 - Objects are sorted against each other by the centre of their bounds; two captures that
   interpenetrate will show order errors where they overlap.
-- Epic's headers are all in `Internal/`, so `VGSRuntime` and `VGSSplatRenderer` set
+- The renderer's headers are in `Internal/`, so the modules that use them set
   `bTreatAsEngineModule`. Epic's plugin is experimental in 5.9 and may change between engine
   versions, and the copy with it (EPIC_RENDERER_COPY.md).
+
+- Static characters lit by the scene: thin, faint splats where a shoe meets the floor (the
+  scan's contact smear) are written opaque with sideways normals and show as a dark wedge at
+  the toe (andreavictor), whichever normals; not addressed yet.
 
 From this plugin, for later phases:
 

@@ -63,3 +63,37 @@ add_dependencies(vgs_unreal_plugin vgsbridge)
 
 #   cmake --install build_win64 --config Release --component unreal --prefix D:/ship
 install(FILES ${zip} DESTINATION unreal COMPONENT unreal)
+
+# ---- VGSStatic: static Gaussian splat characters from PLY files ---------------------------
+#
+#   <build>/plugins/unreal/<config>/VGSStatic/                    the plugin
+#   <build>/plugins/unreal/<config>/vgsstatic-unreal-<version>.zip
+#
+# Shares the renderer copy, its shaders and LUTs, and the float layout with the VGS plugin,
+# copied from plugins/unreal/VGS and renamed (tools/assemble_vgsstatic.cmake), so the two can
+# be enabled in one project; and the VGS editor's normals estimate, for PLYs without normals.
+# It needs no vgsbridge.
+
+set(static_dir ${CMAKE_CURRENT_SOURCE_DIR}/VGSStatic)
+file(STRINGS ${static_dir}/VGSStatic.uplugin static_version_line REGEX "\"VersionName\"")
+string(REGEX REPLACE ".*\"VersionName\" *: *\"([^\"]+)\".*" "\\1" static_version "${static_version_line}")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${static_dir}/VGSStatic.uplugin)
+file(GLOB_RECURSE static_sources CONFIGURE_DEPENDS ${static_dir}/Source/*)
+set(static_stage ${out}/VGSStatic)
+set(static_zip ${out}/vgsstatic-unreal-${static_version}.zip)
+set(editor_dir ${CMAKE_SOURCE_DIR}/editor)
+
+add_custom_target(vgs_static_unreal_plugin ALL
+    COMMAND ${CMAKE_COMMAND} -DVGS=${plugin_dir} -DSTATIC=${static_dir} -DEDITOR=${editor_dir} -DSTAGE=${static_stage}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/assemble_vgsstatic.cmake
+    COMMAND ${CMAKE_COMMAND} -E copy ${icon} ${static_stage}/Resources/Icon128.png
+    COMMAND ${CMAKE_COMMAND} -E chdir ${out}
+            ${CMAKE_COMMAND} -E tar cf ${static_zip} --format=zip --
+            VGSStatic/VGSStatic.uplugin VGSStatic/Source VGSStatic/Shaders VGSStatic/Resources
+    DEPENDS ${static_dir}/VGSStatic.uplugin ${static_sources} ${plugin_sources}
+            ${editor_dir}/gaussiannormals.h ${editor_dir}/gaussiannormals.cpp ${editor_dir}/normalrigs.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/assemble_vgsstatic.cmake ${icon}
+    COMMENT "Assembling the Unreal plugin VGSStatic ${static_version}"
+    VERBATIM)
+
+install(FILES ${static_zip} DESTINATION unreal COMPONENT unreal)

@@ -42,6 +42,20 @@ if(TARGET vgsbridge)
 endif()
 add_test(NAME plugin_unreal_layout COMMAND vgs_unreal_layout)
 
+# The VGSStatic plugin's import without Unreal: reading Gaussian splat PLYs, the records,
+# clusters and normal words its asset keeps, and the normals estimate for PLYs without them.
+# Given a .ply it also reads, builds and estimates that one: vgs_unreal_static some.ply
+add_executable(vgs_unreal_static unreal_static.cpp
+    ${CMAKE_SOURCE_DIR}/editor/gaussiannormals.cpp ${CMAKE_SOURCE_DIR}/editor/normalrigs.cpp)
+target_include_directories(vgs_unreal_static PRIVATE
+    ${CMAKE_SOURCE_DIR}/plugins/unreal/VGS/Source/VGSRuntime/Private
+    ${CMAKE_SOURCE_DIR}/plugins/unreal/VGSStatic/Source/VGSStaticRuntime/Public
+    ${CMAKE_SOURCE_DIR}/plugins/unreal/VGSStatic/Source/VGSStaticEditor/Private
+    ${CMAKE_SOURCE_DIR}/editor
+    ${CMAKE_SOURCE_DIR}/editor/dependencies/eigen)
+vgs_apply_settings(vgs_unreal_static)
+add_test(NAME plugin_unreal_static COMMAND vgs_unreal_static)
+
 # The plugin's packed playback: vgsbridge's packed chunks evaluated by a C++ twin of the
 # plugin's compute shader, against the frames vgsbridge evaluates itself. It needs a
 # capture, so ctest runs it only when VGS_TEST_CAPTURE names one.
