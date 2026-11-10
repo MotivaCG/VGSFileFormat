@@ -734,6 +734,11 @@ void UVGSCaptureComponent::PushRenderState()
 	State.bInvertExpandGamut = bInvertExpandGamut;
 	State.Intensity = FMath::Exp2(IntensityEV);
 	State.bBlendInSRGB = BlendSpace == EVGSBlendSpace::SRGB;
+	State.bLit = Lighting == EVGSLighting::Shaded;
+	State.SelfIllumination = FMath::Clamp(SelfIlluminationAmount, 0.0f, 1.0f);
+	State.Roughness = FMath::Clamp(Roughness, 0.0f, 1.0f);
+	State.Specular = FMath::Clamp(Specular, 0.0f, 1.0f);
+	State.NormalSmoothing = FMath::Max(NormalSmoothing, 0.0f);
 	State.Grade = FVector3f(FMath::Max(Gamma, 0.05f), FMath::Max(Contrast, 0.0f), FMath::Max(Saturation, 0.0f));
 	{
 		// The grade works on sRGB values, so the tint (a linear colour, as the picker gives it)

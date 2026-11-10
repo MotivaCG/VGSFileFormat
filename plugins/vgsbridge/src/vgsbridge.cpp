@@ -284,6 +284,8 @@ ChunkHolder *makeHolder(std::shared_ptr<const PackedChunk> data) {
   h->book_floats = c.books.size();
   h->luts = c.luts.data();
   h->lut_floats = c.luts.size();
+  h->normals = c.normals.empty() ? nullptr : c.normals.data();
+  h->normal_words = c.normals.size();
   h->bytes = c.bytes();
   h->data = std::move(data);
   return h;

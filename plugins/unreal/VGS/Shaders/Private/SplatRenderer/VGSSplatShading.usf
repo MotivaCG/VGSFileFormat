@@ -81,6 +81,57 @@ float CovarianceScale;
 
 // Output
 RWStructuredBuffer<FPackedShadedVGSSplatData> RWShadedVGSSplatBuffer;
+
+// VGS CHANGE: for a lit proxy (VGSSplatGBuffer.usf), each shaded splat's normal in view space,
+// x and y as two halves, at the same index as its record; z faces the camera. The normal is
+// the capture's own (NormalBuffer, octahedral in the capture's axes, 0 for none) or else the
+// splat's shortest axis turned towards the camera.
+uint Lit;
+uint HasNormals;
+StructuredBuffer<uint> NormalBuffer;
+RWStructuredBuffer<uint> RWShadedNormalBuffer;
+
+float3 VGSUnpackNormal(uint W)
+{
+	float2 P = (float2(W & 65535u, W >> 16) - 1.0f) / 65534.0f * 2.0f - 1.0f;
+	const float Z = 1.0f - abs(P.x) - abs(P.y);
+	if (Z < 0.0f)
+	{
+		P = (1.0f - abs(P.yx)) * select(P.xy >= 0.0f, 1.0f, -1.0f);
+	}
+	return normalize(float3(P, Z));
+}
+
+uint VGSShadedNormal(uint SplatIndex, FVGSSplatData SplatData)
+{
+	float3 WorldNormal;
+	bool bFaceCamera = true;
+	const uint Word = HasNormals != 0u ? NormalBuffer[SplatIndex] : 0u;
+	if (Word != 0u)
+	{
+		WorldNormal = mul((float3x3)WorldToLocal, VGSUnpackNormal(Word));
+		bFaceCamera = false;
+	}
+	else
+	{
+		const float3x3 R = QuaternionToFloat3x3(SplatData.Rotation);
+		const float3 S = SplatData.Scale;
+		const float3 Axis = (S.x <= S.y && S.x <= S.z) ? R[0] : (S.y <= S.z ? R[1] : R[2]);
+		WorldNormal = mul((float3x3)WorldToLocal, Axis);
+	}
+	float3 ViewNormal = normalize(mul(WorldNormal, (float3x3)PrimaryView.TranslatedWorldToView));
+	// Towards the camera is -z in view space. A normal the capture does not know the side of is
+	// turned whenever it faces away. The capture's own may face slightly away at a silhouette
+	// and is kept there; one clearly facing away (beyond about 17 degrees past edge-on) is a
+	// splat its estimation turned the wrong way, which would show as a dark speck, and is
+	// turned too. Tried on maria_simbo_carrito: 0 trades the specks for dark patches along
+	// silhouettes.
+	if (ViewNormal.z > (bFaceCamera ? 0.0f : 0.3f))
+	{
+		ViewNormal = -ViewNormal;
+	}
+	return VGSSplatPackHalf2(ViewNormal.xy);
+}
 RWBuffer<uint> RWSplatCount;
 
 // Sort keys
@@ -382,9 +433,11 @@ void MainCS(
 		}
 
 		bool bVisible = false;
+		uint ShadedNormal = 0u; // VGS CHANGE
 		if (bInBounds)
 		{
 			FVGSSplatData SplatData = UnpackVGSSplatData(SplatDataIndex);
+			const FVGSSplatData LocalSplatData = SplatData; // VGS CHANGE: for the normal, in the capture's axes
 			float Opacity = saturate(SplatData.Opacity * OpacityScale);
 			bVisible = Opacity >= OpacityThreshold;
 			if (bVisible)
@@ -398,6 +451,10 @@ void MainCS(
 					float3 WorldCameraDir = GetCameraVectorFromWorldPosition(SplatData.Position);
 					float3 LocalCameraDir = normalize(mul(float4(WorldCameraDir, 0.0), WorldToLocal).xyz);
 					ShadedSplatData.Color = float4(CalculateColor(SplatDataIndex, LocalCameraDir), Opacity);
+					if (Lit != 0u)
+					{
+						ShadedNormal = VGSShadedNormal(SplatDataIndex, LocalSplatData); // VGS CHANGE
+					}
 				}
 			}
 		}
@@ -436,6 +493,10 @@ void MainCS(
 				const uint WriteIndex = Offset + SplatIndex;
 				const FPackedShadedVGSSplatData PackedShadedSplatData = PackShadedVGSSplat(ShadedSplatData);
 				RWShadedVGSSplatBuffer[WriteIndex] = PackedShadedSplatData;
+				if (Lit != 0u)
+				{
+					RWShadedNormalBuffer[WriteIndex] = ShadedNormal; // VGS CHANGE
+				}
 				if (GAUSSIAN_SPLAT_WRITE_SORT_KEYS)
 				{
 					RWSortKeys[WriteIndex] = ComputeSortKey(ShadedSplatData.Position, PackedShadedSplatData.ViewZ);
@@ -447,6 +508,10 @@ void MainCS(
 		{
 			const FPackedShadedVGSSplatData PackedShadedSplatData = PackShadedVGSSplat(ShadedSplatData);
 			RWShadedVGSSplatBuffer[SplatDataIndex] = PackedShadedSplatData;
+			if (Lit != 0u)
+			{
+				RWShadedNormalBuffer[SplatDataIndex] = ShadedNormal; // VGS CHANGE
+			}
 			if (GAUSSIAN_SPLAT_WRITE_SORT_KEYS)
 			{
 				// Mark culled splats with sentinel value

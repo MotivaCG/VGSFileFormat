@@ -65,6 +65,21 @@ public:
 	// those values. (1, 1, 1) leaves it alone.
 	FVector3f Grade = FVector3f(1.0f, 1.0f, 1.0f);
 	FVector3f Tint = FVector3f(1.0f, 1.0f, 1.0f);
+
+	// VGS CHANGE: lit by the scene. The splats are drawn after Unreal's base pass into the
+	// GBuffer, as an opaque Default Lit surface (VGSSplatGBuffer.usf), so every light, shadow,
+	// skylight, Lumen and fog reaches them; the rest of the settings above that are about
+	// compositing (inverse tone curve, Intensity) do not apply. The colour is the base colour,
+	// and SelfIllumination of it is kept as emissive, so shade never turns the capture black.
+	bool bLit = false;
+	float SelfIllumination = 0.1f;
+	float Roughness = 0.8f;
+	float Specular = 0.5f;
+	float NormalSmoothing = 2.0f; // VGS CHANGE: the lit pass's normal filter radius, in Unreal units
+	// Optional: per splat one word, the outward normal in the capture's axes (octahedral, 16
+	// bits a component biased so that 0 means none). Without it, or for a splat with 0, the
+	// normal is the splat's shortest axis, turned to face the camera.
+	TRefCountPtr<FRDGPooledBuffer> NormalBuffer;
 	float InverseToneCurveStrength = 0.0f;
 	bool bInvertExpandGamutLUT = true;
 
@@ -94,5 +109,35 @@ namespace VGSSplat
 		const FScreenPassRenderTarget& Output,
 		FRDGTextureRef SceneDepthTexture,
 		FRDGTextureRef SceneVelocityTexture
+	);
+
+	// VGS CHANGE: proxies with bLit, drawn into the GBuffer after the base pass
+	// (FVGSSplatViewExtension::PostRenderBasePassDeferred_RenderThread). Where SupportsLit is
+	// false (no deferred GBuffer of the usual layout: forward shading, Substrate, mobile), they
+	// are drawn in the post-process pass like the others, self-illuminated.
+	struct FLitTargets
+	{
+		FRDGTextureRef SceneColor = nullptr;
+		FRDGTextureRef SceneDepth = nullptr;
+		FRDGTextureRef GBufferA = nullptr;
+		FRDGTextureRef GBufferB = nullptr;
+		FRDGTextureRef GBufferC = nullptr;
+		// With Substrate's own material buffer, that instead of GBuffer A-C: its array (the
+		// first three slices are render targets), a UAV for the rest, and its top layer.
+		bool bSubstrateMaterial = false;
+		FRDGTextureRef SubstrateMaterial = nullptr;
+		FRDGTextureUAVRef SubstrateMaterialUAV = nullptr;
+		FRDGTextureRef SubstrateTopLayer = nullptr;
+		uint32 SubstrateMaxBytesPerPixel = 0;
+		bool bSubstrateRoughDiffuse = false;
+		FIntRect ViewRect;
+	};
+	bool SupportsLit(const FSceneView& View);
+	void RenderLit(
+		FRDGBuilder& GraphBuilder,
+		const FSceneView& View,
+		TConstArrayView<FVGSSplatRenderItem> RenderItems,
+		FRenderStats& RenderStats,
+		const FLitTargets& Targets
 	);
 }

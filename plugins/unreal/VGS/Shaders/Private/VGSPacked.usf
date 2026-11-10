@@ -29,6 +29,7 @@ StructuredBuffer<uint> RotationSamples;  // a packed quaternion per sample
 StructuredBuffer<float4> Books;          // SH codebooks, static then temporal
 StructuredBuffer<float2> Luts;           // scale, base colour
 StructuredBuffer<float4> Basis;          // the shared tables at this instant
+StructuredBuffer<uint> Normals;          // per splat: normal code + bit 16, or 0; when HasNormals
 
 uint Splats;
 uint Samples;
@@ -55,6 +56,52 @@ float DensityExponent;
 
 uint SplatStride;
 RWByteAddressBuffer RWSplatBuffer;
+
+// The outward normal of each record in the capture's axes, for lit captures: octahedral, 16
+// bits a component biased so that 0 means none (the renderer then takes the shortest axis).
+uint HasNormals;
+RWStructuredBuffer<uint> RWNormalBuffer;
+
+// vgs::decodeNormal (vgscodec.h): the code is in the splat's axes ordered by scale index,
+// shortest first, ties to the lower axis; a hemi-octahedral map of that axis's hemisphere.
+float3 DecodeNormal(uint Code, uint ScaleIndices)
+{
+	const uint3 S = uint3(ScaleIndices & 255u, (ScaleIndices >> 8) & 255u, (ScaleIndices >> 16) & 255u);
+	uint A0 = 0u, A1 = 1u, A2 = 2u; // insertion sort by scale index, stable
+	if (S[A1] < S[A0]) { const uint T = A0; A0 = A1; A1 = T; }
+	if (S[A2] < S[A1]) { const uint T = A1; A1 = A2; A2 = T; if (S[A1] < S[A0]) { const uint T2 = A0; A0 = A1; A1 = T2; } }
+	const float U = float(Code & 255u) / 255.0f * 2.0f - 1.0f;
+	const float V = float((Code >> 9) & 127u) / 127.0f * 2.0f - 1.0f;
+	const float Px = (U + V) * 0.5f;
+	const float Py = (U - V) * 0.5f;
+	float Z = max(0.0f, 1.0f - abs(Px) - abs(Py));
+	Z = ((Code >> 8) & 1u) != 0u ? -Z : Z;
+	const float Norm = max(sqrt(Px * Px + Py * Py + Z * Z), 1e-20f);
+	float3 Local = 0;
+	Local[A1] = Px / Norm;
+	Local[A2] = Py / Norm;
+	Local[A0] = Z / Norm;
+	return Local;
+}
+
+// V turned by Q (xyzw), as vgsframe.cpp turns normals.
+float3 RotateByQuat(float4 Q, float3 V)
+{
+	const float3 T = 2.0f * cross(Q.xyz, V);
+	return V + Q.w * T + cross(Q.xyz, T);
+}
+
+uint PackNormal(float3 N)
+{
+	const float L1 = max(abs(N.x) + abs(N.y) + abs(N.z), 1e-20f);
+	float2 P = N.xy / L1;
+	if (N.z < 0.0f)
+	{
+		P = (1.0f - abs(P.yx)) * select(P.xy >= 0.0f, 1.0f, -1.0f);
+	}
+	const uint2 Q = uint2(saturate(P * 0.5f + 0.5f) * 65534.0f + 0.5f) + 1u;
+	return Q.x | (Q.y << 16);
+}
 
 // 21 bits per axis over one range, x in the high bits and z in the low ones.
 float3 UnpackPosition(uint2 W, float Lo, float Hi)
@@ -125,6 +172,10 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupThreadIndex : SV_GroupIndex)
 	if (int(Frame) < int(A.w >> 24) || int(Frame) + 1 > int(C.w >> 24) || (Thinned != 0u && DensityHash(Index) >= DensityThreshold))
 	{
 		WriteInactive(Offset);
+		if (HasNormals != 0u)
+		{
+			RWNormalBuffer[Index] = 0u;
+		}
 		return;
 	}
 
@@ -198,6 +249,12 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupThreadIndex : SV_GroupIndex)
 		}
 	}
 	Q = Q / max(length(Q), 1e-20f);
+
+	if (HasNormals != 0u)
+	{
+		const uint Code = Normals[Index];
+		RWNormalBuffer[Index] = (Code & 0x10000u) != 0u ? PackNormal(RotateByQuat(Q, DecodeNormal(Code & 0xFFFFu, A.w))) : 0u;
+	}
 
 	float3 Sh0 = float3(Luts[C.w & 255u].y, Luts[(C.w >> 8) & 255u].y, Luts[(C.w >> 16) & 255u].y);
 	float Opacity = 0.0f;

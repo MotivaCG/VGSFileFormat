@@ -26,6 +26,7 @@
 #include "BlueNoise.h"
 #include "SystemTextures.h"
 #include "SceneRendering.h"
+#include "RenderUtils.h" // VGS CHANGE: IsForwardShadingEnabled, Substrate::IsSubstrateEnabled
 
 DECLARE_GPU_STAT(VGSSplat);
 
@@ -680,6 +681,12 @@ class FShadeVGSSplatCS : public FGlobalShader
 		SHADER_PARAMETER(uint32, SHCoordinateSpace)
 		SHADER_PARAMETER(uint32, BlendInSRGB) // VGS CHANGE
 
+		// VGS CHANGE: a lit proxy's normals (VGSSplatShading.usf, VGSShadedNormal)
+		SHADER_PARAMETER(uint32, Lit)
+		SHADER_PARAMETER(uint32, HasNormals)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, NormalBuffer)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, RWShadedNormalBuffer)
+
 		// Per-component overrides
 		SHADER_PARAMETER(float, PointScaleFactor)
 		SHADER_PARAMETER(float, OpacityScale)
@@ -1027,17 +1034,25 @@ class FHardwareRasterizeVGSSplatVS : public FGlobalShader
 
 	class FGatherShadedSplats : SHADER_PERMUTATION_BOOL("GAUSSIAN_SPLAT_GATHER_SHADED_SPLATS");
 	class FVertexAttributeFetch : SHADER_PERMUTATION_BOOL("GAUSSIAN_SPLAT_VERTEX_ATTRIBUTE_FETCH");
-	using FPermutationDomain = TShaderPermutationDomain<FGatherShadedSplats, FVertexAttributeFetch>;
+	class FLit : SHADER_PERMUTATION_BOOL("VGS_LIT"); // VGS CHANGE
+	using FPermutationDomain = TShaderPermutationDomain<FGatherShadedSplats, FVertexAttributeFetch, FLit>;
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FShadedVGSSplatData>, ShadedVGSSplatBuffer)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(Buffer<uint>, SortedIndexBuffer)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, ShadedNormalBuffer) // VGS CHANGE
 	END_SHADER_PARAMETER_STRUCT()
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
 	{
 		const FPermutationDomain PermutationVector(Parameters.PermutationId);
+
+		// VGS CHANGE: a lit proxy reads its normals by record, so its records stay in place.
+		if (PermutationVector.Get<FLit>() && (PermutationVector.Get<FGatherShadedSplats>() || PermutationVector.Get<FVertexAttributeFetch>()))
+		{
+			return false;
+		}
 
 		if (PermutationVector.Get<FVertexAttributeFetch>() && !PermutationVector.Get<FGatherShadedSplats>())
 		{
@@ -1064,7 +1079,8 @@ class FHardwareRasterizeVGSSplatPS : public FGlobalShader
 	class FUseBlueNoise : SHADER_PERMUTATION_BOOL("USE_BLUE_NOISE");
 	class FWriteExpectedDepth : SHADER_PERMUTATION_BOOL("WRITE_EXPECTED_DEPTH");
 	class FSuperSample : SHADER_PERMUTATION_BOOL("GAUSSIAN_SPLAT_SUPERSAMPLE");
-	using FPermutationDomain = TShaderPermutationDomain<FWriteStochasticDepth, FWriteVelocity, FUseBlueNoise, FWriteExpectedDepth, FSuperSample>;
+	class FLit : SHADER_PERMUTATION_BOOL("VGS_LIT"); // VGS CHANGE
+	using FPermutationDomain = TShaderPermutationDomain<FWriteStochasticDepth, FWriteVelocity, FUseBlueNoise, FWriteExpectedDepth, FSuperSample, FLit>;
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
@@ -1094,6 +1110,11 @@ class FHardwareRasterizeVGSSplatPS : public FGlobalShader
 		}
 		if (PermutationVector.Get<FWriteExpectedDepth>() &&
 			(PermutationVector.Get<FWriteStochasticDepth>() || PermutationVector.Get<FWriteVelocity>() || PermutationVector.Get<FUseBlueNoise>()))
+		{
+			return false;
+		}
+		// VGS CHANGE: a lit proxy accumulates its normals beside the expected depth, at full resolution.
+		if (PermutationVector.Get<FLit>() && (!PermutationVector.Get<FWriteExpectedDepth>() || PermutationVector.Get<FSuperSample>()))
 		{
 			return false;
 		}
@@ -1148,6 +1169,66 @@ class FVGSSplatExpectedDepthPS : public FGlobalShader
 };
 
 IMPLEMENT_GLOBAL_SHADER(FVGSSplatExpectedDepthPS, "/Plugin/VGS/Private/SplatRenderer/VGSSplatHardwareRasterize.usf", "MainPS_ExpectedDepth", SF_Pixel);
+
+// VGS CHANGE: writes a lit proxy into the GBuffer (VGSSplatGBuffer.usf).
+static TAutoConsoleVariable<int32> CVarVGSSplatLitDither(
+	TEXT("r.VGSSplat.Lit.Dither"),
+	1,
+	TEXT("Lit captures: where splats only partly cover a pixel, write it at random as much as they cover, for temporal anti-aliasing to smooth (1, default); or write it where they cover half or more (0)."),
+	ECVF_RenderThreadSafe);
+
+static TAutoConsoleVariable<float> CVarVGSSplatLitMinCoverage(
+	TEXT("r.VGSSplat.Lit.MinCoverage"),
+	0.02f,
+	TEXT("Lit captures: pixels the splats cover less than this are never written."),
+	ECVF_RenderThreadSafe);
+
+static TAutoConsoleVariable<float> CVarVGSSplatLitNormalSmoothing(
+	TEXT("r.VGSSplat.Lit.NormalSmoothing"),
+	-1.0f,
+	TEXT("Lit captures: overrides every capture's Normal Smoothing, in cm (0 off); below 0 (default) each capture's own."),
+	ECVF_RenderThreadSafe);
+
+class FVGSSplatGBufferPS : public FGlobalShader
+{
+	DECLARE_GLOBAL_SHADER(FVGSSplatGBufferPS);
+	SHADER_USE_PARAMETER_STRUCT(FVGSSplatGBufferPS, FGlobalShader);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, SplatColorTexture)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, DepthMomentsTexture)
+		SHADER_PARAMETER(float, ExpectedDepthScale)
+		SHADER_PARAMETER(uint32, BlendInSRGB)
+		SHADER_PARAMETER(float, SelfIllumination)
+		SHADER_PARAMETER(float, Intensity)
+		SHADER_PARAMETER(float, Roughness)
+		SHADER_PARAMETER(float, Specular)
+		SHADER_PARAMETER(float, MinCoverage)
+		SHADER_PARAMETER(uint32, Dither)
+		SHADER_PARAMETER(float, NormalSmoothing)
+		SHADER_PARAMETER(FVector3f, Grade)
+		SHADER_PARAMETER(FVector3f, Tint)
+		SHADER_PARAMETER(uint32, GradeActive)
+		// Substrate's material buffer, when it has its own (not the blendable GBuffer).
+		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<uint>, MaterialTextureArrayUAV)
+		SHADER_PARAMETER(uint32, MaxBytesPerPixel)
+		SHADER_PARAMETER(uint32, bRoughDiffuse)
+		RENDER_TARGET_BINDING_SLOTS()
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+	}
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+	{
+		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+		OutEnvironment.SetDefine(TEXT("SUBSTRATE_INLINE_SHADING"), 1); // as the engine's debug probes
+	}
+};
+
+IMPLEMENT_GLOBAL_SHADER(FVGSSplatGBufferPS, "/Plugin/VGS/Private/SplatRenderer/VGSSplatGBuffer.usf", "MainPS", SF_Pixel);
 
 class FVGSSplatResolveVelocityPS : public FGlobalShader
 {
@@ -1263,10 +1344,15 @@ void RasterizeHardware(
 	uint32 NumClusters,
 	FRDGBufferRef ClusterCountBuffer,
 	VGSSplat::FRenderStats& RenderStats,
-	ERenderTargetLoadAction ColorLoadAction = ERenderTargetLoadAction::ELoad
+	ERenderTargetLoadAction ColorLoadAction = ERenderTargetLoadAction::ELoad,
+	// VGS CHANGE: for a lit proxy, its normals by record; the depth moments come back in
+	// OutDepthMoments for VGSSplatGBuffer.usf instead of being resolved into scene depth.
+	FRDGBufferRef ShadedNormalBuffer = nullptr,
+	FRDGTextureRef* OutDepthMoments = nullptr
 )
 {
 	const bool bGpuDrivenPipeline = (SplatCountBuffer != nullptr);
+	const bool bLit = ShadedNormalBuffer != nullptr; // VGS CHANGE
 
 	const EVGSSplatDepthMode DepthMode = GetDepthMode(View.GetShaderPlatform());
 	const uint32 SortElementCount = NumSplats;
@@ -1368,7 +1454,9 @@ void RasterizeHardware(
 	}
 
 	const bool bVertexAttributeFetch = IsVertexAttributeFetchEnabled(View.GetShaderPlatform());
-	const bool bGatherShadedSplats = bVertexAttributeFetch || IsGatherShadedSplatsEnabled(View.GetShaderPlatform());
+	// VGS CHANGE: a lit proxy's records stay in place, for its normals (VGSSplat::SupportsLit
+	// keeps it off platforms that need vertex attribute fetch).
+	const bool bGatherShadedSplats = !bLit && (bVertexAttributeFetch || IsGatherShadedSplatsEnabled(View.GetShaderPlatform()));
 	if (bGatherShadedSplats)
 	{
 		FRDGBufferRef GatheredShadedVGSSplatBuffer = GraphBuilder.CreateBuffer(
@@ -1410,17 +1498,18 @@ void RasterizeHardware(
 		ShadedVGSSplatBuffer = GatheredShadedVGSSplatBuffer;
 	}
 
-	const bool bVelocity = IsVelocityEnabled()
+	const bool bVelocity = !bLit && IsVelocityEnabled() // VGS CHANGE: not lit
 		&& DepthMode != EVGSSplatDepthMode::Off
 		&& SceneVelocityTexture != nullptr
 		&& EnumHasAnyFlags(SceneVelocityTexture->Desc.Flags, TexCreate_RenderTargetable);
 
-	const bool bHardwareDepth = (DepthMode == EVGSSplatDepthMode::Hardware);
-	const bool bStochasticDepth = (DepthMode == EVGSSplatDepthMode::Stochastic);
-	const bool bExpectedDepth = (DepthMode == EVGSSplatDepthMode::Expected);
+	// VGS CHANGE: a lit proxy is drawn as expected depth is, whatever r.VGSSplat.Depth says.
+	const bool bHardwareDepth = !bLit && (DepthMode == EVGSSplatDepthMode::Hardware);
+	const bool bStochasticDepth = !bLit && (DepthMode == EVGSSplatDepthMode::Stochastic);
+	const bool bExpectedDepth = bLit || (DepthMode == EVGSSplatDepthMode::Expected);
 
 	FRDGTextureRef DepthTexture = nullptr;
-	if (DepthMode == EVGSSplatDepthMode::Stochastic)
+	if (bStochasticDepth) // VGS CHANGE: was DepthMode == Stochastic
 	{
 		const FRDGTextureDesc SplatDepthDesc = FRDGTextureDesc::Create2D(
 			Output.Texture->Desc.Extent,
@@ -1445,7 +1534,8 @@ void RasterizeHardware(
 	{
 		FHardwareRasterizeVGSSplatVS::FPermutationDomain VSPermutationVector;
 		VSPermutationVector.Set<FHardwareRasterizeVGSSplatVS::FGatherShadedSplats>(bGatherShadedSplats);
-		VSPermutationVector.Set<FHardwareRasterizeVGSSplatVS::FVertexAttributeFetch>(bVertexAttributeFetch);
+		VSPermutationVector.Set<FHardwareRasterizeVGSSplatVS::FVertexAttributeFetch>(bVertexAttributeFetch && !bLit);
+		VSPermutationVector.Set<FHardwareRasterizeVGSSplatVS::FLit>(bLit); // VGS CHANGE
 		TShaderMapRef<FHardwareRasterizeVGSSplatVS> VertexShader(GetGlobalShaderMap(View.GetShaderPlatform()), VSPermutationVector);
 
 		FHardwareRasterizeVGSSplatPS::FPermutationDomain PermutationVector;
@@ -1454,6 +1544,7 @@ void RasterizeHardware(
 		PermutationVector.Set<FHardwareRasterizeVGSSplatPS::FUseBlueNoise>(bStochasticDepth && IsBlueNoiseEnabled());
 		PermutationVector.Set<FHardwareRasterizeVGSSplatPS::FWriteExpectedDepth>(bExpectedDepth);
 		PermutationVector.Set<FHardwareRasterizeVGSSplatPS::FSuperSample>(DownsampleFactor > 1);
+		PermutationVector.Set<FHardwareRasterizeVGSSplatPS::FLit>(bLit); // VGS CHANGE
 		TShaderMapRef<FHardwareRasterizeVGSSplatPS> PixelShader(GetGlobalShaderMap(View.GetShaderPlatform()), PermutationVector);
 
 		FHardwareRasterizeVGSSplatPassParameters* PassParameters = GraphBuilder.AllocParameters<FHardwareRasterizeVGSSplatPassParameters>();
@@ -1466,6 +1557,7 @@ void RasterizeHardware(
 				? nullptr
 				: GraphBuilder.CreateSRV(GPUSortValuesBuffer[SortedBufferIndex], PF_R32_UINT);
 			PassParameters->GatheredSplatVertexBuffer = bVertexAttributeFetch ? ShadedVGSSplatBuffer : nullptr;
+			PassParameters->VS.ShadedNormalBuffer = bLit ? GraphBuilder.CreateSRV(ShadedNormalBuffer) : nullptr; // VGS CHANGE
 			PassParameters->PS.View = ViewUniformBuffer;
 			PassParameters->PS.BlueNoise = CreateUniformBufferImmediate(GetBlueNoiseGlobalParameters(), EUniformBufferUsage::UniformBuffer_SingleDraw);
 			PassParameters->PS.OpacityThreshold = GetHardwareRasterizationOpacityThreshold();
@@ -1590,6 +1682,12 @@ void RasterizeHardware(
 			BlendState,
 			RasterizerState,
 			TStaticDepthStencilState<true, CF_GreaterEqual>::GetRHI());
+	}
+	else if (bLit)
+	{
+		// VGS CHANGE: resolved by VGSSplatGBuffer.usf, which writes scene depth itself.
+		check(OutDepthMoments != nullptr);
+		*OutDepthMoments = DepthMomentsTexture;
 	}
 	else if (bExpectedDepth)
 	{
@@ -1894,7 +1992,8 @@ static void RenderProxyInternal(
 	VGSSplat::FRenderStats& RenderStats,
 	const FScreenPassRenderTarget& Output,
 	FRDGTextureRef SceneDepthTexture,
-	FRDGTextureRef SceneVelocityTexture)
+	FRDGTextureRef SceneVelocityTexture,
+	const VGSSplat::FLitTargets* LitTargets = nullptr) // VGS CHANGE: drawn into the GBuffer
 {
 	if (RenderProxy.NumSplats == 0)
 	{
@@ -1902,14 +2001,16 @@ static void RenderProxyInternal(
 	}
 
 	const bool bHWRaster = VGSSplat::IsHardwareRasterization(View.GetShaderPlatform());
-	const bool bProxyUsesInverseTC = ProxyLUTRHI != nullptr && SupportsSplatScratch(bHWRaster);
-	const bool bExpectedDepth = (GetDepthMode(View.GetShaderPlatform()) == EVGSSplatDepthMode::Expected);
+	const bool bLit = LitTargets != nullptr; // VGS CHANGE
+	const bool bProxyUsesInverseTC = !bLit && ProxyLUTRHI != nullptr && SupportsSplatScratch(bHWRaster);
+	// VGS CHANGE: a lit proxy is sorted and blended front to back, as expected depth is.
+	const bool bExpectedDepth = bLit || (GetDepthMode(View.GetShaderPlatform()) == EVGSSplatDepthMode::Expected);
 	const bool bDownsampled = DownsampleFactor > 1;
 	// VGS CHANGE: always through the scratch target, where splats blend in sRGB values; the
 	// post-blend pass makes the result linear. Epic only uses it for the inverse tone curve,
 	// expected depth or downsampling. Without scratch support (an RGBA16F render target)
 	// the colours are composited as they are, sRGB values taken as linear.
-	const bool bUsesScratch = SupportsSplatScratch(bHWRaster) || bProxyUsesInverseTC || bExpectedDepth || bDownsampled;
+	const bool bUsesScratch = SupportsSplatScratch(bHWRaster) || bProxyUsesInverseTC || bExpectedDepth || bDownsampled || bLit;
 
 	FScreenPassRenderTarget ProxyScratchRT;
 	if (bUsesScratch)
@@ -1953,6 +2054,11 @@ static void RenderProxyInternal(
 		FRDGBufferDesc::CreateStructuredDesc(ShadedSplatStride, NumSplats),
 		TEXT("VGSSplat.ShadedBuffer")
 	);
+
+	// VGS CHANGE: a lit proxy's view-space normals, by record (VGSSplatShading.usf).
+	FRDGBufferRef ShadedNormalBuffer = bLit
+		? GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), NumSplats), TEXT("VGSSplat.ShadedNormals"))
+		: nullptr;
 
 	// Debug pipeline configurations
 	const bool bDebug = IsDebug();
@@ -2111,6 +2217,17 @@ static void RenderProxyInternal(
 			PassParameters->SHCoordinateSpace = static_cast<uint32>(RenderProxy.SHCoordinateSpace);
 			PassParameters->BlendInSRGB = RenderProxy.bBlendInSRGB ? 1u : 0u; // VGS CHANGE
 
+			// VGS CHANGE: a lit proxy's normals
+			const bool bHasNormals = bLit && RenderProxy.NormalBuffer.IsValid();
+			PassParameters->Lit = bLit ? 1u : 0u;
+			PassParameters->HasNormals = bHasNormals ? 1u : 0u;
+			PassParameters->NormalBuffer = bHasNormals
+				? GraphBuilder.CreateSRV(GraphBuilder.RegisterExternalBuffer(RenderProxy.NormalBuffer))
+				: GraphBuilder.CreateSRV(GSystemTextures.GetDefaultStructuredBuffer(GraphBuilder, sizeof(uint32)));
+			PassParameters->RWShadedNormalBuffer = GraphBuilder.CreateUAV(bLit
+				? ShadedNormalBuffer
+				: GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), 1), TEXT("VGSSplat.ShadedNormals.Dummy")));
+
 			// Per-component overrides
 			PassParameters->PointScaleFactor = RenderProxy.PointScaleFactor;
 			PassParameters->OpacityScale     = RenderProxy.OpacityScale;
@@ -2142,17 +2259,78 @@ static void RenderProxyInternal(
 	}
 
 	// Rasterization
+	FRDGTextureRef DepthMoments = nullptr; // VGS CHANGE: a lit proxy's, for the GBuffer pass
 	if (bHWRaster)
 	{
 		const ERenderTargetLoadAction ColorLoadAction = bUsesScratch ? ERenderTargetLoadAction::EClear : ERenderTargetLoadAction::ELoad;
 		const uint32 NumClusters = bClusterDispatch ? RenderProxy.NumClusters : 0u;
 		RasterizeHardware(GraphBuilder, View, ViewUniformBuffer, DownsampleFactor, SceneDepthTexture, SceneVelocityTexture, NumSplats, ShadedVGSSplatBuffer, RasterTarget, SplatCountBuffer,
-			SortKeyBuffer, SplatIndexBuffer, NumClusters, ClusterCountBuffer, RenderStats, ColorLoadAction);
+			SortKeyBuffer, SplatIndexBuffer, NumClusters, ClusterCountBuffer, RenderStats, ColorLoadAction,
+			ShadedNormalBuffer, bLit ? &DepthMoments : nullptr); // VGS CHANGE
 	}
 	else
 	{
 		// TODO: Missing indirect dispatch and depth + velocity support
 		RasterizeTiledCompute(GraphBuilder, View, ViewUniformBuffer, NumSplats, ShadedVGSSplatBuffer, RasterTarget);
+	}
+
+	// VGS CHANGE: a lit proxy goes into the GBuffer instead of being composited.
+	if (bLit)
+	{
+		if (DepthMoments == nullptr)
+		{
+			return;
+		}
+		FVGSSplatGBufferPS::FParameters* Params = GraphBuilder.AllocParameters<FVGSSplatGBufferPS::FParameters>();
+		Params->View = View.ViewUniformBuffer;
+		Params->SplatColorTexture = ProxyScratchRT.Texture;
+		Params->DepthMomentsTexture = DepthMoments;
+		Params->ExpectedDepthScale = GetExpectedDepthScale();
+		Params->BlendInSRGB = RenderProxy.bBlendInSRGB ? 1u : 0u;
+		Params->SelfIllumination = RenderProxy.SelfIllumination;
+		Params->Intensity = RenderProxy.Intensity;
+		Params->Roughness = RenderProxy.Roughness;
+		Params->Specular = RenderProxy.Specular;
+		Params->MinCoverage = FMath::Clamp(CVarVGSSplatLitMinCoverage.GetValueOnRenderThread(), 0.0f, 1.0f);
+		Params->Dither = CVarVGSSplatLitDither.GetValueOnRenderThread() != 0 ? 1u : 0u;
+		const float SmoothingOverride = CVarVGSSplatLitNormalSmoothing.GetValueOnRenderThread();
+		Params->NormalSmoothing = FMath::Max(SmoothingOverride >= 0.0f ? SmoothingOverride : RenderProxy.NormalSmoothing, 0.0f);
+		Params->Grade = RenderProxy.Grade;
+		Params->Tint = RenderProxy.Tint;
+		Params->GradeActive = (RenderProxy.Grade.Equals(FVector3f(1.0f, 1.0f, 1.0f), 1e-4f) && RenderProxy.Tint.Equals(FVector3f(1.0f, 1.0f, 1.0f), 1e-4f)) ? 0u : 1u;
+		Params->RenderTargets[0] = FRenderTargetBinding(LitTargets->SceneColor, ERenderTargetLoadAction::ELoad);
+		if (LitTargets->bSubstrateMaterial)
+		{
+			// The order VGSSplatGBuffer.usf writes: the material's first three slices, the top layer.
+			for (int32 Slice = 0; Slice < 3; ++Slice)
+			{
+				Params->RenderTargets[1 + Slice] = FRenderTargetBinding(LitTargets->SubstrateMaterial, ERenderTargetLoadAction::ELoad, 0, int16(Slice));
+			}
+			Params->RenderTargets[4] = FRenderTargetBinding(LitTargets->SubstrateTopLayer, ERenderTargetLoadAction::ELoad);
+			Params->MaterialTextureArrayUAV = LitTargets->SubstrateMaterialUAV;
+			Params->MaxBytesPerPixel = LitTargets->SubstrateMaxBytesPerPixel;
+			Params->bRoughDiffuse = LitTargets->bSubstrateRoughDiffuse ? 1u : 0u;
+		}
+		else
+		{
+			Params->RenderTargets[1] = FRenderTargetBinding(LitTargets->GBufferA, ERenderTargetLoadAction::ELoad);
+			Params->RenderTargets[2] = FRenderTargetBinding(LitTargets->GBufferB, ERenderTargetLoadAction::ELoad);
+			Params->RenderTargets[3] = FRenderTargetBinding(LitTargets->GBufferC, ERenderTargetLoadAction::ELoad);
+		}
+		Params->RenderTargets.DepthStencil = FDepthStencilBinding(LitTargets->SceneDepth, ERenderTargetLoadAction::ELoad, ERenderTargetLoadAction::ELoad, FExclusiveDepthStencil::DepthWrite_StencilNop);
+
+		TShaderMapRef<FVGSSplatGBufferPS> PixelShader(GetGlobalShaderMap(View.GetShaderPlatform()));
+		FPixelShaderUtils::AddFullscreenPass(
+			GraphBuilder,
+			GetGlobalShaderMap(View.GetShaderPlatform()),
+			RDG_EVENT_NAME("VGSSplat.GBuffer"),
+			PixelShader,
+			Params,
+			Output.ViewRect,
+			nullptr,
+			nullptr,
+			TStaticDepthStencilState<true, CF_GreaterEqual>::GetRHI());
+		return;
 	}
 
 	// Post-processing
@@ -2195,6 +2373,41 @@ static void RenderProxyInternal(
 			// SrcAlpha (= transmittance); alpha multiplies transmittances to match UE
 			// SceneColor convention.
 			TStaticBlendState<CW_RGBA, BO_Add, BF_One, BF_SourceAlpha, BO_Add, BF_Zero, BF_SourceAlpha>::GetRHI());
+	}
+}
+
+// VGS CHANGE: lit proxies, drawn into the GBuffer after the base pass.
+bool VGSSplat::SupportsLit(const FSceneView& View)
+{
+	const EShaderPlatform Platform = View.GetShaderPlatform();
+	return View.bIsViewInfo
+		&& View.GetFeatureLevel() >= ERHIFeatureLevel::SM5
+		&& IsHardwareRasterization(Platform)
+		&& SupportsSplatScratch(true)
+		&& FDataDrivenShaderPlatformInfo::GetSupportsVertexShaderSRVs(Platform)
+		&& !IsVertexAttributeFetchEnabled(Platform)
+		&& !IsForwardShadingEnabled(Platform);
+}
+
+void VGSSplat::RenderLit(
+	FRDGBuilder& GraphBuilder,
+	const FSceneView& View,
+	TConstArrayView<FVGSSplatRenderItem> RenderItems,
+	VGSSplat::FRenderStats& RenderStats,
+	const FLitTargets& Targets)
+{
+	RDG_EVENT_SCOPE_STAT(GraphBuilder, VGSSplat, "GaussianSplat.Lit");
+	if (View.Family == nullptr || View.Family->Scene == nullptr || RenderItems.IsEmpty()
+		|| !Targets.SceneColor || !Targets.SceneDepth
+		|| (Targets.bSubstrateMaterial ? (!Targets.SubstrateMaterial || !Targets.SubstrateMaterialUAV || !Targets.SubstrateTopLayer) : (!Targets.GBufferA || !Targets.GBufferB || !Targets.GBufferC)))
+	{
+		return;
+	}
+	const FScreenPassRenderTarget Output(Targets.SceneColor, Targets.ViewRect, ERenderTargetLoadAction::ELoad);
+	for (const FVGSSplatRenderItem& Item : RenderItems)
+	{
+		// Full resolution, the base pass's: no downsampling for a lit proxy.
+		RenderProxyInternal(GraphBuilder, View, View.ViewUniformBuffer, 1, *Item.Proxy, nullptr, RenderStats, Output, Targets.SceneDepth, nullptr, &Targets);
 	}
 }
 

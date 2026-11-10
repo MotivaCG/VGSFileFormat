@@ -250,6 +250,13 @@ typedef struct vgsb_packed_chunk {
   uint64_t sh_words, position_term_words, rotation_term_words, position_sample_words,
       rotation_sample_words, book_floats, lut_floats;
   uint64_t bytes;                   /* all of the above together, what uploading it costs */
+  /* One word per splat when the capture carries normals, else NULL: the format's two code
+   * bytes in the low 16 bits and bit 16 set, or 0 for a splat that has none. The code is in
+   * the splat's own axes ordered by its scale indices (splat_a's fourth word), as FORMAT.md
+   * (Normals) and vgs::decodeNormal read it; turn the result by the splat's rotation at the
+   * instant. Added after `bytes`, which counts it, so the fields before keep their places. */
+  const uint32_t *normals;
+  uint64_t normal_words;
 } vgsb_packed_chunk;
 
 typedef struct vgsb_packed_frame {

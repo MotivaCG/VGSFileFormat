@@ -3,8 +3,8 @@
 Plays VGS captures in Unreal Engine 5.9 through a copy of Epic's Gaussian Splat renderer
 (`Engine/Plugins/GaussianSplat`, experimental in 5.9), changed to blend splats as they were
 trained. **The copy is Epic's code and has to be taken again for every engine version:
-[EPIC_RENDERER_COPY.md](EPIC_RENDERER_COPY.md).** Phase 1: playback, nothing of
-lighting or shadows. Draws and plays; sixteen captures at once keep their 30 fps — see
+[EPIC_RENDERER_COPY.md](EPIC_RENDERER_COPY.md).** Plays, and can be lit by the scene
+(*Lighting* Shaded); casts no shadows. Sixteen captures at once keep their 30 fps — see
 *State* below.
 
 ```
@@ -107,6 +107,28 @@ stays enabled beside it, untouched.
   are made linear; at 1 they are skipped, and otherwise cost a few operations per pixel. (Before the copy, intensity was put
   into the coefficients as they were packed - `VGSSplatLayout.h`, `gainFor`, still tested -
   which the per-splat clamp of the sRGB blend would now cut.)
+- **Lighting** (*Lighting* Shaded): the capture goes into Unreal's GBuffer as an opaque
+  Default Lit surface, after the base pass and before lighting
+  (`PostRenderBasePassDeferred_RenderThread`), so the scene's lights, shadows falling on it,
+  the skylight, Lumen and fog reach it as they reach a mesh. The splats are drawn front to
+  back into a scratch target that keeps, per pixel, their coverage, colour, expected depth
+  and opacity-weighted view-space normal; `VGSSplatGBuffer.usf` turns that into base colour
+  (the graded colour made linear), normal, depth, *Roughness* and *Specular*, and writes
+  *Self-illumination Amount* of the colour as emissive. Pixels the splats only partly cover
+  are written at random in proportion (`r.VGSSplat.Lit.Dither`), for TSR to smooth; below
+  `r.VGSSplat.Lit.MinCoverage` (2 %) never. Normals are the capture's when it has them
+  (*Normals* in the VGS editor's export settings, attribute 48: `VGSPacked.usf` turns each
+  into world space with its splat's rotation), otherwise each splat's shortest axis turned
+  towards the camera, which is much noisier. Either way a splat's normal is noisy (a splat
+  is a blob as often as a patch of surface), so the GBuffer pass averages it over *Normal
+  Smoothing* (2 cm by default; `r.VGSSplat.Lit.NormalSmoothing` overrides it for all) on
+  screen, among neighbours at the same depth, so a silhouette is not crossed: without it the
+  capture looks crumpled and specked under coloured lights. With Substrate (its own material
+  buffer, `SUBSTRATE_GBUFFER_FORMAT` 1) the surface is packed as one simple Default Lit slab
+  with `PackSubstrateOut`, as the engine's `DebugProbes.usf` stamps its probes, and with
+  Substrate's blendable GBuffer through `EncodeGBuffer`. Lighting costs about 0.55 ms a frame at
+  1920x1080 on an RTX 4070 (one paused capture of 535k splats: 5.65 ms self-illuminated, 6.20
+  ms shaded).
 
 ## Scaling
 
@@ -204,8 +226,22 @@ What to check, in this order:
 From Epic's renderer, which the copy keeps (`VGSSplatRenderPipeline.cpp`,
 `VGSSplatViewExtension.cpp`):
 
-- No lighting and no shadows, cast or received; no fog, Lumen or ray tracing. Splats are
-  composited over translucency, occluded only by opaque depth.
+- Self-illuminated (the default), no lighting and no shadows, cast or received; no fog,
+  Lumen or ray tracing. Splats are composited over translucency, occluded only by opaque
+  depth.
+- Shaded: lit as an opaque surface, so faint splats, hair and edges are dithered rather
+  than blended, and the capture casts no shadow (it is not in shadow depth passes). The
+  studio's light is already in its colours, so it shows lit twice. Needs the deferred
+  renderer (with or without Substrate), hardware rasterization and vertex shaders that read buffers
+  (`r.VGSSplat.*` defaults on desktop GPUs); elsewhere a Shaded capture is drawn
+  self-illuminated. No velocity and no stencil are written, so a
+  moving performer can ghost under TSR. With *Evaluate On* CPU the capture's normals are
+  not used (the shortest axis is). The VGS editor's normals of `maria_simbo_carrito`
+  (THE4DSCANNER rig) have scattered splats tilted the wrong way, which show as dark specks
+  under a strong light; the shading pass turns those clearly facing away from the camera
+  (`VGSShadedNormal`), the editor now corrects the worst before writing them, and *Normal
+  Smoothing* takes care of most of the rest. Forward shading is not lit (it has no GBuffer):
+  a Shaded capture stays self-illuminated there.
 - Within the capture splats blend in sRGB values (*Blend Space* sRGB, the default), but the
   capture is composited over the scene in linear light, as any translucent layer: its edges
   against the background are blended as Unreal blends, not as the viewer would.

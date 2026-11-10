@@ -106,6 +106,8 @@ void FVGSSplatSource::UploadChunk_RenderThread(FRDGBuilder& GraphBuilder, const 
 	ChunkBuffers.RotationSamples = Upload(TEXT("VGS.RotationSamples"), 4, C.rotation_samples, C.rotation_sample_words, 1);
 	ChunkBuffers.Books = Upload(TEXT("VGS.Books"), 16, C.books, C.book_floats, 4);
 	ChunkBuffers.Luts = Upload(TEXT("VGS.Luts"), 8, C.luts, C.lut_floats, 2);
+	ChunkBuffers.bHasNormals = C.normals != nullptr && C.normal_words >= Splats;
+	ChunkBuffers.Normals = Upload(TEXT("VGS.Normals"), 4, ChunkBuffers.bHasNormals ? C.normals : nullptr, ChunkBuffers.bHasNormals ? C.normal_words : 0, 1);
 	ChunkBuffers.Serial = C.serial;
 }
 
@@ -186,6 +188,26 @@ void FVGSSplatSource::Evaluate_RenderThread(FRDGBuilder& GraphBuilder, const FVG
 	P->SplatStride = Stride;
 	P->RWSplatBuffer = GraphBuilder.CreateUAV(Output);
 
+	// Normals, when the capture has them: one word per record, beside the records.
+	P->Normals = Srv(ChunkBuffers.Normals);
+	P->HasNormals = ChunkBuffers.bHasNormals ? 1u : 0u;
+	if (ChunkBuffers.bHasNormals)
+	{
+		const uint64 NormalBytes = uint64(NumSplats) * sizeof(uint32);
+		if (!NormalBuffer.IsValid() || NormalBuffer->GetSize() < NormalBytes)
+		{
+			const uint32 Capacity = uint32(Align(NormalBytes, uint64(BufferGranularity)));
+			NormalBuffer = GraphBuilder.ConvertToExternalBuffer(
+				GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), Capacity / sizeof(uint32)), TEXT("VGS.SplatNormals")));
+		}
+		P->RWNormalBuffer = GraphBuilder.CreateUAV(GraphBuilder.RegisterExternalBuffer(NormalBuffer));
+	}
+	else
+	{
+		NormalBuffer = nullptr;
+		P->RWNormalBuffer = GraphBuilder.CreateUAV(GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), 1), TEXT("VGS.SplatNormals.Dummy")));
+	}
+
 	TShaderMapRef<FVGSPackedEvaluateCS> Shader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
 	FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("VGS.EvaluatePacked %u", NumSplats), Shader, P,
 		FComputeShaderUtils::GetGroupCountWrapped(NumSplats, FVGSPackedEvaluateCS::ThreadGroupSize));
@@ -201,6 +223,7 @@ void FVGSSplatSource::Upload_RenderThread(FRDGBuilder& GraphBuilder, const FVGSP
 	if (Frame->NumSplats == 0 || Frame->Bytes.Num() == 0)
 	{
 		SplatBuffer = nullptr;
+		NormalBuffer = nullptr;
 		UploadedSplats = 0;
 		ChunkBuffers = FChunkBuffers();
 		return;
@@ -217,8 +240,10 @@ void FVGSSplatSource::Upload_RenderThread(FRDGBuilder& GraphBuilder, const FVGSP
 	// renderer registers it again in the same graph, which RDG resolves to this buffer.
 	SplatBuffer = GraphBuilder.ConvertToExternalBuffer(Buffer);
 	UploadedSplats = Frame->NumSplats;
-	// A CPU frame after packed ones: the chunk on the GPU is of no more use.
+	// A CPU frame after packed ones: the chunk on the GPU is of no more use. Evaluated on
+	// the CPU, a capture is lit by its splats' shortest axes; its normals are not uploaded.
 	ChunkBuffers = FChunkBuffers();
+	NormalBuffer = nullptr;
 	SetLayout(Frame->NumSplats, Frame->SHDegree, Frame->Stride, Frame->bQuantized, &Frame->Quantization);
 }
 
@@ -260,6 +285,12 @@ void FVGSSplatSource::Collect_RenderThread(FRDGBuilder& GraphBuilder, const FSce
 	Proxy.bBlendInSRGB = State.bBlendInSRGB;
 	Proxy.Grade = State.Grade;
 	Proxy.Tint = State.Tint;
+	Proxy.bLit = State.bLit;
+	Proxy.SelfIllumination = State.SelfIllumination;
+	Proxy.Roughness = State.Roughness;
+	Proxy.Specular = State.Specular;
+	Proxy.NormalSmoothing = State.NormalSmoothing;
+	Proxy.NormalBuffer = NormalBuffer;
 	Proxy.bVisible = true;
 	OutProxies.Add(&Proxy);
 }

@@ -20,6 +20,9 @@
 #include "VGSSplatSubsystem.h"
 #include "Engine/World.h"
 #include "Containers/SortedMap.h"
+#include "SceneRendering.h" // VGS CHANGE: FViewInfo, for the lit pass
+#include "SceneTextures.h" // VGS CHANGE
+#include "Substrate/Substrate.h" // VGS CHANGE: its material buffer, for the lit pass
 
 #define INVALID_ID 0xFFFFFFFF
 
@@ -250,7 +253,55 @@ FScreenPassTexture FVGSSplatViewExtension::PostProcessPass_RenderThread(FRDGBuil
 	return MoveTemp(Output);
 }
 
-void FVGSSplatViewExtension::Render(FRDGBuilder& GraphBuilder, const FSceneView& View, const FScreenPassRenderTarget& Output, FRDGTexture* SceneDepthTexture, FRDGTexture* SceneVelocityTexture)
+// VGS CHANGE: lit proxies, into the GBuffer before Unreal lights it.
+void FVGSSplatViewExtension::PostRenderBasePassDeferred_RenderThread(FRDGBuilder& GraphBuilder, FSceneView& InView, const FRenderTargetBindingSlots& RenderTargets, TRDGUniformBufferRef<FSceneTextureUniformParameters> SceneTextures)
+{
+	if (!GaussianSplat::IsEnabled() || InView.Family == nullptr || InView.Family->Scene == nullptr || !VGSSplat::SupportsLit(InView))
+	{
+		return;
+	}
+	// The scene textures uniform buffer has no GBuffer yet at this point; the textures are
+	// the view family's.
+	const FSceneTextures& Textures = static_cast<const FViewInfo&>(InView).GetSceneTextures();
+	const FViewInfo& ViewInfo = static_cast<const FViewInfo&>(InView);
+	VGSSplat::FLitTargets Targets;
+	Targets.SceneColor = Textures.Color.Target;
+	Targets.SceneDepth = Textures.Depth.Target;
+	Targets.ViewRect = ViewInfo.ViewRect;
+	if (Substrate::IsSubstrateEnabled() && !Substrate::IsSubstrateBlendableGBufferEnabled(InView.GetShaderPlatform()))
+	{
+		// Substrate's material buffer, as the engine's debug probes write it
+		// (DebugProbeRendering.cpp).
+		const FSubstrateSceneData* Substrate = ViewInfo.SubstrateViewData.SceneData;
+		if (Substrate == nullptr || !Substrate->MaterialTextureArray || !Substrate->MaterialTextureArrayUAVWithoutRTs || !Substrate->TopLayerTexture)
+		{
+			return;
+		}
+		Targets.bSubstrateMaterial = true;
+		Targets.SubstrateMaterial = Substrate->MaterialTextureArray;
+		Targets.SubstrateMaterialUAV = Substrate->MaterialTextureArrayUAVWithoutRTs;
+		Targets.SubstrateTopLayer = Substrate->TopLayerTexture;
+		Targets.SubstrateMaxBytesPerPixel = Substrate->EffectiveMaxBytesPerPixel;
+		Targets.bSubstrateRoughDiffuse = Substrate->bRoughDiffuse;
+	}
+	else
+	{
+		Targets.GBufferA = Textures.GBufferA;
+		Targets.GBufferB = Textures.GBufferB;
+		Targets.GBufferC = Textures.GBufferC;
+		if (!Targets.GBufferA || !Targets.GBufferB || !Targets.GBufferC)
+		{
+			return;
+		}
+	}
+	if (!Targets.SceneColor || !Targets.SceneDepth)
+	{
+		return;
+	}
+	Render(GraphBuilder, InView, FScreenPassRenderTarget(Targets.SceneColor, Targets.ViewRect, ERenderTargetLoadAction::ELoad), Targets.SceneDepth, nullptr, &Targets);
+}
+
+void FVGSSplatViewExtension::Render(FRDGBuilder& GraphBuilder, const FSceneView& View, const FScreenPassRenderTarget& Output, FRDGTexture* SceneDepthTexture, FRDGTexture* SceneVelocityTexture, const VGSSplat::FLitTargets* LitTargets)
 {
 	FVGSSplatRendererModule& Module = FModuleManager::GetModuleChecked<FVGSSplatRendererModule>("VGSSplatRenderer");
 
@@ -269,6 +320,13 @@ void FVGSSplatViewExtension::Render(FRDGBuilder& GraphBuilder, const FSceneView&
 	for (const FVGSSplatRenderProxy* RenderProxy : Proxies)
 	{
 		if (!RenderProxy->bVisible || !RenderProxy->GpuBuffer.IsValid())
+		{
+			continue;
+		}
+		// VGS CHANGE: a lit proxy is drawn in one pass or the other, never both; where lit
+		// drawing is not supported it stays in the post-process pass, self-illuminated.
+		const bool bDrawnLit = RenderProxy->bLit && VGSSplat::SupportsLit(View);
+		if (bDrawnLit != (LitTargets != nullptr))
 		{
 			continue;
 		}
@@ -312,6 +370,11 @@ void FVGSSplatViewExtension::Render(FRDGBuilder& GraphBuilder, const FSceneView&
 	});
 
 	VGSSplat::FRenderStats& RenderStats = Module.GetRenderStats_RenderThread();
+	if (LitTargets != nullptr)
+	{
+		VGSSplat::RenderLit(GraphBuilder, View, RenderItems, RenderStats, *LitTargets); // VGS CHANGE
+		return;
+	}
 	VGSSplat::Render(GraphBuilder, View, RenderItems, RenderStats, Output, SceneDepthTexture, SceneVelocityTexture);
 }
 

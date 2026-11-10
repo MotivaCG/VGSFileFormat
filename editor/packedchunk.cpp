@@ -23,7 +23,7 @@ enum : uint32_t {
     RotationInitial, RotationDeltaLut, RotationDeltas, PositionTrajectories,
     ScaleIndices = 32, PositionSamples, ShStaticIndices, ShTemporalIndices, Lifetimes, RotationSamples,
     Sh0Terms, Sh0Base, OpacityTerms, RotationBase, RotationTerms, RotationRanks, PositionBase,
-    PositionTerms, PositionRanks, OpacityScales
+    PositionTerms, PositionRanks, OpacityScales, Normals = 48
 };
 // The numerical descriptor's kind for SH index planes: one block of rows per plane.
 constexpr uint32_t ShIndexPlanesKind = 3;
@@ -87,7 +87,7 @@ void need(const Bytes &bytes, uint64_t size) { if (bytes.size() < size) throw st
 
 uint64_t PackedChunk::bytes() const {
     uint64_t total = 0;
-    for (const auto *v : {&splatA,&splatB,&splatC,&shStatic,&shTemporal,&positionTerms,&rotationTerms,&positionSamples,&rotationSamples}) total += v->size()*4;
+    for (const auto *v : {&splatA,&splatB,&splatC,&shStatic,&shTemporal,&positionTerms,&rotationTerms,&positionSamples,&rotationSamples,&normals}) total += v->size()*4;
     return total + (books.size() + luts.size())*4 + lifetimes.size();
 }
 
@@ -198,6 +198,9 @@ std::shared_ptr<PackedChunk> packChunk(const vgsdec::ChunkData &data, unsigned s
     c.splatA.assign(n*4, 0); c.splatB.assign(n*4, 0); c.splatC.assign(n*4, 0);
     c.lifetimes.assign(n*2, 0);
     if (c.hasSh) { c.shStatic.assign(n*c.planes, 0); c.shTemporal.assign(n*c.planes, 0); }
+    bool anyNormals = false;
+    for (size_t g = 1; g < groups.size(); ++g) anyNormals = anyNormals || (groups[g].splats && groups[g].optional(Normals));
+    if (anyNormals) c.normals.assign(n, 0);
 
     // Splats are sorted by term count and the boundaries are cumulative, so a splat's terms
     // follow by arithmetic (vgsframe.cpp, RankLookup); C keeps where they start and how many.
@@ -239,6 +242,11 @@ std::shared_ptr<PackedChunk> packChunk(const vgsdec::ChunkData &data, unsigned s
             B[2] = u32(opacityRq.data() + i*8); B[3] = (u32(opacityRq.data() + i*8 + 4) & 0x0FFFFFFFu) | ((code & 15u) << 28);
             C[3] = sh0Base[i*3] | (uint32_t(sh0Base[i*3+1]) << 8) | (uint32_t(sh0Base[i*3+2]) << 16) | (uint32_t(life[i*2+1]) << 24);
             c.lifetimes[(at+i)*2] = life[i*2]; c.lifetimes[(at+i)*2+1] = life[i*2+1];
+        }
+        if (const Bytes *normals = group.optional(Normals)) {
+            need(*normals, count*2);
+            for (uint64_t i = 0; i < count; ++i)
+                c.normals[at+i] = (*normals)[i*2] | (uint32_t((*normals)[i*2+1]) << 8) | 0x10000u;
         }
         if (flags & 1) {
             const Bytes &s = group.array(PositionSamples); need(s, count*samples*8);

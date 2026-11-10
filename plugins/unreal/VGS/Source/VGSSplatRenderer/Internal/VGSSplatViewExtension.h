@@ -13,6 +13,7 @@ class UGaussianSplatComponent;
 class FVGSSplatRenderProxy;
 class FVGSSplatViewExtension;
 struct FScreenPassRenderTarget;
+namespace VGSSplat { struct FLitTargets; } // VGS CHANGE
 
 #define UE_API VGSSPLATRENDERER_API
 
@@ -45,6 +46,8 @@ public:
 
 	virtual void SetupViewFamily(FSceneViewFamily& InViewFamily) override;
 	virtual void SubscribeToPostProcessingPass(EPostProcessingPass PassId, const FSceneView& View, FAfterPassCallbackDelegateArray& InOutPassCallbacks, bool bIsPassEnabled) override;
+	// VGS CHANGE: lit proxies go into the GBuffer here, after the base pass and before lighting.
+	virtual void PostRenderBasePassDeferred_RenderThread(FRDGBuilder& GraphBuilder, FSceneView& InView, const FRenderTargetBindingSlots& RenderTargets, TRDGUniformBufferRef<FSceneTextureUniformParameters> SceneTextures) override;
 
 	void RegisterComponent(const UGaussianSplatComponent* InComponent);
 	void UnregisterComponent(const UGaussianSplatComponent* InComponent);
@@ -54,7 +57,8 @@ protected:
 	virtual bool IsActiveThisFrame_Internal(const FSceneViewExtensionContext& Context) const override;
 
 	FScreenPassTexture PostProcessPass_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& View, const FPostProcessMaterialInputs& InOutInputs);
-	void Render(FRDGBuilder& GraphBuilder, const FSceneView& View, const FScreenPassRenderTarget& Output, FRDGTexture* SceneDepthTexture, FRDGTexture* SceneVelocityTexture);
+	// VGS CHANGE: with LitTargets, only the proxies drawn lit, into the GBuffer; without, the rest.
+	void Render(FRDGBuilder& GraphBuilder, const FSceneView& View, const FScreenPassRenderTarget& Output, FRDGTexture* SceneDepthTexture, FRDGTexture* SceneVelocityTexture, const VGSSplat::FLitTargets* LitTargets = nullptr);
 
 private:
 	TArray<const UGaussianSplatComponent*> RegisteredComponents;

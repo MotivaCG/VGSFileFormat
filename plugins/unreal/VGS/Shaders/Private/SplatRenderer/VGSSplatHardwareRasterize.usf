@@ -35,6 +35,13 @@
 #define GAUSSIAN_SPLAT_SUPERSAMPLE 0
 #endif // GAUSSIAN_SPLAT_SUPERSAMPLE
 
+// VGS CHANGE: a lit proxy (VGSSplatGBuffer.usf). Drawn as expected depth is, front to back,
+// with each splat's view-space normal x and y accumulated in the moments target's two free
+// channels beside the depth.
+#ifndef VGS_LIT
+#define VGS_LIT 0
+#endif // VGS_LIT
+
 float OpacityThreshold;
 float ExpectedDepthScale;
 float3 FalloffParameters;
@@ -45,6 +52,9 @@ StructuredBuffer<FPackedShadedVGSSplatData> ShadedVGSSplatBuffer;
 Buffer<uint> SortedIndexBuffer;
 #endif // !GAUSSIAN_SPLAT_GATHER_SHADED_SPLATS
 #endif // !GAUSSIAN_SPLAT_VERTEX_ATTRIBUTE_FETCH
+#if VGS_LIT
+StructuredBuffer<uint> ShadedNormalBuffer; // VGS CHANGE: by record, as ShadedVGSSplatBuffer
+#endif // VGS_LIT
 
 static const float2 QuadCorners[4] =
 {
@@ -60,6 +70,9 @@ struct FVertexOutput
 	float2 LocalUV : TEXCOORD0;
 	float4 Color : TEXCOORD1;
 	nointerpolation uint SplatIndex : TEXCOORD2;
+#if VGS_LIT
+	nointerpolation float2 ViewNormalXY : TEXCOORD3; // VGS CHANGE
+#endif // VGS_LIT
 };
 
 FVertexOutput CreateVGSSplatVertex(FShadedVGSSplatData SplatData, uint VertexID, uint SplatIndex)
@@ -73,6 +86,9 @@ FVertexOutput CreateVGSSplatVertex(FShadedVGSSplatData SplatData, uint VertexID,
 		Output.LocalUV  = 0;
 		Output.Color = 0;
 		Output.SplatIndex = 0;
+#if VGS_LIT
+		Output.ViewNormalXY = 0;
+#endif // VGS_LIT
 		return Output;
 	}
 
@@ -93,6 +109,9 @@ FVertexOutput CreateVGSSplatVertex(FShadedVGSSplatData SplatData, uint VertexID,
 	Output.Position = float4(CornerNDC * W, SplatData.Position.z, W);
 	Output.Color = SplatData.Color;
 	Output.SplatIndex = SplatIndex;
+#if VGS_LIT
+	Output.ViewNormalXY = 0; // set by MainVS
+#endif // VGS_LIT
 
 	return Output;
 }
@@ -125,7 +144,11 @@ FVertexOutput MainVS(
 	PackedSplatData = ShadedVGSSplatBuffer[SplatIndex];
 #endif // GAUSSIAN_SPLAT_VERTEX_ATTRIBUTE_FETCH
 
-	return CreateVGSSplatVertex(UnpackShadedVGSSplat(PackedSplatData), VertexID, SplatIndex);
+	FVertexOutput Output = CreateVGSSplatVertex(UnpackShadedVGSSplat(PackedSplatData), VertexID, SplatIndex);
+#if VGS_LIT && !GAUSSIAN_SPLAT_VERTEX_ATTRIBUTE_FETCH && !GAUSSIAN_SPLAT_GATHER_SHADED_SPLATS
+	Output.ViewNormalXY = VGSSplatUnpackHalf2(ShadedNormalBuffer[SplatIndex]); // VGS CHANGE
+#endif
+	return Output;
 }
 
 #if GAUSSIAN_SPLAT_SUPERSAMPLE
@@ -210,7 +233,11 @@ void MainPS(
 	
 #elif WRITE_EXPECTED_DEPTH
 	float LinearZ = ConvertFromDeviceZ(Input.Position.z) / ExpectedDepthScale;
+#if VGS_LIT
+	OutDepthMoments = float4(LinearZ, Input.ViewNormalXY, 1.0f) * SrcAlpha; // VGS CHANGE
+#else
 	OutDepthMoments = float4(LinearZ * SrcAlpha, 0.0f, 0.0f, SrcAlpha);
+#endif // VGS_LIT
 #endif
 	
 #if WRITE_VELOCITY

@@ -62,6 +62,11 @@ struct FVGSRenderState
 	bool bBlendInSRGB = true;
 	FVector3f Grade = FVector3f(1.0f, 1.0f, 1.0f); // gamma, contrast, saturation
 	FVector3f Tint = FVector3f(1.0f, 1.0f, 1.0f); // sRGB values
+	bool bLit = false;
+	float SelfIllumination = 0.1f;
+	float Roughness = 0.8f;
+	float Specular = 0.5f;
+	float NormalSmoothing = 2.0f;
 };
 
 /**
@@ -102,11 +107,14 @@ private:
 	{
 		uint64 Serial = 0;
 		TRefCountPtr<FRDGPooledBuffer> SplatA, SplatB, SplatC, ShStatic, ShTemporal, PositionTerms,
-			RotationTerms, PositionSamples, RotationSamples, Books, Luts;
+			RotationTerms, PositionSamples, RotationSamples, Books, Luts, Normals;
+		bool bHasNormals = false;
 	};
 	FChunkBuffers ChunkBuffers;
 
 	/** The instant on the GPU, kept for the frames of the game where the capture does not move on. */
 	TRefCountPtr<FRDGPooledBuffer> SplatBuffer;
 	uint32 UploadedSplats = 0;
+	/** Each record's normal, beside SplatBuffer; null when the capture carries none. */
+	TRefCountPtr<FRDGPooledBuffer> NormalBuffer;
 };

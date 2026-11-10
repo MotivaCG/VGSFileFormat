@@ -54,6 +54,12 @@ struct PackedChunk {
     std::vector<float> books;                     // RGBA per SH codebook entry: static, then temporal
     std::vector<float> luts;                      // 256 pairs: scale, base colour
     std::vector<uint8_t> lifetimes;               // birth and death sample per splat
+    // One word per splat when the capture carries normals (FORMAT.md, Normals), else empty:
+    // the two code bytes in the low 16 bits and bit 16 set; a word of 0 is a splat whose
+    // group has none. The code is in the splat's own axes ordered by its scale indices
+    // (A's fourth word), so a reader decodes it (vgs::decodeNormal) and turns it by the
+    // splat's rotation at the instant.
+    std::vector<uint32_t> normals;
 
     // The shared tables, kept to evaluate the basis at each instant.
     std::vector<uint8_t> positionTrajectories, sh0Trajectories, opacityTrajectories, rotationInitial, rotationDeltas;

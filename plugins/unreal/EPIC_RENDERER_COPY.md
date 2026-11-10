@@ -93,10 +93,33 @@ All marked `VGS CHANGE`; `tools/vgs_renderer_changes.patch` is the exact diff.
    parameters `BlendInSRGB` (shading, composite), `Intensity`, `Grade`, `Tint` and `GradeActive`
    (composite).
 5. **Proxy** (`VGSSplatRenderPipeline.h`, `FVGSSplatRenderProxy`). New `Intensity` (a scale
-   on the linear colour; VGS's *Intensity (EV)* is 2^EV), `bBlendInSRGB`, `Grade` and `Tint`.
+   on the linear colour; VGS's *Intensity (EV)* is 2^EV), `bBlendInSRGB`, `Grade` and `Tint`;
+   for lit captures `bLit`, `SelfIllumination`, `Roughness`, `Specular`, `NormalSmoothing`
+   and `NormalBuffer`.
 6. **Module** (`VGSSplatRendererModule.cpp`). No registration with Epic's
    `FGaussianSplatRendererRegistry`.
-7. **Build rules** (`VGSSplatRenderer.Build.cs`). `bTreatAsEngineModule`, since a project
+7. **Lit captures** (*Lighting* Shaded). The view extension also overrides
+   `PostRenderBasePassDeferred_RenderThread` and draws there, into the GBuffer, the proxies
+   with `bLit` (when `VGSSplat::SupportsLit`: deferred, hardware rasterization);
+   the post-process pass draws the rest, so each proxy is drawn in one pass only.
+   `VGSSplat::RenderLit` sorts front to back and forces the expected-depth path; the shading
+   pass (`VGSSplatShading.usf`, `VGSShadedNormal`) writes each splat's view-space normal,
+   from the proxy's `NormalBuffer` (the capture's normals) or its shortest axis turned to the
+   camera; the vertex and pixel shaders (`VGS_LIT` permutation of
+   `VGSSplatHardwareRasterize.usf`) accumulate it, opacity-weighted, beside the depth
+   moments; and a new full-screen pass, `FVGSSplatGBufferPS` in `VGSSplatGBuffer.usf`, writes
+   SceneColor (emissive), GBuffer A-C through Unreal's `EncodeGBuffer` and depth, after a
+   bilateral filter of the normal over the proxy's `NormalSmoothing`. With Substrate's own
+   material buffer it writes instead the buffer's first three slices and its top layer, one
+   simple slab packed with `PackSubstrateOut` (`SUBSTRATE_FASTPATH`: without it a global
+   shader packs the complex encoding, and those tiles go unlit in a scene with no complex
+   material), with the buffer's UAV from `View.SubstrateViewData.SceneData`, as the engine's
+   `DebugProbes.usf`. Console variables `r.VGSSplat.Lit.Dither`, `r.VGSSplat.Lit.MinCoverage`
+   and `r.VGSSplat.Lit.NormalSmoothing`. The grade
+   moved into `VGSSplatGrade.ush`, shared by the composite and the GBuffer pass.
+   `VGSSplatGrade.ush` and `VGSSplatGBuffer.usf` are VGS's own files in the copy's folder:
+   copying again removes them, and the patch adds them back.
+8. **Build rules** (`VGSSplatRenderer.Build.cs`). `bTreatAsEngineModule`, since a project
    plugin needs it to see the GaussianSplat runtime module's `Internal/` headers, and a
    dependency on `VGSShaders`, which maps `/Plugin/VGS`.
 
@@ -104,7 +127,8 @@ Outside the copy, in the VGS plugin's own code: `VGS.uplugin` lists `VGSSplatRen
 (Runtime, PostConfigInit, Win64); `VGSRuntime` registers its splat sources with
 `VGSSplat::RegisterExternalProxySource` instead of Epic's; and the capture component has
 *Blend Space* (sRGB, the default, or Linear, for a capture trained in linear light) and
-*Gamma*, *Contrast*, *Saturation* and *Tint* (the proxy's `Grade` and `Tint`), and applies *Intensity (EV)*
+*Gamma*, *Contrast*, *Saturation* and *Tint* (the proxy's `Grade` and `Tint`), *Lighting*,
+*Self-illumination Amount*, *Roughness*, *Specular* and *Normal Smoothing*, and applies *Intensity (EV)*
 through the proxy instead of in the splat data, where the per-splat
 clamp would cut it.
 
@@ -148,7 +172,16 @@ linear, and pre-exposure would be missing. Win64 is the only platform the plugin
    `Engine/Binaries` and run `exec <file>`). The host project
    has `/Game/Stress/Close` and `/Game/Stress/Close_Linear` for this, and
    `vgs.Debug.After 8 HighResShot 1920x1080` in `-ExecCmds` takes the screenshot once
-   things have loaded.
+   things have loaded. For lighting, `/Game/Stress/Lit` (a capture with normals, Shaded, a
+   red point light on its left), `Lit_Self` (the same, self-illuminated) and `Lit_Axis`
+   (no normals, Shaded); `ShowFlag.VisualizeBuffer 1,r.BufferVisualizationTarget
+   WorldNormal` shows the normals it wrote. `/Game/Stress/Color_Neon`, `Color_Rim` and
+   `Color_RGB` are the same capture in the dark under two or three coloured point lights.
+   Substrate without changing the project: `-ini:Engine:[/Script/Engine.RendererSettings]:r.Substrate=1`
+   on the command line (the first start compiles every shader again), and
+   `r.Substrate.ViewMode 4` shows its tile classification: every tile the capture covers
+   should be simple (green).
 
-The copy was taken and checked this way on 2026-11-10: copying again and applying the patch
-reproduced the plugin's files exactly.
+The copy was taken and checked this way on 2026-11-10, and the patch regenerated the same
+way after the lighting changes: copying again and applying it reproduced the plugin's files
+exactly.

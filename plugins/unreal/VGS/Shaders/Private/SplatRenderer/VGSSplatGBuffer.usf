@@ -1,0 +1,295 @@
+// VGS: not Epic's. Writes a lit capture into Unreal's GBuffer, after the base pass and before
+// lighting, as an opaque Default Lit surface: every light, the shadows other objects cast on
+// it, the skylight, Lumen, ambient occlusion and fog then reach it as they reach a mesh.
+//
+// The splats have been drawn front to back into two targets (VGSSplatHardwareRasterize.usf,
+// VGS_LIT): the colour, premultiplied, with transmittance in alpha; and the depth moments -
+// linear depth and the view-space normal's x and y, each weighted by what reaches the camera,
+// and transmittance again. A pixel gets the weighted means: one colour, one normal, one depth.
+// The GBuffer holds one opaque surface a pixel, so where the splats only partly cover it
+// (edges, hair) it is written or not at random, as much as they cover; temporal
+// anti-aliasing turns that back into a soft edge.
+//
+// With Substrate's own material buffer (SUBSTRATE_GBUFFER_FORMAT 1) the surface is one Default
+// Lit slab packed into it with PackSubstrateOut, as the engine's DebugProbes.usf stamps its
+// probes; with the legacy GBuffer, or Substrate's blendable one, EncodeGBuffer.
+
+#include "/Engine/Private/Common.ush"
+
+#define VGS_SUBSTRATE_MATERIAL (SUBSTRATE_ENABLED && SUBSTRATE_GBUFFER_FORMAT == 1)
+#if VGS_SUBSTRATE_MATERIAL
+// One slab, shaded inline, as DebugProbes.usf.
+#define SUBSTRATE_CLAMPED_CLOSURE_COUNT 1
+// And encoded as a simple material: the material translator sets this for a material that
+// qualifies; without it a global shader packs the complex encoding, its tiles are classified
+// complex, and with no complex material in the scene they are not lit at all.
+#define SUBSTRATE_FASTPATH 1
+#ifndef SUBSTRATE_INLINE_SHADING // also set by FVGSSplatGBufferPS, as for DebugProbes.usf
+#define SUBSTRATE_INLINE_SHADING 1
+#endif
+#include "/Engine/Private/Substrate/Substrate.ush"
+#define MATERIAL_SUBSTRATE_OPAQUE_PRECOMPUTED_LIGHTING 0
+#include "/Engine/Private/Substrate/SubstrateExport.ush"
+#endif
+
+#include "/Engine/Private/ColorSpace.ush"
+#include "/Engine/Private/Random.ush"
+#include "/Engine/Private/DeferredShadingCommon.ush"
+
+#if VGS_SUBSTRATE_MATERIAL
+#if SUBSTRATE_BASE_PASS_MRT_OUTPUT_COUNT != 3
+#error Substrate's base pass outputs changed: update the outputs below and FVGSSplatGBufferPS.
+#endif
+RWTexture2DArray<uint> MaterialTextureArrayUAV;
+uint MaxBytesPerPixel;
+uint bRoughDiffuse;
+
+// Nothing to do for a single slab; PackSubstrateOut needs them defined (as DebugProbes.usf).
+void FSubstratePixelHeader::PreUpdateAllBSDFWithBottomUpOperatorVisit(float3 V) {}
+void FSubstratePixelHeader::UpdateAllBSDFsOperatorCoverageTransmittance(FSubstrateIntegrationSettings Settings, float3 V) {}
+void FSubstratePixelHeader::UpdateAllOperatorsCoverageTransmittance() {}
+void FSubstratePixelHeader::UpdateAllBSDFWithBottomUpOperatorVisit() {}
+void FSubstratePixelHeader::PreUpdateAllBSDFWithBottomUpOperatorVisit_FullySimplified(float3 V) {}
+void FSubstratePixelHeader::UpdateAllBSDFsOperatorCoverageTransmittance_FullySimplified(FSubstrateIntegrationSettings Settings, float3 V) {}
+void FSubstratePixelHeader::UpdateAllOperatorsCoverageTransmittance_FullySimplified() {}
+void FSubstratePixelHeader::UpdateAllBSDFWithBottomUpOperatorVisit_FullySimplified() {}
+#endif
+
+#include "VGSSplatGrade.ush"
+
+Texture2D<float4> SplatColorTexture;
+Texture2D<float4> DepthMomentsTexture;
+
+float ExpectedDepthScale;
+uint BlendInSRGB;       // the colour target holds sRGB values (VGSSplatShading.usf), else linear
+float SelfIllumination; // the share of the colour kept as emissive
+float Intensity;        // on the emissive part, as on a self-illuminated capture
+float Roughness;
+float Specular;
+float MinCoverage;      // below this a pixel is never written
+uint Dither;            // 0: written where coverage reaches one half, no dithering
+float NormalSmoothing;  // the bilateral filter's radius, in Unreal units; 0 leaves each pixel's own normal
+
+// The splats' mean view-space normal at a pixel, and how much they cover it.
+float3 VGSPixelViewNormal(float4 Moments, float Coverage)
+{
+	const float2 XY = Moments.gb / Coverage;
+	return normalize(float3(XY, -sqrt(saturate(1.0f - dot(XY, XY)))));
+}
+
+// The normal averaged with the neighbours' on the same surface: one splat's normal is noisy
+// (a splat is a blob as often as a patch of surface), so lit directly the capture looks
+// crumpled and specked. Neighbours count by how much the splats cover them and by how close
+// they lie in depth, so the average does not cross a silhouette.
+float3 VGSSmoothedViewNormal(int2 PixelXY, float3 Normal, float Depth)
+{
+	// The radius on screen at this depth, so the capture is smoothed alike near and far.
+	const float Radius = min(NormalSmoothing * View.ViewToClip[0][0] * 0.5f * View.ViewSizeAndInvSize.x / max(Depth, 1.0f), 24.0f);
+	if (Radius < 1.0f)
+	{
+		return Normal;
+	}
+	const float Step = Radius / 2.0f;
+	const float Tolerance = 0.015f * Depth + 0.5f; // in Unreal units: 1.5 % of the distance
+	float3 Sum = Normal;
+	for (int y = -2; y <= 2; ++y)
+	{
+		for (int x = -2; x <= 2; ++x)
+		{
+			if (x == 0 && y == 0)
+			{
+				continue;
+			}
+			const int2 Tap = PixelXY + int2(round(float2(x, y) * Step));
+			const float4 Moments = DepthMomentsTexture.Load(int3(Tap, 0));
+			const float Coverage = 1.0f - Moments.a;
+			if (Coverage < 0.25f)
+			{
+				continue;
+			}
+			const float TapDepth = Moments.r / Coverage * ExpectedDepthScale;
+			const float DepthWeight = saturate(1.0f - abs(TapDepth - Depth) / Tolerance);
+			const float Distance2 = float(x * x + y * y);
+			const float Weight = Coverage * DepthWeight * exp(-0.5f * Distance2 / 2.0f);
+			Sum += VGSPixelViewNormal(Moments, Coverage) * Weight;
+		}
+	}
+	return normalize(Sum);
+}
+
+float3 VGSWorkingColorSpaceToSRGB(float3 Color)
+{
+#if WORKING_COLOR_SPACE_IS_SRGB
+	return Color;
+#else
+	return mul(XYZ_2_Linear_sRGB_MAT, LinearRGB_2_XYZ(Color));
+#endif
+}
+
+void MainPS(
+	float4 SvPosition : SV_Position,
+	out float4 OutSceneColor : SV_Target0,
+#if VGS_SUBSTRATE_MATERIAL
+	// The material buffer's first three slices, then the top layer, bound in this order by
+	// FVGSSplatGBufferPS's caller.
+	out uint OutSubstrateMat0 : SV_Target1,
+	out uint OutSubstrateMat1 : SV_Target2,
+	out uint OutSubstrateMat2 : SV_Target3,
+	out SUBSTRATE_TOP_LAYER_TYPE OutSubstrateTopLayer : SV_Target4,
+#else
+	out float4 OutGBufferA : SV_Target1,
+	out float4 OutGBufferB : SV_Target2,
+	out float4 OutGBufferC : SV_Target3,
+#endif
+	out float OutDepth : SV_Depth)
+{
+	const int3 Pixel = int3((int2)SvPosition.xy, 0);
+	const float4 Moments = DepthMomentsTexture.Load(Pixel);
+	const float Coverage = 1.0f - Moments.a;
+	if (Coverage < MinCoverage)
+	{
+		discard;
+	}
+	if (Dither != 0u)
+	{
+		if (Coverage < 0.999f && InterleavedGradientNoise(SvPosition.xy, View.StateFrameIndexMod8) >= Coverage)
+		{
+			discard;
+		}
+	}
+	else if (Coverage < 0.5f)
+	{
+		discard;
+	}
+
+	// The weighted means.
+	const float InvCoverage = 1.0f / Coverage;
+	const float4 Splat = SplatColorTexture.Load(Pixel);
+	float3 Linear;
+	if (BlendInSRGB != 0u)
+	{
+		float3 ColorSRGB = saturate(Splat.rgb * InvCoverage);
+		if (GradeActive != 0u)
+		{
+			ColorSRGB = VGSApplyGrade(ColorSRGB, 1.0f);
+		}
+		Linear = SRGBColorToWorkingColorSpace(VGSSRGBToLinear(ColorSRGB));
+	}
+	else
+	{
+		Linear = max(Splat.rgb * InvCoverage, 0.0f);
+		if (GradeActive != 0u)
+		{
+			const float3 ColorSRGB = VGSLinearToSRGB(saturate(VGSWorkingColorSpaceToSRGB(Linear)));
+			Linear = SRGBColorToWorkingColorSpace(VGSSRGBToLinear(VGSApplyGrade(ColorSRGB, 1.0f)));
+		}
+	}
+
+	const float Depth = Moments.r * InvCoverage * ExpectedDepthScale;
+	float3 ViewNormal = VGSPixelViewNormal(Moments, Coverage);
+	if (NormalSmoothing > 0.0f)
+	{
+		ViewNormal = VGSSmoothedViewNormal(int2(SvPosition.xy), ViewNormal, Depth);
+	}
+	const float3 WorldNormal = normalize(mul(ViewNormal, (float3x3)View.ViewToTranslatedWorld));
+
+	OutDepth = ConvertToDeviceZ(Depth);
+
+#if VGS_SUBSTRATE_MATERIAL
+	const float3 BaseColor = saturate(Linear);
+	FSubstratePixelHeader SubstratePixelHeader = InitialiseSubstratePixelHeader();
+	SubstratePixelHeader.SubstrateTree = GetInitialisedSubstrateTree();
+	SubstratePixelHeader.IrradianceAO = InitIrradianceAndOcclusion();
+	SubstratePixelHeader.IrradianceAO.MaterialAO = 1.0f;
+	SubstratePixelHeader.SetCastContactShadow(true);
+
+	const uint SharedLocalBasisIndex = 0;
+	SubstratePixelHeader.SharedLocalBases.Normals[SharedLocalBasisIndex] = WorldNormal;
+	SubstratePixelHeader.SharedLocalBases.Count = 1;
+
+	FSubstratePixelFootprint PixelFootprint = (FSubstratePixelFootprint)0;
+	FSubstrateData SlabData = GetSubstrateSlabBSDF(
+		PixelFootprint,
+		WorldNormal,
+		ComputeDiffuseAlbedo(BaseColor, 0.0f),	// DiffuseAlbedo, metallic 0
+		ComputeF0(Specular, BaseColor, 0.0f),	// F0
+		1.0f,									// F90
+		Roughness,
+		0.0f,									// Anisotropy
+		0,										// SSSProfileID
+		false,									// bSupportDefaultSSSProfile
+		0.0f,									// SSSMFP
+		0.0f,									// SSSMFPScale
+		0.0f,									// SSSPhaseAniso
+		SSS_TYPE_NONE,
+		0.0f,									// Emissive: scene colour holds it
+		0.0f,									// SecondRoughness
+		0.0f,									// SecondRoughnessWeight
+		0.0f,									// SecondRoughnessAsSimpleClearCoat
+		0.0f,									// ClearCoatUseSecondNormal
+		0.0f.xxx,								// ClearCoatBottomNormal
+		0.0f,									// FuzzAmount
+		0.0f,									// FuzzColor
+		0.0f,									// FuzzRoughness
+		1.0f,									// GlintValue
+		0.0f.xx,								// GlintUV
+		0.0f,									// SpecularProfile
+		1.0f,									// Thickness
+		false,									// bIsThinSurface
+		false,									// bIsAtTheBottomOfTopology
+		SharedLocalBasisIndex,
+		SubstratePixelHeader.SharedLocalBases.Types);
+
+	FSubstrateData SubstrateData = SubstratePixelHeader.SubstrateTree.PromoteParameterBlendedBSDFToOperator(SlabData, 0, 0, 0, 1);
+	SubstratePixelHeader.SubstrateTree.BSDFs[0].LuminanceWeightV = 1.0f;
+	SubstratePixelHeader.SubstrateTree.BSDFs[0].TransmittanceAboveAlongN = 1.0f;
+	SubstratePixelHeader.SubstrateTree.BSDFs[0].TopLayerDataWeight = 1.0f;
+
+	FSubstrateSubsurfaceData SSSData = (FSubstrateSubsurfaceData)0;
+	FSubstrateTopLayerData TopLayerData = (FSubstrateTopLayerData)0;
+	FSubstrateOpaqueRoughRefractionData OpaqueRoughRefractionData = (FSubstrateOpaqueRoughRefractionData)0;
+	const FSubstrateIntegrationSettings Settings = InitSubstrateIntegrationSettings(false, bRoughDiffuse != 0u, 0, false);
+
+	const uint2 PixelCoord = uint2(SvPosition.xy);
+	// Towards the camera, from where the surface is written.
+	const float3 TranslatedWorldPosition = SvPositionToTranslatedWorld(float4(SvPosition.xy, OutDepth, 1.0f));
+	const float3 V = normalize(View.TranslatedWorldCameraOrigin - TranslatedWorldPosition);
+	FSubstrateAddressing SubstrateAddressing = GetSubstratePixelDataByteOffset(PixelCoord, uint2(View.BufferSizeAndInvSize.xy), MaxBytesPerPixel);
+	FRWSubstrateMaterialContainer RWSubstrateMaterialContainer = InitialiseRWSubstrateMaterialContainer(MaterialTextureArrayUAV, 1, PixelCoord);
+	bool bSubstrateSubsurfaceEnable = false;
+	float3 EmissiveLuminance = 0.0f; // scene colour holds the emissive
+	PackSubstrateOut(
+		RWSubstrateMaterialContainer,
+		MaterialTextureArrayUAV,
+		0.0f,	// Dither
+		Settings,
+		SubstrateAddressing,
+		SubstratePixelHeader, SubstrateData, V, WorldNormal, bSubstrateSubsurfaceEnable, EmissiveLuminance,
+		SSSData, TopLayerData, OpaqueRoughRefractionData);
+
+	OutSubstrateMat0 = RWSubstrateMaterialContainer.MaterialRenderTargets[0];
+	OutSubstrateMat1 = RWSubstrateMaterialContainer.MaterialRenderTargets[1];
+	OutSubstrateMat2 = RWSubstrateMaterialContainer.MaterialRenderTargets[2];
+	OutSubstrateTopLayer = SubstratePackTopLayerData(TopLayerData);
+#else
+	FGBufferData GBuffer = (FGBufferData)0;
+	GBuffer.WorldNormal = WorldNormal;
+	GBuffer.BaseColor = saturate(Linear);
+	GBuffer.Metallic = 0.0f;
+	GBuffer.Specular = Specular;
+	GBuffer.Roughness = Roughness;
+	GBuffer.ShadingModelID = SHADINGMODELID_DEFAULT_LIT;
+	// No precomputed shadowing: GBufferE is not written, and the lighting reads it as 1.
+	GBuffer.SelectiveOutputMask = SKIP_PRECSHADOW_MASK;
+	GBuffer.GBufferAO = 1.0f;
+	GBuffer.IndirectIrradiance = 0.0f;
+	// As a primitive that casts contact shadows (BasePassPixelShader.usf, PerObjectGBufferData).
+	GBuffer.PerObjectGBufferData = 1.0f / 3.0f;
+
+	float4 OutGBufferD, OutGBufferE, OutVelocity;
+	EncodeGBuffer(GBuffer, OutGBufferA, OutGBufferB, OutGBufferC, OutGBufferD, OutGBufferE, OutVelocity, 0.0f);
+#endif
+
+	// The base pass writes emissive (and baked lighting) to scene colour; this is the capture's.
+	OutSceneColor = float4(Linear * (SelfIllumination * Intensity * View.PreExposure), 0.0f);
+}

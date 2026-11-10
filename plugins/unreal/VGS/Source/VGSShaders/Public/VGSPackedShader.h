@@ -49,6 +49,9 @@ class FVGSPackedEvaluateCS : public FGlobalShader
 		SHADER_PARAMETER(float, DensityExponent)
 		SHADER_PARAMETER(uint32, SplatStride)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWByteAddressBuffer, RWSplatBuffer)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, Normals)
+		SHADER_PARAMETER(uint32, HasNormals)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, RWNormalBuffer)
 	END_SHADER_PARAMETER_STRUCT()
 
 	static constexpr int32 ThreadGroupSize = 64;

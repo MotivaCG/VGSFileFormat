@@ -38,35 +38,7 @@ float InverseToneCurveLUTEdge;
 float Intensity;
 uint BlendInSRGB;
 
-// VGS CHANGE: a grade on the capture's display colour, sRGB values in [0, 1]: x = gamma
-// (above 1 brightens the midtones), y = contrast about 0.5, z = saturation; then Tint
-// multiplies the values (the tint colour as sRGB values). GradeActive is 0 when both are
-// (1, 1, 1), and then the colour is not touched at all.
-float3 Grade;
-float3 Tint;
-uint GradeActive;
-
-float3 VGSSRGBToLinear(float3 C)
-{
-	return select(C > 0.04045f, pow(C * (1.0f / 1.055f) + 0.0521327f, 2.4f), C * (1.0f / 12.92f));
-}
-
-float3 VGSLinearToSRGB(float3 C)
-{
-	return select(C > 0.0031308f, 1.055f * pow(C, 1.0f / 2.4f) - 0.055f, C * 12.92f);
-}
-
-// The colour of a pixel the splats barely cover is the scratch divided by a tiny opacity,
-// so it is unreliable; the grade fades out below 5 % opacity to keep it off the capture's
-// outline. What such a pixel adds to the image is small either way.
-float3 VGSApplyGrade(float3 ColorSRGB, float Opacity)
-{
-	float3 C = (ColorSRGB - 0.5f) * Grade.y + 0.5f;
-	C = pow(saturate(C), 1.0f / max(Grade.x, 1e-3f));
-	const float Luma = dot(C, float3(0.2126f, 0.7152f, 0.0722f));
-	C = saturate(lerp(Luma.xxx, C, Grade.z) * Tint);
-	return lerp(ColorSRGB, C, smoothstep(0.0f, 0.05f, Opacity));
-}
+#include "VGSSplatGrade.ush" // VGS CHANGE: Grade, Tint, GradeActive and the sRGB curves
 
 // Working color space -> sRGB linear. The LUT is baked against sRGB primaries (D65),
 // so non-sRGB projects must transform before sampling. The reverse transform ships

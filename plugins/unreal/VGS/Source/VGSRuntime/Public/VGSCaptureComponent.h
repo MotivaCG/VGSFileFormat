@@ -35,6 +35,23 @@ enum class EVGSUpAxis : uint8
 	Z UMETA(DisplayName = "Z Up"),
 };
 
+/** Whether the scene's lights reach the capture. */
+UENUM(BlueprintType)
+enum class EVGSLighting : uint8
+{
+	/** The capture shows its own colours, as captured; lights and shadows do not touch it. */
+	SelfIllumination UMETA(DisplayName = "Self-illumination"),
+	/**
+	 * Lit by the scene as an opaque surface: its colours become the base colour of a Default
+	 * Lit material, drawn into Unreal's GBuffer, so lights, shadows cast on it, the skylight,
+	 * Lumen and fog all apply. Edges and hair are dithered, which temporal anti-aliasing
+	 * smooths. The capture already has its studio's light in its colours, so it shows lit
+	 * twice; Self-illumination Amount keeps part of it glowing. Needs the deferred renderer
+	 * without Substrate; elsewhere the capture stays self-illuminated.
+	 */
+	Shaded UMETA(DisplayName = "Shaded"),
+};
+
 /** How splats are blended over each other: the way the capture was trained. */
 UENUM(BlueprintType)
 enum class EVGSBlendSpace : uint8
@@ -175,6 +192,33 @@ public:
 	/** How splats blend over each other: as the capture was trained. Most are trained in sRGB. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Rendering")
 	EVGSBlendSpace BlendSpace = EVGSBlendSpace::SRGB;
+
+	/** Self-illumination shows the capture as captured; Shaded lets the scene's lights reach it, by its normals when the capture has them. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Lighting")
+	EVGSLighting Lighting = EVGSLighting::SelfIllumination;
+
+	/** How much of the colour still glows when Shaded: 0 is lit only by the scene, 1 as bright as self-illuminated plus the lights. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Lighting",
+		meta = (DisplayName = "Self-illumination Amount", ClampMin = "0.0", ClampMax = "1.0", EditCondition = "Lighting == EVGSLighting::Shaded", EditConditionHides))
+	float SelfIlluminationAmount = 0.1f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Lighting",
+		meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "Lighting == EVGSLighting::Shaded", EditConditionHides))
+	float Roughness = 0.8f;
+
+	/** Unreal's Specular: 0.5 is the usual dielectric, 0 no highlights at all. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Lighting",
+		meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "Lighting == EVGSLighting::Shaded", EditConditionHides))
+	float Specular = 0.3f;
+
+	/**
+	 * Averages the normal over this distance (cm) on screen, among neighbours at the same depth:
+	 * a splat's own normal is noisy, and lit directly the capture looks crumpled and specked.
+	 * 0 lights each pixel by its splats' normal alone.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Lighting",
+		meta = (ClampMin = "0.0", UIMax = "10.0", Units = "cm", EditCondition = "Lighting == EVGSLighting::Shaded", EditConditionHides))
+	float NormalSmoothing = 2.0f;
 
 	// Grade of the capture's colours, as in an image editor: on its display (sRGB) values,
 	// after the splats are blended and before Intensity and the tone curve. 1 leaves them as
