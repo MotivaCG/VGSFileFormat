@@ -23,6 +23,12 @@
 			"PlatformAllowList": [ "Win64" ]
 		},
 		{
+			"Name": "VGSSplatRenderer",
+			"Type": "Runtime",
+			"LoadingPhase": "PostConfigInit",
+			"PlatformAllowList": [ "Win64" ]
+		},
+		{
 			"Name": "VGSRuntime",
 			"Type": "Runtime",
 			"LoadingPhase": "Default",

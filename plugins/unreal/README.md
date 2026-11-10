@@ -1,7 +1,9 @@
 # plugins/unreal — the Unreal Engine plugin
 
-Plays VGS captures in Unreal Engine 5.9 through Epic's own Gaussian Splat renderer
-(`Engine/Plugins/GaussianSplat`, experimental in 5.9). Phase 1: playback, nothing of
+Plays VGS captures in Unreal Engine 5.9 through a copy of Epic's Gaussian Splat renderer
+(`Engine/Plugins/GaussianSplat`, experimental in 5.9), changed to blend splats as they were
+trained. **The copy is Epic's code and has to be taken again for every engine version:
+[EPIC_RENDERER_COPY.md](EPIC_RENDERER_COPY.md).** Phase 1: playback, nothing of
 lighting or shadows. Draws and plays; sixteen captures at once keep their 30 fps — see
 *State* below.
 
@@ -9,7 +11,9 @@ lighting or shadows. Draws and plays; sixteen captures at once keep their 30 fps
 VGS/                         the plugin as it goes into a project's Plugins folder
   VGS.uplugin                depends on Epic's GaussianSplat plugin, Win64 only
   Shaders/Private/VGSPacked.usf  evaluates a packed chunk at an instant, on the GPU
+  Shaders/Private/SplatRenderer/ Epic's renderer shaders, copied (EPIC_RENDERER_COPY.md)
   Source/VGSShaders/         the shader's C++ side; loads at PostConfigInit, as global shaders must
+  Source/VGSSplatRenderer/   Epic's renderer module, copied and renamed (EPIC_RENDERER_COPY.md)
   Source/VGSRuntime/
     VGSRuntime.Build.cs      why it is treated as an engine module; where the bridge comes from
     Public/VGSCaptureComponent.h   the component: file, playback, splat and rendering settings
@@ -19,6 +23,8 @@ VGS/                         the plugin as it goes into a project's Plugins fold
     Private/VGSSplatSource.*       render thread: uploads, the evaluation pass, the proxy
     Private/VGSCaptureComponent.cpp time, scheduling, acquiring, packing (CPU)
 CMakeLists.txt               assembles the plugin with the bridge beside it, and its zip
+EPIC_RENDERER_COPY.md        what of Epic's is copied, what changed, how to update it
+tools/                       the copy script and the patch of VGS's changes to the copy
 ```
 
 ## Building and installing
@@ -45,13 +51,15 @@ Settings > Packaging > Additional Non-Asset Directories To Copy*.
 
 ## How it works
 
-Epic's renderer draws splats from a world's `FGaussianSplatViewExtension`, a scene view
-extension that runs in the post-process chain before depth of field. Besides its own
-components it accepts **external proxy sources**: a delegate called on the render thread
-once per view, which may add passes to the graph and append `FGaussianSplatRenderProxy`
-objects (a GPU buffer in its layout, a transform, a few settings). Niagara's splat
-renderer uses that hook (`NiagaraRendererSplats.cpp`), and so does this plugin; nothing of
-Epic's plugin is copied or modified.
+Epic's renderer draws splats from a world's scene view extension, which runs in the
+post-process chain before depth of field. Besides Epic's own components it accepts
+**external proxy sources**: a delegate called on the render thread once per view, which may
+add passes to the graph and append render proxies (a GPU buffer in its layout, a transform,
+a few settings). Niagara's splat renderer uses that hook, and so does this plugin - with
+`VGSSplatRenderer`, a renamed copy of that renderer that blends splats in sRGB values, as
+captures are trained, instead of in linear light (*Blend Space*; see
+[EPIC_RENDERER_COPY.md](EPIC_RENDERER_COPY.md) for why and what changed). Epic's own plugin
+stays enabled beside it, untouched.
 
 - **Decoding** is vgsbridge's, as in Blender and Houdini: two lanes per capture decode
   ahead of the times the component schedules, on Unreal's task workers (the bridge's
@@ -88,14 +96,15 @@ Epic's plugin is copied or modified.
   for the harmonics, so the capture's space stays the local space and the turn from the
   capture's axes and metres to Unreal's is one matrix in front of the component transform.
   The harmonics are therefore evaluated in the space they were fitted in.
-- **Exposure**: the renderer draws splats as an emissive of fixed brightness - DC + 0.5 as
-  sRGB, made linear, times `View.PreExposure` - exactly as it draws Epic's own splat
-  assets. A white of the capture is 1 in Unreal's units whatever the lights, so a scene
-  exposed for physical light units (EV100 around 14 under a sun) shows it nearly black,
-  and the renderer has no intensity control. *Intensity (EV)* is ours: k = 2^EV applied
-  to the coefficients as they are packed (each one past DC times k^(1/2.4), DC also
-  offset), which makes the linear colour exactly k times brighter above sRGB's toe. In
-  the quantized layout it costs nothing: the bytes stay, the scales and biases carry it.
+- **Colour and exposure**: splats are an emissive of fixed brightness - the blended sRGB
+  colour made linear, times `View.PreExposure`. A white of the capture is 1 in Unreal's
+  units whatever the lights, so a scene exposed for physical light units (EV100 around 14
+  under a sun) shows it nearly black. *Intensity (EV)* scales the linear colour by 2^EV
+  where the splats are composited (`FVGSSplatRenderProxy::Intensity`). *Invert UE Tone
+  Curve*, on by default, undoes Unreal's filmic tone curve on the splats with Epic's inverse
+  LUT, so they show as captured, as in the VGS viewer. (Before the copy, intensity was put
+  into the coefficients as they were packed - `VGSSplatLayout.h`, `gainFor`, still tested -
+  which the per-splat clamp of the sRGB blend would now cut.)
 
 ## Scaling
 
@@ -190,17 +199,27 @@ What to check, in this order:
 
 ## Known limits
 
-From the renderer, not from this plugin (`GaussianSplatRenderPipeline.cpp`,
-`GaussianSplatViewExtension.cpp` in Epic's plugin):
+From Epic's renderer, which the copy keeps (`VGSSplatRenderPipeline.cpp`,
+`VGSSplatViewExtension.cpp`):
 
 - No lighting and no shadows, cast or received; no fog, Lumen or ray tracing. Splats are
   composited over translucency, occluded only by opaque depth.
+- Within the capture splats blend in sRGB values (*Blend Space* sRGB, the default), but the
+  capture is composited over the scene in linear light, as any translucent layer: its edges
+  against the background are blended as Unreal blends, not as the viewer would.
+- Splats go through Unreal's filmic tone curve unless *Invert UE Tone Curve* (on by default)
+  undoes it; without it skin turns warmer, darks crush and contrast rises.
+- Splats are composited before TSR, at the scene's screen percentage, with no velocity of
+  their own: below 100 % they are upscaled, and a moving performer is softened by TSR's
+  history. `r.ScreenPercentage 100` keeps them sharp when it can be afforded.
 - Velocity is written as zero (camera motion only), so a moving performer can ghost under
-  TSR or motion blur. Depth writes are off unless `r.GaussianSplat.Depth` is set.
+  TSR or motion blur. Depth writes are off unless `r.VGSSplat.Depth` is set (the copy has its
+  own `r.VGSSplat.*` console variables; Epic's `r.GaussianSplat.*` no longer affect captures).
 - Objects are sorted against each other by the centre of their bounds; two captures that
   interpenetrate will show order errors where they overlap.
-- Epic's headers are all in `Internal/`, so `VGSRuntime` sets `bTreatAsEngineModule`. The
-  plugin is experimental in 5.9 and its interface may change between engine versions.
+- Epic's headers are all in `Internal/`, so `VGSRuntime` and `VGSSplatRenderer` set
+  `bTreatAsEngineModule`. Epic's plugin is experimental in 5.9 and may change between engine
+  versions, and the copy with it (EPIC_RENDERER_COPY.md).
 
 From this plugin, for later phases:
 

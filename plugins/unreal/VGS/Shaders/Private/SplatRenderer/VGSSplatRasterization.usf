@@ -1,0 +1,77 @@
+// VGS: a copy of Epic's GaussianSplat renderer (UE 5.9.0, CL 60351404), renamed by plugins/unreal/tools/copy_epic_splat_renderer.py.
+// What VGS changed is marked "VGS CHANGE"; see plugins/unreal/EPIC_RENDERER_COPY.md.
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+#include "/Engine/Private/Common.ush"
+#include "VGSSplatCommon.ush"
+
+int NumSplats;
+StructuredBuffer<FPackedShadedVGSSplatData> ShadedVGSSplatBuffer;
+Buffer<uint> SortedIndexBuffer;
+float3 FalloffParameters;
+
+RWTexture2D<float4> RWColorTexture;
+
+[numthreads(THREADGROUP_SIZE_2D, THREADGROUP_SIZE_2D, 1)]
+void MainCS(
+	uint2 DispatchThreadId : SV_DispatchThreadID
+)
+{
+	float2 Pixel = DispatchThreadId + 0.5;
+	RWColorTexture[Pixel] = 0;
+
+	if (any(Pixel >= (uint2)PrimaryView.ViewSizeAndInvSize.xy))
+	{
+		return;
+	}
+
+	for (int SplatIndex = 0; SplatIndex < NumSplats; ++SplatIndex)
+	{
+		int SortedSplatIndex = SortedIndexBuffer[SplatIndex];
+		FShadedVGSSplatData SplatData = UnpackShadedVGSSplat(ShadedVGSSplatBuffer[SortedSplatIndex]);
+		if (SplatData.Position.w > 0)
+		{
+			// Convert position to screen space
+			float2 NDC = SplatData.Position.xy / SplatData.Position.w;
+			float2 UV = NDC * float2(0.5, -0.5) + 0.5;
+			float2 ScreenPos = UV * PrimaryView.ViewSizeAndInvSize.xy;// +PrimaryView.ViewRectMin.xy;
+
+			// Focii
+			float2 Axis0 = SplatData.Axes.xy * float2(1, -1);
+			float2 Axis1 = SplatData.Axes.zw * float2(1, -1);
+
+			// Ellipse
+			float2 P = Pixel - ScreenPos;
+			float Pdot0 = dot(P, Axis0);
+			float Pdot1 = dot(P, Axis1);
+
+			float n0 = Pdot0 / dot(Axis0, Axis0);
+			float n1 = Pdot1 / dot(Axis1, Axis1);
+			float r2 = n0 * n0 + n1 * n1;
+
+			bool bValid = r2 < GAUSSIAN_SPLAT_RADIUS_SQUARED;
+			if (bValid)
+			{
+				float SplatWeight = VGSSplatFalloff(r2, FalloffParameters);
+
+				float DstAlpha = RWColorTexture[Pixel].a;
+				float DstTransmittance = 1.0 - DstAlpha;
+				float3 DstColor = RWColorTexture[Pixel].rgb;
+
+				float SrcAlpha = SplatData.Color.a * SplatWeight;
+				float SrcTransmittance = 1.0 - SrcAlpha;
+
+				// UNDER
+				float3 SrcColor = SplatData.Color.rgb * SrcAlpha;
+				float3 Color = DstColor + SrcColor * DstTransmittance;
+				float Transmittance = SrcTransmittance * DstTransmittance;
+				RWColorTexture[Pixel] = float4(Color, 1.0 - Transmittance);
+
+				if (Transmittance < GAUSSIAN_SPLAT_MIN_TRANSMITTANCE)
+				{
+					break;
+				}
+			}
+		}
+	}
+}

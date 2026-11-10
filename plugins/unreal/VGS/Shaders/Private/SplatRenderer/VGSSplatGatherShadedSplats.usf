@@ -1,0 +1,64 @@
+// VGS: a copy of Epic's GaussianSplat renderer (UE 5.9.0, CL 60351404), renamed by plugins/unreal/tools/copy_epic_splat_renderer.py.
+// What VGS changed is marked "VGS CHANGE"; see plugins/unreal/EPIC_RENDERER_COPY.md.
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+#include "/Engine/Private/Common.ush"
+#include "/Engine/Private/ComputeShaderUtils.ush"
+
+#include "VGSSplatCommon.ush"
+
+#ifndef GAUSSIAN_SPLAT_GPU_DRIVEN_PIPELINE
+#define GAUSSIAN_SPLAT_GPU_DRIVEN_PIPELINE 0
+#endif // GAUSSIAN_SPLAT_GPU_DRIVEN_PIPELINE
+
+#ifndef GAUSSIAN_SPLAT_VERTEX_ATTRIBUTE_FETCH
+#define GAUSSIAN_SPLAT_VERTEX_ATTRIBUTE_FETCH 0
+#endif // GAUSSIAN_SPLAT_VERTEX_ATTRIBUTE_FETCH
+
+uint NumSplats;
+StructuredBuffer<FPackedShadedVGSSplatData> ShadedVGSSplatBuffer;
+Buffer<uint> SortedIndexBuffer;
+
+#if GAUSSIAN_SPLAT_GPU_DRIVEN_PIPELINE
+Buffer<uint> SplatCountBuffer;
+#endif // GAUSSIAN_SPLAT_GPU_DRIVEN_PIPELINE
+
+#if GAUSSIAN_SPLAT_VERTEX_ATTRIBUTE_FETCH
+RWBuffer<uint> RWGatheredShadedVGSSplatVertexBuffer;
+#else
+RWStructuredBuffer<FPackedShadedVGSSplatData> RWGatheredShadedVGSSplatBuffer;
+#endif // GAUSSIAN_SPLAT_VERTEX_ATTRIBUTE_FETCH
+
+[numthreads(THREADGROUP_SIZE_1D, 1, 1)]
+void MainCS(
+	uint3 GroupId : SV_GroupID,
+	uint GroupThreadIndex : SV_GroupIndex
+)
+{
+	const uint SortedIndex = GetUnWrappedDispatchThreadId(GroupId, GroupThreadIndex, THREADGROUP_SIZE_1D);
+
+#if GAUSSIAN_SPLAT_GPU_DRIVEN_PIPELINE
+	const uint SplatCount = min(SplatCountBuffer[0], NumSplats);
+#else
+	const uint SplatCount = NumSplats;
+#endif // GAUSSIAN_SPLAT_GPU_DRIVEN_PIPELINE
+	
+	if (SortedIndex >= SplatCount)
+	{
+		return;
+	}
+
+	const FPackedShadedVGSSplatData PackedSplatData = ShadedVGSSplatBuffer[SortedIndexBuffer[SortedIndex]];
+
+#if GAUSSIAN_SPLAT_VERTEX_ATTRIBUTE_FETCH
+	const uint Base = SortedIndex * 6;
+	RWGatheredShadedVGSSplatVertexBuffer[Base + 0] = asuint(PackedSplatData.ViewZ);
+	RWGatheredShadedVGSSplatVertexBuffer[Base + 1] = PackedSplatData.NDC;
+	RWGatheredShadedVGSSplatVertexBuffer[Base + 2] = PackedSplatData.Axes.x;
+	RWGatheredShadedVGSSplatVertexBuffer[Base + 3] = PackedSplatData.Axes.y;
+	RWGatheredShadedVGSSplatVertexBuffer[Base + 4] = PackedSplatData.Color.x;
+	RWGatheredShadedVGSSplatVertexBuffer[Base + 5] = PackedSplatData.Color.y;
+#else
+	RWGatheredShadedVGSSplatBuffer[SortedIndex] = PackedSplatData;
+#endif // GAUSSIAN_SPLAT_VERTEX_ATTRIBUTE_FETCH
+}

@@ -1,0 +1,90 @@
+// VGS: a copy of Epic's GaussianSplat renderer (UE 5.9.0, CL 60351404), renamed by plugins/unreal/tools/copy_epic_splat_renderer.py.
+// What VGS changed is marked "VGS CHANGE"; see plugins/unreal/EPIC_RENDERER_COPY.md.
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+#include "/Engine/Private/Common.ush"
+#include "/Engine/Private/ComputeShaderUtils.ush"
+#include "VGSSplatCommon.ush"
+
+StructuredBuffer<FPackedShadedVGSSplatData> ShadedVGSSplatBuffer;
+uint NumSplats;
+
+int2 TileSize;
+int2 TileDimension;
+RWBuffer<uint> RWTileCountBuffer;
+RWBuffer<uint> RWMinDepthPerTileBuffer;
+RWBuffer<uint> RWMaxDepthPerTileBuffer;
+
+#if SHADER_DEBUG
+struct FTileDebugData
+{
+	uint2 Tile0;
+	uint2 Tile1;
+};
+RWStructuredBuffer<FTileDebugData> RWTileDebugBuffer;
+#endif
+
+[numthreads(THREADGROUP_SIZE_1D, 1, 1)]
+void MainCS(
+	uint3 GroupId : SV_GroupID,
+	uint GroupThreadIndex : SV_GroupIndex
+)
+{
+	uint DispatchThreadId = GetUnWrappedDispatchThreadId(GroupId, GroupThreadIndex, THREADGROUP_SIZE_1D);
+	if (DispatchThreadId >= NumSplats)
+	{
+		return;
+	}
+
+	FPackedShadedVGSSplatData PackedSplatData = ShadedVGSSplatBuffer[DispatchThreadId];
+	FShadedVGSSplatData SplatData = UnpackShadedVGSSplat(PackedSplatData);
+	if (SplatData.Position.w > 0)
+	{
+		float2 ViewSize = PrimaryView.ViewSizeAndInvSize.xy;
+
+		// Convert position to screen space
+		float2 NDC = SplatData.Position.xy / SplatData.Position.w;
+		float2 UV = NDC * float2(0.5, -0.5) + 0.5;
+		float2 ScreenPos = UV * ViewSize;// +PrimaryView.ViewRectMin.xy;
+
+		// Focii
+		float2 Axis[] = {
+			SplatData.Axes.xy * float2(1, -1),
+			SplatData.Axes.zw * float2(1, -1)
+		};
+
+		float4 BBox2D = ComputeBBox(ScreenPos, Axis[0], Axis[1]);
+		BBox2D.xy = clamp(BBox2D.xy, 0, ViewSize - 1);
+		BBox2D.zw = clamp(BBox2D.zw, 0, ViewSize - 1);
+
+		uint2 Tiles[] = {
+			ComputeTile2D(floor(BBox2D.xy), TileSize),
+			ComputeTile2D(ceil(BBox2D.zw), TileSize)
+		};
+
+		for (uint TileY = Tiles[0].y; TileY <= Tiles[1].y; ++TileY)
+		{
+			for (uint TileX = Tiles[0].x; TileX <= Tiles[1].x; ++TileX)
+			{
+				uint TileID = ComputeTileId(uint2(TileX, TileY), TileDimension);
+				InterlockedAdd(RWTileCountBuffer[TileID], 1);
+
+				float CameraDepth = PackedSplatData.ViewZ;
+				InterlockedMin(RWMinDepthPerTileBuffer[TileID], asuint(CameraDepth));
+				InterlockedMax(RWMaxDepthPerTileBuffer[TileID], asuint(CameraDepth));
+			}
+		}
+
+#if SHADER_DEBUG
+		RWTileDebugBuffer[DispatchThreadId].Tile0 = Tiles[0];
+		RWTileDebugBuffer[DispatchThreadId].Tile1 = Tiles[1];
+#endif
+	}
+	else
+	{
+#if SHADER_DEBUG
+		RWTileDebugBuffer[DispatchThreadId].Tile0 = 0;
+		RWTileDebugBuffer[DispatchThreadId].Tile1 = 0;
+#endif
+	}
+}

@@ -1,0 +1,132 @@
+// VGS: a copy of Epic's GaussianSplat renderer (UE 5.9.0, CL 60351404), renamed by plugins/unreal/tools/copy_epic_splat_renderer.py.
+// What VGS changed is marked "VGS CHANGE"; see plugins/unreal/EPIC_RENDERER_COPY.md.
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+#include "/Engine/Private/Common.ush"
+#include "/Engine/Private/ComputeShaderUtils.ush"
+#include "/Engine/Private/Nanite/NaniteHZBCull.ush"
+
+#include "VGSSplatCommon.ush"
+
+// Transform
+float4x4 LocalToWorld;
+
+// Clusters
+uint NumClusters;
+float PointScaleFactor;
+StructuredBuffer<FGaussianSplatCluster> ClusterBuffer;
+
+// LOD settings
+int LOD;
+float ErrorThreshold;
+
+// Output
+RWBuffer<uint> RWClusterOutputBuffer;
+RWBuffer<uint> RWClusterCount;
+
+#ifndef GAUSSIAN_SPLAT_USE_WAVE_OPS
+#define GAUSSIAN_SPLAT_USE_WAVE_OPS 0
+#endif
+
+float ComputeErrorInPixels(uint ClusterIndex, float4x4 LocalToTranslatedWorld)
+{
+	const FGaussianSplatCluster Cluster = ClusterBuffer[ClusterIndex];
+	
+	float DepthScale = 1.0f;
+	bool bIsPerspective = !IsOrthoProjection(PrimaryView.ViewToClip);
+	if (bIsPerspective)
+	{
+		const float3 BoundsCenterLocal = 0.5f * (Cluster.BoundsMax + Cluster.BoundsMin);
+		const float3 BoundsExtentLocal = 0.5f * (Cluster.BoundsMax - Cluster.BoundsMin) * max(1.0f, PointScaleFactor);
+		float3 BoundsCenterWorld = mul(float4(BoundsCenterLocal, 1.0), LocalToTranslatedWorld).xyz;
+		float3 BoundsCenterView = mul(float4(BoundsCenterWorld, 1.0), PrimaryView.TranslatedWorldToView).xyz;
+		float BoundsMaxScaleWorld = max3(length(LocalToWorld[0].xyz), length(LocalToWorld[1].xyz), length(LocalToWorld[2].xyz));
+
+		float Radius = length(BoundsExtentLocal) * BoundsMaxScaleWorld;
+		float Z = max(BoundsCenterView.z - Radius, PrimaryView.NearPlane);
+		float CosTheta = Z * rsqrt(dot(BoundsCenterView.xy, BoundsCenterView.xy) + Z * Z);
+		DepthScale = rcp(Z * CosTheta);
+	}
+	
+	float NormalizedErrorPixels = DepthScale * (0.5f * PrimaryView.ViewSizeAndInvSize.x) / PrimaryView.ClipToView[0][0];
+	float BoundsMinScaleWorld = min3(length(LocalToWorld[0].xyz), length(LocalToWorld[1].xyz), length(LocalToWorld[2].xyz));
+	float ErrorPixel = Cluster.Error * NormalizedErrorPixels * BoundsMinScaleWorld;
+	return ErrorPixel;
+}
+
+[numthreads(THREADGROUP_SIZE_1D, 1, 1)]
+void MainCS(
+	uint3 GroupId : SV_GroupID,
+	uint GroupThreadIndex : SV_GroupIndex
+)
+{
+	const uint ClusterIndex = GetUnWrappedDispatchThreadId(GroupId, GroupThreadIndex, THREADGROUP_SIZE_1D);
+	if (ClusterIndex >= NumClusters)
+	{
+		return;
+	}
+
+	const FGaussianSplatCluster Cluster = ClusterBuffer[ClusterIndex];
+
+	const float3 RelativeWorldOrigin = LocalToWorld[3].xyz;
+	const float3 TranslatedWorldOrigin = DFFastToTranslatedWorld(
+		DFFromTileOffset_Hack(MakeLWCVector3(PrimaryView.ViewTilePosition, RelativeWorldOrigin)),
+		PrimaryView.PreViewTranslation);
+
+	float4x4 LocalToTranslatedWorld = LocalToWorld;
+	LocalToTranslatedWorld[3] = float4(TranslatedWorldOrigin, LocalToWorld[3].w);
+
+	const float3 BoundsCenter = 0.5f * (Cluster.BoundsMax + Cluster.BoundsMin);
+	const float3 BoundsExtent = 0.5f * (Cluster.BoundsMax - Cluster.BoundsMin) * max(1.0f, PointScaleFactor);
+
+	const FFrustumCullData Cull = BoxCullFrustum(
+		BoundsCenter,
+		BoundsExtent,
+		LocalToTranslatedWorld,
+		PrimaryView.TranslatedWorldToClip,
+		PrimaryView.ViewToClip,
+		IsOrthoProjection(PrimaryView.ViewToClip),
+		true,
+		false);
+	
+	bool bVisible = Cull.bIsVisible;
+	if (bVisible)
+	{
+		// Static LOD
+		if (LOD >= 0)
+		{
+			bVisible = (Cluster.Level == (uint) LOD);
+		}
+		// Screen-based LOD
+		else
+		{
+			float Error = ComputeErrorInPixels(ClusterIndex, LocalToTranslatedWorld);
+			float ParentError = (Cluster.ParentIndex == ~0u) ? POSITIVE_INFINITY : ComputeErrorInPixels(Cluster.ParentIndex, LocalToTranslatedWorld);
+			bVisible = (ErrorThreshold >= Error) && (ErrorThreshold < ParentError);
+		}
+	}
+
+#if GAUSSIAN_SPLAT_USE_WAVE_OPS
+	const uint WaveWriteOffset  = WavePrefixCountBits(bVisible);
+	const uint WaveVisibleCount = WaveActiveCountBits(bVisible);
+
+	uint Offset = 0;
+	if (WaveIsFirstLane() && WaveVisibleCount > 0)
+	{
+		InterlockedAdd(RWClusterCount[0], WaveVisibleCount, Offset);
+	}
+	Offset = WaveReadLaneFirst(Offset);
+
+	if (bVisible)
+	{
+		RWClusterOutputBuffer[Offset + WaveWriteOffset] = ClusterIndex;
+	}
+#else
+	if (bVisible)
+	{
+		uint WriteIndex = 0;
+		InterlockedAdd(RWClusterCount[0], 1u, WriteIndex);
+		RWClusterOutputBuffer[WriteIndex] = ClusterIndex;
+	}
+#endif
+}

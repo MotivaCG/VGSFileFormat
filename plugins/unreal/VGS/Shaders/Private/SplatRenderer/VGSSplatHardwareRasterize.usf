@@ -1,0 +1,308 @@
+// VGS: a copy of Epic's GaussianSplat renderer (UE 5.9.0, CL 60351404), renamed by plugins/unreal/tools/copy_epic_splat_renderer.py.
+// What VGS changed is marked "VGS CHANGE"; see plugins/unreal/EPIC_RENDERER_COPY.md.
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+#include "/Engine/Private/Common.ush"
+#include "/Engine/Private/BlueNoise.ush"
+
+#include "VGSSplatCommon.ush"
+
+#ifndef USE_BLUE_NOISE
+#define USE_BLUE_NOISE 0
+#endif // USE_BLUE_NOISE
+
+#ifndef WRITE_STOCHASTIC_DEPTH
+#define WRITE_STOCHASTIC_DEPTH 0
+#endif // WRITE_STOCHASTIC_DEPTH
+
+#ifndef WRITE_EXPECTED_DEPTH
+#define WRITE_EXPECTED_DEPTH 0
+#endif // WRITE_EXPECTED_DEPTH
+
+#ifndef WRITE_VELOCITY
+#define WRITE_VELOCITY 0
+#endif // WRITE_VELOCITY
+
+#ifndef GAUSSIAN_SPLAT_GATHER_SHADED_SPLATS
+#define GAUSSIAN_SPLAT_GATHER_SHADED_SPLATS 0
+#endif // GAUSSIAN_SPLAT_GATHER_SHADED_SPLATS
+
+#ifndef GAUSSIAN_SPLAT_VERTEX_ATTRIBUTE_FETCH
+#define GAUSSIAN_SPLAT_VERTEX_ATTRIBUTE_FETCH 0
+#endif // GAUSSIAN_SPLAT_VERTEX_ATTRIBUTE_FETCH
+
+#ifndef GAUSSIAN_SPLAT_SUPERSAMPLE
+#define GAUSSIAN_SPLAT_SUPERSAMPLE 0
+#endif // GAUSSIAN_SPLAT_SUPERSAMPLE
+
+float OpacityThreshold;
+float ExpectedDepthScale;
+float3 FalloffParameters;
+int SuperSampleGrid;
+#if !GAUSSIAN_SPLAT_VERTEX_ATTRIBUTE_FETCH
+StructuredBuffer<FPackedShadedVGSSplatData> ShadedVGSSplatBuffer;
+#if !GAUSSIAN_SPLAT_GATHER_SHADED_SPLATS
+Buffer<uint> SortedIndexBuffer;
+#endif // !GAUSSIAN_SPLAT_GATHER_SHADED_SPLATS
+#endif // !GAUSSIAN_SPLAT_VERTEX_ATTRIBUTE_FETCH
+
+static const float2 QuadCorners[4] =
+{
+	float2(-1, -1),
+	float2(+1, -1),
+	float2(-1, +1),
+	float2(+1, +1),
+};
+
+struct FVertexOutput
+{
+	float4 Position : SV_Position;
+	float2 LocalUV : TEXCOORD0;
+	float4 Color : TEXCOORD1;
+	nointerpolation uint SplatIndex : TEXCOORD2;
+};
+
+FVertexOutput CreateVGSSplatVertex(FShadedVGSSplatData SplatData, uint VertexID, uint SplatIndex)
+{
+	FVertexOutput Output;
+
+	// Discard if behind camera
+	if (SplatData.Position.w <= 0.0f)
+	{
+		Output.Position = 0;
+		Output.LocalUV  = 0;
+		Output.Color = 0;
+		Output.SplatIndex = 0;
+		return Output;
+	}
+
+	float2 Corner = QuadCorners[VertexID & 3];
+	Output.LocalUV = Corner * GAUSSIAN_SPLAT_RADIUS;
+
+	float W = SplatData.Position.w;
+	float2 Axis0 = SplatData.Axes.xy * float2(1, -1);
+	float2 Axis1 = SplatData.Axes.zw * float2(1, -1);
+
+	float2 CornerOffsetPixels = Corner.x * GAUSSIAN_SPLAT_RADIUS * Axis0 + Corner.y * GAUSSIAN_SPLAT_RADIUS * Axis1;
+	float2 CornerOffsetNDC = CornerOffsetPixels * PrimaryView.ViewSizeAndInvSize.zw * float2(2, -2);
+
+	float2 CenterNDC = SplatData.Position.xy / W;
+	float2 CornerNDC = CenterNDC + CornerOffsetNDC;
+
+	// Clip-space position and color
+	Output.Position = float4(CornerNDC * W, SplatData.Position.z, W);
+	Output.Color = SplatData.Color;
+	Output.SplatIndex = SplatIndex;
+
+	return Output;
+}
+
+FVertexOutput MainVS(
+	uint VertexID : SV_VertexID,
+	uint InstanceID : SV_InstanceID
+#if GAUSSIAN_SPLAT_VERTEX_ATTRIBUTE_FETCH
+	// Per-instance stream matching FPackedShadedVGSSplatData's 24-byte layout.
+	, uint2 InViewZAndNDC : ATTRIBUTE0
+	, uint2 InAxes        : ATTRIBUTE1
+	, uint2 InColor       : ATTRIBUTE2
+#endif // GAUSSIAN_SPLAT_VERTEX_ATTRIBUTE_FETCH
+)
+{
+	FPackedShadedVGSSplatData PackedSplatData;
+
+#if GAUSSIAN_SPLAT_VERTEX_ATTRIBUTE_FETCH
+	PackedSplatData.ViewZ = asfloat(InViewZAndNDC.x);
+	PackedSplatData.NDC   = InViewZAndNDC.y;
+	PackedSplatData.Axes  = InAxes;
+	PackedSplatData.Color = InColor;
+	const uint SplatIndex = InstanceID;
+#elif GAUSSIAN_SPLAT_GATHER_SHADED_SPLATS
+	// Records are already in sorted order: read them sequentially.
+	const uint SplatIndex = InstanceID;
+	PackedSplatData = ShadedVGSSplatBuffer[SplatIndex];
+#else
+	const uint SplatIndex = SortedIndexBuffer[InstanceID];
+	PackedSplatData = ShadedVGSSplatBuffer[SplatIndex];
+#endif // GAUSSIAN_SPLAT_VERTEX_ATTRIBUTE_FETCH
+
+	return CreateVGSSplatVertex(UnpackShadedVGSSplat(PackedSplatData), VertexID, SplatIndex);
+}
+
+#if GAUSSIAN_SPLAT_SUPERSAMPLE
+float SuperSampledSplatWeight(float2 LocalUV)
+{
+	const float2 dUVdx = ddx(LocalUV);
+	const float2 dUVdy = ddy(LocalUV);
+	const float Step = 1.0f / (float) SuperSampleGrid;
+
+	float Weight = 0.0f;
+	for (int y = 0; y < SuperSampleGrid; ++y)
+	{
+		for (int x = 0; x < SuperSampleGrid; ++x)
+		{
+			const float2 Offset = (float2(x, y) + 0.5f) * Step - 0.5f;
+			const float2 UV = LocalUV + dUVdx * Offset.x + dUVdy * Offset.y;
+			const float r2 = dot(UV, UV);
+			Weight += (r2 < GAUSSIAN_SPLAT_RADIUS_SQUARED) ? VGSSplatFalloff(r2, FalloffParameters) : 0.0f;
+		}
+	}
+	return Weight * Step * Step;
+}
+#endif // GAUSSIAN_SPLAT_SUPERSAMPLE
+
+float WangHash(uint2 PixelCoord, uint Seed)
+{
+	uint S = PixelCoord.x * 1973u + PixelCoord.y * 9277u + Seed * 26699u;
+	S = (S ^ 61u) ^ (S >> 16u);
+	S *= 9u;
+	S ^= (S >> 4u);
+	S *= 0x27d4eb2du;
+	S ^= (S >> 15u);
+	return float(S & 0x00FFFFFFu) / float(0x01000000u);
+}
+
+void MainPS(
+	FVertexOutput Input,
+	out float4 OutColor : SV_Target0
+#if WRITE_STOCHASTIC_DEPTH
+	, out float OutDepth : SV_Target1
+#elif WRITE_EXPECTED_DEPTH
+	, out float4 OutDepthMoments : SV_Target1
+#endif
+#if WRITE_VELOCITY
+	, out float4 OutVelocity : SV_Target1
+#endif
+)
+{
+#if GAUSSIAN_SPLAT_SUPERSAMPLE
+	float SplatWeight = SuperSampledSplatWeight(Input.LocalUV);
+	if (SplatWeight <= 0.0f)
+	{
+		discard;
+	}
+#else
+	float r2 = dot(Input.LocalUV, Input.LocalUV);
+	if (r2 >= GAUSSIAN_SPLAT_RADIUS_SQUARED)
+	{
+		discard;
+	}
+
+	float SplatWeight = VGSSplatFalloff(r2, FalloffParameters);
+#endif
+	float SrcAlpha    = Input.Color.a * SplatWeight;
+	if (SrcAlpha < OpacityThreshold)
+	{
+		discard;
+	}
+
+	// Premultiplied alpha
+	// VGS CHANGE: no View.PreExposure here; the scratch holds sRGB values, and exposure is
+	// applied after they are made linear (VGSSplatInverseToneCurvePostBlend.usf).
+	OutColor = float4(Input.Color.rgb * SrcAlpha, SrcAlpha);
+
+#if WRITE_STOCHASTIC_DEPTH
+	#if USE_BLUE_NOISE
+		float RandSample = BlueNoiseScalar((uint2) Input.Position.xy, View.StateFrameIndex + Input.SplatIndex);
+	#else
+		float RandSample = WangHash((uint2) Input.Position.xy, View.StateFrameIndex ^ (Input.SplatIndex * 2654435761u));
+	#endif
+	OutDepth = (RandSample < SrcAlpha) ? Input.Position.z : 0.0f;
+	
+#elif WRITE_EXPECTED_DEPTH
+	float LinearZ = ConvertFromDeviceZ(Input.Position.z) / ExpectedDepthScale;
+	OutDepthMoments = float4(LinearZ * SrcAlpha, 0.0f, 0.0f, SrcAlpha);
+#endif
+	
+#if WRITE_VELOCITY
+	OutVelocity = (float4) 0;
+#endif
+}
+
+void MainPS_StochasticDepth(
+	FVertexOutput Input
+#if WRITE_VELOCITY
+	, out float4 OutVelocity : SV_Target0
+#endif
+)
+{
+	float r2 = dot(Input.LocalUV, Input.LocalUV);
+	if (r2 >= GAUSSIAN_SPLAT_RADIUS_SQUARED)
+	{
+		discard;
+	}
+
+	float SplatWeight = VGSSplatFalloff(r2, FalloffParameters);
+	float Alpha       = Input.Color.a * SplatWeight;
+
+#if USE_BLUE_NOISE
+		float RandSample = BlueNoiseScalar((uint2) Input.Position.xy, View.StateFrameIndex + Input.SplatIndex);
+#else
+	float RandSample = WangHash((uint2) Input.Position.xy, View.StateFrameIndex ^ (Input.SplatIndex * 2654435761u));
+#endif
+	if (RandSample >= Alpha)
+	{
+		discard;
+	}
+
+#if WRITE_VELOCITY
+	// Write sentinel value, enforcing camera-motion only for the fragment
+	OutVelocity = (float4) 0;
+#endif
+}
+
+Texture2D<float4> DepthMomentsTexture;
+
+void MainPS_ExpectedDepth(
+	float4 SvPosition : SV_Position,
+	out float OutDepth : SV_Depth)
+{
+	float4 Moments = DepthMomentsTexture.Load(int3((int2) SvPosition.xy, 0));
+	float Numerator = Moments.r;
+	float Denominator = 1.0f - Moments.a;
+	if (Denominator <= 1e-5f)
+	{
+		discard;
+	}
+	float ExpectedDepth = (Numerator / Denominator) * ExpectedDepthScale;
+	OutDepth = ConvertToDeviceZ(ExpectedDepth);
+}
+
+Texture2D<float> DepthTexture;
+
+void MainPS_ResolveDepth(
+	float4 SvPosition : SV_Position,
+	out float OutDepth : SV_Depth
+#if WRITE_VELOCITY
+	, out float4 OutVelocity : SV_Target0
+#endif
+)
+{
+	float Depth = DepthTexture.Load(int3((int2) SvPosition.xy, 0));
+	if (Depth <= 0.0f)
+	{
+		discard;
+	}
+	OutDepth = Depth;
+
+#if WRITE_VELOCITY
+	OutVelocity = (float4) 0;
+#endif
+}
+
+void MainPS_ResolveVelocity(
+	float4 SvPosition : SV_Position,
+	out float4 OutVelocity : SV_Target0)
+{
+	float Coverage   = 1.0f - DepthMomentsTexture.Load(int3((int2) SvPosition.xy, 0)).a;
+#if USE_BLUE_NOISE
+	float RandSample = BlueNoiseScalar((uint2) SvPosition.xy, View.StateFrameIndex);
+#else
+	float RandSample = WangHash((uint2) SvPosition.xy, View.StateFrameIndex);
+#endif
+	
+	if (RandSample >= Coverage)
+	{
+		discard;
+	}
+	OutVelocity = (float4) 0;
+}

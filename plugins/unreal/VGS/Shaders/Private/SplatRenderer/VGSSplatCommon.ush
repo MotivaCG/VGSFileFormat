@@ -1,0 +1,115 @@
+// VGS: a copy of Epic's GaussianSplat renderer (UE 5.9.0, CL 60351404), renamed by plugins/unreal/tools/copy_epic_splat_renderer.py.
+// What VGS changed is marked "VGS CHANGE"; see plugins/unreal/EPIC_RENDERER_COPY.md.
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+#pragma once
+
+#include "/Plugin/GaussianSplat/Shared/GaussianSplatDefinitions.h"
+
+struct FShadedVGSSplatData
+{
+	float4 Position;
+	float4 Axes;
+	float4 Color;
+};
+
+// Mirrors FGaussianSplatCluster in VGSSplatCluster.h, keep the two in sync.
+struct FGaussianSplatCluster
+{
+	float3 BoundsMin;
+	uint   SplatOffset;
+	float3 BoundsMax;
+	uint   SplatCount;
+	uint   Level;
+	float  Error;
+	uint   ParentIndex;
+	uint   Padding;
+};
+
+uint VGSSplatPackHalf2(float2 V)
+{
+	return f32tof16(V.x) | (f32tof16(V.y) << 16);
+}
+
+float2 VGSSplatUnpackHalf2(uint Packed)
+{
+	return float2(f16tof32(Packed & 0xFFFFu), f16tof32(Packed >> 16));
+}
+
+struct FPackedShadedVGSSplatData
+{
+	float ViewZ;
+	uint  NDC;
+	uint2 Axes;
+	uint2 Color;
+};
+
+FPackedShadedVGSSplatData PackShadedVGSSplat(FShadedVGSSplatData In)
+{
+	const float ViewZ = In.Position.z * PrimaryView.ClipToView[2][2] + In.Position.w * PrimaryView.ClipToView[3][2];
+
+	FPackedShadedVGSSplatData Out;
+	// Culled splats use sentinel value: -FLOAT_MAX.
+	Out.ViewZ = (In.Position.w > 0.0f) ? ViewZ : -FLOAT_MAX;
+	Out.NDC = VGSSplatPackHalf2(In.Position.xy / In.Position.w);
+	Out.Axes = uint2(VGSSplatPackHalf2(In.Axes.xy), VGSSplatPackHalf2(In.Axes.zw));
+	Out.Color = uint2(VGSSplatPackHalf2(In.Color.rg), VGSSplatPackHalf2(In.Color.ba));
+	return Out;
+}
+
+FShadedVGSSplatData UnpackShadedVGSSplat(FPackedShadedVGSSplatData In)
+{
+	FShadedVGSSplatData Out;
+
+	if (In.ViewZ <= 0.0f)
+	{
+		Out.Position = -FLOAT_MAX;
+		Out.Axes = (float4)0;
+		Out.Color = (float4)0;
+		return Out;
+	}
+
+	const float2 NDC = VGSSplatUnpackHalf2(In.NDC);
+	const float W = In.ViewZ * PrimaryView.ViewToClip[2][3] + PrimaryView.ViewToClip[3][3];
+	const float ClipZ = In.ViewZ * PrimaryView.ViewToClip[2][2] + PrimaryView.ViewToClip[3][2];
+
+	Out.Position = float4(NDC * W, ClipZ, W);
+	Out.Axes = float4(VGSSplatUnpackHalf2(In.Axes.x), VGSSplatUnpackHalf2(In.Axes.y));
+	Out.Color = float4(VGSSplatUnpackHalf2(In.Color.x), VGSSplatUnpackHalf2(In.Color.y));
+	return Out;
+}
+
+float VGSSplatFalloff(float r2, float3 FalloffParameters)
+{
+	return saturate(FalloffParameters.x * exp(-r2) + FalloffParameters.y * r2 + FalloffParameters.z);
+}
+
+uint2 ComputeTile2D(float2 ScreenPos, uint2 TileSize)
+{
+	return ScreenPos / TileSize;
+}
+
+uint ComputeTileId(uint2 Tile2D, int2 TileDimension)
+{
+	return Tile2D.y * TileDimension.x + Tile2D.x;
+}
+
+float4 ComputeBBox(float2 P, float2 X, float2 Y)
+{
+#if 1
+	float2 HalfExtent = float2(
+		sqrt(X.x * X.x + Y.x * Y.x),
+		sqrt(X.y * X.y + Y.y * Y.y)
+	);
+	return float4(P - HalfExtent, P + HalfExtent);
+#else
+	float2 P00 = P - Y - X;
+	float2 P01 = P - Y + X;
+	float2 P10 = P + Y - X;
+	float2 P11 = P + X + Y;
+
+	float2 Min = min(min(P00, P01), min(P10, P11));
+	float2 Max = max(max(P00, P01), max(P10, P11));
+	return float4(Min, Max);
+#endif
+}

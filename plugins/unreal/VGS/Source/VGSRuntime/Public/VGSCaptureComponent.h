@@ -35,6 +35,23 @@ enum class EVGSUpAxis : uint8
 	Z UMETA(DisplayName = "Z Up"),
 };
 
+/** How splats are blended over each other: the way the capture was trained. */
+UENUM(BlueprintType)
+enum class EVGSBlendSpace : uint8
+{
+	/**
+	 * In sRGB values, as most 3D Gaussian splatting training does and as the VGS viewer
+	 * draws. The blended result is made linear when it is composited into the scene.
+	 */
+	SRGB UMETA(DisplayName = "sRGB (as trained)"),
+	/**
+	 * In linear light, as Epic's renderer does, for captures trained that way. Used on an
+	 * sRGB-trained capture, faint splats show far more than they should: coloured haze
+	 * around hair and edges.
+	 */
+	Linear,
+};
+
 /** Where each instant of the capture is worked out. */
 UENUM(BlueprintType)
 enum class EVGSEvaluateOn : uint8
@@ -155,9 +172,18 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Rendering", meta = (DisplayName = "Intensity (EV)", UIMin = "-4.0", UIMax = "18.0"))
 	float IntensityEV = 0.0f;
 
-	/** Keep the capture's colours under Unreal's filmic tone curve by inverting it (an approximation, as Epic's component does). */
+	/** How splats blend over each other: as the capture was trained. Most are trained in sRGB. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Rendering")
+	EVGSBlendSpace BlendSpace = EVGSBlendSpace::SRGB;
+
+	/**
+	 * Show the capture's colours as captured, as the VGS viewer does, by undoing Unreal's
+	 * filmic tone curve on the splats (Epic's inverse LUT, applied when they are composited).
+	 * Off, the tone curve applies to them as to the rest of the scene: more contrast, crushed
+	 * darks and warmer skin.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Rendering", meta = (DisplayName = "Invert UE Tone Curve"))
-	bool bInvertToneCurve = false;
+	bool bInvertToneCurve = true;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Rendering", AdvancedDisplay,
 		meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bInvertToneCurve", EditConditionHides))
@@ -291,7 +317,6 @@ private:
 	FPlaybackSummary Summary;
 
 	/** What the instant on screen was packed with, so a change from Blueprint repacks it. */
-	float PackedIntensityEV = 0.0f;
 	EVGSGpuLayout PackedLayout = EVGSGpuLayout::Float;
 	float PackedDensity = 1.0f;
 };

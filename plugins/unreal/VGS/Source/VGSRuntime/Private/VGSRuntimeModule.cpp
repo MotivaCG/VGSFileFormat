@@ -28,3 +28,40 @@ public:
 };
 
 IMPLEMENT_MODULE(FVGSRuntimeModule, VGSRuntime)
+
+#if !UE_BUILD_SHIPPING
+#include "Containers/Ticker.h"
+#include "Engine/Engine.h"
+#include "Engine/GameViewportClient.h"
+#include "HAL/IConsoleManager.h"
+
+// -ExecCmds runs on the first frame, before a capture has a frame on screen or Epic's
+// renderer has loaded its inverse tone curve; screenshots for comparing looks need later.
+namespace
+{
+	void RunAfter(const TArray<FString>& Args)
+	{
+		if (Args.Num() < 2)
+		{
+			return;
+		}
+		const float Delay = FCString::Atof(*Args[0]);
+		TArray<FString> Rest = Args;
+		Rest.RemoveAt(0);
+		const FString Command = FString::Join(Rest, TEXT(" "));
+		FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([Command](float)
+		{
+			if (GEngine && GEngine->GameViewport)
+			{
+				GEngine->GameViewport->ConsoleCommand(Command);
+			}
+			return false;
+		}), Delay);
+	}
+
+	FAutoConsoleCommand GVGSDebugAfter(
+		TEXT("vgs.Debug.After"),
+		TEXT("vgs.Debug.After <seconds> <command...>: runs a console command later, through the game viewport, e.g. vgs.Debug.After 8 HighResShot 1920x1080"),
+		FConsoleCommandWithArgsDelegate::CreateStatic(&RunAfter));
+}
+#endif

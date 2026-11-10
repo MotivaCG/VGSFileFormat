@@ -1,0 +1,36 @@
+// VGS: a copy of Epic's GaussianSplat renderer (UE 5.9.0, CL 60351404), renamed by plugins/unreal/tools/copy_epic_splat_renderer.py.
+// What VGS changed is marked "VGS CHANGE"; see plugins/unreal/EPIC_RENDERER_COPY.md.
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+#include "/Engine/Public/Platform.ush"
+#include "/Engine/Private/ThreadGroupPrefixSum.ush"
+#include "/Engine/Shared/HLSLStaticAssert.h"
+
+HLSL_STATIC_ASSERT(THREADGROUP_SIZE_1D == NUM_THREADS_PER_GROUP, "THREADGROUP_SIZE_1D != NUM_THREADS_PER_GROUP");
+
+uint NumItems;
+Buffer<uint> ItemBuffer;
+RWBuffer<uint> RWPrefixSumBuffer;
+
+[numthreads(THREADGROUP_SIZE_1D, 1, 1)]
+void MainCS(
+	uint GroupThreadId : SV_GroupThreadID
+)
+{
+	int RunningSum = 0;
+	for (int Offset = 0; Offset < NumItems; Offset += THREADGROUP_SIZE_1D)
+	{
+		int Index = Offset + GroupThreadId;
+		bool bInBounds = Index < NumItems;
+
+		int GroupSum = 0;
+		int Item = bInBounds ? ItemBuffer[Index] : 0;
+		int PrefixSum = ThreadGroupPrefixSum(Item, GroupThreadId, GroupSum);
+
+		if (bInBounds)
+		{
+			RWPrefixSumBuffer[Index] = RunningSum + PrefixSum;
+		}
+		RunningSum += GroupSum;
+	}
+}

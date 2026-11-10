@@ -222,7 +222,7 @@ void FVGSSplatSource::Upload_RenderThread(FRDGBuilder& GraphBuilder, const FVGSP
 	SetLayout(Frame->NumSplats, Frame->SHDegree, Frame->Stride, Frame->bQuantized, &Frame->Quantization);
 }
 
-void FVGSSplatSource::Collect_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& View, TArray<const FGaussianSplatRenderProxy*>& OutProxies)
+void FVGSSplatSource::Collect_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& View, TArray<const FVGSSplatRenderProxy*>& OutProxies)
 {
 	// Once per frame of the game, not per view: the first view uploads, the rest reuse it.
 	if (PendingFrame.IsValid())
@@ -256,6 +256,8 @@ void FVGSSplatSource::Collect_RenderThread(FRDGBuilder& GraphBuilder, const FSce
 	Proxy.OpacityScale = State.OpacityScale;
 	Proxy.InverseToneCurveStrength = State.InverseToneCurveStrength;
 	Proxy.bInvertExpandGamutLUT = State.bInvertExpandGamut;
+	Proxy.Intensity = State.Intensity;
+	Proxy.bBlendInSRGB = State.bBlendInSRGB;
 	Proxy.bVisible = true;
 	OutProxies.Add(&Proxy);
 }

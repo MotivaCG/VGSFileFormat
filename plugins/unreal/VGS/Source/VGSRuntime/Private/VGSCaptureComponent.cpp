@@ -8,7 +8,7 @@
 #include "Async/ParallelFor.h"
 #include "HAL/PlatformTime.h"
 #include "Engine/World.h"
-#include "GaussianSplatViewExtension.h" // GaussianSplat::RegisterExternalProxySource (Internal)
+#include "VGSSplatViewExtension.h" // VGSSplat::RegisterExternalProxySource (VGSSplatRenderer)
 #include "HAL/IConsoleManager.h"
 #include "Misc/App.h"
 #include "Misc/Paths.h"
@@ -422,7 +422,7 @@ void UVGSCaptureComponent::UpdateFrame(bool bAdvancing, double AdvancePerTick)
 	}
 
 	// Settings that need the instant packed again, wherever they were changed from.
-	if (IntensityEV != PackedIntensityEV || (!Player->IsPacked() && GpuLayout != PackedLayout) || (Player->IsPacked() && Density != PackedDensity))
+	if ((!Player->IsPacked() && GpuLayout != PackedLayout) || (Player->IsPacked() && Density != PackedDensity))
 	{
 		bFrameDirty = true;
 	}
@@ -580,7 +580,9 @@ void UVGSCaptureComponent::PackAndSend(const vgsb_frame& Frame)
 	}
 
 	const bool bQuantized = GpuLayout == EVGSGpuLayout::Quantized;
-	const vgsunreal::Gain Gain = vgsunreal::gainFor(FMath::Exp2(IntensityEV));
+	// Intensity is applied where the splats are composited (FVGSSplatRenderProxy::Intensity),
+	// after they are blended: in the data, a gain would be clipped by the per-splat clamp.
+	const vgsunreal::Gain Gain;
 	const uint32 Stride = bQuantized ? vgsunreal::quantizedStride(View.shCoefficients) : vgsunreal::floatStride(View.shCoefficients);
 	const uint64 Bytes = uint64(View.count) * Stride;
 	if (Bytes > uint64(MAX_int32))
@@ -640,12 +642,6 @@ void UVGSCaptureComponent::PackAndSend(const vgsb_frame& Frame)
 		});
 	}
 
-	if (bQuantized)
-	{
-		// The bytes are packed as decoded; the renderer's scales and biases carry the gain.
-		vgsunreal::applyGain(Packed->Quantization, Gain);
-	}
-	PackedIntensityEV = IntensityEV;
 	PackedLayout = GpuLayout;
 
 	ShownFrame = Packed;
@@ -678,16 +674,15 @@ void UVGSCaptureComponent::SendPacked(const vgsb_packed_frame& Frame)
 	Gpu->Basis.SetNumUninitialized(Texels);
 	FMemory::Memcpy(Gpu->Basis.GetData(), Frame.basis, size_t(Texels) * sizeof(FVector4f));
 
-	const vgsunreal::Gain Gain = vgsunreal::gainFor(FMath::Exp2(IntensityEV));
-	Gpu->Gain = Gain.m;
-	Gpu->DcOffset = Gain.dcOffset;
+	// Intensity is applied where the splats are composited, not here (see PackAndSend).
+	Gpu->Gain = 1.0f;
+	Gpu->DcOffset = 0.0f;
 	// As vgsbridge thins a CPU frame (vgsb_set_density): the same records, the same opacity.
 	const float Kept = FMath::Clamp(Density, 0.01f, 1.0f);
 	Gpu->bThinned = Kept < 1.0f;
 	Gpu->DensityThreshold = Gpu->bThinned ? uint32(FMath::Min(double(Kept) * 4294967296.0, 4294967295.0)) : MAX_uint32;
 	Gpu->DensityExponent = Gpu->bThinned ? 1.0f / Kept : 1.0f;
 
-	PackedIntensityEV = IntensityEV;
 	PackedDensity = Density;
 	ShownFrame.Reset();
 	// Every record of the chunk is drawn; those not alive at the instant have no size.
@@ -737,6 +732,8 @@ void UVGSCaptureComponent::PushRenderState()
 	State.OpacityScale = OpacityScale;
 	State.InverseToneCurveStrength = bInvertToneCurve ? InverseToneCurveStrength : 0.0f;
 	State.bInvertExpandGamut = bInvertExpandGamut;
+	State.Intensity = FMath::Exp2(IntensityEV);
+	State.bBlendInSRGB = BlendSpace == EVGSBlendSpace::SRGB;
 
 	ENQUEUE_RENDER_COMMAND(VGSSetState)([Target = Source, State](FRHICommandList&)
 	{
@@ -757,8 +754,8 @@ void UVGSCaptureComponent::RegisterSource()
 	}
 
 	Source = MakeShared<FVGSSplatSource, ESPMode::ThreadSafe>();
-	GaussianSplat::RegisterExternalProxySource(World,
-		FOnCollectGaussianSplatProxies::FDelegate::CreateSP(Source.ToSharedRef(), &FVGSSplatSource::Collect_RenderThread));
+	VGSSplat::RegisterExternalProxySource(World,
+		FOnCollectVGSSplatProxies::FDelegate::CreateSP(Source.ToSharedRef(), &FVGSSplatSource::Collect_RenderThread));
 
 	// Registered again after an edit: show what was on screen without waiting for a new frame.
 	if (ShownFrame.IsValid())

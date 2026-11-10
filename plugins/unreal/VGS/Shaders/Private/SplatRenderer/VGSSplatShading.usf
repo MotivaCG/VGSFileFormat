@@ -1,0 +1,460 @@
+// VGS: a copy of Epic's GaussianSplat renderer (UE 5.9.0, CL 60351404), renamed by plugins/unreal/tools/copy_epic_splat_renderer.py.
+// What VGS changed is marked "VGS CHANGE"; see plugins/unreal/EPIC_RENDERER_COPY.md.
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+//#include "/Plugin/GaussianSplat/Shared/GaussianSplatShared.h"
+#include "/Engine/Private/Common.ush"
+#include "/Engine/Private/ColorSpace.ush"
+#include "/Engine/Private/ComputeShaderUtils.ush"
+#define GaussianViewData PrimaryView
+#define GPU_SIMULATION 1
+#include "/Plugin/GaussianSplat/Shared/GaussianSplatShared.h"
+#include "/Plugin/VGS/Private/SplatRenderer/SphericalGaussianCommon.ush"
+
+#include "VGSSplatCommon.ush"
+
+#ifndef SH_DEGREE
+#define SH_DEGREE 3
+#endif
+
+#ifndef SHADER_DEBUG
+#define SHADER_DEBUG 0
+#endif
+
+#if SHADER_DEBUG
+	// Pipeline debug configurations are enabled with shader constants
+	uint DebugGpuDrivenPipeline;
+	uint DebugClustering;
+	uint DebugFrustumCull;
+	uint DebugWriteSortKeys;
+
+	#define GAUSSIAN_SPLAT_GPU_DRIVEN_PIPELINE (DebugGpuDrivenPipeline != 0u)
+	#define GAUSSIAN_SPLAT_CLUSTERING (DebugClustering != 0u)
+	#define FRUSTUM_CULL (DebugFrustumCull != 0u)
+	#define GAUSSIAN_SPLAT_WRITE_SORT_KEYS (DebugWriteSortKeys != 0u)
+#else
+	// Production environment forces preferred execution
+	#define GAUSSIAN_SPLAT_GPU_DRIVEN_PIPELINE 1
+	#define GAUSSIAN_SPLAT_CLUSTERING 1
+	#define FRUSTUM_CULL 1
+	#define GAUSSIAN_SPLAT_WRITE_SORT_KEYS 1
+#endif
+
+struct FVGSSplatData
+{
+	float3 Position;
+	float3 Scale;
+	float4 Rotation;
+	float Opacity;
+};
+
+// Transform
+float4x4 LocalToWorld;
+float4x4 WorldToLocal;
+
+// Buffer
+int NumSplats;
+ByteAddressBuffer VGSSplatBuffer;
+
+// Compression
+int BufferFormat;
+int BufferStride;
+float3 PositionScale;
+float3 PositionBias;
+float3 ScaleScale;
+float3 ScaleBias;
+float3 SHScale;
+float3 SHBias;
+float4 ColorScale;
+float4 ColorBias;
+
+// Spherical harmonics
+uint SHCoordinateSpace;
+uint BlendInSRGB; // VGS CHANGE: see CalculateColor
+
+// Per-component overrides
+float PointScaleFactor;
+float OpacityScale;
+
+float OpacityThreshold;
+float CovarianceScale;
+
+// Output
+RWStructuredBuffer<FPackedShadedVGSSplatData> RWShadedVGSSplatBuffer;
+RWBuffer<uint> RWSplatCount;
+
+// Sort keys
+RWBuffer<uint> RWSortKeys;
+RWBuffer<uint> RWSortValues;
+uint SortKeyFrontToBack;
+uint SortKeyBits;
+
+uint GetSortKeySentinel()
+{
+	if (SortKeyBits >= 32u)
+	{
+		return 0xFFFFFFFFu;
+	}
+	return (1u << SortKeyBits) - 1u;
+}
+
+uint ComputeSortKey(float4 ClipPosition, float ViewZ)
+{
+	if (SortKeyBits >= 32u)
+	{
+		return SortKeyFrontToBack ? asuint(ViewZ) : ~asuint(ViewZ);
+	}
+
+	const uint MaxValue = GetSortKeySentinel() - 1u;
+	const float DeviceZ = saturate(ClipPosition.z / ClipPosition.w);
+	const float Dist01 = 1.0f - DeviceZ;
+	const uint QuantizedValue = min((uint) (Dist01 * (float) MaxValue + 0.5f), MaxValue);
+	return SortKeyFrontToBack ? QuantizedValue : (MaxValue - QuantizedValue);
+}
+
+// Cluster dispatch
+Buffer<uint> ClusterCountBuffer;
+Buffer<uint> ClusterIndexBuffer;
+StructuredBuffer<FGaussianSplatCluster> ClusterBuffer;
+
+#ifndef GAUSSIAN_SPLAT_USE_WAVE_OPS
+#define GAUSSIAN_SPLAT_USE_WAVE_OPS 0
+#endif
+
+#if !GAUSSIAN_SPLAT_USE_WAVE_OPS
+#define NUM_THREADS_PER_GROUP THREADGROUP_SIZE_1D
+#include "/Engine/Private/ThreadGroupPrefixSum.ush"
+
+groupshared uint GroupWriteOffset;
+#endif
+
+FVGSSplatData UnpackFloatBufferData(int BufferIndex)
+{
+	FVGSSplatData SplatData;
+
+	const uint ReadOffset = BufferIndex * BufferStride;
+	SplatData.Position = asfloat(VGSSplatBuffer.Load3(ReadOffset + FGaussianSplatShared::EFloat_PositionOffset));
+	SplatData.Scale    = asfloat(VGSSplatBuffer.Load3(ReadOffset + FGaussianSplatShared::EFloat_ScaleOffset));
+	SplatData.Rotation = asfloat(VGSSplatBuffer.Load4(ReadOffset + FGaussianSplatShared::EFloat_RotationOffset));
+	SplatData.Opacity  = asfloat(VGSSplatBuffer.Load (ReadOffset + FGaussianSplatShared::EFloat_ColorOpacityOffset + 12u));
+	return SplatData;
+}
+
+FVGSSplatData UnpackQuantizedBufferData(int BufferIndex)
+{
+	FVGSSplatData SplatData;
+
+	const uint ReadOffset = BufferIndex * BufferStride;
+	const uint4 QuantizedData = VGSSplatBuffer.Load4(ReadOffset);
+	const uint QuantizedColor = VGSSplatBuffer.Load(ReadOffset + FGaussianSplatShared::EQuantized_ColorOpacityOffset);
+	SplatData.Position = FGaussianSplatShared::Unpack_21_21_21(QuantizedData.xy, PositionScale, PositionBias);
+	SplatData.Scale = FGaussianSplatShared::Unpack_11_11_10_Exp(QuantizedData.z, ScaleScale, ScaleBias);
+	SplatData.Rotation = FGaussianSplatShared::UnpackQuat(QuantizedData.w);
+	SplatData.Opacity = FGaussianSplatShared::Unpack_8_8_8_8(QuantizedColor, ColorScale, ColorBias).w;
+	return SplatData;
+}
+
+FVGSSplatData UnpackVGSSplatData(int BufferIndex)
+{
+	FVGSSplatData SplatData;
+	if (BufferFormat == 0)
+	{
+		SplatData = UnpackFloatBufferData(BufferIndex);
+	}
+	else
+	{
+		SplatData = UnpackQuantizedBufferData(BufferIndex);
+	}
+	return SplatData;
+}
+
+float3x3 ComputeCovariance3D(const float4 Rotation, const float3 Scale)
+{
+	float3x3 R = QuaternionToFloat3x3(Rotation);
+	float3x3 M_Local = float3x3(R[0] * Scale.x, R[1] * Scale.y, R[2] * Scale.z);
+	const float3x3 M = mul(M_Local, (float3x3)LocalToWorld);
+	return mul(transpose(M), M);
+}
+
+bool ProjectVGSSplat(
+	FVGSSplatData SplatData,
+	inout float4 ClipPosition,
+	inout float2 Axis0,
+	inout float2 Axis1
+)
+{
+	const FLWCVector3 LwcWorldPosition = MakeLWCVector3(PrimaryView.ViewTilePosition, SplatData.Position);
+	const float3 TranslatedWorldPosition = DFFastToTranslatedWorld(DFFromTileOffset_Hack(LwcWorldPosition), PrimaryView.PreViewTranslation);
+
+	ClipPosition = mul(float4(TranslatedWorldPosition, 1.0f), PrimaryView.TranslatedWorldToClip);
+	if (ClipPosition.w > 0.0f)
+	{
+		const float3x3 Covariance3D = ComputeCovariance3D(SplatData.Rotation, SplatData.Scale);
+		const float3 Covariance2D = SG_CalcCovariance2D(TranslatedWorldPosition, Covariance3D, CovarianceScale);
+		if (!SG_DecomposeCovariance(Covariance2D, Axis0, Axis1, /* bClipAxis = */true, CovarianceScale))
+		{
+			ClipPosition = -FLOAT_MAX;
+			Axis0 = Axis1 = 0;
+			return false;
+		}
+
+		if (FRUSTUM_CULL)
+		{
+			const float2 CenterNDC = ClipPosition.xy / ClipPosition.w;
+			const float2 ExtentNDC = 2.0f * GAUSSIAN_SPLAT_RADIUS * (abs(Axis0) + abs(Axis1)) * PrimaryView.ViewSizeAndInvSize.zw;
+			if (any(CenterNDC + ExtentNDC < -1.0f) || any(CenterNDC - ExtentNDC > 1.0f))
+			{
+				ClipPosition = -FLOAT_MAX;
+				Axis0 = Axis1 = 0;
+				return false;
+			}
+		}
+		return true;
+	}
+
+	return false;
+}
+
+float3 CalculateColor(uint Index, float3 Direction)
+{
+	float3 Color = 0;
+
+	if (SHCoordinateSpace == COORDINATE_SPACE_RH_RUB)
+	{
+		Direction = float3(Direction.y, Direction.z, -Direction.x);
+	}
+	else if (SHCoordinateSpace == COORDINATE_SPACE_RH_RDF)
+	{
+		Direction = float3(Direction.y, -Direction.z, Direction.x);
+	}
+	// else if (SHCoordinateSpace == COORDINATE_SPACE_LH_FRU) {}
+
+	const uint SHDimension = (SH_DEGREE + 1) * (SH_DEGREE + 1);
+	float3 Coefs[16];
+
+	uint ReadOffset = Index * BufferStride;
+	if (BufferFormat == 0)
+	{
+		const uint ColorOffset = ReadOffset + FGaussianSplatShared::EFloat_ColorOpacityOffset;
+		Coefs[0] = asfloat(VGSSplatBuffer.Load3(ColorOffset));
+
+		uint SHOffset = ReadOffset + FGaussianSplatShared::EFloat_Stride;
+		for (int i = 1; i < SHDimension; ++i)
+		{
+			Coefs[i] = asfloat(VGSSplatBuffer.Load3(SHOffset));
+			SHOffset += 12u;
+		}
+	}
+	else
+	{
+		const uint ColorOffset = ReadOffset + FGaussianSplatShared::EQuantized_ColorOpacityOffset;
+		Coefs[0] = FGaussianSplatShared::Unpack_8_8_8_8(VGSSplatBuffer.Load(ColorOffset), ColorScale, ColorBias).xyz;
+
+		const float4 SHScale4 = float4(SHScale, 0.0f);
+		const float4 SHBias4 = float4(SHBias, 0.0f);
+
+		uint SHOffset = ReadOffset + FGaussianSplatShared::EQuantized_Stride;
+		for (uint i = 1; i < SHDimension; ++i)
+		{
+			const uint PackedSH = VGSSplatBuffer.Load(SHOffset);
+			Coefs[i] = FGaussianSplatShared::Unpack_8_8_8_8(PackedSH, SHScale4, SHBias4).xyz;
+
+			SHOffset += 4u;
+		}
+	}
+
+	Color = FGaussianSplatSHConstants::SH_C0 * Coefs[0];
+#if SH_DEGREE >= 1
+	{
+		const float X = Direction.x;
+		const float Y = Direction.y;
+		const float Z = Direction.z;
+
+		Color = Color
+			- FGaussianSplatSHConstants::SH_C1 * Y * Coefs[1]
+			+ FGaussianSplatSHConstants::SH_C1 * Z * Coefs[2]
+			- FGaussianSplatSHConstants::SH_C1 * X * Coefs[3]
+			;
+#if SH_DEGREE >= 2
+		{
+			const float XX = X * X;
+			const float YY = Y * Y;
+			const float ZZ = Z * Z;
+			const float XY = X * Y;
+			const float XZ = X * Z;
+			const float YZ = Y * Z;
+
+			Color = Color
+				+ FGaussianSplatSHConstants::SH_C2_0 * XY * Coefs[4]
+				+ FGaussianSplatSHConstants::SH_C2_1 * YZ * Coefs[5]
+				+ FGaussianSplatSHConstants::SH_C2_2 * (2.0f * ZZ - XX - YY) * Coefs[6]
+				+ FGaussianSplatSHConstants::SH_C2_3 * XZ * Coefs[7]
+				+ FGaussianSplatSHConstants::SH_C2_4 * (XX - YY) * Coefs[8]
+				;
+
+#if SH_DEGREE >= 3
+			{
+				Color = Color
+					+ FGaussianSplatSHConstants::SH_C3_0 * Y * (3.0f * XX - YY) * Coefs[9]
+					+ FGaussianSplatSHConstants::SH_C3_1 * XY * Z * Coefs[10]
+					+ FGaussianSplatSHConstants::SH_C3_2 * Y * (4.0f * ZZ - XX - YY) * Coefs[11]
+					+ FGaussianSplatSHConstants::SH_C3_3 * Z * (2.0f * ZZ - 3.0f * XX - 3.0f * YY) * Coefs[12]
+					+ FGaussianSplatSHConstants::SH_C3_4 * X * (4.0f * ZZ - XX - YY) * Coefs[13]
+					+ FGaussianSplatSHConstants::SH_C3_5 * Z * (XX - YY) * Coefs[14]
+					+ FGaussianSplatSHConstants::SH_C3_6 * X * (XX - 3.0f * YY) * Coefs[15]
+					;
+			}
+#endif // SH_DEGREE >= 3
+		}
+#endif // SH_DEGREE >= 2
+	}
+#endif // SH_DEGREE >= 1
+
+	// VGS CHANGE: Epic makes each splat's colour linear here and blends in linear light,
+	// which BlendInSRGB 0 still does.
+	// Captures are trained blending sRGB values, and the VGS viewer draws them that way, so
+	// the colour stays sRGB, clamped to [0, 1] as the viewer clamps it, and the blended
+	// result is made linear in VGSSplatInverseToneCurvePostBlend.usf. Blending in linear
+	// light makes faint splats show far more than they were trained to (a 20 % splat over
+	// black gives 48 % of its colour instead of 20 %): coloured haze around hair and edges.
+	if (BlendInSRGB != 0u)
+	{
+		Color = saturate(Color + 0.5f);
+	}
+	else
+	{
+		// Epic's, for captures trained blending in linear light.
+		// Clamp to minimum positive denormal
+		Color = max(Color + 0.5f, 6.10352e-5);
+		// Convert sRGB -> Linear
+		Color = select(Color > 0.04045f, pow(Color * (1.0f / 1.055f) + 0.0521327f, 2.4f), Color * (1.0f / 12.92f));
+		// Ensure that imported colors are brought to the working color space gamut
+		Color = SRGBColorToWorkingColorSpace(Color);
+	}
+
+	return Color;
+}
+
+[numthreads(THREADGROUP_SIZE_1D, 1, 1)]
+void MainCS(
+	uint3 GroupId : SV_GroupID,
+	uint GroupThreadIndex : SV_GroupIndex
+)
+{
+	// Clustering
+	uint LocalClusterCount = 1;
+	FGaussianSplatCluster Cluster = (FGaussianSplatCluster) 0;
+	if (GAUSSIAN_SPLAT_CLUSTERING)
+	{
+		const uint ClusterIndex = GetUnWrappedDispatchGroupId(GroupId);
+		if (ClusterIndex >= ClusterCountBuffer[0])
+		{
+			return;
+		}
+
+		Cluster = ClusterBuffer[ClusterIndexBuffer[ClusterIndex]];
+		LocalClusterCount = DivideAndRoundUp(Cluster.SplatCount, (uint) THREADGROUP_SIZE_1D);
+	}
+
+	for (uint LocalClusterIndex = 0; LocalClusterIndex < LocalClusterCount; ++LocalClusterIndex)
+	{
+		uint SplatDataIndex = 0;
+		bool bInBounds = false;
+		if (GAUSSIAN_SPLAT_CLUSTERING)
+		{
+			const uint LocalSplatIndex = LocalClusterIndex * THREADGROUP_SIZE_1D + GroupThreadIndex;
+			SplatDataIndex = Cluster.SplatOffset + LocalSplatIndex;
+			bInBounds = LocalSplatIndex < Cluster.SplatCount;
+		}
+		else
+		{
+			SplatDataIndex = GetUnWrappedDispatchThreadId(GroupId, GroupThreadIndex, THREADGROUP_SIZE_1D);
+			bInBounds = SplatDataIndex < (uint) NumSplats;
+		}
+
+		ResolvedView = ResolveView();
+
+		FShadedVGSSplatData ShadedSplatData;
+		{
+			ShadedSplatData.Position = -FLOAT_MAX;
+			ShadedSplatData.Axes = 0;
+			ShadedSplatData.Color = 0;
+		}
+
+		bool bVisible = false;
+		if (bInBounds)
+		{
+			FVGSSplatData SplatData = UnpackVGSSplatData(SplatDataIndex);
+			float Opacity = saturate(SplatData.Opacity * OpacityScale);
+			bVisible = Opacity >= OpacityThreshold;
+			if (bVisible)
+			{
+				SplatData.Scale *= PointScaleFactor;
+				SplatData.Position = mul(float4(SplatData.Position, 1.0f), LocalToWorld).xyz;
+
+				bVisible = ProjectVGSSplat(SplatData, ShadedSplatData.Position, ShadedSplatData.Axes.xy, ShadedSplatData.Axes.zw);
+				if (bVisible)
+				{
+					float3 WorldCameraDir = GetCameraVectorFromWorldPosition(SplatData.Position);
+					float3 LocalCameraDir = normalize(mul(float4(WorldCameraDir, 0.0), WorldToLocal).xyz);
+					ShadedSplatData.Color = float4(CalculateColor(SplatDataIndex, LocalCameraDir), Opacity);
+				}
+			}
+		}
+
+		if (GAUSSIAN_SPLAT_GPU_DRIVEN_PIPELINE)
+		{
+			// Compact visible splats
+#if GAUSSIAN_SPLAT_USE_WAVE_OPS
+			const uint SplatIndex = WavePrefixCountBits(bVisible);
+			const uint SplatCount = WaveActiveCountBits(bVisible);
+
+			uint Offset = 0;
+			if (WaveIsFirstLane() && SplatCount > 0)
+			{
+				InterlockedAdd(RWSplatCount[0], SplatCount, Offset);
+			}
+			Offset = WaveReadLaneFirst(Offset);
+#else
+			uint SplatCount = 0;
+			const uint SplatIndex = ThreadGroupPrefixSum(bVisible ? 1u : 0u, GroupThreadIndex, SplatCount);
+
+			if (GroupThreadIndex == 0)
+			{
+				GroupWriteOffset = 0;
+				if (SplatCount > 0)
+				{
+					InterlockedAdd(RWSplatCount[0], SplatCount, GroupWriteOffset);
+				}
+			}
+			GroupMemoryBarrierWithGroupSync();
+			const uint Offset = GroupWriteOffset;
+#endif
+
+			if (bVisible)
+			{
+				const uint WriteIndex = Offset + SplatIndex;
+				const FPackedShadedVGSSplatData PackedShadedSplatData = PackShadedVGSSplat(ShadedSplatData);
+				RWShadedVGSSplatBuffer[WriteIndex] = PackedShadedSplatData;
+				if (GAUSSIAN_SPLAT_WRITE_SORT_KEYS)
+				{
+					RWSortKeys[WriteIndex] = ComputeSortKey(ShadedSplatData.Position, PackedShadedSplatData.ViewZ);
+					RWSortValues[WriteIndex] = WriteIndex;
+				}
+			}
+		}
+		else if (bInBounds)
+		{
+			const FPackedShadedVGSSplatData PackedShadedSplatData = PackShadedVGSSplat(ShadedSplatData);
+			RWShadedVGSSplatBuffer[SplatDataIndex] = PackedShadedSplatData;
+			if (GAUSSIAN_SPLAT_WRITE_SORT_KEYS)
+			{
+				// Mark culled splats with sentinel value
+				RWSortKeys[SplatDataIndex] = (!bVisible || PackedShadedSplatData.ViewZ <= 0.0f)
+					? GetSortKeySentinel()
+					: ComputeSortKey(ShadedSplatData.Position, PackedShadedSplatData.ViewZ);
+				RWSortValues[SplatDataIndex] = SplatDataIndex;
+			}
+		}
+	}
+}

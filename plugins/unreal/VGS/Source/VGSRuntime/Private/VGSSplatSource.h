@@ -1,7 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "GaussianSplatRenderPipeline.h" // FGaussianSplatRenderProxy (GaussianSplatSceneViewExtension, Internal)
+#include "VGSSplatRenderPipeline.h" // FVGSSplatRenderProxy (VGSSplatRenderer, the copy of Epic's renderer)
 #include "RenderGraphResources.h"
 #include "VGSSplatLayout.h"
 
@@ -58,12 +58,14 @@ struct FVGSRenderState
 	float OpacityScale = 1.0f;
 	float InverseToneCurveStrength = 0.0f;
 	bool bInvertExpandGamut = true;
+	float Intensity = 1.0f;
+	bool bBlendInSRGB = true;
 };
 
 /**
  * A capture as the Gaussian Splat renderer sees it: a source of splats with no
- * UGaussianSplatComponent behind it, which is what GaussianSplat::RegisterExternalProxySource
- * is for (Niagara's splat renderer is the other user, NiagaraRendererSplats.cpp).
+ * component of Epic's behind it, which is what VGSSplat::RegisterExternalProxySource is for
+ * (the copy keeps Epic's GaussianSplat::RegisterExternalProxySource, which Niagara uses).
  *
  * Render thread only, apart from construction. The renderer calls Collect once per view,
  * inside its post-process pass; the first call of a frame uploads a new instant if the game
@@ -78,7 +80,7 @@ public:
 	void SetFrame_RenderThread(FVGSPackedFrameRef Frame);
 	void SetGpuFrame_RenderThread(FVGSGpuFrameRef Frame);
 
-	void Collect_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& View, TArray<const FGaussianSplatRenderProxy*>& OutProxies);
+	void Collect_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& View, TArray<const FVGSSplatRenderProxy*>& OutProxies);
 
 private:
 	void Upload_RenderThread(FRDGBuilder& GraphBuilder, const FVGSPackedFrameRef& Frame);
@@ -86,7 +88,7 @@ private:
 	void UploadChunk_RenderThread(FRDGBuilder& GraphBuilder, const FVGSPackedChunkRef& Chunk);
 	void SetLayout(uint32 NumSplats, int32 SHDegree, uint32 Stride, bool bQuantized, const vgsunreal::Quantization* Quantization);
 
-	FGaussianSplatRenderProxy Proxy;
+	FVGSSplatRenderProxy Proxy;
 	FVGSRenderState State;
 
 	/** Sent by the game thread and not uploaded yet: one or the other. */

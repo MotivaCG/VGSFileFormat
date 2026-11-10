@@ -1,0 +1,123 @@
+// VGS: a copy of Epic's GaussianSplat renderer (UE 5.9.0, CL 60351404), renamed by plugins/unreal/tools/copy_epic_splat_renderer.py.
+// What VGS changed is marked "VGS CHANGE"; see plugins/unreal/EPIC_RENDERER_COPY.md.
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+#pragma once
+
+#include "/Plugin/GaussianSplat/Shared/GaussianSplatDefinitions.h"
+
+float3x3 QuaternionToFloat3x3(float4 Q)
+{
+	float x2 = Q.x + Q.x;
+	float y2 = Q.y + Q.y;
+	float z2 = Q.z + Q.z;
+	float xx = Q.x * x2;
+	float xy = Q.x * y2;
+	float xz = Q.x * z2;
+	float yy = Q.y * y2;
+	float yz = Q.y * z2;
+	float zz = Q.z * z2;
+	float wx = Q.w * x2;
+	float wy = Q.w * y2;
+	float wz = Q.w * z2;
+
+	float3x3 Mat =
+	{
+		1.0f - (yy + zz), xy + wz, xz - wy,
+          xy - wz, 1.0f - (xx + zz), yz + wx,
+          xz + wy, yz - wx, 1.0f - (xx + yy),
+	};
+
+	return Mat;
+}
+
+float3x3 SG_ComputeCovariance3D(const float4 Rotation, const float3 Scale)
+{
+	float3x3 R = QuaternionToFloat3x3(Rotation);
+	float3x3 M = float3x3(R[0] * Scale.x, R[1] * Scale.y, R[2] * Scale.z);
+	return mul(transpose(M), M);
+}
+
+float3 SG_CalcCovariance2D(float3 WorldPosition, float3x3 Covariance3D, float CovarianceScale = 1.0f)
+{
+	const float4x4 WorldToView = transpose(GaussianViewData.TranslatedWorldToView);
+	float3 ViewPosition = mul(WorldToView, float4(WorldPosition, 1.0f)).xyz;
+
+	const float2 TanFov = GaussianViewData.TanAndInvTanHalfFOV.xy;
+	const float2 Limit = 1.3f * TanFov;
+	ViewPosition.x = clamp(ViewPosition.x / ViewPosition.z, -Limit.x, Limit.x) * ViewPosition.z;
+	ViewPosition.y = clamp(ViewPosition.y / ViewPosition.z, -Limit.y, Limit.y) * ViewPosition.z;
+
+	const float Focal = GaussianViewData.ViewSizeAndInvSize.x * GaussianViewData.ViewToClip._m00 / 2.0f;
+
+	const float3x3 J = float3x3(
+        Focal / ViewPosition.z, 0, -(Focal * ViewPosition.x) / (ViewPosition.z * ViewPosition.z),
+        0, Focal / ViewPosition.z, -(Focal * ViewPosition.y) / (ViewPosition.z * ViewPosition.z),
+        0, 0, 0
+    );
+	const float3x3 W = (float3x3) WorldToView;
+	const float3x3 T = mul(J, W);
+	const float3x3 V = float3x3(
+        Covariance3D._m00, Covariance3D._m01, Covariance3D._m02,
+        Covariance3D._m01, Covariance3D._m11, Covariance3D._m12,
+        Covariance3D._m02, Covariance3D._m12, Covariance3D._m22
+    );
+	const float3x3 Covariance2D = mul(T, mul(V, transpose(T)));
+
+	const float Dilation = GAUSSIAN_SPLAT_COVARIANCE_DILATION * CovarianceScale;
+	return float3(Covariance2D._m00 + Dilation, Covariance2D._m01, Covariance2D._m11 + Dilation);
+}
+
+bool SG_DecomposeCovariance(float3 Covariance2D, out float2 Axis0, out float2 Axis1, bool bClipAxis=true, float CovarianceScale = 1.0f)
+{
+	Axis0 = 0;
+	Axis1 = 0;
+
+	const float Mid = 0.5f * (Covariance2D.x + Covariance2D.z);
+	const float Det = Covariance2D.x * Covariance2D.z - Covariance2D.y * Covariance2D.y;
+	const float Radius = sqrt(max(0.1f * CovarianceScale * CovarianceScale, Mid * Mid - Det));
+
+	const float Lambda0 = Mid + Radius;
+	const float Lambda1 = Mid - Radius;
+
+	bool bValidBasis = Lambda1 > 0.0f;
+	if (bValidBasis)
+	{
+		const float2 MajorAxisDir = float2(Covariance2D.y, Lambda0 - Covariance2D.x);
+		const float MajorAxisLenSq = dot(MajorAxisDir, MajorAxisDir);
+		const float2 MajorAxis = MajorAxisLenSq > 0.0f ? MajorAxisDir * rsqrt(MajorAxisLenSq) : float2(1.0f, 0.0f);
+		const float2 MinorAxis = float2(MajorAxis.y, -MajorAxis.x);
+
+		const float MaxSize = bClipAxis ? GAUSSIAN_SPLAT_MAX_SIZE_PIXELS / (2.0f * GAUSSIAN_SPLAT_RADIUS) : FLOAT_MAX;
+		Axis0 = min(sqrt(2.0 * Lambda0), MaxSize) * MajorAxis;
+		Axis1 = min(sqrt(2.0 * Lambda1), MaxSize) * MinorAxis;
+	}
+
+	return bValidBasis;
+}
+
+bool SG_DecomposeCovarianceForSprite(float3 Covariance2D, out float2 SpriteSizePixels, out float SpriteRotationRadians, float CovarianceScale = 1.0f)
+{
+	SpriteSizePixels = 0;
+	SpriteRotationRadians = 0;
+
+	const float Mid = 0.5f * (Covariance2D.x + Covariance2D.z);
+	const float Det = Covariance2D.x * Covariance2D.z - Covariance2D.y * Covariance2D.y;
+	const float Radius = sqrt(max(0.1f * CovarianceScale * CovarianceScale, Mid * Mid - Det));
+
+	const float Lambda0 = Mid + Radius;
+	const float Lambda1 = Mid - Radius;
+
+	bool bValidBasis = Lambda1 > 0.0f;
+	if (bValidBasis)
+	{
+		const float MaxSize = GAUSSIAN_SPLAT_MAX_SIZE_PIXELS;
+		SpriteSizePixels.x = min(sqrt(2.0f * Lambda0) * (2.0f * GAUSSIAN_SPLAT_RADIUS), MaxSize);
+		SpriteSizePixels.y = min(sqrt(2.0f * Lambda1) * (2.0f * GAUSSIAN_SPLAT_RADIUS), MaxSize);
+
+		const float2 RotationDir = float2(Lambda0 - Covariance2D.x, -Covariance2D.y);
+		SpriteRotationRadians = dot(RotationDir, RotationDir) > 0.0f ? atan2(RotationDir.x, RotationDir.y) : 0.0f;
+	}
+
+	return bValidBasis;
+}

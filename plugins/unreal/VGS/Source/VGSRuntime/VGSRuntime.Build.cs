@@ -7,13 +7,12 @@ public class VGSRuntime : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
-		// Epic's Gaussian Splat plugin keeps every header in Internal/, and UnrealBuildTool
-		// shows Internal/ only to modules of the same scope as the plugin: the engine's
-		// (UEBuildModule.cs, "only if the scope is the same as the SourceModule's scope or
-		// if the source module is an engine module"). This module includes two of them -
-		// GaussianSplatViewExtension.h and GaussianSplatRenderPipeline.h - so it asks
-		// to be treated as an engine module, which also lets it live in a project's Plugins
-		// folder. Installed under Engine/Plugins it would not need to.
+		// Splats are drawn by VGSSplatRenderer, this plugin's copy of Epic's Gaussian Splat
+		// renderer (EPIC_RENDERER_COPY.md). Its proxy still names a type of Epic's
+		// GaussianSplat runtime module, whose headers are all in Internal/, and
+		// UnrealBuildTool shows Internal/ only to modules of the engine's scope (UEBuildModule.cs,
+		// "only if the scope is the same as the SourceModule's scope or if the source module
+		// is an engine module"), so this module asks to be treated as an engine module.
 		bTreatAsEngineModule = true;
 
 		PublicDependencyModuleNames.AddRange(new[] { "Core", "CoreUObject", "Engine" });
@@ -26,7 +25,7 @@ public class VGSRuntime : ModuleRules
 			"RHI",
 			"GaussianSplat",
 			"GaussianSplatShader",
-			"GaussianSplatSceneViewExtension",
+			"VGSSplatRenderer",
 			"VGSShaders"
 		});
 

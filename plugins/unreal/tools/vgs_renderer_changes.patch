@@ -1,0 +1,264 @@
+diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatHardwareRasterize.usf b/VGS/Shaders/Private/SplatRenderer/VGSSplatHardwareRasterize.usf
+--- a/VGS/Shaders/Private/SplatRenderer/VGSSplatHardwareRasterize.usf	2026-11-10 03:21:38.519077700 +0100
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatHardwareRasterize.usf	2026-11-10 03:21:38.565393600 +0100
+@@ -196,7 +196,9 @@
+ 	}
+ 
+ 	// Premultiplied alpha
+-	OutColor = float4(Input.Color.rgb * SrcAlpha * View.PreExposure, SrcAlpha);
++	// VGS CHANGE: no View.PreExposure here; the scratch holds sRGB values, and exposure is
++	// applied after they are made linear (VGSSplatInverseToneCurvePostBlend.usf).
++	OutColor = float4(Input.Color.rgb * SrcAlpha, SrcAlpha);
+ 
+ #if WRITE_STOCHASTIC_DEPTH
+ 	#if USE_BLUE_NOISE
+diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatInverseToneCurvePostBlend.usf b/VGS/Shaders/Private/SplatRenderer/VGSSplatInverseToneCurvePostBlend.usf
+--- a/VGS/Shaders/Private/SplatRenderer/VGSSplatInverseToneCurvePostBlend.usf	2026-11-10 03:21:38.517571100 +0100
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatInverseToneCurvePostBlend.usf	2026-11-10 03:21:38.561366100 +0100
+@@ -33,6 +33,11 @@
+ // Per-axis grid size of the (cubic) LUT.
+ float InverseToneCurveLUTEdge;
+ 
++// VGS CHANGE: the capture's intensity, a scale on its linear colour; and whether the
++// scratch holds sRGB values (VGSSplatShading.usf, BlendInSRGB) or Epic's linear ones.
++float Intensity;
++uint BlendInSRGB;
++
+ // Working color space -> sRGB linear. The LUT is baked against sRGB primaries (D65),
+ // so non-sRGB projects must transform before sampling. The reverse transform ships
+ // as SRGBColorToWorkingColorSpace in ColorSpace.ush.
+@@ -147,23 +152,37 @@
+ 		return;
+ 	}
+ 
+-	// Note: Unpremultiplying/premultiplying (now removed) introduced visible artifacts
+-	// in splat translucent gradients.
+-
+-	// Undo pre-exposure -> WCS->sRGB -> saturate (clip out-of-gamut) -> inverse LUT
+-	// -> sRGB->WCS -> lerp by strength -> reapply pre-exposure.
+-	const float3 Color        = Splat.rgb * View.OneOverPreExposure;
++	// VGS CHANGE: the scratch holds the splats blended in sRGB values, premultiplied, with
++	// no pre-exposure (VGSSplatShading.usf, VGSSplatHardwareRasterize.usf). Unpremultiply to
++	// the sRGB colour of the splat layer, make it linear, then as Epic: the inverse tone
++	// curve, the working colour space; then the capture's intensity, pre-exposure, and
++	// premultiply again for the composite. Epic avoids unpremultiplying because of artefacts
++	// in faint gradients; making the blend linear needs it, so faint pixels are guarded.
++	float3 Blended;
++	if (BlendInSRGB != 0u)
++	{
++		const float3 ColorSRGB    = saturate(Splat.rgb / max(Opacity, 1e-3f));
++		const float3 LinearSRGB   = select(ColorSRGB > 0.04045f, pow(ColorSRGB * (1.0f / 1.055f) + 0.0521327f, 2.4f), ColorSRGB * (1.0f / 12.92f));
++#if APPLY_INVERSE_TONE_CURVE
++		const float3 InversedSRGB = SampleInverseToneCurveLUT(LinearSRGB, InverseToneCurveLUTEdge);
++		Blended = SRGBColorToWorkingColorSpace(lerp(LinearSRGB, InversedSRGB, Strength)) * Opacity;
++#else
++		Blended = SRGBColorToWorkingColorSpace(LinearSRGB) * Opacity;
++#endif
++	}
++	else
++	{
++		// Epic's, premultiplied as it comes (pre-exposure is no longer in the scratch).
++		const float3 Color = Splat.rgb;
+ #if APPLY_INVERSE_TONE_CURVE
+-	const float3 ColorSRGB    = WorkingColorSpaceColorToSRGB(Color);
+-	const float3 InversedSRGB = SampleInverseToneCurveLUT(saturate(ColorSRGB), InverseToneCurveLUTEdge);
+-	const float3 Inversed     = SRGBColorToWorkingColorSpace(InversedSRGB);
+-	const float3 Blended      = lerp(Color, Inversed, Strength);
++		const float3 InversedSRGB = SampleInverseToneCurveLUT(saturate(WorkingColorSpaceColorToSRGB(Color)), InverseToneCurveLUTEdge);
++		Blended = lerp(Color, SRGBColorToWorkingColorSpace(InversedSRGB), Strength);
+ #else
+-	// Fall-through implementation composites the original color
+-	const float3 Blended      = Color;
++		Blended = Color;
+ #endif
++	}
+ 
+ 	// Output alpha stays as transmittance for the ROP blend (One, SrcAlpha) /
+ 	// (Zero, SrcAlpha) so transmittances multiply correctly into SceneColor.
+-	OutColor = float4(Blended * View.PreExposure, Transmittance);
++	OutColor = float4(Blended * (Intensity * View.PreExposure), Transmittance);
+ }
+diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf b/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf
+--- a/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf	2026-11-10 03:21:38.518575000 +0100
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf	2026-11-10 03:21:38.562874200 +0100
+@@ -70,6 +70,7 @@
+ 
+ // Spherical harmonics
+ uint SHCoordinateSpace;
++uint BlendInSRGB; // VGS CHANGE: see CalculateColor
+ 
+ // Per-component overrides
+ float PointScaleFactor;
+@@ -309,12 +310,27 @@
+ 	}
+ #endif // SH_DEGREE >= 1
+ 
+-	// Clamp to minimum positive denormal
+-	Color = max(Color + 0.5f, 6.10352e-5);
+-	// Convert sRGB -> Linear
+-	Color = select(Color > 0.04045f, pow(Color * (1.0f / 1.055f) + 0.0521327f, 2.4f), Color * (1.0f / 12.92f));
+-	// Ensure that imported colors are brought to the working color space gamut
+-	Color = SRGBColorToWorkingColorSpace(Color);
++	// VGS CHANGE: Epic makes each splat's colour linear here and blends in linear light,
++	// which BlendInSRGB 0 still does.
++	// Captures are trained blending sRGB values, and the VGS viewer draws them that way, so
++	// the colour stays sRGB, clamped to [0, 1] as the viewer clamps it, and the blended
++	// result is made linear in VGSSplatInverseToneCurvePostBlend.usf. Blending in linear
++	// light makes faint splats show far more than they were trained to (a 20 % splat over
++	// black gives 48 % of its colour instead of 20 %): coloured haze around hair and edges.
++	if (BlendInSRGB != 0u)
++	{
++		Color = saturate(Color + 0.5f);
++	}
++	else
++	{
++		// Epic's, for captures trained blending in linear light.
++		// Clamp to minimum positive denormal
++		Color = max(Color + 0.5f, 6.10352e-5);
++		// Convert sRGB -> Linear
++		Color = select(Color > 0.04045f, pow(Color * (1.0f / 1.055f) + 0.0521327f, 2.4f), Color * (1.0f / 12.92f));
++		// Ensure that imported colors are brought to the working color space gamut
++		Color = SRGBColorToWorkingColorSpace(Color);
++	}
+ 
+ 	return Color;
+ }
+diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatTileRasterize.usf b/VGS/Shaders/Private/SplatRenderer/VGSSplatTileRasterize.usf
+--- a/VGS/Shaders/Private/SplatRenderer/VGSSplatTileRasterize.usf	2026-11-10 03:21:38.519077700 +0100
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatTileRasterize.usf	2026-11-10 03:21:38.562874200 +0100
+@@ -83,6 +83,8 @@
+ 		}
+ 	}
+ 
+-	RWColorTexture[Pixel].rgb = OutColor.rgb * PrimaryView.PreExposure + RWColorTexture[Pixel].rgb * OutColor.a;
++	// VGS CHANGE: no PreExposure; the target is always the scratch, holding sRGB values
++	// (VGSSplatInverseToneCurvePostBlend.usf applies exposure).
++	RWColorTexture[Pixel].rgb = OutColor.rgb + RWColorTexture[Pixel].rgb * OutColor.a;
+ 	RWColorTexture[Pixel].a = OutColor.a * RWColorTexture[Pixel].a;
+ }
+diff -ruN a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatRenderPipeline.h b/VGS/Source/VGSSplatRenderer/Internal/VGSSplatRenderPipeline.h
+--- a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatRenderPipeline.h	2026-11-10 03:21:38.493294800 +0100
++++ b/VGS/Source/VGSSplatRenderer/Internal/VGSSplatRenderPipeline.h	2026-11-10 03:21:38.537254600 +0100
+@@ -54,6 +54,12 @@
+ 	float OpacityScale = 1.0f;
+ 
+ 	bool bVisible = true;
++	// VGS CHANGE: a scale on the splats' linear colour, applied when they are composited
++	// (VGSSplatInverseToneCurvePostBlend.usf). VGS's Intensity (EV) is 2^EV.
++	float Intensity = 1.0f;
++	// VGS CHANGE: blend splats in sRGB values, as most captures are trained and as the VGS
++	// viewer draws them, rather than in linear light as Epic's renderer does.
++	bool bBlendInSRGB = true;
+ 	float InverseToneCurveStrength = 0.0f;
+ 	bool bInvertExpandGamutLUT = true;
+ 
+diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp b/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp
+--- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp	2026-11-10 03:21:38.498328200 +0100
++++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp	2026-11-10 03:21:38.540266100 +0100
+@@ -678,6 +678,7 @@
+ 
+ 		// Spherical harmonics
+ 		SHADER_PARAMETER(uint32, SHCoordinateSpace)
++		SHADER_PARAMETER(uint32, BlendInSRGB) // VGS CHANGE
+ 
+ 		// Per-component overrides
+ 		SHADER_PARAMETER(float, PointScaleFactor)
+@@ -733,6 +734,8 @@
+ 		SHADER_PARAMETER(FScreenTransform, SvPositionToInputTextureUV)
+ 		SHADER_PARAMETER(float, Strength)
+ 		SHADER_PARAMETER(float, InverseToneCurveLUTEdge)
++		SHADER_PARAMETER(float, Intensity) // VGS CHANGE
++		SHADER_PARAMETER(uint32, BlendInSRGB) // VGS CHANGE
+ 		RENDER_TARGET_BINDING_SLOTS()
+ 	END_SHADER_PARAMETER_STRUCT()
+ };
+@@ -1899,7 +1902,11 @@
+ 	const bool bProxyUsesInverseTC = ProxyLUTRHI != nullptr && SupportsSplatScratch(bHWRaster);
+ 	const bool bExpectedDepth = (GetDepthMode(View.GetShaderPlatform()) == EVGSSplatDepthMode::Expected);
+ 	const bool bDownsampled = DownsampleFactor > 1;
+-	const bool bUsesScratch = bProxyUsesInverseTC || bExpectedDepth || bDownsampled;
++	// VGS CHANGE: always through the scratch target, where splats blend in sRGB values; the
++	// post-blend pass makes the result linear. Epic only uses it for the inverse tone curve,
++	// expected depth or downsampling. Without scratch support (an RGBA16F render target)
++	// the colours are composited as they are, sRGB values taken as linear.
++	const bool bUsesScratch = SupportsSplatScratch(bHWRaster) || bProxyUsesInverseTC || bExpectedDepth || bDownsampled;
+ 
+ 	FScreenPassRenderTarget ProxyScratchRT;
+ 	if (bUsesScratch)
+@@ -2099,6 +2106,7 @@
+ 
+ 			// Spherical harmonics
+ 			PassParameters->SHCoordinateSpace = static_cast<uint32>(RenderProxy.SHCoordinateSpace);
++			PassParameters->BlendInSRGB = RenderProxy.bBlendInSRGB ? 1u : 0u; // VGS CHANGE
+ 
+ 			// Per-component overrides
+ 			PassParameters->PointScaleFactor = RenderProxy.PointScaleFactor;
+@@ -2163,6 +2171,8 @@
+ 			Params->Strength                   = RenderProxy.InverseToneCurveStrength;
+ 			Params->InverseToneCurveLUTEdge    = static_cast<float>(ProxyLUTRHI->GetSizeX());
+ 		}
++		Params->Intensity = RenderProxy.Intensity; // VGS CHANGE
++		Params->BlendInSRGB = RenderProxy.bBlendInSRGB ? 1u : 0u; // VGS CHANGE
+ 
+ 		FVGSSplatInverseToneCurvePostBlendPS::FPermutationDomain PermutationVector;
+ 		PermutationVector.Set<FVGSSplatInverseToneCurvePostBlendPS::FApplyInverseToneCurve>(bProxyUsesInverseTC);
+diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRendererModule.cpp b/VGS/Source/VGSSplatRenderer/Private/VGSSplatRendererModule.cpp
+--- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRendererModule.cpp	2026-11-10 03:21:38.495798800 +0100
++++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatRendererModule.cpp	2026-11-10 03:21:38.540266100 +0100
+@@ -6,10 +6,8 @@
+ 
+ #include "VGSSplatInverseToneCurveLUTCache.h"
+ #include "VGSSplatRenderStats.h"
+-#include "GaussianSplatRenderer.h"
+-#include "VGSSplatRendererRenderer.h"
+-
+-static TUniquePtr<FVGSSplatRendererRenderer> GSceneViewExtensionRenderer;
++// VGS CHANGE: no FGaussianSplatRendererRegistry registration. Epic's UGaussianSplatComponents
++// are drawn by Epic's renderer; this copy draws only the sources registered with it.
+ 
+ FVGSSplatRendererModule::~FVGSSplatRendererModule() = default;
+ 
+@@ -17,19 +15,10 @@
+ {
+ 	InverseToneCurveLUTCache = MakeShared<VGSSplat::FInverseToneCurveLUTCache, ESPMode::ThreadSafe>();
+ 	RenderStats = MakeUnique<VGSSplat::FRenderStats>();
+-
+-	GSceneViewExtensionRenderer = MakeUnique<FVGSSplatRendererRenderer>();
+-	FGaussianSplatRendererRegistry::Get().Register(GSceneViewExtensionRenderer.Get());
+ }
+ 
+ void FVGSSplatRendererModule::ShutdownModule()
+ {
+-	if (GSceneViewExtensionRenderer.IsValid())
+-	{
+-		FGaussianSplatRendererRegistry::Get().Unregister(GSceneViewExtensionRenderer.Get());
+-		GSceneViewExtensionRenderer.Reset();
+-	}
+-
+ 	InverseToneCurveLUTCache.Reset();
+ 
+ 	RenderStats.Reset();
+diff -ruN a/VGS/Source/VGSSplatRenderer/VGSSplatRenderer.Build.cs b/VGS/Source/VGSSplatRenderer/VGSSplatRenderer.Build.cs
+--- a/VGS/Source/VGSSplatRenderer/VGSSplatRenderer.Build.cs	2026-11-10 03:21:38.492290400 +0100
++++ b/VGS/Source/VGSSplatRenderer/VGSSplatRenderer.Build.cs	2026-11-10 03:21:38.537254600 +0100
+@@ -10,6 +10,10 @@
+ 		{
+ 			PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
+ 
++			// VGS CHANGE: Epic's module is an engine module and sees the GaussianSplat runtime
++			// module's Internal headers; a project plugin has to ask for the same scope.
++			bTreatAsEngineModule = true;
++
+ 			PublicDependencyModuleNames.AddRange(new[] { "Core" });
+ 
+ 			PrivateDependencyModuleNames.AddRange(
+@@ -22,7 +26,8 @@
+ 					"RHI",
+ 					"Projects",
+ 					"GaussianSplat",
+-					"GaussianSplatShader"
++					"GaussianSplatShader",
++					"VGSShaders" // VGS CHANGE: maps /Plugin/VGS, where these shaders are
+ 				}
+ 			);
+ 

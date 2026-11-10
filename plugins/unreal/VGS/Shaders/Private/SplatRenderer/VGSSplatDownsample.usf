@@ -1,0 +1,45 @@
+// VGS: a copy of Epic's GaussianSplat renderer (UE 5.9.0, CL 60351404), renamed by plugins/unreal/tools/copy_epic_splat_renderer.py.
+// What VGS changed is marked "VGS CHANGE"; see plugins/unreal/EPIC_RENDERER_COPY.md.
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+#include "/Engine/Private/Common.ush"
+#include "/Engine/Private/ScreenPass.ush"
+
+#ifndef WRITE_VELOCITY
+#define WRITE_VELOCITY 0
+#endif // WRITE_VELOCITY
+
+Texture2D<float> SceneDepthTexture;
+Texture2D<float> SplatDepthTexture;
+FScreenTransform SvPositionToSourcePixel;
+FScreenTransform SvPositionToDownsampledPixel;
+int2 SourcePixelMax;
+
+void MainPS_DownsampleDepth(
+	float4 SvPosition : SV_Position,
+	out float OutDepth : SV_Depth)
+{
+	const int2 SourcePixel = min((int2) ApplyScreenTransform(SvPosition.xy, SvPositionToSourcePixel), SourcePixelMax);
+	OutDepth = SceneDepthTexture.Load(int3(SourcePixel, 0));
+}
+
+void MainPS_UpsampleDepth(
+	float4 SvPosition : SV_Position,
+	out float OutDepth : SV_Depth
+#if WRITE_VELOCITY
+	, out float4 OutVelocity : SV_Target0
+#endif
+)
+{
+	const int2 DownsampledPixel = (int2) ApplyScreenTransform(SvPosition.xy, SvPositionToDownsampledPixel);
+	const float SplatDepth = SplatDepthTexture.Load(int3(DownsampledPixel, 0));
+	if (SplatDepth == SceneDepthTexture.Load(int3(DownsampledPixel, 0)))
+	{
+		discard;
+	}
+	OutDepth = SplatDepth;
+
+#if WRITE_VELOCITY
+	OutVelocity = (float4) 0;
+#endif
+}

@@ -1,0 +1,17 @@
+// VGS: a copy of Epic's GaussianSplat renderer (UE 5.9.0, CL 60351404), renamed by plugins/unreal/tools/copy_epic_splat_renderer.py.
+// What VGS changed is marked "VGS CHANGE"; see plugins/unreal/EPIC_RENDERER_COPY.md.
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+#include "/Engine/Public/Platform.ush"
+#include "/Engine/Private/ComputeShaderUtils.ush"
+
+Buffer<uint> ClusterCountBuffer;
+uint2 DimensionLimit;
+
+RWBuffer<uint> RWShadeIndirectArgs;
+
+[numthreads(1, 1, 1)]
+void MainCS()
+{
+	WriteDispatchIndirectArgs(RWShadeIndirectArgs, 0, GetGroupCountWrapped(ClusterCountBuffer[0], DimensionLimit));
+}
