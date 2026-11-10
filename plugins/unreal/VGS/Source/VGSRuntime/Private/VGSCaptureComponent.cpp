@@ -734,6 +734,18 @@ void UVGSCaptureComponent::PushRenderState()
 	State.bInvertExpandGamut = bInvertExpandGamut;
 	State.Intensity = FMath::Exp2(IntensityEV);
 	State.bBlendInSRGB = BlendSpace == EVGSBlendSpace::SRGB;
+	State.Grade = FVector3f(FMath::Max(Gamma, 0.05f), FMath::Max(Contrast, 0.0f), FMath::Max(Saturation, 0.0f));
+	{
+		// The grade works on sRGB values, so the tint (a linear colour, as the picker gives it)
+		// is encoded the same way; multiplying sRGB values by it is close to multiplying the
+		// linear colour by Tint.
+		auto Encode = [](float L)
+		{
+			L = FMath::Max(L, 0.0f);
+			return L <= 0.0031308f ? L * 12.92f : 1.055f * FMath::Pow(L, 1.0f / 2.4f) - 0.055f;
+		};
+		State.Tint = FVector3f(Encode(Tint.R), Encode(Tint.G), Encode(Tint.B));
+	}
 
 	ENQUEUE_RENDER_COMMAND(VGSSetState)([Target = Source, State](FRHICommandList&)
 	{

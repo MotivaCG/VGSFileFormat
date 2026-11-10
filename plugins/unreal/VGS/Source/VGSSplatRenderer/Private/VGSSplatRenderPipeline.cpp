@@ -736,6 +736,9 @@ class FVGSSplatInverseToneCurvePostBlendPS : public FGlobalShader
 		SHADER_PARAMETER(float, InverseToneCurveLUTEdge)
 		SHADER_PARAMETER(float, Intensity) // VGS CHANGE
 		SHADER_PARAMETER(uint32, BlendInSRGB) // VGS CHANGE
+		SHADER_PARAMETER(FVector3f, Grade) // VGS CHANGE
+		SHADER_PARAMETER(FVector3f, Tint) // VGS CHANGE
+		SHADER_PARAMETER(uint32, GradeActive) // VGS CHANGE
 		RENDER_TARGET_BINDING_SLOTS()
 	END_SHADER_PARAMETER_STRUCT()
 };
@@ -2173,6 +2176,9 @@ static void RenderProxyInternal(
 		}
 		Params->Intensity = RenderProxy.Intensity; // VGS CHANGE
 		Params->BlendInSRGB = RenderProxy.bBlendInSRGB ? 1u : 0u; // VGS CHANGE
+		Params->Grade = RenderProxy.Grade; // VGS CHANGE
+		Params->Tint = RenderProxy.Tint; // VGS CHANGE
+		Params->GradeActive = (RenderProxy.Grade.Equals(FVector3f(1.0f, 1.0f, 1.0f), 1e-4f) && RenderProxy.Tint.Equals(FVector3f(1.0f, 1.0f, 1.0f), 1e-4f)) ? 0u : 1u; // VGS CHANGE
 
 		FVGSSplatInverseToneCurvePostBlendPS::FPermutationDomain PermutationVector;
 		PermutationVector.Set<FVGSSplatInverseToneCurvePostBlendPS::FApplyInverseToneCurve>(bProxyUsesInverseTC);

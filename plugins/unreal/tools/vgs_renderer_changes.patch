@@ -1,6 +1,6 @@
 diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatHardwareRasterize.usf b/VGS/Shaders/Private/SplatRenderer/VGSSplatHardwareRasterize.usf
---- a/VGS/Shaders/Private/SplatRenderer/VGSSplatHardwareRasterize.usf	2026-11-10 03:21:38.519077700 +0100
-+++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatHardwareRasterize.usf	2026-11-10 03:21:38.565393600 +0100
+--- a/VGS/Shaders/Private/SplatRenderer/VGSSplatHardwareRasterize.usf	2026-11-10 09:56:53.906140900 +0100
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatHardwareRasterize.usf	2026-11-10 09:56:53.946152100 +0100
 @@ -196,7 +196,9 @@
  	}
  
@@ -13,9 +13,9 @@ diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatHardwareRasterize.usf b/VG
  #if WRITE_STOCHASTIC_DEPTH
  	#if USE_BLUE_NOISE
 diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatInverseToneCurvePostBlend.usf b/VGS/Shaders/Private/SplatRenderer/VGSSplatInverseToneCurvePostBlend.usf
---- a/VGS/Shaders/Private/SplatRenderer/VGSSplatInverseToneCurvePostBlend.usf	2026-11-10 03:21:38.517571100 +0100
-+++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatInverseToneCurvePostBlend.usf	2026-11-10 03:21:38.561366100 +0100
-@@ -33,6 +33,11 @@
+--- a/VGS/Shaders/Private/SplatRenderer/VGSSplatInverseToneCurvePostBlend.usf	2026-11-10 09:56:53.907145000 +0100
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatInverseToneCurvePostBlend.usf	2026-11-10 09:56:53.943138500 +0100
+@@ -33,6 +33,41 @@
  // Per-axis grid size of the (cubic) LUT.
  float InverseToneCurveLUTEdge;
  
@@ -24,10 +24,40 @@ diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatInverseToneCurvePostBlend.
 +float Intensity;
 +uint BlendInSRGB;
 +
++// VGS CHANGE: a grade on the capture's display colour, sRGB values in [0, 1]: x = gamma
++// (above 1 brightens the midtones), y = contrast about 0.5, z = saturation; then Tint
++// multiplies the values (the tint colour as sRGB values). GradeActive is 0 when both are
++// (1, 1, 1), and then the colour is not touched at all.
++float3 Grade;
++float3 Tint;
++uint GradeActive;
++
++float3 VGSSRGBToLinear(float3 C)
++{
++	return select(C > 0.04045f, pow(C * (1.0f / 1.055f) + 0.0521327f, 2.4f), C * (1.0f / 12.92f));
++}
++
++float3 VGSLinearToSRGB(float3 C)
++{
++	return select(C > 0.0031308f, 1.055f * pow(C, 1.0f / 2.4f) - 0.055f, C * 12.92f);
++}
++
++// The colour of a pixel the splats barely cover is the scratch divided by a tiny opacity,
++// so it is unreliable; the grade fades out below 5 % opacity to keep it off the capture's
++// outline. What such a pixel adds to the image is small either way.
++float3 VGSApplyGrade(float3 ColorSRGB, float Opacity)
++{
++	float3 C = (ColorSRGB - 0.5f) * Grade.y + 0.5f;
++	C = pow(saturate(C), 1.0f / max(Grade.x, 1e-3f));
++	const float Luma = dot(C, float3(0.2126f, 0.7152f, 0.0722f));
++	C = saturate(lerp(Luma.xxx, C, Grade.z) * Tint);
++	return lerp(ColorSRGB, C, smoothstep(0.0f, 0.05f, Opacity));
++}
++
  // Working color space -> sRGB linear. The LUT is baked against sRGB primaries (D65),
  // so non-sRGB projects must transform before sampling. The reverse transform ships
  // as SRGBColorToWorkingColorSpace in ColorSpace.ush.
-@@ -147,23 +152,37 @@
+@@ -147,23 +182,48 @@
  		return;
  	}
  
@@ -46,31 +76,42 @@ diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatInverseToneCurvePostBlend.
 +	float3 Blended;
 +	if (BlendInSRGB != 0u)
 +	{
-+		const float3 ColorSRGB    = saturate(Splat.rgb / max(Opacity, 1e-3f));
-+		const float3 LinearSRGB   = select(ColorSRGB > 0.04045f, pow(ColorSRGB * (1.0f / 1.055f) + 0.0521327f, 2.4f), ColorSRGB * (1.0f / 12.92f));
-+#if APPLY_INVERSE_TONE_CURVE
-+		const float3 InversedSRGB = SampleInverseToneCurveLUT(LinearSRGB, InverseToneCurveLUTEdge);
-+		Blended = SRGBColorToWorkingColorSpace(lerp(LinearSRGB, InversedSRGB, Strength)) * Opacity;
-+#else
-+		Blended = SRGBColorToWorkingColorSpace(LinearSRGB) * Opacity;
-+#endif
-+	}
-+	else
-+	{
-+		// Epic's, premultiplied as it comes (pre-exposure is no longer in the scratch).
-+		const float3 Color = Splat.rgb;
++		float3 ColorSRGB = saturate(Splat.rgb / max(Opacity, 1e-3f));
++		if (GradeActive != 0u)
++		{
++			ColorSRGB = VGSApplyGrade(ColorSRGB, Opacity);
++		}
++		const float3 LinearSRGB   = VGSSRGBToLinear(ColorSRGB);
  #if APPLY_INVERSE_TONE_CURVE
 -	const float3 ColorSRGB    = WorkingColorSpaceColorToSRGB(Color);
 -	const float3 InversedSRGB = SampleInverseToneCurveLUT(saturate(ColorSRGB), InverseToneCurveLUTEdge);
 -	const float3 Inversed     = SRGBColorToWorkingColorSpace(InversedSRGB);
 -	const float3 Blended      = lerp(Color, Inversed, Strength);
-+		const float3 InversedSRGB = SampleInverseToneCurveLUT(saturate(WorkingColorSpaceColorToSRGB(Color)), InverseToneCurveLUTEdge);
-+		Blended = lerp(Color, SRGBColorToWorkingColorSpace(InversedSRGB), Strength);
++		const float3 InversedSRGB = SampleInverseToneCurveLUT(LinearSRGB, InverseToneCurveLUTEdge);
++		Blended = SRGBColorToWorkingColorSpace(lerp(LinearSRGB, InversedSRGB, Strength)) * Opacity;
  #else
 -	// Fall-through implementation composites the original color
 -	const float3 Blended      = Color;
-+		Blended = Color;
++		Blended = SRGBColorToWorkingColorSpace(LinearSRGB) * Opacity;
  #endif
++	}
++	else
++	{
++		// Epic's, premultiplied as it comes (pre-exposure is no longer in the scratch).
++		float3 Color = Splat.rgb;
++		if (GradeActive != 0u)
++		{
++			// The grade works on display values: unpremultiply, to sRGB values, grade, back.
++			const float SafeOpacity = max(Opacity, 1e-3f);
++			const float3 ColorSRGB = VGSLinearToSRGB(saturate(WorkingColorSpaceColorToSRGB(Color / SafeOpacity)));
++			Color = SRGBColorToWorkingColorSpace(VGSSRGBToLinear(VGSApplyGrade(ColorSRGB, Opacity))) * SafeOpacity;
++		}
++#if APPLY_INVERSE_TONE_CURVE
++		const float3 InversedSRGB = SampleInverseToneCurveLUT(saturate(WorkingColorSpaceColorToSRGB(Color)), InverseToneCurveLUTEdge);
++		Blended = lerp(Color, SRGBColorToWorkingColorSpace(InversedSRGB), Strength);
++#else
++		Blended = Color;
++#endif
 +	}
  
  	// Output alpha stays as transmittance for the ROP blend (One, SrcAlpha) /
@@ -79,8 +120,8 @@ diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatInverseToneCurvePostBlend.
 +	OutColor = float4(Blended * (Intensity * View.PreExposure), Transmittance);
  }
 diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf b/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf
---- a/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf	2026-11-10 03:21:38.518575000 +0100
-+++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf	2026-11-10 03:21:38.562874200 +0100
+--- a/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf	2026-11-10 09:56:53.912153600 +0100
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf	2026-11-10 09:56:53.944645500 +0100
 @@ -70,6 +70,7 @@
  
  // Spherical harmonics
@@ -124,8 +165,8 @@ diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf b/VGS/Shaders/
  	return Color;
  }
 diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatTileRasterize.usf b/VGS/Shaders/Private/SplatRenderer/VGSSplatTileRasterize.usf
---- a/VGS/Shaders/Private/SplatRenderer/VGSSplatTileRasterize.usf	2026-11-10 03:21:38.519077700 +0100
-+++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatTileRasterize.usf	2026-11-10 03:21:38.562874200 +0100
+--- a/VGS/Shaders/Private/SplatRenderer/VGSSplatTileRasterize.usf	2026-11-10 09:56:53.913666900 +0100
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatTileRasterize.usf	2026-11-10 09:56:53.944645500 +0100
 @@ -83,6 +83,8 @@
  		}
  	}
@@ -137,9 +178,9 @@ diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatTileRasterize.usf b/VGS/Sh
  	RWColorTexture[Pixel].a = OutColor.a * RWColorTexture[Pixel].a;
  }
 diff -ruN a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatRenderPipeline.h b/VGS/Source/VGSSplatRenderer/Internal/VGSSplatRenderPipeline.h
---- a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatRenderPipeline.h	2026-11-10 03:21:38.493294800 +0100
-+++ b/VGS/Source/VGSSplatRenderer/Internal/VGSSplatRenderPipeline.h	2026-11-10 03:21:38.537254600 +0100
-@@ -54,6 +54,12 @@
+--- a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatRenderPipeline.h	2026-11-10 09:56:53.868829600 +0100
++++ b/VGS/Source/VGSSplatRenderer/Internal/VGSSplatRenderPipeline.h	2026-11-10 09:56:54.000812600 +0100
+@@ -54,6 +54,17 @@
  	float OpacityScale = 1.0f;
  
  	bool bVisible = true;
@@ -149,12 +190,17 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatRenderPipeline.h b/VGS/
 +	// VGS CHANGE: blend splats in sRGB values, as most captures are trained and as the VGS
 +	// viewer draws them, rather than in linear light as Epic's renderer does.
 +	bool bBlendInSRGB = true;
++	// VGS CHANGE: a grade on the capture's display colour (its sRGB values), applied when
++	// it is composited: gamma, contrast about 0.5 and saturation, then a tint that multiplies
++	// those values. (1, 1, 1) leaves it alone.
++	FVector3f Grade = FVector3f(1.0f, 1.0f, 1.0f);
++	FVector3f Tint = FVector3f(1.0f, 1.0f, 1.0f);
  	float InverseToneCurveStrength = 0.0f;
  	bool bInvertExpandGamutLUT = true;
  
 diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp b/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp
---- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp	2026-11-10 03:21:38.498328200 +0100
-+++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp	2026-11-10 03:21:38.540266100 +0100
+--- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp	2026-11-10 09:56:53.891486600 +0100
++++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp	2026-11-10 09:56:54.004020600 +0100
 @@ -678,6 +678,7 @@
  
  		// Spherical harmonics
@@ -163,16 +209,19 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp b/VGS
  
  		// Per-component overrides
  		SHADER_PARAMETER(float, PointScaleFactor)
-@@ -733,6 +734,8 @@
+@@ -733,6 +734,11 @@
  		SHADER_PARAMETER(FScreenTransform, SvPositionToInputTextureUV)
  		SHADER_PARAMETER(float, Strength)
  		SHADER_PARAMETER(float, InverseToneCurveLUTEdge)
 +		SHADER_PARAMETER(float, Intensity) // VGS CHANGE
 +		SHADER_PARAMETER(uint32, BlendInSRGB) // VGS CHANGE
++		SHADER_PARAMETER(FVector3f, Grade) // VGS CHANGE
++		SHADER_PARAMETER(FVector3f, Tint) // VGS CHANGE
++		SHADER_PARAMETER(uint32, GradeActive) // VGS CHANGE
  		RENDER_TARGET_BINDING_SLOTS()
  	END_SHADER_PARAMETER_STRUCT()
  };
-@@ -1899,7 +1902,11 @@
+@@ -1899,7 +1905,11 @@
  	const bool bProxyUsesInverseTC = ProxyLUTRHI != nullptr && SupportsSplatScratch(bHWRaster);
  	const bool bExpectedDepth = (GetDepthMode(View.GetShaderPlatform()) == EVGSSplatDepthMode::Expected);
  	const bool bDownsampled = DownsampleFactor > 1;
@@ -185,7 +234,7 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp b/VGS
  
  	FScreenPassRenderTarget ProxyScratchRT;
  	if (bUsesScratch)
-@@ -2099,6 +2106,7 @@
+@@ -2099,6 +2109,7 @@
  
  			// Spherical harmonics
  			PassParameters->SHCoordinateSpace = static_cast<uint32>(RenderProxy.SHCoordinateSpace);
@@ -193,18 +242,21 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp b/VGS
  
  			// Per-component overrides
  			PassParameters->PointScaleFactor = RenderProxy.PointScaleFactor;
-@@ -2163,6 +2171,8 @@
+@@ -2163,6 +2174,11 @@
  			Params->Strength                   = RenderProxy.InverseToneCurveStrength;
  			Params->InverseToneCurveLUTEdge    = static_cast<float>(ProxyLUTRHI->GetSizeX());
  		}
 +		Params->Intensity = RenderProxy.Intensity; // VGS CHANGE
 +		Params->BlendInSRGB = RenderProxy.bBlendInSRGB ? 1u : 0u; // VGS CHANGE
++		Params->Grade = RenderProxy.Grade; // VGS CHANGE
++		Params->Tint = RenderProxy.Tint; // VGS CHANGE
++		Params->GradeActive = (RenderProxy.Grade.Equals(FVector3f(1.0f, 1.0f, 1.0f), 1e-4f) && RenderProxy.Tint.Equals(FVector3f(1.0f, 1.0f, 1.0f), 1e-4f)) ? 0u : 1u; // VGS CHANGE
  
  		FVGSSplatInverseToneCurvePostBlendPS::FPermutationDomain PermutationVector;
  		PermutationVector.Set<FVGSSplatInverseToneCurvePostBlendPS::FApplyInverseToneCurve>(bProxyUsesInverseTC);
 diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRendererModule.cpp b/VGS/Source/VGSSplatRenderer/Private/VGSSplatRendererModule.cpp
---- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRendererModule.cpp	2026-11-10 03:21:38.495798800 +0100
-+++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatRendererModule.cpp	2026-11-10 03:21:38.540266100 +0100
+--- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRendererModule.cpp	2026-11-10 09:56:53.894013700 +0100
++++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatRendererModule.cpp	2026-11-10 09:56:54.005020900 +0100
 @@ -6,10 +6,8 @@
  
  #include "VGSSplatInverseToneCurveLUTCache.h"
@@ -239,8 +291,8 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRendererModule.cpp b/VGS
  
  	RenderStats.Reset();
 diff -ruN a/VGS/Source/VGSSplatRenderer/VGSSplatRenderer.Build.cs b/VGS/Source/VGSSplatRenderer/VGSSplatRenderer.Build.cs
---- a/VGS/Source/VGSSplatRenderer/VGSSplatRenderer.Build.cs	2026-11-10 03:21:38.492290400 +0100
-+++ b/VGS/Source/VGSSplatRenderer/VGSSplatRenderer.Build.cs	2026-11-10 03:21:38.537254600 +0100
+--- a/VGS/Source/VGSSplatRenderer/VGSSplatRenderer.Build.cs	2026-11-10 09:56:53.867830500 +0100
++++ b/VGS/Source/VGSSplatRenderer/VGSSplatRenderer.Build.cs	2026-11-10 09:56:54.000812600 +0100
 @@ -10,6 +10,10 @@
  		{
  			PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;

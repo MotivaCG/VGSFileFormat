@@ -258,6 +258,8 @@ void FVGSSplatSource::Collect_RenderThread(FRDGBuilder& GraphBuilder, const FSce
 	Proxy.bInvertExpandGamutLUT = State.bInvertExpandGamut;
 	Proxy.Intensity = State.Intensity;
 	Proxy.bBlendInSRGB = State.bBlendInSRGB;
+	Proxy.Grade = State.Grade;
+	Proxy.Tint = State.Tint;
 	Proxy.bVisible = true;
 	OutProxies.Add(&Proxy);
 }

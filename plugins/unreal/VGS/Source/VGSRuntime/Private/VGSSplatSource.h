@@ -60,6 +60,8 @@ struct FVGSRenderState
 	bool bInvertExpandGamut = true;
 	float Intensity = 1.0f;
 	bool bBlendInSRGB = true;
+	FVector3f Grade = FVector3f(1.0f, 1.0f, 1.0f); // gamma, contrast, saturation
+	FVector3f Tint = FVector3f(1.0f, 1.0f, 1.0f); // sRGB values
 };
 
 /**

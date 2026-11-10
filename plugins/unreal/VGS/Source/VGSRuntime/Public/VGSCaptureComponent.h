@@ -176,6 +176,25 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Rendering")
 	EVGSBlendSpace BlendSpace = EVGSBlendSpace::SRGB;
 
+	// Grade of the capture's colours, as in an image editor: on its display (sRGB) values,
+	// after the splats are blended and before Intensity and the tone curve. 1 leaves them as
+	// captured. A few operations per pixel in the composite, which runs anyway.
+	/** Midtones: above 1 brightens them, below 1 darkens them; black and white stay. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Rendering|Grade", meta = (ClampMin = "0.05", UIMin = "0.25", UIMax = "4.0"))
+	float Gamma = 1.0f;
+
+	/** About mid grey (0.5 in sRGB values): above 1 spreads the tones, below 1 flattens them. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Rendering|Grade", meta = (ClampMin = "0.0", UIMax = "3.0"))
+	float Contrast = 1.0f;
+
+	/** 0 is grey, 1 as captured, above 1 more saturated. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Rendering|Grade", meta = (ClampMin = "0.0", UIMax = "3.0"))
+	float Saturation = 1.0f;
+
+	/** Multiplies the colours, after the rest of the grade: white leaves them, Saturation 0 and a tint tones them. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Rendering|Grade", meta = (HideAlphaChannel))
+	FLinearColor Tint = FLinearColor::White;
+
 	/**
 	 * Show the capture's colours as captured, as the VGS viewer does, by undoing Unreal's
 	 * filmic tone curve on the splats (Epic's inverse LUT, applied when they are composited).

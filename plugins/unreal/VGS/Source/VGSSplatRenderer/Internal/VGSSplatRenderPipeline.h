@@ -60,6 +60,11 @@ public:
 	// VGS CHANGE: blend splats in sRGB values, as most captures are trained and as the VGS
 	// viewer draws them, rather than in linear light as Epic's renderer does.
 	bool bBlendInSRGB = true;
+	// VGS CHANGE: a grade on the capture's display colour (its sRGB values), applied when
+	// it is composited: gamma, contrast about 0.5 and saturation, then a tint that multiplies
+	// those values. (1, 1, 1) leaves it alone.
+	FVector3f Grade = FVector3f(1.0f, 1.0f, 1.0f);
+	FVector3f Tint = FVector3f(1.0f, 1.0f, 1.0f);
 	float InverseToneCurveStrength = 0.0f;
 	bool bInvertExpandGamutLUT = true;
 

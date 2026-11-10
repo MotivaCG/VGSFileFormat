@@ -102,7 +102,9 @@ stays enabled beside it, untouched.
   under a sun) shows it nearly black. *Intensity (EV)* scales the linear colour by 2^EV
   where the splats are composited (`FVGSSplatRenderProxy::Intensity`). *Invert UE Tone
   Curve*, on by default, undoes Unreal's filmic tone curve on the splats with Epic's inverse
-  LUT, so they show as captured, as in the VGS viewer. (Before the copy, intensity was put
+  LUT, so they show as captured, as in the VGS viewer. *Gamma*, *Contrast* (about mid
+  grey), *Saturation* and *Tint* (a multiply, last) grade the capture's sRGB values in the same composite, before they
+  are made linear; at 1 they are skipped, and otherwise cost a few operations per pixel. (Before the copy, intensity was put
   into the coefficients as they were packed - `VGSSplatLayout.h`, `gainFor`, still tested -
   which the per-splat clamp of the sRGB blend would now cut.)
 

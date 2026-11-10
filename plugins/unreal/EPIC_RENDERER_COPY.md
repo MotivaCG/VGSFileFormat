@@ -83,13 +83,17 @@ All marked `VGS CHANGE`; `tools/vgs_renderer_changes.patch` is the exact diff.
    `BlendInSRGB`: unpremultiply the scratch to the splat layer's sRGB colour, make it linear,
    then as Epic: the inverse tone curve if asked for, the working colour space; then the new
    `Intensity`, pre-exposure, and premultiply again. Without it, Epic's composite, with
-   `Intensity` and with pre-exposure applied here rather than in rasterization.
+   `Intensity` and with pre-exposure applied here rather than in rasterization. In both, an
+   optional grade (`Grade`: gamma, contrast about 0.5, saturation; then `Tint` multiplies)
+   on the unpremultiplied sRGB values before they are made linear, faded out below 5 %
+   opacity; skipped entirely when both are (1, 1, 1).
 4. **Pipeline** (`VGSSplatRenderPipeline.cpp`). Splats always go through the scratch texture
    when the platform supports it (Epic uses it only for the inverse tone curve, expected
    depth or downsampling), since the composite is what makes the blend linear. New shader
-   parameters `BlendInSRGB` (shading, composite) and `Intensity` (composite).
+   parameters `BlendInSRGB` (shading, composite), `Intensity`, `Grade`, `Tint` and `GradeActive`
+   (composite).
 5. **Proxy** (`VGSSplatRenderPipeline.h`, `FVGSSplatRenderProxy`). New `Intensity` (a scale
-   on the linear colour; VGS's *Intensity (EV)* is 2^EV) and `bBlendInSRGB`.
+   on the linear colour; VGS's *Intensity (EV)* is 2^EV), `bBlendInSRGB`, `Grade` and `Tint`.
 6. **Module** (`VGSSplatRendererModule.cpp`). No registration with Epic's
    `FGaussianSplatRendererRegistry`.
 7. **Build rules** (`VGSSplatRenderer.Build.cs`). `bTreatAsEngineModule`, since a project
@@ -100,7 +104,8 @@ Outside the copy, in the VGS plugin's own code: `VGS.uplugin` lists `VGSSplatRen
 (Runtime, PostConfigInit, Win64); `VGSRuntime` registers its splat sources with
 `VGSSplat::RegisterExternalProxySource` instead of Epic's; and the capture component has
 *Blend Space* (sRGB, the default, or Linear, for a capture trained in linear light) and
-applies *Intensity (EV)* through the proxy instead of in the splat data, where the per-splat
+*Gamma*, *Contrast*, *Saturation* and *Tint* (the proxy's `Grade` and `Tint`), and applies *Intensity (EV)*
+through the proxy instead of in the splat data, where the per-splat
 clamp would cut it.
 
 One consequence to know: without scratch support (an RGBA16F render target that can be
@@ -137,7 +142,10 @@ linear, and pre-exposure would be missing. Win64 is the only platform the plugin
 4. Update the engine version in this file, and check that `VGSRuntime` still compiles against
    the proxy (`FVGSSplatRenderProxy`) and `VGSSplat::RegisterExternalProxySource`.
 5. Look at it: the same frame with *Blend Space* sRGB and Linear (Linear should look like
-   Epic's own renderer), *Invert UE Tone Curve* on and off, *Intensity (EV)*. The host project
+   Epic's own renderer), *Invert UE Tone Curve* on and off, *Intensity (EV)*, the grade
+   (`set VGSCaptureComponent Saturation 0` in `-ExecCmds` sets it on every capture; a colour
+   has commas, which `-ExecCmds` splits on, so put its `set` in a file under the engine's
+   `Engine/Binaries` and run `exec <file>`). The host project
    has `/Game/Stress/Close` and `/Game/Stress/Close_Linear` for this, and
    `vgs.Debug.After 8 HighResShot 1920x1080` in `-ExecCmds` takes the screenshot once
    things have loaded.
