@@ -4,7 +4,7 @@
 
 #include "VGSSplatRenderPipeline.h"
 
-#include "GaussianSplatCluster.h"
+#include "VGSSplatCluster.h"
 #include "VGSSplatInverseToneCurveLUT.h"
 #include "VGSSplatRenderStats.h"
 
@@ -27,6 +27,14 @@
 #include "SystemTextures.h"
 #include "SceneRendering.h"
 #include "RenderUtils.h" // VGS CHANGE: IsForwardShadingEnabled, Substrate::IsSubstrateEnabled
+#include "Runtime/Launch/Resources/Version.h" // VGS CHANGE: the copy builds against Unreal 5.6 and later
+
+// VGS CHANGE: what Epic's 5.9 renderer uses that older engines lack. Before 5.9 there is no
+// SortGPUBuffersIndirect (the GPU-driven pipeline sorts a count the GPU wrote), and no
+// VET_UInt2 (vertex attribute fetch, for platforms whose vertex shaders cannot read buffers):
+// the GPU-driven pipeline is off there, and vertex attribute fetch is never chosen, which on
+// Win64, the only platform the plugins build for, it is not anyway.
+#define VGSSPLAT_ENGINE_5_9 (ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 9))
 
 DECLARE_GPU_STAT(VGSSplat);
 
@@ -462,6 +470,9 @@ namespace
 	// Vertex attribute fetch is required if the platform does not support SRVs in Vertex Shading
 	bool IsVertexAttributeFetchEnabled(EShaderPlatform ShaderPlatform)
 	{
+#if !VGSSPLAT_ENGINE_5_9
+		return false; // VGS CHANGE: no VET_UInt2 before 5.9 (above)
+#else
 		if (IsGLES31EmulationEnabled())
 		{
 			return true;
@@ -479,6 +490,7 @@ namespace
 		}
 
 		return false;
+#endif
 	}
 }
 
@@ -514,8 +526,12 @@ bool VGSSplat::IsHardwareRasterization(EShaderPlatform ShaderPlatform)
 
 bool VGSSplat::IsGPUDrivenPipeline()
 {
+#if !VGSSPLAT_ENGINE_5_9
+	return false; // VGS CHANGE: no SortGPUBuffersIndirect before 5.9 (above)
+#else
 	return CVarVGSSplatHardwareRasterization.GetValueOnRenderThread() != 0 &&
 		CVarVGSSplatGPUDrivenPipeline.GetValueOnRenderThread() != 0;
+#endif
 }
 
 struct FShadedVGSSplatData
@@ -544,6 +560,7 @@ public:
 
 	virtual void InitRHI(FRHICommandListBase& RHICmdList) override
 	{
+#if VGSSPLAT_ENGINE_5_9 // VGS CHANGE
 		// TODO: Consider VET_Half2 for implicit floating-point conversion if platform supports it
 		constexpr uint16 Stride = sizeof(FPackedShadedVGSSplatData);
 		FVertexDeclarationElementList Elements;
@@ -551,6 +568,7 @@ public:
 		Elements.Add(FVertexElement(0,  8, VET_UInt2, 1, Stride, /*bUseInstanceIndex*/ true)); // Axes
 		Elements.Add(FVertexElement(0, 16, VET_UInt2, 2, Stride, /*bUseInstanceIndex*/ true)); // Color
 		VertexDeclarationRHI = PipelineStateCache::GetOrCreateVertexDeclaration(Elements);
+#endif // else never used (IsVertexAttributeFetchEnabled)
 	}
 
 	virtual void ReleaseRHI() override
@@ -561,8 +579,8 @@ public:
 
 static TGlobalResource<FVGSSplatInstanceVertexDeclaration> GVGSSplatInstanceVertexDeclaration;
 
-// Mirrors FGaussianSplatCluster in VGSSplatCommon.ush
-static_assert(sizeof(FGaussianSplatCluster) == 48, "Cluster stride must match the shader layout");
+// Mirrors FVGSSplatCluster in VGSSplatCommon.ush
+static_assert(sizeof(FVGSSplatCluster) == 48, "Cluster stride must match the shader layout");
 
 class FVGSSplatCullClustersCS : public FGlobalShader
 {
@@ -582,7 +600,7 @@ class FVGSSplatCullClustersCS : public FGlobalShader
 		// Cluster data
 		SHADER_PARAMETER(uint32, NumClusters)
 		SHADER_PARAMETER(float, PointScaleFactor)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGaussianSplatCluster>, ClusterBuffer)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FVGSSplatCluster>, ClusterBuffer)
 
 		// LOD data
 		SHADER_PARAMETER(int32, LOD)
@@ -660,7 +678,7 @@ class FShadeVGSSplatCS : public FGlobalShader
 		SHADER_PARAMETER_RDG_BUFFER_SRV(ByteAddressBuffer, VGSSplatBuffer)
 
 		// Cluster dispatch
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGaussianSplatCluster>, ClusterBuffer)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FVGSSplatCluster>, ClusterBuffer)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(Buffer<uint>, ClusterIndexBuffer)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(Buffer<uint>, ClusterCountBuffer)
 		RDG_BUFFER_ACCESS(IndirectArgs, ERHIAccess::IndirectArgs)
@@ -1173,8 +1191,9 @@ IMPLEMENT_GLOBAL_SHADER(FVGSSplatExpectedDepthPS, "/Plugin/VGS/Private/SplatRend
 // VGS CHANGE: writes a lit proxy into the GBuffer (VGSSplatGBuffer.usf).
 static TAutoConsoleVariable<int32> CVarVGSSplatLitDither(
 	TEXT("r.VGSSplat.Lit.Dither"),
-	1,
-	TEXT("Lit captures: where splats only partly cover a pixel, write it at random as much as they cover, for temporal anti-aliasing to smooth (1, default); or write it where they cover half or more (0)."),
+	0,
+	TEXT("Lit captures: where splats only partly cover a pixel, write it where they cover half or more (0, default); or at random as much as they cover (1),") LINE_TERMINATOR
+	TEXT("for temporal anti-aliasing to smooth. TSR does not smooth it away (2026-11-11, UE 5.9): edges and faint splats stay speckled."),
 	ECVF_RenderThreadSafe);
 
 static TAutoConsoleVariable<float> CVarVGSSplatLitMinCoverage(
@@ -1445,9 +1464,13 @@ void RasterizeHardware(
 				};
 				RHICmdList.Transition(MakeArrayView(SortBufferToUAV));
 
+#if VGSSPLAT_ENGINE_5_9 // VGS CHANGE
 				const int32 ResultIndex = bGpuDrivenPipeline
 					? SortGPUBuffersIndirect(RHICmdList, SortBuffers, 0, KeyMask, PassParameters->SplatCountSRV->GetRHI(), FeatureLevel)
 					: SortGPUBuffers(RHICmdList, SortBuffers, 0, KeyMask, SortElementCount, FeatureLevel);
+#else
+				const int32 ResultIndex = SortGPUBuffers(RHICmdList, SortBuffers, 0, KeyMask, SortElementCount, FeatureLevel);
+#endif
 				check(ResultIndex == SortedBufferIndex);
 				RHICmdList.Transition(MakeArrayView(SortBufferToUAV));
 			});
@@ -2196,7 +2219,7 @@ static void RenderProxyInternal(
 			else
 			{
 				// Default bindings when disabled
-				PassParameters->ClusterBuffer = GraphBuilder.CreateSRV(GSystemTextures.GetDefaultStructuredBuffer(GraphBuilder, sizeof(FGaussianSplatCluster)));
+				PassParameters->ClusterBuffer = GraphBuilder.CreateSRV(GSystemTextures.GetDefaultStructuredBuffer(GraphBuilder, sizeof(FVGSSplatCluster)));
 				PassParameters->ClusterIndexBuffer = GraphBuilder.CreateSRV(GSystemTextures.GetDefaultBuffer(GraphBuilder, sizeof(uint32)), PF_R32_UINT);
 				PassParameters->ClusterCountBuffer = GraphBuilder.CreateSRV(GSystemTextures.GetDefaultBuffer(GraphBuilder, sizeof(uint32)), PF_R32_UINT);
 			}
@@ -2220,7 +2243,7 @@ static void RenderProxyInternal(
 			// VGS CHANGE: a lit proxy's normals
 			const bool bHasNormals = bLit && RenderProxy.NormalBuffer.IsValid();
 			PassParameters->Lit = bLit ? 1u : 0u;
-			PassParameters->HasNormals = bHasNormals ? 1u : 0u;
+			PassParameters->HasNormals = bHasNormals ? (RenderProxy.bNormalsFaceCamera ? 2u : 1u) : 0u;
 			PassParameters->NormalBuffer = bHasNormals
 				? GraphBuilder.CreateSRV(GraphBuilder.RegisterExternalBuffer(RenderProxy.NormalBuffer))
 				: GraphBuilder.CreateSRV(GSystemTextures.GetDefaultStructuredBuffer(GraphBuilder, sizeof(uint32)));

@@ -14,7 +14,7 @@ float4x4 LocalToWorld;
 // Clusters
 uint NumClusters;
 float PointScaleFactor;
-StructuredBuffer<FGaussianSplatCluster> ClusterBuffer;
+StructuredBuffer<FVGSSplatCluster> ClusterBuffer;
 
 // LOD settings
 int LOD;
@@ -30,7 +30,7 @@ RWBuffer<uint> RWClusterCount;
 
 float ComputeErrorInPixels(uint ClusterIndex, float4x4 LocalToTranslatedWorld)
 {
-	const FGaussianSplatCluster Cluster = ClusterBuffer[ClusterIndex];
+	const FVGSSplatCluster Cluster = ClusterBuffer[ClusterIndex];
 	
 	float DepthScale = 1.0f;
 	bool bIsPerspective = !IsOrthoProjection(PrimaryView.ViewToClip);
@@ -66,7 +66,7 @@ void MainCS(
 		return;
 	}
 
-	const FGaussianSplatCluster Cluster = ClusterBuffer[ClusterIndex];
+	const FVGSSplatCluster Cluster = ClusterBuffer[ClusterIndex];
 
 	const float3 RelativeWorldOrigin = LocalToWorld[3].xyz;
 	const float3 TranslatedWorldOrigin = DFFastToTranslatedWorld(

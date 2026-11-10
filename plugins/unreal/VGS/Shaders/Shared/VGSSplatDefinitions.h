@@ -4,12 +4,8 @@
 
 #pragma once
 
-#include "Math/Matrix.h"
-
-class UGaussianSplatComponent;
-
-namespace VGSSplat
-{
-	/** Game-thread local-to-world matrix shared by proxy creation and per-frame updates. */
-	VGSSPLATRENDERER_API FMatrix44f GetComponentLocalToWorld(const UGaussianSplatComponent& Component);
-}
+#define GAUSSIAN_SPLAT_RADIUS				2.0f
+#define GAUSSIAN_SPLAT_RADIUS_SQUARED		(GAUSSIAN_SPLAT_RADIUS * GAUSSIAN_SPLAT_RADIUS)
+#define GAUSSIAN_SPLAT_COVARIANCE_DILATION	0.3f
+#define GAUSSIAN_SPLAT_MAX_SIZE_PIXELS		4096.0f
+#define GAUSSIAN_SPLAT_MIN_TRANSMITTANCE	1.0e-4f

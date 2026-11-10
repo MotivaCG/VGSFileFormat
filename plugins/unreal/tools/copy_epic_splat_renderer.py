@@ -7,13 +7,16 @@
 This is the mechanical half of EPIC_RENDERER_COPY.md (beside the plugin): it copies the
 GaussianSplatSceneViewExtension module and the shaders it compiles, renames everything that
 would collide with Epic's own copy when both are loaded (module, classes, shader types and
-paths, console variables, stats, log category), and leaves untouched what is still Epic's
-and shared with their plugin (the GaussianSplat runtime module's types, the shared shader
-headers, the inverse tone curve LUT assets). It does not apply the VGS changes; those are
-in vgs_renderer_changes.patch, applied after it (see the .md).
+paths, console variables, stats, log category). It also copies, renamed the same way, the
+few things of Epic's runtime module and shared shader headers the renderer uses (the
+coordinate space enum, the cluster record, the record layout and constants), so the copy
+does not need Epic's GaussianSplat plugin, which only Unreal 5.9 has. What it leaves
+untouched (Epic's component and asset types, the LUT assets) the VGS changes remove. It
+does not apply the VGS changes; those are in vgs_renderer_changes.patch, applied after it
+(see the .md).
 
-Output: <plugin>/Source/VGSSplatRenderer and <plugin>/Shaders/Private/SplatRenderer.
-Both are replaced whole.
+Output: <plugin>/Source/VGSSplatRenderer, <plugin>/Shaders/Private/SplatRenderer and
+<plugin>/Shaders/Shared. All three are replaced whole.
 """
 
 import os
@@ -28,6 +31,15 @@ EPIC = os.path.join(ENGINE, "Engine", "Plugins", "GaussianSplat")
 SOURCE_IN = os.path.join(EPIC, "Source", "GaussianSplatSceneViewExtension")
 SOURCE_OUT = os.path.join(PLUGIN, "Source", "VGSSplatRenderer")
 SHADERS_OUT = os.path.join(PLUGIN, "Shaders", "Private", "SplatRenderer")
+SHARED_OUT = os.path.join(PLUGIN, "Shaders", "Shared")
+
+# From Epic's GaussianSplat runtime module, into the copy's Internal/: what the renderer
+# needs of it.
+RUNTIME_HEADERS = ["GaussianSplatCommon.h", "GaussianSplatCluster.h"]
+
+# Epic's shared shader headers, read by both C++ and HLSL: into Shaders/Shared, which the
+# copy's Build.cs adds to its include path and /Plugin/VGS/Shared/ maps for shaders.
+SHARED_HEADERS = ["GaussianSplatDefinitions.h", "GaussianSplatShared.h"]
 
 # Files of the module not copied: they register Epic's own components with the renderer,
 # and this copy must never draw those (Epic's renderer does).
@@ -52,28 +64,21 @@ SHADERS = [
     "Public/SphericalGaussianCommon.ush",
 ]
 
-# Still Epic's, used as they are: the GaussianSplat runtime module's types and headers,
-# the shared shader headers, the LUT assets. Protected from the renaming below.
+# Epic's, left as they are: the code of the copy that draws Epic's own components and loads
+# Epic's LUT assets, which the VGS changes remove (the copy draws only its own sources and
+# builds the LUTs from Resources/InverseToneCurve). Protected from the renaming below, so
+# that what the changes remove is plainly Epic's.
 KEEP = [
-    r'"/Plugin/GaussianSplat/Shared/',
     r'/GaussianSplat/LUTs/',
     r'"GaussianSplat\.h"',
-    r'"GaussianSplatCommon\.h"',
-    r'"GaussianSplatCluster\.h"',
     r'"GaussianSplatComponent\.h"',
     r'"GaussianSplatRenderResource\.h"',
     r'"GaussianSplatRenderer\.h"',
     r'\bGaussianSplat::IsEnabled\b',
-    r'\bGaussianSplatShared\b',
-    r'\bGaussianSplatDefinitions\b',
-    r'\bFGaussianSplatShared\b',
-    r'\bFGaussianSplatSHConstants\b',
-    r'\bFGaussianSplatCluster\b',
     r'\bFGaussianSplatFormatQuantized\b',
     r'\bFGaussianSplatRenderResource\b',
     r'\bFGaussianSplatRendererRegistry\b',
     r'\bIGaussianSplatRenderer\b',
-    r'\bEGaussianSplatCoordinateSpace\b',
     r'\bUGaussianSplatComponent\b',
     r'\bUGaussianSplat\b',
     r'"GaussianSplat"',  # dependency module names in Build.cs
@@ -89,6 +94,7 @@ RENAMES = [
     (r'GaussianSplatSceneViewExtension', 'VGSSplatRenderer'),
     (r'/Plugin/GaussianSplat/Private/', '/Plugin/VGS/Private/SplatRenderer/'),
     (r'/Plugin/GaussianSplat/Public/', '/Plugin/VGS/Private/SplatRenderer/'),
+    (r'/Plugin/GaussianSplat/Shared/', '/Plugin/VGS/Shared/'),
     (r'r\.GaussianSplat\.', 'r.VGSSplat.'),
     (r'GaussianSplat', 'VGSSplat'),
 ] + [(r'\b' + name + r'\b', 'FVGSSplat' + name[1:]) for name in SHADER_TYPES]
@@ -127,7 +133,7 @@ def write(path, text, header):
 
 def main():
     header = HEADER.format(version=engine_version())
-    for out in (SOURCE_OUT, SHADERS_OUT):
+    for out in (SOURCE_OUT, SHADERS_OUT, SHARED_OUT):
         if os.path.isdir(out):
             shutil.rmtree(out)
 
@@ -148,7 +154,17 @@ def main():
         target = os.path.join(SHADERS_OUT, transform(os.path.basename(shader)))
         write(target, transform(text), header)
 
-    print("copied into", os.path.abspath(SOURCE_OUT), "and", os.path.abspath(SHADERS_OUT))
+    for name in RUNTIME_HEADERS:
+        with open(os.path.join(EPIC, "Source", "GaussianSplat", "Internal", name), encoding="utf-8-sig") as f:
+            text = f.read()
+        write(os.path.join(SOURCE_OUT, "Internal", transform(name)), transform(text), header)
+
+    for name in SHARED_HEADERS:
+        with open(os.path.join(EPIC, "Shaders", "Shared", name), encoding="utf-8-sig") as f:
+            text = f.read()
+        write(os.path.join(SHARED_OUT, transform(name)), transform(text), header)
+
+    print("copied into", os.path.abspath(SOURCE_OUT), ",", os.path.abspath(SHADERS_OUT), "and", os.path.abspath(SHARED_OUT))
 
 
 if __name__ == "__main__":

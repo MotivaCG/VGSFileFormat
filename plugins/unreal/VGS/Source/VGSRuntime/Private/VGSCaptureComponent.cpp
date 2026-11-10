@@ -201,6 +201,7 @@ void UVGSCaptureComponent::ClosePlayer(const FString& Why)
 {
 	Player.Reset();
 	Status = Why;
+	Normals.Reset();
 	ShownSeconds = -1.0;
 	ShownSplats = 0;
 	bFrameDirty = true;
@@ -646,6 +647,8 @@ void UVGSCaptureComponent::PackAndSend(const vgsb_frame& Frame)
 
 	ShownFrame = Packed;
 	ShownSplats = int64(View.count);
+	Normals = Frame.normals ? TEXT("In the capture, but not used when evaluated on the CPU: each splat is lit by its shortest axis")
+		: TEXT("None: Shaded lights each splat by its shortest axis, which is much noisier");
 	if (Source.IsValid())
 	{
 		ENQUEUE_RENDER_COMMAND(VGSSetFrame)([Target = Source, Frame = FVGSPackedFrameRef(Packed)](FRHICommandList&)
@@ -687,6 +690,8 @@ void UVGSCaptureComponent::SendPacked(const vgsb_packed_frame& Frame)
 	ShownFrame.Reset();
 	// Every record of the chunk is drawn; those not alive at the instant have no size.
 	ShownSplats = int64(Chunk.splats);
+	Normals = Chunk.normals && Chunk.normal_words >= Chunk.splats ? TEXT("From the capture")
+		: TEXT("None: Shaded lights each splat by its shortest axis, which is much noisier");
 	if (Source.IsValid())
 	{
 		ENQUEUE_RENDER_COMMAND(VGSSetGpuFrame)([Target = Source, Frame = FVGSGpuFrameRef(Gpu)](FRHICommandList&)

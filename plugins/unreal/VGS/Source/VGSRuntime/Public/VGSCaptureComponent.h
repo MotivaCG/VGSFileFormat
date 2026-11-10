@@ -280,6 +280,14 @@ public:
 	UPROPERTY(VisibleAnywhere, Transient, BlueprintReadOnly, Category = "VGS|Capture")
 	int32 SHDegree = 0;
 
+	/**
+	 * Whether the capture has normals for Shaded lighting (the VGS editor's export setting
+	 * Normals). Without them, or evaluated on the CPU, each splat is lit by its shortest axis,
+	 * which is much noisier.
+	 */
+	UPROPERTY(VisibleAnywhere, Transient, BlueprintReadOnly, Category = "VGS|Capture")
+	FString Normals;
+
 	/** Splats in the instant on screen. */
 	UPROPERTY(VisibleAnywhere, Transient, BlueprintReadOnly, Category = "VGS|Capture")
 	int64 ShownSplats = 0;

@@ -8,8 +8,7 @@ public class VGSRuntime : ModuleRules
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
 		// Splats are drawn by VGSSplatRenderer, this plugin's copy of Epic's Gaussian Splat
-		// renderer (EPIC_RENDERER_COPY.md). Its proxy still names a type of Epic's
-		// GaussianSplat runtime module, whose headers are all in Internal/, and
+		// renderer (EPIC_RENDERER_COPY.md), whose headers are in Internal/, as Epic's were, and
 		// UnrealBuildTool shows Internal/ only to modules of the engine's scope (UEBuildModule.cs,
 		// "only if the scope is the same as the SourceModule's scope or if the source module
 		// is an engine module"), so this module asks to be treated as an engine module.
@@ -23,8 +22,6 @@ public class VGSRuntime : ModuleRules
 			"RenderCore",
 			"Renderer",
 			"RHI",
-			"GaussianSplat",
-			"GaussianSplatShader",
 			"VGSSplatRenderer",
 			"VGSShaders"
 		});

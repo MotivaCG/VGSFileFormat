@@ -13,6 +13,9 @@
 # (Binaries/Win64, Intermediate) stays out of it. The staged Source/ is replaced on every
 # build, and so is Shaders/, so a file removed from the tree does not linger there.
 #
+# Resources/InverseToneCurve holds the data of Epic's inverse tone curve LUTs, which the
+# renderer copy builds its textures from (EPIC_RENDERER_COPY.md); the icon is added beside it.
+#
 # Content/ holds the editor's assets (the actor's icon), saved by Unreal 5.9 and committed as
 # they are. A running editor keeps vgsbridge.dll open, so it is only replaced when it changed.
 #
@@ -25,7 +28,7 @@ file(STRINGS ${plugin_dir}/VGS.uplugin version_line REGEX "\"VersionName\"")
 string(REGEX REPLACE ".*\"VersionName\" *: *\"([^\"]+)\".*" "\\1" plugin_version "${version_line}")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${plugin_dir}/VGS.uplugin)
 
-file(GLOB_RECURSE plugin_sources CONFIGURE_DEPENDS ${plugin_dir}/Source/* ${plugin_dir}/Shaders/* ${plugin_dir}/Content/*)
+file(GLOB_RECURSE plugin_sources CONFIGURE_DEPENDS ${plugin_dir}/Source/* ${plugin_dir}/Shaders/* ${plugin_dir}/Content/* ${plugin_dir}/Resources/*)
 
 set(out ${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>)
 set(stage ${out}/${plugin})
@@ -45,6 +48,7 @@ add_custom_target(vgs_unreal_plugin ALL
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${plugin_dir}/Source ${stage}/Source
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${plugin_dir}/Shaders ${stage}/Shaders
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${plugin_dir}/Content ${stage}/Content
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${plugin_dir}/Resources ${stage}/Resources
     COMMAND ${CMAKE_COMMAND} -E copy ${bridge_header} ${stage}/Source/ThirdParty/vgsbridge/include
     COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:vgsbridge> ${third_party_bin}
     COMMAND ${CMAKE_COMMAND} -E copy ${decoder_license} ${third_party_bin}/LICENSE.md

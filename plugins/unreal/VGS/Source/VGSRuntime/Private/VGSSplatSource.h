@@ -72,7 +72,7 @@ struct FVGSRenderState
 /**
  * A capture as the Gaussian Splat renderer sees it: a source of splats with no
  * component of Epic's behind it, which is what VGSSplat::RegisterExternalProxySource is for
- * (the copy keeps Epic's GaussianSplat::RegisterExternalProxySource, which Niagara uses).
+ * (the copy of Epic's GaussianSplat::RegisterExternalProxySource, which Niagara uses).
  *
  * Render thread only, apart from construction. The renderer calls Collect once per view,
  * inside its post-process pass; the first call of a frame uploads a new instant if the game

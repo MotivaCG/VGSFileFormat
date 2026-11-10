@@ -1,3 +1,6 @@
 # Vendored crates: cargo checks every file against .cargo-checksum.json byte for byte,
 # so line endings must never be converted on checkout.
 core/third_party/rust-vendor/** -text
+
+# Packed float data the Unreal plugins read at run time.
+*.vgslut binary

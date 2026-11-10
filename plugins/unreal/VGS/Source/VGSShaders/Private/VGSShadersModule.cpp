@@ -14,6 +14,8 @@ public:
 		const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("VGS"));
 		check(Plugin.IsValid());
 		AddShaderSourceDirectoryMapping(TEXT("/Plugin/VGS"), FPaths::Combine(Plugin->GetBaseDir(), TEXT("Shaders")));
+		// Read by C++ too (the renderer's record layout), as Epic maps its own Shared folder.
+		AddShaderSourceSharedVirtualDirectory(TEXT("/Plugin/VGS/Shared/"));
 	}
 };
 

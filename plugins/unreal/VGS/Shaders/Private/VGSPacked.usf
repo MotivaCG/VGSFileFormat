@@ -15,7 +15,7 @@
 // GaussianSplatShared.h is shared with C++; this picks its shader half, as Niagara's splat
 // builder does.
 #define GPU_SIMULATION 1
-#include "/Plugin/GaussianSplat/Shared/GaussianSplatShared.h"
+#include "/Plugin/VGS/Shared/VGSSplatShared.h"
 
 StructuredBuffer<uint4> SplatA;          // position base (2), rotation base, scale indices + birth
 StructuredBuffer<uint4> SplatB;          // colour and opacity residual words; opacity factor nibbles
@@ -151,10 +151,10 @@ uint DensityHash(uint Record)
 
 void WriteInactive(uint Offset)
 {
-	RWSplatBuffer.Store3(Offset + FGaussianSplatShared::EFloat_PositionOffset, asuint(float3(0, 0, 0)));
-	RWSplatBuffer.Store3(Offset + FGaussianSplatShared::EFloat_ScaleOffset, asuint(float3(0, 0, 0)));
-	RWSplatBuffer.Store4(Offset + FGaussianSplatShared::EFloat_RotationOffset, asuint(float4(0, 0, 0, 1)));
-	RWSplatBuffer.Store4(Offset + FGaussianSplatShared::EFloat_ColorOpacityOffset, asuint(float4(0, 0, 0, 0)));
+	RWSplatBuffer.Store3(Offset + FVGSSplatShared::EFloat_PositionOffset, asuint(float3(0, 0, 0)));
+	RWSplatBuffer.Store3(Offset + FVGSSplatShared::EFloat_ScaleOffset, asuint(float3(0, 0, 0)));
+	RWSplatBuffer.Store4(Offset + FVGSSplatShared::EFloat_RotationOffset, asuint(float4(0, 0, 0, 1)));
+	RWSplatBuffer.Store4(Offset + FVGSSplatShared::EFloat_ColorOpacityOffset, asuint(float4(0, 0, 0, 0)));
 }
 
 [numthreads(THREADGROUP_SIZE, 1, 1)]
@@ -275,10 +275,10 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupThreadIndex : SV_GroupIndex)
 	const float SmallestScale = 1e-6f;
 	const float3 Scale = max(float3(Luts[A.w & 255u].x, Luts[(A.w >> 8) & 255u].x, Luts[(A.w >> 16) & 255u].x), SmallestScale);
 
-	RWSplatBuffer.Store3(Offset + FGaussianSplatShared::EFloat_PositionOffset, asuint(P));
-	RWSplatBuffer.Store3(Offset + FGaussianSplatShared::EFloat_ScaleOffset, asuint(Scale));
-	RWSplatBuffer.Store4(Offset + FGaussianSplatShared::EFloat_RotationOffset, asuint(Q));
-	RWSplatBuffer.Store4(Offset + FGaussianSplatShared::EFloat_ColorOpacityOffset, asuint(float4(Sh0 * Gain + DcOffset, Opacity)));
+	RWSplatBuffer.Store3(Offset + FVGSSplatShared::EFloat_PositionOffset, asuint(P));
+	RWSplatBuffer.Store3(Offset + FVGSSplatShared::EFloat_ScaleOffset, asuint(Scale));
+	RWSplatBuffer.Store4(Offset + FVGSSplatShared::EFloat_RotationOffset, asuint(Q));
+	RWSplatBuffer.Store4(Offset + FVGSSplatShared::EFloat_ColorOpacityOffset, asuint(float4(Sh0 * Gain + DcOffset, Opacity)));
 
 	// One word per plane carries three coefficients' codebook indices.
 	const uint TemporalBase = BooksTemporal + Frame * ShPlanes * 3u * EntriesTemporal;
@@ -289,6 +289,6 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupThreadIndex : SV_GroupIndex)
 		const uint Si = (ShStatic[Word] >> Shift) & 1023u;
 		const uint Ti = (ShTemporal[Word] >> Shift) & 1023u;
 		const float3 Coefficient = (Books[Co * EntriesStatic + Si].xyz + Books[TemporalBase + Co * EntriesTemporal + Ti].xyz) * Gain;
-		RWSplatBuffer.Store3(Offset + FGaussianSplatShared::EFloat_Stride + Co * 12u, asuint(Coefficient));
+		RWSplatBuffer.Store3(Offset + FVGSSplatShared::EFloat_Stride + Co * 12u, asuint(Coefficient));
 	}
 }

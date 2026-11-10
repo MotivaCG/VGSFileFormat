@@ -9,7 +9,6 @@
 #include "Containers/SortedMap.h"
 #include "Containers/SortedSet.h"
 
-class UGaussianSplatComponent;
 class FVGSSplatRenderProxy;
 class FVGSSplatViewExtension;
 struct FScreenPassRenderTarget;
@@ -49,8 +48,7 @@ public:
 	// VGS CHANGE: lit proxies go into the GBuffer here, after the base pass and before lighting.
 	virtual void PostRenderBasePassDeferred_RenderThread(FRDGBuilder& GraphBuilder, FSceneView& InView, const FRenderTargetBindingSlots& RenderTargets, TRDGUniformBufferRef<FSceneTextureUniformParameters> SceneTextures) override;
 
-	void RegisterComponent(const UGaussianSplatComponent* InComponent);
-	void UnregisterComponent(const UGaussianSplatComponent* InComponent);
+	// VGS CHANGE: no RegisterComponent / UnregisterComponent; only external sources are drawn.
 	void AddExternalProxySource(FOnCollectVGSSplatProxies::FDelegate&& InSource);
 
 protected:
@@ -61,9 +59,6 @@ protected:
 	void Render(FRDGBuilder& GraphBuilder, const FSceneView& View, const FScreenPassRenderTarget& Output, FRDGTexture* SceneDepthTexture, FRDGTexture* SceneVelocityTexture, const VGSSplat::FLitTargets* LitTargets = nullptr);
 
 private:
-	TArray<const UGaussianSplatComponent*> RegisteredComponents;
-	TSortedSet<uint32> Components_GameThread;
-	TSortedMap<uint32, TUniquePtr<FVGSSplatRenderProxy>> RenderProxy_RenderThread;
 	FOnCollectVGSSplatProxies ExternalProxySources_RenderThread;
 };
 

@@ -7,7 +7,7 @@
 #include "CoreMinimal.h"
 #include "Containers/ArrayView.h"
 #include "Templates/RefCounting.h"
-#include "GaussianSplatCommon.h"
+#include "VGSSplatCommon.h"
 #include "RenderGraphFwd.h"
 #include "RHIShaderPlatform.h"
 
@@ -26,7 +26,7 @@ public:
 	uint32 NumSplats = 0;
 	uint32 NumLOD0Splats = 0;
 	int32  SHDegree = 0;
-	EGaussianSplatCoordinateSpace SHCoordinateSpace = EGaussianSplatCoordinateSpace::LH_FRU;
+	EVGSSplatCoordinateSpace SHCoordinateSpace = EVGSSplatCoordinateSpace::LH_FRU;
 
 	TRefCountPtr<FRDGPooledBuffer> GpuBuffer; // set on render thread in RegisterComponent
 	uint32 GpuDataStride = 0;
@@ -80,6 +80,9 @@ public:
 	// bits a component biased so that 0 means none). Without it, or for a splat with 0, the
 	// normal is the splat's shortest axis, turned to face the camera.
 	TRefCountPtr<FRDGPooledBuffer> NormalBuffer;
+	// VGS CHANGE: NormalBuffer holds directions whose side is not known (a splat's shortest
+	// axis, as PGSR takes it): each is turned to face the camera, as the shortest axis is.
+	bool bNormalsFaceCamera = false;
 	float InverseToneCurveStrength = 0.0f;
 	bool bInvertExpandGamutLUT = true;
 

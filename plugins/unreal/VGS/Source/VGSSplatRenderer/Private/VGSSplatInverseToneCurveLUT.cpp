@@ -5,11 +5,12 @@
 #include "VGSSplatInverseToneCurveLUT.h"
 #include "VGSSplatInverseToneCurveLUTCache.h"
 
-#include "Async/Async.h"
-#include "HAL/ThreadSafeBool.h"
+#include "Interfaces/IPluginManager.h"
+#include "Misc/Compression.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
 #include "RenderingThread.h"
-#include "RenderResource.h"
-#include "RHITextureReference.h"
+#include "RHICommandList.h"
 
 DEFINE_LOG_CATEGORY(LogVGSSplat);
 
@@ -17,146 +18,92 @@ namespace VGSSplat
 {
 	namespace
 	{
-		// Baked asset path for each LUT variant.
-		const TSortedMap<EInverseToneCurveLUTVariant, const TCHAR*> GLUTAssetPaths =
+		// VGS CHANGE: files under the plugin's Resources/InverseToneCurve, one per variant, the
+		// data of Epic's assets /GaussianSplat/LUTs/UE_InverseFilmicTC and UE_InverseFilmicTC_Full.
+		const TSortedMap<EInverseToneCurveLUTVariant, const TCHAR*> GLUTFiles =
 		{
-			{ EInverseToneCurveLUTVariant::Filmic,            TEXT("/GaussianSplat/LUTs/UE_InverseFilmicTC.UE_InverseFilmicTC") },
-			{ EInverseToneCurveLUTVariant::FilmicExpandGamut, TEXT("/GaussianSplat/LUTs/UE_InverseFilmicTC_Full.UE_InverseFilmicTC_Full") },
+			{ EInverseToneCurveLUTVariant::Filmic,            TEXT("UE_InverseFilmicTC.vgslut") },
+			{ EInverseToneCurveLUTVariant::FilmicExpandGamut, TEXT("UE_InverseFilmicTC_Full.vgslut") },
 		};
+
+		// "VLUT", edge, channels (3, half floats), unpacked bytes, then a zlib stream of the
+		// texels, x fastest (pack_inverse_tone_curve_luts.py). Returns RGBA16F texels.
+		bool ReadLUT(const FString& Path, uint32& OutEdge, TArray<uint16>& OutRGBA)
+		{
+			TArray<uint8> File;
+			if (!FFileHelper::LoadFileToArray(File, *Path, FILEREAD_Silent) || File.Num() < 16 || FMemory::Memcmp(File.GetData(), "VLUT", 4) != 0)
+			{
+				return false;
+			}
+			uint32 Header[3];
+			FMemory::Memcpy(Header, File.GetData() + 4, sizeof(Header));
+			const uint32 Edge = Header[0], Channels = Header[1], Unpacked = Header[2];
+			const uint64 Texels = uint64(Edge) * Edge * Edge;
+			if (Edge < 2 || Edge > 256 || Channels != 3 || Unpacked != Texels * 3 * sizeof(uint16))
+			{
+				return false;
+			}
+			TArray<uint16> RGB;
+			RGB.SetNumUninitialized(int32(Texels * 3));
+			if (!FCompression::UncompressMemory(NAME_Zlib, RGB.GetData(), int32(Unpacked), File.GetData() + 16, File.Num() - 16))
+			{
+				return false;
+			}
+			constexpr uint16 HalfOne = 0x3C00;
+			OutRGBA.SetNumUninitialized(int32(Texels * 4));
+			for (uint64 Texel = 0; Texel < Texels; ++Texel)
+			{
+				OutRGBA[Texel * 4 + 0] = RGB[Texel * 3 + 0];
+				OutRGBA[Texel * 4 + 1] = RGB[Texel * 3 + 1];
+				OutRGBA[Texel * 4 + 2] = RGB[Texel * 3 + 2];
+				OutRGBA[Texel * 4 + 3] = HalfOne;
+			}
+			OutEdge = Edge;
+			return true;
+		}
 	}
 
-	/** One per-variant render-thread cache slot: the stable texture reference and one-shot load guard. */
-	struct FInverseToneCurveLUTRenderThreadCacheSlot
-	{
-		/** Stable RHI texture reference. */
-		FTextureReferenceRHIRef TextureReferenceRHI;
-
-		/** Render-thread only; gates the one-shot load dispatch. */
-		bool bLoadRequested = false;
-	};
-
-	/** Render-thread state may be weakly referenced by queued commands after the cache starts shutting down. */
-	struct FInverseToneCurveLUTRenderThreadState
-	{
-		/** Per-variant render-thread cache slots. */
-		TSortedMap<EInverseToneCurveLUTVariant, FInverseToneCurveLUTRenderThreadCacheSlot> CacheSlots;
-
-		/** Set during module shutdown so queued render-thread work can early-out. */
-		FThreadSafeBool bShuttingDown = false;
-	};
-
-	FInverseToneCurveLUTCache::FInverseToneCurveLUTCache()
-		: RenderThreadState(MakeShared<FInverseToneCurveLUTRenderThreadState, ESPMode::ThreadSafe>())
-	{
-	}
+	FInverseToneCurveLUTCache::FInverseToneCurveLUTCache() = default;
 
 	FInverseToneCurveLUTCache::~FInverseToneCurveLUTCache()
 	{
-		// Assets holds UObject strong pointers, so the cache must only ever be destroyed on the game thread.
-		check(IsInGameThread());
-
-		if (RenderThreadState.IsValid())
+		// The textures are render resources: let the render thread drop the last references.
+		TSortedMap<EInverseToneCurveLUTVariant, FSlot> ToRelease = MoveTemp(Slots);
+		ENQUEUE_RENDER_COMMAND(ReleaseVGSSplatInverseToneCurveLUTs)([ToRelease = MoveTemp(ToRelease)](FRHICommandListImmediate&) mutable
 		{
-			RenderThreadState->bShuttingDown = true;
-
-			TSharedPtr<FInverseToneCurveLUTRenderThreadState, ESPMode::ThreadSafe> RenderThreadStateToRelease = MoveTemp(RenderThreadState);
-			ENQUEUE_RENDER_COMMAND(ReleaseInverseToneCurveLUTRenderState)(
-				[RenderThreadStateToRelease = MoveTemp(RenderThreadStateToRelease)](FRHICommandListImmediate&) mutable
-				{
-					RenderThreadStateToRelease.Reset();
-				});
-		}
-
-		Assets.Empty();
+			ToRelease.Empty();
+		});
 	}
 
 	FRHITexture* FInverseToneCurveLUTCache::GetRHI_RenderThread(bool bInvertExpandGamut)
 	{
 		checkSlow(IsInRenderingThread());
-		TSharedPtr<FInverseToneCurveLUTRenderThreadState, ESPMode::ThreadSafe> LocalRenderThreadState = RenderThreadState;
-		if (!LocalRenderThreadState.IsValid() || LocalRenderThreadState->bShuttingDown)
-		{
-			return nullptr;
-		}
-
-		// Derive the variant from the bool for now.
 		const EInverseToneCurveLUTVariant Variant = static_cast<EInverseToneCurveLUTVariant>(bInvertExpandGamut);
-		FInverseToneCurveLUTRenderThreadCacheSlot& Slot = LocalRenderThreadState->CacheSlots.FindOrAdd(Variant);
-
-		if (Slot.TextureReferenceRHI)
+		FSlot& Slot = Slots.FindOrAdd(Variant);
+		if (Slot.Texture.IsValid() || Slot.bTried)
 		{
-			if (FRHITexture* ReferencedTexture = Slot.TextureReferenceRHI->GetReferencedTexture())
-			{
-				if (FRHITexture* ReferencedTexture3D = ReferencedTexture->GetTexture3D())
-				{
-					return ReferencedTexture3D;
-				}
-			}
+			return Slot.Texture.GetReference();
+		}
+		Slot.bTried = true;
 
-			// Keep the stable reference cached. The engine may update what it references after
-			// load/streaming/resource recreation; resolve the actual texture again next frame.
+		const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(VGSSPLAT_PLUGIN_NAME);
+		const FString Path = Plugin.IsValid() ? FPaths::Combine(Plugin->GetBaseDir(), TEXT("Resources"), TEXT("InverseToneCurve"), GLUTFiles[Variant]) : FString();
+		uint32 Edge = 0;
+		TArray<uint16> Texels;
+		if (!ReadLUT(Path, Edge, Texels))
+		{
+			UE_LOG(LogVGSSplat, Warning, TEXT("Inverse tone curve LUT not found or unreadable at %s; splats are composited without it."), *Path);
 			return nullptr;
 		}
 
-		if (!Slot.bLoadRequested)
-		{
-			Slot.bLoadRequested = true;
-
-			// Pinning the cache itself proves `this` (and Assets) is alive and keeps it so for the whole task.
-			TWeakPtr<FInverseToneCurveLUTCache, ESPMode::ThreadSafe> WeakThis = AsWeak();
-			AsyncTask(ENamedThreads::GameThread, [WeakThis, Variant]()
-			{
-				TSharedPtr<FInverseToneCurveLUTCache, ESPMode::ThreadSafe> PinnedThis = WeakThis.Pin();
-				if (!PinnedThis.IsValid())
-				{
-					return;
-				}
-
-				const TCHAR* AssetPath = GLUTAssetPaths[Variant];
-				TSoftObjectPtr<UVolumeTexture> SoftPtr{FSoftObjectPath(AssetPath)};
-
-				UVolumeTexture* Loaded = SoftPtr.LoadSynchronous();
-				if (!Loaded)
-				{
-					UE_LOGF(LogVGSSplat, Warning, "InverseToneCurveLUT asset not found at %ls; post-blend pass disabled.", AssetPath);
-					return;
-				}
-
-				// The LUT is needed immediately by the render-thread pass. In editor, UVolumeTexture can
-				// otherwise keep a temporary default/proxy resource while async texture compilation finishes.
-#if WITH_EDITOR
-				Loaded->BlockOnAnyAsyncBuild();
-#endif // WITH_EDITOR
-
-				PinnedThis->Assets.FindOrAdd(Variant).Reset(Loaded);
-				FTextureReferenceRHIRef TextureReferenceRHI = Loaded->TextureReference.TextureReferenceRHI;
-
-				// Render state has its own render-thread lifetime, so the capture command still guards on it.
-				TWeakPtr<FInverseToneCurveLUTRenderThreadState, ESPMode::ThreadSafe> WeakRenderThreadState = PinnedThis->RenderThreadState;
-				ENQUEUE_RENDER_COMMAND(CaptureInverseToneCurveLUTReference)(
-					[WeakRenderThreadState, Variant, TextureReferenceRHI](FRHICommandListImmediate&)
-					{
-						TSharedPtr<FInverseToneCurveLUTRenderThreadState, ESPMode::ThreadSafe> LocalRenderThreadState = WeakRenderThreadState.Pin();
-						if (!LocalRenderThreadState.IsValid() || LocalRenderThreadState->bShuttingDown)
-						{
-							return;
-						}
-
-						FInverseToneCurveLUTRenderThreadCacheSlot& Slot = LocalRenderThreadState->CacheSlots.FindOrAdd(Variant);
-						if (TextureReferenceRHI)
-						{
-							Slot.TextureReferenceRHI = TextureReferenceRHI;
-						}
-						else
-						{
-							// The texture load can enqueue its own render-thread initialization work. If it has not
-							// produced a texture reference yet, retry on a later frame instead of permanently gating off.
-							Slot.bLoadRequested = false;
-						}
-					});
-			});
-		}
-
-		return nullptr;
+		FRHICommandListImmediate& RHICmdList = FRHICommandListExecutor::GetImmediateCommandList();
+		const FRHITextureCreateDesc Desc = FRHITextureCreateDesc::Create3D(TEXT("VGSSplat.InverseToneCurveLUT"), Edge, Edge, Edge, PF_FloatRGBA)
+			.SetFlags(ETextureCreateFlags::ShaderResource)
+			.SetInitialState(ERHIAccess::SRVMask);
+		Slot.Texture = RHICmdList.CreateTexture(Desc);
+		const uint32 RowPitch = Edge * 4 * sizeof(uint16);
+		RHICmdList.UpdateTexture3D(Slot.Texture, 0, FUpdateTextureRegion3D(0, 0, 0, 0, 0, 0, Edge, Edge, Edge), RowPitch, RowPitch * Edge,
+			reinterpret_cast<const uint8*>(Texels.GetData()));
+		return Slot.Texture.GetReference();
 	}
 }

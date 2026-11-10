@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include "/Plugin/GaussianSplat/Shared/GaussianSplatDefinitions.h"
+#include "/Plugin/VGS/Shared/VGSSplatDefinitions.h"
 
 struct FShadedVGSSplatData
 {
@@ -13,8 +13,8 @@ struct FShadedVGSSplatData
 	float4 Color;
 };
 
-// Mirrors FGaussianSplatCluster in VGSSplatCluster.h, keep the two in sync.
-struct FGaussianSplatCluster
+// Mirrors FVGSSplatCluster in VGSSplatCluster.h, keep the two in sync.
+struct FVGSSplatCluster
 {
 	float3 BoundsMin;
 	uint   SplatOffset;

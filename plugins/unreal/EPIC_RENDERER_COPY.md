@@ -10,6 +10,13 @@ What is copied:
 |---|---|
 | `Source/GaussianSplatSceneViewExtension/` (the renderer module) | `Source/VGSSplatRenderer/` |
 | the 14 shaders it compiles, `Shaders/Private/GaussianSplat*.usf/.ush` and `Shaders/Public/SphericalGaussianCommon.ush` (not Niagara's) | `Shaders/Private/SplatRenderer/` |
+| the shared headers, `Shaders/Shared/GaussianSplatShared.h` and `GaussianSplatDefinitions.h` (read by C++ and HLSL) | `Shaders/Shared/` |
+| from the GaussianSplat runtime module, `GaussianSplatCommon.h` (the coordinate space enum) and `GaussianSplatCluster.h` | `Source/VGSSplatRenderer/Internal/` |
+| the data of the LUT assets `/GaussianSplat/LUTs/UE_InverseFilmicTC` and `_Full` | `Resources/InverseToneCurve/` (by hand, see *The LUTs*) |
+
+The VGSStatic plugin uses the same copy: `tools/assemble_vgsstatic.cmake` copies it from
+here and renames it again (`VGSSplat` to `VGSStaticSplat`, `/Plugin/VGS/` to
+`/Plugin/VGSStatic/`), so a change made here reaches both.
 
 Every copied file starts with a line saying so. Everything VGS changed is marked
 `VGS CHANGE` in the code, and the whole set of changes is
@@ -39,9 +46,8 @@ who are not Unreal Engine licensees.
 
 ## What was renamed, and what was not
 
-Both renderers are loaded at once - Epic's plugin stays enabled, for its own splat assets,
-for the shared headers and for the LUT assets - so everything that would collide was renamed
-by [`tools/copy_epic_splat_renderer.py`](tools/copy_epic_splat_renderer.py):
+Epic's plugin may be enabled beside the copy (for its own splat assets), so everything that
+would collide was renamed by [`tools/copy_epic_splat_renderer.py`](tools/copy_epic_splat_renderer.py):
 
 - the module, `GaussianSplatSceneViewExtension` to `VGSSplatRenderer`, and its API macro;
 - every class, struct, namespace and file named `GaussianSplat*` to `VGSSplat*`
@@ -54,19 +60,20 @@ by [`tools/copy_epic_splat_renderer.py`](tools/copy_epic_splat_renderer.py):
   (mapped by the `VGSShaders` module);
 - console variables, `r.GaussianSplat.*` to `r.VGSSplat.*`, so the copy has its own
   (`r.VGSSplat.Depth`, `r.VGSSplat.Falloff`, ...), separate from Epic's;
-- stats, the CSV category, the GPU stat, the log category (`LogVGSSplat`).
+- stats, the CSV category, the GPU stat, the log category (`LogVGSSplat`);
+- the shared headers and the two runtime headers the renderer used (`FVGSSplatShared`,
+  `FVGSSplatCluster`, `EVGSSplatCoordinateSpace`, under `/Plugin/VGS/Shared/` and in the
+  copy's `Internal/`).
 
-Still Epic's, used as they are: the GaussianSplat runtime module's types
-(`EGaussianSplatCoordinateSpace`, `FGaussianSplatCluster`, `UGaussianSplatComponent` and the
-rest, `GaussianSplat::IsEnabled`), the shared shader headers under
-`/Plugin/GaussianSplat/Shared/` (`GaussianSplatShared.h`, `GaussianSplatDefinitions.h`), and
-the inverse tone curve LUTs at `/GaussianSplat/LUTs/`. So the plugin still depends on Epic's
-GaussianSplat plugin being enabled.
+Nothing of Epic's plugin is used any more, so the plugins need no GaussianSplat plugin, and
+build against engines that have none (before 5.9). The script leaves alone the few names of
+Epic's runtime module the copied code mentions (`UGaussianSplatComponent`,
+`FGaussianSplatRenderResource`, `GaussianSplat::IsEnabled`, the LUT asset paths), and the
+VGS changes remove that code.
 
 Not copied: `GaussianSplatSceneViewExtensionRenderer.h/.cpp`, which register Epic's
 components with the renderer. Epic's splat assets are drawn by Epic's renderer and never by
-this copy; its component code is still there, unused (nothing registers a component with it),
-to keep the copy close to Epic's.
+this copy.
 
 ## What was changed
 
@@ -120,8 +127,35 @@ All marked `VGS CHANGE`; `tools/vgs_renderer_changes.patch` is the exact diff.
    `VGSSplatGrade.ush` and `VGSSplatGBuffer.usf` are VGS's own files in the copy's folder:
    copying again removes them, and the patch adds them back.
 8. **Build rules** (`VGSSplatRenderer.Build.cs`). `bTreatAsEngineModule`, since a project
-   plugin needs it to see the GaussianSplat runtime module's `Internal/` headers, and a
-   dependency on `VGSShaders`, which maps `/Plugin/VGS`.
+   plugin needs it to see the renderer's `Internal/` headers; a dependency on `VGSShaders`,
+   which maps `/Plugin/VGS`; no GaussianSplat or GaussianSplatShader; `Shaders/Shared` on the
+   include path; the plugin's name (`VGSSPLAT_PLUGIN_NAME`, from its `.uplugin`) and
+   `Resources/InverseToneCurve` as a runtime dependency, for the LUTs.
+9. **No Epic plugin** (`VGSSplatViewExtension.cpp/.h`, the deleted `VGSSplatTransform.h`).
+   The code that registered and updated Epic's `UGaussianSplatComponent`s is removed (only
+   external sources are drawn); `GaussianSplat::IsEnabled` (`r.GaussianSplat`) became the
+   copy's own `r.VGSSplat`.
+10. **The LUTs** (`VGSSplatInverseToneCurveLUT.cpp`, `...LUTCache.h`). Built on the render
+    thread, on first use, from `Resources/InverseToneCurve/*.vgslut` (65 x 65 x 65 RGBA16F
+    textures), instead of loading Epic's `UVolumeTexture` assets, which only 5.9 has and
+    older engines cannot load. The same on every engine version. Compared on 2026-11-10 with
+    the assets themselves: the same image (mean difference 0.33 of 255, TSR noise).
+11. **Engine versions** (`VGSSplatRenderPipeline.cpp`, `VGSSPLAT_ENGINE_5_9`). Before 5.9
+    there is no `SortGPUBuffersIndirect` and no `VET_UInt2`: the GPU-driven pipeline and
+    vertex attribute fetch are off there (the classic path, and Win64 does not need vertex
+    attribute fetch). Built against 5.8 and 5.9 on 2026-11-11.
+12. **Normals without a side** (`FVGSSplatRenderProxy::bNormalsFaceCamera`; `HasNormals` 2 in
+    `VGSSplatShading.usf`): a proxy's normals may be directions only (VGSStatic's shortest
+    axes), turned towards the camera as the shortest axis is.
+13. **Dithering off by default** (`r.VGSSplat.Lit.Dither` 0): TSR left it speckled.
+
+### The LUTs
+
+Epic's two inverse tone curve LUTs are data, not code: their source mip was dumped from the
+5.9 assets in an editor (a console command in the host project, since removed: load each
+`UVolumeTexture` and write `Source.GetMipData(Data, 0)`), and packed by
+`tools/pack_inverse_tone_curve_luts.py` (RGB half floats, zlib; alpha is 1 everywhere). If a
+later engine changes the assets, dump and pack them again.
 
 Outside the copy, in the VGS plugin's own code: `VGS.uplugin` lists `VGSSplatRenderer`
 (Runtime, PostConfigInit, Win64); `VGSRuntime` registers its splat sources with
@@ -152,7 +186,8 @@ linear, and pre-exposure would be missing. Win64 is the only platform the plugin
    shaders added or removed (`SHADERS`), Epic types the copy should keep using (`KEEP`),
    and shader types whose names do not say GaussianSplat (`SHADER_TYPES`; two global shader
    types of one name stop the engine at start-up).
-3. Apply the VGS changes, from `plugins/unreal`:
+3. Apply the VGS changes (the patch also adds VGS's own files in the copy's folders and
+   deletes `VGSSplatTransform.h`), from `plugins/unreal`:
 
    ```
    cd plugins/unreal

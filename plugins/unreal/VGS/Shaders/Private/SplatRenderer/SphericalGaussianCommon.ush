@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include "/Plugin/GaussianSplat/Shared/GaussianSplatDefinitions.h"
+#include "/Plugin/VGS/Shared/VGSSplatDefinitions.h"
 
 float3x3 QuaternionToFloat3x3(float4 Q)
 {

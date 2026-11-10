@@ -1,6 +1,6 @@
 diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatGBuffer.usf b/VGS/Shaders/Private/SplatRenderer/VGSSplatGBuffer.usf
 --- a/VGS/Shaders/Private/SplatRenderer/VGSSplatGBuffer.usf	1970-01-01 01:00:00.000000000 +0100
-+++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatGBuffer.usf	2026-11-10 21:13:07.785651000 +0100
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatGBuffer.usf	2026-11-11 00:50:31.335863500 +0100
 @@ -0,0 +1,295 @@
 +// VGS: not Epic's. Writes a lit capture into Unreal's GBuffer, after the base pass and before
 +// lighting, as an opaque Default Lit surface: every light, the shadows other objects cast on
@@ -299,7 +299,7 @@ diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatGBuffer.usf b/VGS/Shaders/
 +}
 diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatGrade.ush b/VGS/Shaders/Private/SplatRenderer/VGSSplatGrade.ush
 --- a/VGS/Shaders/Private/SplatRenderer/VGSSplatGrade.ush	1970-01-01 01:00:00.000000000 +0100
-+++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatGrade.ush	2026-11-10 21:13:07.785651000 +0100
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatGrade.ush	2026-11-11 00:50:31.335863500 +0100
 @@ -0,0 +1,34 @@
 +// VGS: not Epic's. The capture's colour grade, shared by the composite
 +// (VGSSplatInverseToneCurvePostBlend.usf) and the lit pass (VGSSplatGBuffer.usf).
@@ -336,8 +336,8 @@ diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatGrade.ush b/VGS/Shaders/Pr
 +	return lerp(ColorSRGB, C, smoothstep(0.0f, 0.05f, Opacity));
 +}
 diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatHardwareRasterize.usf b/VGS/Shaders/Private/SplatRenderer/VGSSplatHardwareRasterize.usf
---- a/VGS/Shaders/Private/SplatRenderer/VGSSplatHardwareRasterize.usf	2026-11-10 19:50:24.932908600 +0100
-+++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatHardwareRasterize.usf	2026-11-10 21:13:07.784644300 +0100
+--- a/VGS/Shaders/Private/SplatRenderer/VGSSplatHardwareRasterize.usf	2026-11-10 23:41:35.125116100 +0100
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatHardwareRasterize.usf	2026-11-11 00:50:31.335863500 +0100
 @@ -35,6 +35,13 @@
  #define GAUSSIAN_SPLAT_SUPERSAMPLE 0
  #endif // GAUSSIAN_SPLAT_SUPERSAMPLE
@@ -429,8 +429,8 @@ diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatHardwareRasterize.usf b/VG
  	
  #if WRITE_VELOCITY
 diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatInverseToneCurvePostBlend.usf b/VGS/Shaders/Private/SplatRenderer/VGSSplatInverseToneCurvePostBlend.usf
---- a/VGS/Shaders/Private/SplatRenderer/VGSSplatInverseToneCurvePostBlend.usf	2026-11-10 19:50:24.934948300 +0100
-+++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatInverseToneCurvePostBlend.usf	2026-11-10 21:13:07.781584000 +0100
+--- a/VGS/Shaders/Private/SplatRenderer/VGSSplatInverseToneCurvePostBlend.usf	2026-11-10 23:41:35.140368400 +0100
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatInverseToneCurvePostBlend.usf	2026-11-11 00:50:31.332336800 +0100
 @@ -33,6 +33,13 @@
  // Per-axis grid size of the (cubic) LUT.
  float InverseToneCurveLUTEdge;
@@ -508,8 +508,8 @@ diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatInverseToneCurvePostBlend.
 +	OutColor = float4(Blended * (Intensity * View.PreExposure), Transmittance);
  }
 diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf b/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf
---- a/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf	2026-11-10 19:50:24.939677600 +0100
-+++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf	2026-11-10 21:13:07.784644300 +0100
+--- a/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf	2026-11-10 23:41:35.130672200 +0100
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf	2026-11-11 00:50:31.334842100 +0100
 @@ -70,6 +70,7 @@
  
  // Spherical harmonics
@@ -518,7 +518,7 @@ diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf b/VGS/Shaders/
  
  // Per-component overrides
  float PointScaleFactor;
-@@ -80,6 +81,57 @@
+@@ -80,6 +81,59 @@
  
  // Output
  RWStructuredBuffer<FPackedShadedVGSSplatData> RWShadedVGSSplatBuffer;
@@ -526,7 +526,9 @@ diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf b/VGS/Shaders/
 +// VGS CHANGE: for a lit proxy (VGSSplatGBuffer.usf), each shaded splat's normal in view space,
 +// x and y as two halves, at the same index as its record; z faces the camera. The normal is
 +// the capture's own (NormalBuffer, octahedral in the capture's axes, 0 for none) or else the
-+// splat's shortest axis turned towards the camera.
++// splat's shortest axis turned towards the camera. HasNormals is 0 for no NormalBuffer, 1 for
++// outward normals, 2 for normals whose side is not known (directions only), which are turned
++// towards the camera as the shortest axis is.
 +uint Lit;
 +uint HasNormals;
 +StructuredBuffer<uint> NormalBuffer;
@@ -551,7 +553,7 @@ diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf b/VGS/Shaders/
 +	if (Word != 0u)
 +	{
 +		WorldNormal = mul((float3x3)WorldToLocal, VGSUnpackNormal(Word));
-+		bFaceCamera = false;
++		bFaceCamera = HasNormals == 2u;
 +	}
 +	else
 +	{
@@ -576,7 +578,7 @@ diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf b/VGS/Shaders/
  RWBuffer<uint> RWSplatCount;
  
  // Sort keys
-@@ -309,12 +361,27 @@
+@@ -309,12 +363,27 @@
  	}
  #endif // SH_DEGREE >= 1
  
@@ -610,7 +612,7 @@ diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf b/VGS/Shaders/
  
  	return Color;
  }
-@@ -366,9 +433,11 @@
+@@ -366,9 +435,11 @@
  		}
  
  		bool bVisible = false;
@@ -622,7 +624,7 @@ diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf b/VGS/Shaders/
  			float Opacity = saturate(SplatData.Opacity * OpacityScale);
  			bVisible = Opacity >= OpacityThreshold;
  			if (bVisible)
-@@ -382,6 +451,10 @@
+@@ -382,6 +453,10 @@
  					float3 WorldCameraDir = GetCameraVectorFromWorldPosition(SplatData.Position);
  					float3 LocalCameraDir = normalize(mul(float4(WorldCameraDir, 0.0), WorldToLocal).xyz);
  					ShadedSplatData.Color = float4(CalculateColor(SplatDataIndex, LocalCameraDir), Opacity);
@@ -633,7 +635,7 @@ diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf b/VGS/Shaders/
  				}
  			}
  		}
-@@ -420,6 +493,10 @@
+@@ -420,6 +495,10 @@
  				const uint WriteIndex = Offset + SplatIndex;
  				const FPackedShadedVGSSplatData PackedShadedSplatData = PackShadedVGSSplat(ShadedSplatData);
  				RWShadedVGSSplatBuffer[WriteIndex] = PackedShadedSplatData;
@@ -644,7 +646,7 @@ diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf b/VGS/Shaders/
  				if (GAUSSIAN_SPLAT_WRITE_SORT_KEYS)
  				{
  					RWSortKeys[WriteIndex] = ComputeSortKey(ShadedSplatData.Position, PackedShadedSplatData.ViewZ);
-@@ -431,6 +508,10 @@
+@@ -431,6 +510,10 @@
  		{
  			const FPackedShadedVGSSplatData PackedShadedSplatData = PackShadedVGSSplat(ShadedSplatData);
  			RWShadedVGSSplatBuffer[SplatDataIndex] = PackedShadedSplatData;
@@ -656,8 +658,8 @@ diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf b/VGS/Shaders/
  			{
  				// Mark culled splats with sentinel value
 diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatTileRasterize.usf b/VGS/Shaders/Private/SplatRenderer/VGSSplatTileRasterize.usf
---- a/VGS/Shaders/Private/SplatRenderer/VGSSplatTileRasterize.usf	2026-11-10 19:50:24.941044400 +0100
-+++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatTileRasterize.usf	2026-11-10 21:13:07.784141000 +0100
+--- a/VGS/Shaders/Private/SplatRenderer/VGSSplatTileRasterize.usf	2026-11-10 23:41:35.115799400 +0100
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatTileRasterize.usf	2026-11-11 00:50:31.333842600 +0100
 @@ -83,6 +83,8 @@
  		}
  	}
@@ -669,9 +671,9 @@ diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatTileRasterize.usf b/VGS/Sh
  	RWColorTexture[Pixel].a = OutColor.a * RWColorTexture[Pixel].a;
  }
 diff -ruN a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatRenderPipeline.h b/VGS/Source/VGSSplatRenderer/Internal/VGSSplatRenderPipeline.h
---- a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatRenderPipeline.h	2026-11-10 19:50:24.833668200 +0100
-+++ b/VGS/Source/VGSSplatRenderer/Internal/VGSSplatRenderPipeline.h	2026-11-10 21:13:07.720057800 +0100
-@@ -54,6 +54,32 @@
+--- a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatRenderPipeline.h	2026-11-10 23:41:35.044098900 +0100
++++ b/VGS/Source/VGSSplatRenderer/Internal/VGSSplatRenderPipeline.h	2026-11-11 00:50:31.309435900 +0100
+@@ -54,6 +54,35 @@
  	float OpacityScale = 1.0f;
  
  	bool bVisible = true;
@@ -701,10 +703,13 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatRenderPipeline.h b/VGS/
 +	// bits a component biased so that 0 means none). Without it, or for a splat with 0, the
 +	// normal is the splat's shortest axis, turned to face the camera.
 +	TRefCountPtr<FRDGPooledBuffer> NormalBuffer;
++	// VGS CHANGE: NormalBuffer holds directions whose side is not known (a splat's shortest
++	// axis, as PGSR takes it): each is turned to face the camera, as the shortest axis is.
++	bool bNormalsFaceCamera = false;
  	float InverseToneCurveStrength = 0.0f;
  	bool bInvertExpandGamutLUT = true;
  
-@@ -84,4 +110,34 @@
+@@ -84,4 +113,34 @@
  		FRDGTextureRef SceneDepthTexture,
  		FRDGTextureRef SceneVelocityTexture
  	);
@@ -739,10 +744,33 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatRenderPipeline.h b/VGS/
 +		const FLitTargets& Targets
 +	);
  }
+diff -ruN a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatTransform.h b/VGS/Source/VGSSplatRenderer/Internal/VGSSplatTransform.h
+--- a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatTransform.h	2026-11-10 23:41:35.047844700 +0100
++++ b/VGS/Source/VGSSplatRenderer/Internal/VGSSplatTransform.h	1970-01-01 01:00:00.000000000 +0100
+@@ -1,15 +0,0 @@
+-// VGS: a copy of Epic's GaussianSplat renderer (UE 5.9.0, CL 60351404), renamed by plugins/unreal/tools/copy_epic_splat_renderer.py.
+-// What VGS changed is marked "VGS CHANGE"; see plugins/unreal/EPIC_RENDERER_COPY.md.
+-// Copyright Epic Games, Inc. All Rights Reserved.
+-
+-#pragma once
+-
+-#include "Math/Matrix.h"
+-
+-class UGaussianSplatComponent;
+-
+-namespace VGSSplat
+-{
+-	/** Game-thread local-to-world matrix shared by proxy creation and per-frame updates. */
+-	VGSSPLATRENDERER_API FMatrix44f GetComponentLocalToWorld(const UGaussianSplatComponent& Component);
+-}
 diff -ruN a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatViewExtension.h b/VGS/Source/VGSSplatRenderer/Internal/VGSSplatViewExtension.h
---- a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatViewExtension.h	2026-11-10 19:50:24.851355000 +0100
-+++ b/VGS/Source/VGSSplatRenderer/Internal/VGSSplatViewExtension.h	2026-11-10 21:13:07.720057800 +0100
-@@ -13,6 +13,7 @@
+--- a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatViewExtension.h	2026-11-10 23:41:35.038593200 +0100
++++ b/VGS/Source/VGSSplatRenderer/Internal/VGSSplatViewExtension.h	2026-11-11 00:50:31.309435900 +0100
+@@ -9,10 +9,10 @@
+ #include "Containers/SortedMap.h"
+ #include "Containers/SortedSet.h"
+ 
+-class UGaussianSplatComponent;
  class FVGSSplatRenderProxy;
  class FVGSSplatViewExtension;
  struct FScreenPassRenderTarget;
@@ -750,16 +778,19 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatViewExtension.h b/VGS/S
  
  #define UE_API VGSSPLATRENDERER_API
  
-@@ -45,6 +46,8 @@
+@@ -45,21 +45,20 @@
  
  	virtual void SetupViewFamily(FSceneViewFamily& InViewFamily) override;
  	virtual void SubscribeToPostProcessingPass(EPostProcessingPass PassId, const FSceneView& View, FAfterPassCallbackDelegateArray& InOutPassCallbacks, bool bIsPassEnabled) override;
 +	// VGS CHANGE: lit proxies go into the GBuffer here, after the base pass and before lighting.
 +	virtual void PostRenderBasePassDeferred_RenderThread(FRDGBuilder& GraphBuilder, FSceneView& InView, const FRenderTargetBindingSlots& RenderTargets, TRDGUniformBufferRef<FSceneTextureUniformParameters> SceneTextures) override;
  
- 	void RegisterComponent(const UGaussianSplatComponent* InComponent);
- 	void UnregisterComponent(const UGaussianSplatComponent* InComponent);
-@@ -54,7 +57,8 @@
+-	void RegisterComponent(const UGaussianSplatComponent* InComponent);
+-	void UnregisterComponent(const UGaussianSplatComponent* InComponent);
++	// VGS CHANGE: no RegisterComponent / UnregisterComponent; only external sources are drawn.
+ 	void AddExternalProxySource(FOnCollectVGSSplatProxies::FDelegate&& InSource);
+ 
+ protected:
  	virtual bool IsActiveThisFrame_Internal(const FSceneViewExtensionContext& Context) const override;
  
  	FScreenPassTexture PostProcessPass_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& View, const FPostProcessMaterialInputs& InOutInputs);
@@ -768,19 +799,380 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatViewExtension.h b/VGS/S
 +	void Render(FRDGBuilder& GraphBuilder, const FSceneView& View, const FScreenPassRenderTarget& Output, FRDGTexture* SceneDepthTexture, FRDGTexture* SceneVelocityTexture, const VGSSplat::FLitTargets* LitTargets = nullptr);
  
  private:
- 	TArray<const UGaussianSplatComponent*> RegisteredComponents;
+-	TArray<const UGaussianSplatComponent*> RegisteredComponents;
+-	TSortedSet<uint32> Components_GameThread;
+-	TSortedMap<uint32, TUniquePtr<FVGSSplatRenderProxy>> RenderProxy_RenderThread;
+ 	FOnCollectVGSSplatProxies ExternalProxySources_RenderThread;
+ };
+ 
+diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUT.cpp b/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUT.cpp
+--- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUT.cpp	2026-11-10 23:41:35.001077700 +0100
++++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUT.cpp	2026-11-11 00:50:31.313186400 +0100
+@@ -5,11 +5,12 @@
+ #include "VGSSplatInverseToneCurveLUT.h"
+ #include "VGSSplatInverseToneCurveLUTCache.h"
+ 
+-#include "Async/Async.h"
+-#include "HAL/ThreadSafeBool.h"
++#include "Interfaces/IPluginManager.h"
++#include "Misc/Compression.h"
++#include "Misc/FileHelper.h"
++#include "Misc/Paths.h"
+ #include "RenderingThread.h"
+-#include "RenderResource.h"
+-#include "RHITextureReference.h"
++#include "RHICommandList.h"
+ 
+ DEFINE_LOG_CATEGORY(LogVGSSplat);
+ 
+@@ -17,146 +18,92 @@
+ {
+ 	namespace
+ 	{
+-		// Baked asset path for each LUT variant.
+-		const TSortedMap<EInverseToneCurveLUTVariant, const TCHAR*> GLUTAssetPaths =
++		// VGS CHANGE: files under the plugin's Resources/InverseToneCurve, one per variant, the
++		// data of Epic's assets /GaussianSplat/LUTs/UE_InverseFilmicTC and UE_InverseFilmicTC_Full.
++		const TSortedMap<EInverseToneCurveLUTVariant, const TCHAR*> GLUTFiles =
+ 		{
+-			{ EInverseToneCurveLUTVariant::Filmic,            TEXT("/GaussianSplat/LUTs/UE_InverseFilmicTC.UE_InverseFilmicTC") },
+-			{ EInverseToneCurveLUTVariant::FilmicExpandGamut, TEXT("/GaussianSplat/LUTs/UE_InverseFilmicTC_Full.UE_InverseFilmicTC_Full") },
++			{ EInverseToneCurveLUTVariant::Filmic,            TEXT("UE_InverseFilmicTC.vgslut") },
++			{ EInverseToneCurveLUTVariant::FilmicExpandGamut, TEXT("UE_InverseFilmicTC_Full.vgslut") },
+ 		};
+-	}
+-
+-	/** One per-variant render-thread cache slot: the stable texture reference and one-shot load guard. */
+-	struct FInverseToneCurveLUTRenderThreadCacheSlot
+-	{
+-		/** Stable RHI texture reference. */
+-		FTextureReferenceRHIRef TextureReferenceRHI;
+ 
+-		/** Render-thread only; gates the one-shot load dispatch. */
+-		bool bLoadRequested = false;
+-	};
+-
+-	/** Render-thread state may be weakly referenced by queued commands after the cache starts shutting down. */
+-	struct FInverseToneCurveLUTRenderThreadState
+-	{
+-		/** Per-variant render-thread cache slots. */
+-		TSortedMap<EInverseToneCurveLUTVariant, FInverseToneCurveLUTRenderThreadCacheSlot> CacheSlots;
+-
+-		/** Set during module shutdown so queued render-thread work can early-out. */
+-		FThreadSafeBool bShuttingDown = false;
+-	};
+-
+-	FInverseToneCurveLUTCache::FInverseToneCurveLUTCache()
+-		: RenderThreadState(MakeShared<FInverseToneCurveLUTRenderThreadState, ESPMode::ThreadSafe>())
+-	{
++		// "VLUT", edge, channels (3, half floats), unpacked bytes, then a zlib stream of the
++		// texels, x fastest (pack_inverse_tone_curve_luts.py). Returns RGBA16F texels.
++		bool ReadLUT(const FString& Path, uint32& OutEdge, TArray<uint16>& OutRGBA)
++		{
++			TArray<uint8> File;
++			if (!FFileHelper::LoadFileToArray(File, *Path, FILEREAD_Silent) || File.Num() < 16 || FMemory::Memcmp(File.GetData(), "VLUT", 4) != 0)
++			{
++				return false;
++			}
++			uint32 Header[3];
++			FMemory::Memcpy(Header, File.GetData() + 4, sizeof(Header));
++			const uint32 Edge = Header[0], Channels = Header[1], Unpacked = Header[2];
++			const uint64 Texels = uint64(Edge) * Edge * Edge;
++			if (Edge < 2 || Edge > 256 || Channels != 3 || Unpacked != Texels * 3 * sizeof(uint16))
++			{
++				return false;
++			}
++			TArray<uint16> RGB;
++			RGB.SetNumUninitialized(int32(Texels * 3));
++			if (!FCompression::UncompressMemory(NAME_Zlib, RGB.GetData(), int32(Unpacked), File.GetData() + 16, File.Num() - 16))
++			{
++				return false;
++			}
++			constexpr uint16 HalfOne = 0x3C00;
++			OutRGBA.SetNumUninitialized(int32(Texels * 4));
++			for (uint64 Texel = 0; Texel < Texels; ++Texel)
++			{
++				OutRGBA[Texel * 4 + 0] = RGB[Texel * 3 + 0];
++				OutRGBA[Texel * 4 + 1] = RGB[Texel * 3 + 1];
++				OutRGBA[Texel * 4 + 2] = RGB[Texel * 3 + 2];
++				OutRGBA[Texel * 4 + 3] = HalfOne;
++			}
++			OutEdge = Edge;
++			return true;
++		}
+ 	}
+ 
++	FInverseToneCurveLUTCache::FInverseToneCurveLUTCache() = default;
++
+ 	FInverseToneCurveLUTCache::~FInverseToneCurveLUTCache()
+ 	{
+-		// Assets holds UObject strong pointers, so the cache must only ever be destroyed on the game thread.
+-		check(IsInGameThread());
+-
+-		if (RenderThreadState.IsValid())
++		// The textures are render resources: let the render thread drop the last references.
++		TSortedMap<EInverseToneCurveLUTVariant, FSlot> ToRelease = MoveTemp(Slots);
++		ENQUEUE_RENDER_COMMAND(ReleaseVGSSplatInverseToneCurveLUTs)([ToRelease = MoveTemp(ToRelease)](FRHICommandListImmediate&) mutable
+ 		{
+-			RenderThreadState->bShuttingDown = true;
+-
+-			TSharedPtr<FInverseToneCurveLUTRenderThreadState, ESPMode::ThreadSafe> RenderThreadStateToRelease = MoveTemp(RenderThreadState);
+-			ENQUEUE_RENDER_COMMAND(ReleaseInverseToneCurveLUTRenderState)(
+-				[RenderThreadStateToRelease = MoveTemp(RenderThreadStateToRelease)](FRHICommandListImmediate&) mutable
+-				{
+-					RenderThreadStateToRelease.Reset();
+-				});
+-		}
+-
+-		Assets.Empty();
++			ToRelease.Empty();
++		});
+ 	}
+ 
+ 	FRHITexture* FInverseToneCurveLUTCache::GetRHI_RenderThread(bool bInvertExpandGamut)
+ 	{
+ 		checkSlow(IsInRenderingThread());
+-		TSharedPtr<FInverseToneCurveLUTRenderThreadState, ESPMode::ThreadSafe> LocalRenderThreadState = RenderThreadState;
+-		if (!LocalRenderThreadState.IsValid() || LocalRenderThreadState->bShuttingDown)
+-		{
+-			return nullptr;
+-		}
+-
+-		// Derive the variant from the bool for now.
+ 		const EInverseToneCurveLUTVariant Variant = static_cast<EInverseToneCurveLUTVariant>(bInvertExpandGamut);
+-		FInverseToneCurveLUTRenderThreadCacheSlot& Slot = LocalRenderThreadState->CacheSlots.FindOrAdd(Variant);
+-
+-		if (Slot.TextureReferenceRHI)
++		FSlot& Slot = Slots.FindOrAdd(Variant);
++		if (Slot.Texture.IsValid() || Slot.bTried)
+ 		{
+-			if (FRHITexture* ReferencedTexture = Slot.TextureReferenceRHI->GetReferencedTexture())
+-			{
+-				if (FRHITexture* ReferencedTexture3D = ReferencedTexture->GetTexture3D())
+-				{
+-					return ReferencedTexture3D;
+-				}
+-			}
+-
+-			// Keep the stable reference cached. The engine may update what it references after
+-			// load/streaming/resource recreation; resolve the actual texture again next frame.
+-			return nullptr;
++			return Slot.Texture.GetReference();
+ 		}
++		Slot.bTried = true;
+ 
+-		if (!Slot.bLoadRequested)
++		const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(VGSSPLAT_PLUGIN_NAME);
++		const FString Path = Plugin.IsValid() ? FPaths::Combine(Plugin->GetBaseDir(), TEXT("Resources"), TEXT("InverseToneCurve"), GLUTFiles[Variant]) : FString();
++		uint32 Edge = 0;
++		TArray<uint16> Texels;
++		if (!ReadLUT(Path, Edge, Texels))
+ 		{
+-			Slot.bLoadRequested = true;
+-
+-			// Pinning the cache itself proves `this` (and Assets) is alive and keeps it so for the whole task.
+-			TWeakPtr<FInverseToneCurveLUTCache, ESPMode::ThreadSafe> WeakThis = AsWeak();
+-			AsyncTask(ENamedThreads::GameThread, [WeakThis, Variant]()
+-			{
+-				TSharedPtr<FInverseToneCurveLUTCache, ESPMode::ThreadSafe> PinnedThis = WeakThis.Pin();
+-				if (!PinnedThis.IsValid())
+-				{
+-					return;
+-				}
+-
+-				const TCHAR* AssetPath = GLUTAssetPaths[Variant];
+-				TSoftObjectPtr<UVolumeTexture> SoftPtr{FSoftObjectPath(AssetPath)};
+-
+-				UVolumeTexture* Loaded = SoftPtr.LoadSynchronous();
+-				if (!Loaded)
+-				{
+-					UE_LOGF(LogVGSSplat, Warning, "InverseToneCurveLUT asset not found at %ls; post-blend pass disabled.", AssetPath);
+-					return;
+-				}
+-
+-				// The LUT is needed immediately by the render-thread pass. In editor, UVolumeTexture can
+-				// otherwise keep a temporary default/proxy resource while async texture compilation finishes.
+-#if WITH_EDITOR
+-				Loaded->BlockOnAnyAsyncBuild();
+-#endif // WITH_EDITOR
+-
+-				PinnedThis->Assets.FindOrAdd(Variant).Reset(Loaded);
+-				FTextureReferenceRHIRef TextureReferenceRHI = Loaded->TextureReference.TextureReferenceRHI;
+-
+-				// Render state has its own render-thread lifetime, so the capture command still guards on it.
+-				TWeakPtr<FInverseToneCurveLUTRenderThreadState, ESPMode::ThreadSafe> WeakRenderThreadState = PinnedThis->RenderThreadState;
+-				ENQUEUE_RENDER_COMMAND(CaptureInverseToneCurveLUTReference)(
+-					[WeakRenderThreadState, Variant, TextureReferenceRHI](FRHICommandListImmediate&)
+-					{
+-						TSharedPtr<FInverseToneCurveLUTRenderThreadState, ESPMode::ThreadSafe> LocalRenderThreadState = WeakRenderThreadState.Pin();
+-						if (!LocalRenderThreadState.IsValid() || LocalRenderThreadState->bShuttingDown)
+-						{
+-							return;
+-						}
+-
+-						FInverseToneCurveLUTRenderThreadCacheSlot& Slot = LocalRenderThreadState->CacheSlots.FindOrAdd(Variant);
+-						if (TextureReferenceRHI)
+-						{
+-							Slot.TextureReferenceRHI = TextureReferenceRHI;
+-						}
+-						else
+-						{
+-							// The texture load can enqueue its own render-thread initialization work. If it has not
+-							// produced a texture reference yet, retry on a later frame instead of permanently gating off.
+-							Slot.bLoadRequested = false;
+-						}
+-					});
+-			});
++			UE_LOG(LogVGSSplat, Warning, TEXT("Inverse tone curve LUT not found or unreadable at %s; splats are composited without it."), *Path);
++			return nullptr;
+ 		}
+ 
+-		return nullptr;
++		FRHICommandListImmediate& RHICmdList = FRHICommandListExecutor::GetImmediateCommandList();
++		const FRHITextureCreateDesc Desc = FRHITextureCreateDesc::Create3D(TEXT("VGSSplat.InverseToneCurveLUT"), Edge, Edge, Edge, PF_FloatRGBA)
++			.SetFlags(ETextureCreateFlags::ShaderResource)
++			.SetInitialState(ERHIAccess::SRVMask);
++		Slot.Texture = RHICmdList.CreateTexture(Desc);
++		const uint32 RowPitch = Edge * 4 * sizeof(uint16);
++		RHICmdList.UpdateTexture3D(Slot.Texture, 0, FUpdateTextureRegion3D(0, 0, 0, 0, 0, 0, Edge, Edge, Edge), RowPitch, RowPitch * Edge,
++			reinterpret_cast<const uint8*>(Texels.GetData()));
++		return Slot.Texture.GetReference();
+ 	}
+ }
+diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUT.h b/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUT.h
+--- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUT.h	2026-11-10 23:41:35.005077600 +0100
++++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUT.h	2026-11-11 00:50:31.310438300 +0100
+@@ -15,9 +15,9 @@
+ 	// Selects which baked inverse-tone-curve LUT to sample; cast from bInvertExpandGamut for now.
+ 	enum class EInverseToneCurveLUTVariant : uint8
+ 	{
+-		/** Inverse filmic tone curve only (asset UE_InverseFilmicTC). */
++		/** Inverse filmic tone curve only (Epic's asset UE_InverseFilmicTC; Resources/InverseToneCurve). */
+ 		Filmic = 0,
+-		/** Inverse filmic tone curve plus gamut expansion (asset UE_InverseFilmicTC_Full). */
++		/** Inverse filmic tone curve plus gamut expansion (UE_InverseFilmicTC_Full). */
+ 		FilmicExpandGamut = 1,
+ 	};
+ }
+diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUTCache.h b/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUTCache.h
+--- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUTCache.h	2026-11-10 23:41:35.029698600 +0100
++++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUTCache.h	2026-11-11 00:50:31.310438300 +0100
+@@ -6,35 +6,34 @@
+ 
+ #include "CoreMinimal.h"
+ #include "Containers/SortedMap.h"
+-#include "Engine/VolumeTexture.h"
++#include "RHIFwd.h"
+ #include "VGSSplatInverseToneCurveLUT.h"
+ #include "Templates/SharedPointer.h"
+-#include "UObject/StrongObjectPtr.h"
+ 
+ class FRHITexture;
+ 
+ namespace VGSSplat
+ {
+-	/** Render-thread-owned state for cached inverse-tone-curve LUT RHI references. */
+-	struct FInverseToneCurveLUTRenderThreadState;
+-
+-	// Loads and caches the baked inverse-tone-curve LUTs. One shared, module-owned instance serves every view.
+-	// Render-thread only, apart from the one-shot game-thread asset load.
+-	// Owned via TSharedPtr so the game-thread load task can pin a weak pointer to the cache before touching it.
++	// VGS CHANGE: the LUTs are built from the plugin's Resources/InverseToneCurve files (Epic's
++	// LUT assets, dumped and packed by plugins/unreal/tools/pack_inverse_tone_curve_luts.py),
++	// not loaded as Epic's UVolumeTexture assets: those are saved by Unreal 5.9 and are part of
++	// Epic's GaussianSplat plugin, which the copy no longer needs. Render thread only.
+ 	class FInverseToneCurveLUTCache : public TSharedFromThis<FInverseToneCurveLUTCache, ESPMode::ThreadSafe>
+ 	{
+ 	public:
+ 		FInverseToneCurveLUTCache();
+ 		~FInverseToneCurveLUTCache();
+ 
+-		// Returns the variant's current 3D LUT texture, or nullptr while the first-request load is in flight.
++		// Returns the variant's 3D LUT texture, built on the first request; nullptr if its file
++		// is missing or unreadable (the post-blend pass then skips the inverse tone curve).
+ 		FRHITexture* GetRHI_RenderThread(bool bInvertExpandGamut);
+ 
+ 	private:
+-		/** Keeps loaded LUT UObjects alive on the game thread. */
+-		TSortedMap<EInverseToneCurveLUTVariant, TStrongObjectPtr<UVolumeTexture>> Assets;
+-
+-		/** Stores render-thread LUT lookup state and is released on the render thread. */
+-		TSharedPtr<FInverseToneCurveLUTRenderThreadState, ESPMode::ThreadSafe> RenderThreadState;
++		struct FSlot
++		{
++			FTextureRHIRef Texture;
++			bool bTried = false;
++		};
++		TSortedMap<EInverseToneCurveLUTVariant, FSlot> Slots;
+ 	};
+ }
 diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp b/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp
---- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp	2026-11-10 19:50:24.890770400 +0100
-+++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp	2026-11-10 21:13:07.722579400 +0100
-@@ -26,6 +26,7 @@
+--- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp	2026-11-10 23:41:35.033701300 +0100
++++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp	2026-11-11 00:50:31.314270300 +0100
+@@ -26,6 +26,15 @@
  #include "BlueNoise.h"
  #include "SystemTextures.h"
  #include "SceneRendering.h"
 +#include "RenderUtils.h" // VGS CHANGE: IsForwardShadingEnabled, Substrate::IsSubstrateEnabled
++#include "Runtime/Launch/Resources/Version.h" // VGS CHANGE: the copy builds against Unreal 5.6 and later
++
++// VGS CHANGE: what Epic's 5.9 renderer uses that older engines lack. Before 5.9 there is no
++// SortGPUBuffersIndirect (the GPU-driven pipeline sorts a count the GPU wrote), and no
++// VET_UInt2 (vertex attribute fetch, for platforms whose vertex shaders cannot read buffers):
++// the GPU-driven pipeline is off there, and vertex attribute fetch is never chosen, which on
++// Win64, the only platform the plugins build for, it is not anyway.
++#define VGSSPLAT_ENGINE_5_9 (ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 9))
  
  DECLARE_GPU_STAT(VGSSplat);
  
-@@ -678,6 +679,13 @@
+@@ -461,6 +470,9 @@
+ 	// Vertex attribute fetch is required if the platform does not support SRVs in Vertex Shading
+ 	bool IsVertexAttributeFetchEnabled(EShaderPlatform ShaderPlatform)
+ 	{
++#if !VGSSPLAT_ENGINE_5_9
++		return false; // VGS CHANGE: no VET_UInt2 before 5.9 (above)
++#else
+ 		if (IsGLES31EmulationEnabled())
+ 		{
+ 			return true;
+@@ -478,6 +490,7 @@
+ 		}
+ 
+ 		return false;
++#endif
+ 	}
+ }
+ 
+@@ -513,8 +526,12 @@
+ 
+ bool VGSSplat::IsGPUDrivenPipeline()
+ {
++#if !VGSSPLAT_ENGINE_5_9
++	return false; // VGS CHANGE: no SortGPUBuffersIndirect before 5.9 (above)
++#else
+ 	return CVarVGSSplatHardwareRasterization.GetValueOnRenderThread() != 0 &&
+ 		CVarVGSSplatGPUDrivenPipeline.GetValueOnRenderThread() != 0;
++#endif
+ }
+ 
+ struct FShadedVGSSplatData
+@@ -543,6 +560,7 @@
+ 
+ 	virtual void InitRHI(FRHICommandListBase& RHICmdList) override
+ 	{
++#if VGSSPLAT_ENGINE_5_9 // VGS CHANGE
+ 		// TODO: Consider VET_Half2 for implicit floating-point conversion if platform supports it
+ 		constexpr uint16 Stride = sizeof(FPackedShadedVGSSplatData);
+ 		FVertexDeclarationElementList Elements;
+@@ -550,6 +568,7 @@
+ 		Elements.Add(FVertexElement(0,  8, VET_UInt2, 1, Stride, /*bUseInstanceIndex*/ true)); // Axes
+ 		Elements.Add(FVertexElement(0, 16, VET_UInt2, 2, Stride, /*bUseInstanceIndex*/ true)); // Color
+ 		VertexDeclarationRHI = PipelineStateCache::GetOrCreateVertexDeclaration(Elements);
++#endif // else never used (IsVertexAttributeFetchEnabled)
+ 	}
+ 
+ 	virtual void ReleaseRHI() override
+@@ -678,6 +697,13 @@
  
  		// Spherical harmonics
  		SHADER_PARAMETER(uint32, SHCoordinateSpace)
@@ -794,7 +1186,7 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp b/VGS
  
  		// Per-component overrides
  		SHADER_PARAMETER(float, PointScaleFactor)
-@@ -733,6 +741,11 @@
+@@ -733,6 +759,11 @@
  		SHADER_PARAMETER(FScreenTransform, SvPositionToInputTextureUV)
  		SHADER_PARAMETER(float, Strength)
  		SHADER_PARAMETER(float, InverseToneCurveLUTEdge)
@@ -806,7 +1198,7 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp b/VGS
  		RENDER_TARGET_BINDING_SLOTS()
  	END_SHADER_PARAMETER_STRUCT()
  };
-@@ -1021,18 +1034,26 @@
+@@ -1021,18 +1052,26 @@
  
  	class FGatherShadedSplats : SHADER_PERMUTATION_BOOL("GAUSSIAN_SPLAT_GATHER_SHADED_SPLATS");
  	class FVertexAttributeFetch : SHADER_PERMUTATION_BOOL("GAUSSIAN_SPLAT_VERTEX_ATTRIBUTE_FETCH");
@@ -834,7 +1226,7 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp b/VGS
  		if (PermutationVector.Get<FVertexAttributeFetch>() && !PermutationVector.Get<FGatherShadedSplats>())
  		{
  			return false;
-@@ -1058,7 +1079,8 @@
+@@ -1058,7 +1097,8 @@
  	class FUseBlueNoise : SHADER_PERMUTATION_BOOL("USE_BLUE_NOISE");
  	class FWriteExpectedDepth : SHADER_PERMUTATION_BOOL("WRITE_EXPECTED_DEPTH");
  	class FSuperSample : SHADER_PERMUTATION_BOOL("GAUSSIAN_SPLAT_SUPERSAMPLE");
@@ -844,7 +1236,7 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp b/VGS
  
  	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
  		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
-@@ -1091,6 +1113,11 @@
+@@ -1091,6 +1131,11 @@
  		{
  			return false;
  		}
@@ -856,15 +1248,16 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp b/VGS
  		return true;
  	}
  };
-@@ -1143,6 +1170,66 @@
+@@ -1143,6 +1188,67 @@
  
  IMPLEMENT_GLOBAL_SHADER(FVGSSplatExpectedDepthPS, "/Plugin/VGS/Private/SplatRenderer/VGSSplatHardwareRasterize.usf", "MainPS_ExpectedDepth", SF_Pixel);
  
 +// VGS CHANGE: writes a lit proxy into the GBuffer (VGSSplatGBuffer.usf).
 +static TAutoConsoleVariable<int32> CVarVGSSplatLitDither(
 +	TEXT("r.VGSSplat.Lit.Dither"),
-+	1,
-+	TEXT("Lit captures: where splats only partly cover a pixel, write it at random as much as they cover, for temporal anti-aliasing to smooth (1, default); or write it where they cover half or more (0)."),
++	0,
++	TEXT("Lit captures: where splats only partly cover a pixel, write it where they cover half or more (0, default); or at random as much as they cover (1),") LINE_TERMINATOR
++	TEXT("for temporal anti-aliasing to smooth. TSR does not smooth it away (2026-11-11, UE 5.9): edges and faint splats stay speckled."),
 +	ECVF_RenderThreadSafe);
 +
 +static TAutoConsoleVariable<float> CVarVGSSplatLitMinCoverage(
@@ -923,7 +1316,7 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp b/VGS
  class FVGSSplatResolveVelocityPS : public FGlobalShader
  {
  	DECLARE_GLOBAL_SHADER(FVGSSplatResolveVelocityPS);
-@@ -1257,10 +1344,15 @@
+@@ -1257,10 +1363,15 @@
  	uint32 NumClusters,
  	FRDGBufferRef ClusterCountBuffer,
  	VGSSplat::FRenderStats& RenderStats,
@@ -940,7 +1333,20 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp b/VGS
  
  	const EVGSSplatDepthMode DepthMode = GetDepthMode(View.GetShaderPlatform());
  	const uint32 SortElementCount = NumSplats;
-@@ -1362,7 +1454,9 @@
+@@ -1353,16 +1464,22 @@
+ 				};
+ 				RHICmdList.Transition(MakeArrayView(SortBufferToUAV));
+ 
++#if VGSSPLAT_ENGINE_5_9 // VGS CHANGE
+ 				const int32 ResultIndex = bGpuDrivenPipeline
+ 					? SortGPUBuffersIndirect(RHICmdList, SortBuffers, 0, KeyMask, PassParameters->SplatCountSRV->GetRHI(), FeatureLevel)
+ 					: SortGPUBuffers(RHICmdList, SortBuffers, 0, KeyMask, SortElementCount, FeatureLevel);
++#else
++				const int32 ResultIndex = SortGPUBuffers(RHICmdList, SortBuffers, 0, KeyMask, SortElementCount, FeatureLevel);
++#endif
+ 				check(ResultIndex == SortedBufferIndex);
+ 				RHICmdList.Transition(MakeArrayView(SortBufferToUAV));
+ 			});
  	}
  
  	const bool bVertexAttributeFetch = IsVertexAttributeFetchEnabled(View.GetShaderPlatform());
@@ -951,7 +1357,7 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp b/VGS
  	if (bGatherShadedSplats)
  	{
  		FRDGBufferRef GatheredShadedVGSSplatBuffer = GraphBuilder.CreateBuffer(
-@@ -1404,17 +1498,18 @@
+@@ -1404,17 +1521,18 @@
  		ShadedVGSSplatBuffer = GatheredShadedVGSSplatBuffer;
  	}
  
@@ -975,7 +1381,7 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp b/VGS
  	{
  		const FRDGTextureDesc SplatDepthDesc = FRDGTextureDesc::Create2D(
  			Output.Texture->Desc.Extent,
-@@ -1439,7 +1534,8 @@
+@@ -1439,7 +1557,8 @@
  	{
  		FHardwareRasterizeVGSSplatVS::FPermutationDomain VSPermutationVector;
  		VSPermutationVector.Set<FHardwareRasterizeVGSSplatVS::FGatherShadedSplats>(bGatherShadedSplats);
@@ -985,7 +1391,7 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp b/VGS
  		TShaderMapRef<FHardwareRasterizeVGSSplatVS> VertexShader(GetGlobalShaderMap(View.GetShaderPlatform()), VSPermutationVector);
  
  		FHardwareRasterizeVGSSplatPS::FPermutationDomain PermutationVector;
-@@ -1448,6 +1544,7 @@
+@@ -1448,6 +1567,7 @@
  		PermutationVector.Set<FHardwareRasterizeVGSSplatPS::FUseBlueNoise>(bStochasticDepth && IsBlueNoiseEnabled());
  		PermutationVector.Set<FHardwareRasterizeVGSSplatPS::FWriteExpectedDepth>(bExpectedDepth);
  		PermutationVector.Set<FHardwareRasterizeVGSSplatPS::FSuperSample>(DownsampleFactor > 1);
@@ -993,7 +1399,7 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp b/VGS
  		TShaderMapRef<FHardwareRasterizeVGSSplatPS> PixelShader(GetGlobalShaderMap(View.GetShaderPlatform()), PermutationVector);
  
  		FHardwareRasterizeVGSSplatPassParameters* PassParameters = GraphBuilder.AllocParameters<FHardwareRasterizeVGSSplatPassParameters>();
-@@ -1460,6 +1557,7 @@
+@@ -1460,6 +1580,7 @@
  				? nullptr
  				: GraphBuilder.CreateSRV(GPUSortValuesBuffer[SortedBufferIndex], PF_R32_UINT);
  			PassParameters->GatheredSplatVertexBuffer = bVertexAttributeFetch ? ShadedVGSSplatBuffer : nullptr;
@@ -1001,7 +1407,7 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp b/VGS
  			PassParameters->PS.View = ViewUniformBuffer;
  			PassParameters->PS.BlueNoise = CreateUniformBufferImmediate(GetBlueNoiseGlobalParameters(), EUniformBufferUsage::UniformBuffer_SingleDraw);
  			PassParameters->PS.OpacityThreshold = GetHardwareRasterizationOpacityThreshold();
-@@ -1585,6 +1683,12 @@
+@@ -1585,6 +1706,12 @@
  			RasterizerState,
  			TStaticDepthStencilState<true, CF_GreaterEqual>::GetRHI());
  	}
@@ -1014,7 +1420,7 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp b/VGS
  	else if (bExpectedDepth)
  	{
  		FVGSSplatExpectedDepthPS::FParameters* PassParameters = GraphBuilder.AllocParameters<FVGSSplatExpectedDepthPS::FParameters>();
-@@ -1888,7 +1992,8 @@
+@@ -1888,7 +2015,8 @@
  	VGSSplat::FRenderStats& RenderStats,
  	const FScreenPassRenderTarget& Output,
  	FRDGTextureRef SceneDepthTexture,
@@ -1024,7 +1430,7 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp b/VGS
  {
  	if (RenderProxy.NumSplats == 0)
  	{
-@@ -1896,10 +2001,16 @@
+@@ -1896,10 +2024,16 @@
  	}
  
  	const bool bHWRaster = VGSSplat::IsHardwareRasterization(View.GetShaderPlatform());
@@ -1044,7 +1450,7 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp b/VGS
  
  	FScreenPassRenderTarget ProxyScratchRT;
  	if (bUsesScratch)
-@@ -1944,6 +2055,11 @@
+@@ -1944,6 +2078,11 @@
  		TEXT("VGSSplat.ShadedBuffer")
  	);
  
@@ -1056,7 +1462,7 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp b/VGS
  	// Debug pipeline configurations
  	const bool bDebug = IsDebug();
  	const bool bShadeDebug = bDebug || !RenderProxy.HasClusters() || !bHWRaster;
-@@ -2099,6 +2215,18 @@
+@@ -2099,6 +2238,18 @@
  
  			// Spherical harmonics
  			PassParameters->SHCoordinateSpace = static_cast<uint32>(RenderProxy.SHCoordinateSpace);
@@ -1065,7 +1471,7 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp b/VGS
 +			// VGS CHANGE: a lit proxy's normals
 +			const bool bHasNormals = bLit && RenderProxy.NormalBuffer.IsValid();
 +			PassParameters->Lit = bLit ? 1u : 0u;
-+			PassParameters->HasNormals = bHasNormals ? 1u : 0u;
++			PassParameters->HasNormals = bHasNormals ? (RenderProxy.bNormalsFaceCamera ? 2u : 1u) : 0u;
 +			PassParameters->NormalBuffer = bHasNormals
 +				? GraphBuilder.CreateSRV(GraphBuilder.RegisterExternalBuffer(RenderProxy.NormalBuffer))
 +				: GraphBuilder.CreateSRV(GSystemTextures.GetDefaultStructuredBuffer(GraphBuilder, sizeof(uint32)));
@@ -1075,7 +1481,7 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp b/VGS
  
  			// Per-component overrides
  			PassParameters->PointScaleFactor = RenderProxy.PointScaleFactor;
-@@ -2131,12 +2259,14 @@
+@@ -2131,12 +2282,14 @@
  	}
  
  	// Rasterization
@@ -1091,7 +1497,7 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp b/VGS
  	}
  	else
  	{
-@@ -2144,6 +2274,65 @@
+@@ -2144,6 +2297,65 @@
  		RasterizeTiledCompute(GraphBuilder, View, ViewUniformBuffer, NumSplats, ShadedVGSSplatBuffer, RasterTarget);
  	}
  
@@ -1157,7 +1563,7 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp b/VGS
  	// Post-processing
  	if (bUsesScratch)
  	{
-@@ -2163,6 +2352,11 @@
+@@ -2163,6 +2375,11 @@
  			Params->Strength                   = RenderProxy.InverseToneCurveStrength;
  			Params->InverseToneCurveLUTEdge    = static_cast<float>(ProxyLUTRHI->GetSizeX());
  		}
@@ -1169,7 +1575,7 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp b/VGS
  
  		FVGSSplatInverseToneCurvePostBlendPS::FPermutationDomain PermutationVector;
  		PermutationVector.Set<FVGSSplatInverseToneCurvePostBlendPS::FApplyInverseToneCurve>(bProxyUsesInverseTC);
-@@ -2182,6 +2376,41 @@
+@@ -2182,6 +2399,41 @@
  	}
  }
  
@@ -1212,8 +1618,8 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp b/VGS
  	FRDGBuilder& GraphBuilder,
  	const FSceneView& View,
 diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRendererModule.cpp b/VGS/Source/VGSSplatRenderer/Private/VGSSplatRendererModule.cpp
---- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRendererModule.cpp	2026-11-10 19:50:24.906536500 +0100
-+++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatRendererModule.cpp	2026-11-10 21:13:07.722579400 +0100
+--- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRendererModule.cpp	2026-11-10 23:41:35.010595800 +0100
++++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatRendererModule.cpp	2026-11-11 00:50:31.312180900 +0100
 @@ -6,10 +6,8 @@
  
  #include "VGSSplatInverseToneCurveLUTCache.h"
@@ -1248,9 +1654,29 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRendererModule.cpp b/VGS
  
  	RenderStats.Reset();
 diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatViewExtension.cpp b/VGS/Source/VGSSplatRenderer/Private/VGSSplatViewExtension.cpp
---- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatViewExtension.cpp	2026-11-10 19:50:24.925688800 +0100
-+++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatViewExtension.cpp	2026-11-10 21:13:07.724084100 +0100
-@@ -20,6 +20,9 @@
+--- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatViewExtension.cpp	2026-11-10 23:41:35.014606300 +0100
++++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatViewExtension.cpp	2026-11-11 00:50:31.313186400 +0100
+@@ -3,9 +3,10 @@
+ // Copyright Epic Games, Inc. All Rights Reserved.
+ 
+ #include "VGSSplatViewExtension.h"
+-#include "GaussianSplatRenderResource.h"
++// VGS CHANGE: no GaussianSplatRenderResource.h, VGSSplatTransform.h or GaussianSplatComponent.h:
++// the copy draws only the sources registered with it, never Epic's components, and does not
++// need Epic's GaussianSplat plugin (only Unreal 5.9 has it).
+ #include "VGSSplatRenderPipeline.h"
+-#include "VGSSplatTransform.h"
+ 
+ #include "SceneView.h"
+ #include "SceneInterface.h"
+@@ -13,27 +14,30 @@
+ 
+ #include "ScreenPass.h"
+ #include "PostProcess/PostProcessMaterialInputs.h"
+-#include "GaussianSplatComponent.h"
+ #include "VGSSplatInverseToneCurveLUT.h"
+ #include "VGSSplatRenderStats.h"
+ #include "VGSSplatRendererModule.h"
  #include "VGSSplatSubsystem.h"
  #include "Engine/World.h"
  #include "Containers/SortedMap.h"
@@ -1260,7 +1686,144 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatViewExtension.cpp b/VGS/
  
  #define INVALID_ID 0xFFFFFFFF
  
-@@ -250,7 +253,55 @@
+-static TAutoConsoleVariable<int32> CVarVGSSplatNumSplats(
+-	TEXT("r.VGSSplat.NumSplats"),
+-	-1,
+-	TEXT("The maximum number of splats to support (default = -1 is unbounded)"),
++// VGS CHANGE: the switch Epic's GaussianSplat::IsEnabled reads (r.GaussianSplat), the copy's own.
++static TAutoConsoleVariable<int32> CVarVGSSplatEnable(
++	TEXT("r.VGSSplat"),
++	1,
++	TEXT("Draw splats (0 to hide them all)."),
+ 	ECVF_RenderThreadSafe);
+ 
+-namespace
++namespace VGSSplat
+ {
+-	static uint32 GetUniqueID(const UGaussianSplatComponent* Component)
++	static bool IsEnabled()
+ 	{
+-		return IsValid(Component->Asset) ? Component->GetUniqueID() : INVALID_ID;
++		return CVarVGSSplatEnable.GetValueOnAnyThread() != 0;
+ 	}
+ }
+ 
+@@ -44,51 +48,6 @@
+ 
+ FVGSSplatViewExtension::~FVGSSplatViewExtension()
+ {
+-	RenderProxy_RenderThread.Reset();
+-}
+-
+-FMatrix44f VGSSplat::GetComponentLocalToWorld(const UGaussianSplatComponent& Component)
+-{
+-	return FMatrix44f(Component.GetComponentTransform().ToMatrixWithScale());
+-}
+-
+-FVGSSplatRenderProxy* CreateRenderProxy(const UGaussianSplatComponent* Component)
+-{
+-	FVGSSplatRenderProxy* Proxy = new FVGSSplatRenderProxy();
+-
+-	Proxy->SplatID = Component->GetUniqueID();
+-	UGaussianSplat* VGSSplat = Component->Asset;
+-	TSharedPtr<FGaussianSplatRenderResource> Resource = VGSSplat->GetResource();
+-
+-	Proxy->SHDegree = Resource->GetSHDegree();
+-	Proxy->SHCoordinateSpace = VGSSplat->GetSHCoordinateSpace();
+-
+-	// Extract compression values
+-	const FSharedStruct& RuntimeData = Resource->GetRuntimeData();
+-	const FGaussianSplatFormatQuantized* QuantizedFormat = RuntimeData.GetPtr<FGaussianSplatFormatQuantized>();
+-	Proxy->BufferFormat = QuantizedFormat != nullptr ? 1u : 0u;
+-	if (QuantizedFormat)
+-	{
+-		Proxy->PositionScale = QuantizedFormat->PositionScaleBias[0];
+-		Proxy->PositionBias  = QuantizedFormat->PositionScaleBias[1];
+-		Proxy->ScaleScale    = QuantizedFormat->ScaleScaleBias[0];
+-		Proxy->ScaleBias     = QuantizedFormat->ScaleScaleBias[1];
+-		Proxy->ColorScale    = QuantizedFormat->ColorScaleBias[0];
+-		Proxy->ColorBias     = QuantizedFormat->ColorScaleBias[1];
+-		Proxy->SHScale       = QuantizedFormat->SHScaleBias[0];
+-		Proxy->SHBias        = QuantizedFormat->SHScaleBias[1];
+-	}
+-
+-	Proxy->LocalToWorld = VGSSplat::GetComponentLocalToWorld(*Component);
+-	Proxy->WorldToLocal = Proxy->LocalToWorld.Inverse();
+-
+-	Proxy->PointScaleFactor = Component->PointScaleFactor;
+-	Proxy->OpacityScale     = Component->OpacityScale;
+-
+-	Proxy->InverseToneCurveStrength = Component->bInvertToneCurve ? Component->InverseToneCurveStrength : 0.0f;
+-	Proxy->bInvertExpandGamutLUT = Component->bInvertExpandGamut;
+-
+-	return Proxy;
+ }
+ 
+ void FVGSSplatViewExtension::SetupViewFamily(FSceneViewFamily& InViewFamily)
+@@ -97,52 +56,7 @@
+ 	{
+ 		FModuleManager::GetModuleChecked<FVGSSplatRendererModule>("VGSSplatRenderer").GetRenderStats_RenderThread().UpdateRegistration();
+ 	});
+-
+-	// Update render-thread transform data
+-	for (const UGaussianSplatComponent* Component : RegisteredComponents)
+-	{
+-		const uint32 UniqueID = GetUniqueID(Component);
+-		if (UniqueID != INVALID_ID)
+-		{
+-			FMatrix44f LocalToWorld = VGSSplat::GetComponentLocalToWorld(*Component);
+-			FMatrix44f WorldToLocal = FMatrix44f(Component->GetComponentTransform().ToMatrixWithScale().Inverse());
+-			bool bVisible = Component->ShouldRender();
+-			const float PointScaleFactor = Component->PointScaleFactor;
+-			const float OpacityScale = Component->OpacityScale;
+-			float InverseToneCurveStrength = Component->bInvertToneCurve ? Component->InverseToneCurveStrength : 0.0f;
+-			bool bInvertExpandGamutLUT = Component->bInvertExpandGamut;
+-
+-			ENQUEUE_RENDER_COMMAND(FCreateVGSSplatRenderProxy)(
+-				[
+-					WeakThis = AsWeak(),
+-					UniqueID,
+-					LocalToWorld,
+-					WorldToLocal,
+-					bVisible,
+-					PointScaleFactor,
+-					OpacityScale,
+-					InverseToneCurveStrength,
+-					bInvertExpandGamutLUT
+-				](FRHICommandList& RHICmdList)
+-				{
+-					TSharedPtr<FVGSSplatViewExtension> This = StaticCastWeakPtr<FVGSSplatViewExtension>(WeakThis).Pin();
+-					if (This.IsValid())
+-					{
+-						if (TUniquePtr<FVGSSplatRenderProxy>* Proxy = This->RenderProxy_RenderThread.Find(UniqueID))
+-						{
+-							(*Proxy)->LocalToWorld = LocalToWorld;
+-							(*Proxy)->WorldToLocal = WorldToLocal;
+-							(*Proxy)->bVisible = bVisible;
+-							(*Proxy)->PointScaleFactor = PointScaleFactor;
+-							(*Proxy)->OpacityScale = OpacityScale;
+-							(*Proxy)->InverseToneCurveStrength = InverseToneCurveStrength;
+-							(*Proxy)->bInvertExpandGamutLUT = bInvertExpandGamutLUT;
+-						}
+-					}
+-				}
+-			);
+-		}
+-	}
++	// VGS CHANGE: no registered components to update; sources set their proxies themselves.
+ }
+ 
+ void FVGSSplatViewExtension::SubscribeToPostProcessingPass(EPostProcessingPass PassId, const FSceneView& View, FAfterPassCallbackDelegateArray& InOutPassCallbacks, bool bIsPassEnabled)
+@@ -150,7 +64,7 @@
+ 	//if (PassId == EPostProcessingPass::VisualizeDepthOfField)
+ 	if (PassId == EPostProcessingPass::BeforeDOF)
+ 	{
+-		if (GaussianSplat::IsEnabled() && View.Family && View.Family->Scene)
++		if (VGSSplat::IsEnabled() && View.Family && View.Family->Scene)
+ 		{
+ 			InOutPassCallbacks.Add(FAfterPassCallbackDelegate::CreateRaw(this, &FVGSSplatViewExtension::PostProcessPass_RenderThread));
+ 		}
+@@ -250,17 +164,60 @@
  	return MoveTemp(Output);
  }
  
@@ -1268,7 +1831,7 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatViewExtension.cpp b/VGS/
 +// VGS CHANGE: lit proxies, into the GBuffer before Unreal lights it.
 +void FVGSSplatViewExtension::PostRenderBasePassDeferred_RenderThread(FRDGBuilder& GraphBuilder, FSceneView& InView, const FRenderTargetBindingSlots& RenderTargets, TRDGUniformBufferRef<FSceneTextureUniformParameters> SceneTextures)
 +{
-+	if (!GaussianSplat::IsEnabled() || InView.Family == nullptr || InView.Family->Scene == nullptr || !VGSSplat::SupportsLit(InView))
++	if (!VGSSplat::IsEnabled() || InView.Family == nullptr || InView.Family->Scene == nullptr || !VGSSplat::SupportsLit(InView))
 +	{
 +		return;
 +	}
@@ -1317,7 +1880,18 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatViewExtension.cpp b/VGS/
  {
  	FVGSSplatRendererModule& Module = FModuleManager::GetModuleChecked<FVGSSplatRendererModule>("VGSSplatRenderer");
  
-@@ -272,6 +323,13 @@
+-	// Registered components first, then whatever external sources build into this frame's graph.
++	// VGS CHANGE: only external sources; the copy has no registered components.
+ 	TArray<const FVGSSplatRenderProxy*> Proxies;
+-	Proxies.Reserve(RenderProxy_RenderThread.Num());
+-	for (auto Itr = RenderProxy_RenderThread.CreateIterator(); Itr; ++Itr)
+-	{
+-		Proxies.Add(Itr.Value().Get());
+-	}
+ 	ExternalProxySources_RenderThread.Broadcast(GraphBuilder, View, Proxies);
+ 
+ 	TSortedMap<VGSSplat::EInverseToneCurveLUTVariant, FRHITexture*> LUTRHI;
+@@ -272,6 +229,13 @@
  		{
  			continue;
  		}
@@ -1331,39 +1905,127 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatViewExtension.cpp b/VGS/
  
  		FRHITexture* ProxyLUTRHI = nullptr;
  		if (RenderProxy->InverseToneCurveStrength > 0.0f)
-@@ -312,6 +370,11 @@
+@@ -312,83 +276,15 @@
  	});
  
  	VGSSplat::FRenderStats& RenderStats = Module.GetRenderStats_RenderThread();
+-	VGSSplat::Render(GraphBuilder, View, RenderItems, RenderStats, Output, SceneDepthTexture, SceneVelocityTexture);
+-}
+-
+-void FVGSSplatViewExtension::RegisterComponent(const UGaussianSplatComponent* Component)
+-{
+-	if (!Component->HasValidSplatData() || RegisteredComponents.Contains(Component))
 +	if (LitTargets != nullptr)
-+	{
+ 	{
 +		VGSSplat::RenderLit(GraphBuilder, View, RenderItems, RenderStats, *LitTargets); // VGS CHANGE
-+		return;
-+	}
- 	VGSSplat::Render(GraphBuilder, View, RenderItems, RenderStats, Output, SceneDepthTexture, SceneVelocityTexture);
+ 		return;
+ 	}
+-	RegisteredComponents.Add(Component);
+-
+-	// Create render proxy on render thread
+-	const uint32 UniqueID = GetUniqueID(Component);
+-	if (UniqueID != INVALID_ID)
+-	{
+-		TUniquePtr<FVGSSplatRenderProxy> RenderProxy(CreateRenderProxy(Component));
+-		TSharedPtr<FGaussianSplatRenderResource> Resource = Component->Asset->GetResource();
+-		const int32 NumSplatsCVar = CVarVGSSplatNumSplats.GetValueOnGameThread();
+-
+-		ENQUEUE_RENDER_COMMAND(FAddVGSSplatRenderProxy)(
+-			[
+-				WeakThis = AsWeak(),
+-				UniqueID,
+-				RenderProxy = MoveTemp(RenderProxy),
+-				Resource,
+-				NumSplatsCVar
+-			](FRHICommandList& RHICmdList) mutable
+-			{
+-				RenderProxy->NumSplats = uint32(Resource->GetNumSplats());
+-				RenderProxy->NumLOD0Splats = uint32(Resource->GetNumLOD0Splats());
+-				RenderProxy->LocalBounds = Resource->GetBounds();
+-
+-				bool bDebugDisableClustering = false;
+-				if (NumSplatsCVar > 0 && uint32(NumSplatsCVar) < RenderProxy->NumSplats)
+-				{
+-					RenderProxy->NumSplats = uint32(NumSplatsCVar);
+-					bDebugDisableClustering = true;
+-				}
+-
+-				RenderProxy->GpuBuffer = Resource->GetSplatBuffer();
+-				RenderProxy->GpuDataStride = Resource->GetSplatStride();
+-				if (!bDebugDisableClustering)
+-				{
+-					RenderProxy->ClusterBuffer = Resource->GetClusterBuffer();
+-					RenderProxy->NumClusters = Resource->GetNumClusters();
+-				}
+-
+-				TSharedPtr<FVGSSplatViewExtension> This = StaticCastWeakPtr<FVGSSplatViewExtension>(WeakThis).Pin();
+-				if (This.IsValid())
+-				{
+-					This->RenderProxy_RenderThread.Add(UniqueID, MoveTemp(RenderProxy));
+-				}
+-			}
+-		);
+-	}
++	VGSSplat::Render(GraphBuilder, View, RenderItems, RenderStats, Output, SceneDepthTexture, SceneVelocityTexture);
  }
  
+-void FVGSSplatViewExtension::UnregisterComponent(const UGaussianSplatComponent* Component)
+-{
+-	RegisteredComponents.Remove(Component);
+-
+-	// Remove render proxy on render thread
+-	const uint32 UniqueID = Component->GetUniqueID(); // bypass asset check
+-	ENQUEUE_RENDER_COMMAND(FRemoveVGSSplatRenderProxy)(
+-		[
+-			WeakThis = AsWeak(),
+-			UniqueID
+-		](FRHICommandList& RHICmdList)
+-		{
+-			TSharedPtr<FVGSSplatViewExtension> This = StaticCastWeakPtr<FVGSSplatViewExtension>(WeakThis).Pin();
+-			if (This.IsValid())
+-			{
+-				This->RenderProxy_RenderThread.Remove(UniqueID); // auto-deletes via TUniquePtr
+-			}
+-		}
+-	);
+-}
++// VGS CHANGE: no RegisterComponent / UnregisterComponent (Epic's components are Epic's to draw).
+ 
+ void FVGSSplatViewExtension::AddExternalProxySource(FOnCollectVGSSplatProxies::FDelegate&& InSource)
+ {
 diff -ruN a/VGS/Source/VGSSplatRenderer/VGSSplatRenderer.Build.cs b/VGS/Source/VGSSplatRenderer/VGSSplatRenderer.Build.cs
---- a/VGS/Source/VGSSplatRenderer/VGSSplatRenderer.Build.cs	2026-11-10 19:50:24.827617600 +0100
-+++ b/VGS/Source/VGSSplatRenderer/VGSSplatRenderer.Build.cs	2026-11-10 21:13:07.718554500 +0100
+--- a/VGS/Source/VGSSplatRenderer/VGSSplatRenderer.Build.cs	2026-11-10 23:41:35.056924900 +0100
++++ b/VGS/Source/VGSSplatRenderer/VGSSplatRenderer.Build.cs	2026-11-11 00:50:31.314270300 +0100
 @@ -10,6 +10,10 @@
  		{
  			PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
  
-+			// VGS CHANGE: Epic's module is an engine module and sees the GaussianSplat runtime
-+			// module's Internal headers; a project plugin has to ask for the same scope.
++			// VGS CHANGE: Epic's module is an engine module, and sees the renderer's Internal
++			// headers; a project plugin has to ask for the same scope.
 +			bTreatAsEngineModule = true;
 +
  			PublicDependencyModuleNames.AddRange(new[] { "Core" });
  
  			PrivateDependencyModuleNames.AddRange(
-@@ -22,7 +26,8 @@
+@@ -21,11 +25,19 @@
+ 					"RenderCore",
  					"RHI",
  					"Projects",
- 					"GaussianSplat",
+-					"GaussianSplat",
 -					"GaussianSplatShader"
-+					"GaussianSplatShader",
++					// VGS CHANGE: no GaussianSplat or GaussianSplatShader: what the renderer used of
++					// them is copied (VGSSplatCommon.h, VGSSplatCluster.h, Shaders/Shared), so the
++					// plugin does not need Epic's GaussianSplat plugin, which only Unreal 5.9 has.
 +					"VGSShaders" // VGS CHANGE: maps /Plugin/VGS, where these shaders are
  				}
  			);
  
++			// VGS CHANGE: the shared shader headers, read by C++ too (as GaussianSplatShader adds
++			// Epic's), and the plugin's name, for its Resources (the inverse tone curve LUTs).
++			PublicIncludePaths.Add(System.IO.Path.Combine(PluginDirectory, "Shaders", "Shared"));
++			PrivateDefinitions.Add("VGSSPLAT_PLUGIN_NAME=TEXT(\"" + System.IO.Path.GetFileNameWithoutExtension(System.IO.Directory.GetFiles(PluginDirectory, "*.uplugin")[0]) + "\")");
++			RuntimeDependencies.Add("$(PluginDir)/Resources/InverseToneCurve/...");
++
+ 			PrivateIncludePaths.Add(System.IO.Path.Combine(EngineDirectory, "Source/Runtime/Renderer/Private"));
+ 		}
+ 	}

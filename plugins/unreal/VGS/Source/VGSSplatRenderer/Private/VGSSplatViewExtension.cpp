@@ -3,9 +3,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "VGSSplatViewExtension.h"
-#include "GaussianSplatRenderResource.h"
+// VGS CHANGE: no GaussianSplatRenderResource.h, VGSSplatTransform.h or GaussianSplatComponent.h:
+// the copy draws only the sources registered with it, never Epic's components, and does not
+// need Epic's GaussianSplat plugin (only Unreal 5.9 has it).
 #include "VGSSplatRenderPipeline.h"
-#include "VGSSplatTransform.h"
 
 #include "SceneView.h"
 #include "SceneInterface.h"
@@ -13,7 +14,6 @@
 
 #include "ScreenPass.h"
 #include "PostProcess/PostProcessMaterialInputs.h"
-#include "GaussianSplatComponent.h"
 #include "VGSSplatInverseToneCurveLUT.h"
 #include "VGSSplatRenderStats.h"
 #include "VGSSplatRendererModule.h"
@@ -26,17 +26,18 @@
 
 #define INVALID_ID 0xFFFFFFFF
 
-static TAutoConsoleVariable<int32> CVarVGSSplatNumSplats(
-	TEXT("r.VGSSplat.NumSplats"),
-	-1,
-	TEXT("The maximum number of splats to support (default = -1 is unbounded)"),
+// VGS CHANGE: the switch Epic's GaussianSplat::IsEnabled reads (r.GaussianSplat), the copy's own.
+static TAutoConsoleVariable<int32> CVarVGSSplatEnable(
+	TEXT("r.VGSSplat"),
+	1,
+	TEXT("Draw splats (0 to hide them all)."),
 	ECVF_RenderThreadSafe);
 
-namespace
+namespace VGSSplat
 {
-	static uint32 GetUniqueID(const UGaussianSplatComponent* Component)
+	static bool IsEnabled()
 	{
-		return IsValid(Component->Asset) ? Component->GetUniqueID() : INVALID_ID;
+		return CVarVGSSplatEnable.GetValueOnAnyThread() != 0;
 	}
 }
 
@@ -47,51 +48,6 @@ FVGSSplatViewExtension::FVGSSplatViewExtension(const FAutoRegister& AutoRegister
 
 FVGSSplatViewExtension::~FVGSSplatViewExtension()
 {
-	RenderProxy_RenderThread.Reset();
-}
-
-FMatrix44f VGSSplat::GetComponentLocalToWorld(const UGaussianSplatComponent& Component)
-{
-	return FMatrix44f(Component.GetComponentTransform().ToMatrixWithScale());
-}
-
-FVGSSplatRenderProxy* CreateRenderProxy(const UGaussianSplatComponent* Component)
-{
-	FVGSSplatRenderProxy* Proxy = new FVGSSplatRenderProxy();
-
-	Proxy->SplatID = Component->GetUniqueID();
-	UGaussianSplat* VGSSplat = Component->Asset;
-	TSharedPtr<FGaussianSplatRenderResource> Resource = VGSSplat->GetResource();
-
-	Proxy->SHDegree = Resource->GetSHDegree();
-	Proxy->SHCoordinateSpace = VGSSplat->GetSHCoordinateSpace();
-
-	// Extract compression values
-	const FSharedStruct& RuntimeData = Resource->GetRuntimeData();
-	const FGaussianSplatFormatQuantized* QuantizedFormat = RuntimeData.GetPtr<FGaussianSplatFormatQuantized>();
-	Proxy->BufferFormat = QuantizedFormat != nullptr ? 1u : 0u;
-	if (QuantizedFormat)
-	{
-		Proxy->PositionScale = QuantizedFormat->PositionScaleBias[0];
-		Proxy->PositionBias  = QuantizedFormat->PositionScaleBias[1];
-		Proxy->ScaleScale    = QuantizedFormat->ScaleScaleBias[0];
-		Proxy->ScaleBias     = QuantizedFormat->ScaleScaleBias[1];
-		Proxy->ColorScale    = QuantizedFormat->ColorScaleBias[0];
-		Proxy->ColorBias     = QuantizedFormat->ColorScaleBias[1];
-		Proxy->SHScale       = QuantizedFormat->SHScaleBias[0];
-		Proxy->SHBias        = QuantizedFormat->SHScaleBias[1];
-	}
-
-	Proxy->LocalToWorld = VGSSplat::GetComponentLocalToWorld(*Component);
-	Proxy->WorldToLocal = Proxy->LocalToWorld.Inverse();
-
-	Proxy->PointScaleFactor = Component->PointScaleFactor;
-	Proxy->OpacityScale     = Component->OpacityScale;
-
-	Proxy->InverseToneCurveStrength = Component->bInvertToneCurve ? Component->InverseToneCurveStrength : 0.0f;
-	Proxy->bInvertExpandGamutLUT = Component->bInvertExpandGamut;
-
-	return Proxy;
 }
 
 void FVGSSplatViewExtension::SetupViewFamily(FSceneViewFamily& InViewFamily)
@@ -100,52 +56,7 @@ void FVGSSplatViewExtension::SetupViewFamily(FSceneViewFamily& InViewFamily)
 	{
 		FModuleManager::GetModuleChecked<FVGSSplatRendererModule>("VGSSplatRenderer").GetRenderStats_RenderThread().UpdateRegistration();
 	});
-
-	// Update render-thread transform data
-	for (const UGaussianSplatComponent* Component : RegisteredComponents)
-	{
-		const uint32 UniqueID = GetUniqueID(Component);
-		if (UniqueID != INVALID_ID)
-		{
-			FMatrix44f LocalToWorld = VGSSplat::GetComponentLocalToWorld(*Component);
-			FMatrix44f WorldToLocal = FMatrix44f(Component->GetComponentTransform().ToMatrixWithScale().Inverse());
-			bool bVisible = Component->ShouldRender();
-			const float PointScaleFactor = Component->PointScaleFactor;
-			const float OpacityScale = Component->OpacityScale;
-			float InverseToneCurveStrength = Component->bInvertToneCurve ? Component->InverseToneCurveStrength : 0.0f;
-			bool bInvertExpandGamutLUT = Component->bInvertExpandGamut;
-
-			ENQUEUE_RENDER_COMMAND(FCreateVGSSplatRenderProxy)(
-				[
-					WeakThis = AsWeak(),
-					UniqueID,
-					LocalToWorld,
-					WorldToLocal,
-					bVisible,
-					PointScaleFactor,
-					OpacityScale,
-					InverseToneCurveStrength,
-					bInvertExpandGamutLUT
-				](FRHICommandList& RHICmdList)
-				{
-					TSharedPtr<FVGSSplatViewExtension> This = StaticCastWeakPtr<FVGSSplatViewExtension>(WeakThis).Pin();
-					if (This.IsValid())
-					{
-						if (TUniquePtr<FVGSSplatRenderProxy>* Proxy = This->RenderProxy_RenderThread.Find(UniqueID))
-						{
-							(*Proxy)->LocalToWorld = LocalToWorld;
-							(*Proxy)->WorldToLocal = WorldToLocal;
-							(*Proxy)->bVisible = bVisible;
-							(*Proxy)->PointScaleFactor = PointScaleFactor;
-							(*Proxy)->OpacityScale = OpacityScale;
-							(*Proxy)->InverseToneCurveStrength = InverseToneCurveStrength;
-							(*Proxy)->bInvertExpandGamutLUT = bInvertExpandGamutLUT;
-						}
-					}
-				}
-			);
-		}
-	}
+	// VGS CHANGE: no registered components to update; sources set their proxies themselves.
 }
 
 void FVGSSplatViewExtension::SubscribeToPostProcessingPass(EPostProcessingPass PassId, const FSceneView& View, FAfterPassCallbackDelegateArray& InOutPassCallbacks, bool bIsPassEnabled)
@@ -153,7 +64,7 @@ void FVGSSplatViewExtension::SubscribeToPostProcessingPass(EPostProcessingPass P
 	//if (PassId == EPostProcessingPass::VisualizeDepthOfField)
 	if (PassId == EPostProcessingPass::BeforeDOF)
 	{
-		if (GaussianSplat::IsEnabled() && View.Family && View.Family->Scene)
+		if (VGSSplat::IsEnabled() && View.Family && View.Family->Scene)
 		{
 			InOutPassCallbacks.Add(FAfterPassCallbackDelegate::CreateRaw(this, &FVGSSplatViewExtension::PostProcessPass_RenderThread));
 		}
@@ -256,7 +167,7 @@ FScreenPassTexture FVGSSplatViewExtension::PostProcessPass_RenderThread(FRDGBuil
 // VGS CHANGE: lit proxies, into the GBuffer before Unreal lights it.
 void FVGSSplatViewExtension::PostRenderBasePassDeferred_RenderThread(FRDGBuilder& GraphBuilder, FSceneView& InView, const FRenderTargetBindingSlots& RenderTargets, TRDGUniformBufferRef<FSceneTextureUniformParameters> SceneTextures)
 {
-	if (!GaussianSplat::IsEnabled() || InView.Family == nullptr || InView.Family->Scene == nullptr || !VGSSplat::SupportsLit(InView))
+	if (!VGSSplat::IsEnabled() || InView.Family == nullptr || InView.Family->Scene == nullptr || !VGSSplat::SupportsLit(InView))
 	{
 		return;
 	}
@@ -305,13 +216,8 @@ void FVGSSplatViewExtension::Render(FRDGBuilder& GraphBuilder, const FSceneView&
 {
 	FVGSSplatRendererModule& Module = FModuleManager::GetModuleChecked<FVGSSplatRendererModule>("VGSSplatRenderer");
 
-	// Registered components first, then whatever external sources build into this frame's graph.
+	// VGS CHANGE: only external sources; the copy has no registered components.
 	TArray<const FVGSSplatRenderProxy*> Proxies;
-	Proxies.Reserve(RenderProxy_RenderThread.Num());
-	for (auto Itr = RenderProxy_RenderThread.CreateIterator(); Itr; ++Itr)
-	{
-		Proxies.Add(Itr.Value().Get());
-	}
 	ExternalProxySources_RenderThread.Broadcast(GraphBuilder, View, Proxies);
 
 	TSortedMap<VGSSplat::EInverseToneCurveLUTVariant, FRHITexture*> LUTRHI;
@@ -378,80 +284,7 @@ void FVGSSplatViewExtension::Render(FRDGBuilder& GraphBuilder, const FSceneView&
 	VGSSplat::Render(GraphBuilder, View, RenderItems, RenderStats, Output, SceneDepthTexture, SceneVelocityTexture);
 }
 
-void FVGSSplatViewExtension::RegisterComponent(const UGaussianSplatComponent* Component)
-{
-	if (!Component->HasValidSplatData() || RegisteredComponents.Contains(Component))
-	{
-		return;
-	}
-	RegisteredComponents.Add(Component);
-
-	// Create render proxy on render thread
-	const uint32 UniqueID = GetUniqueID(Component);
-	if (UniqueID != INVALID_ID)
-	{
-		TUniquePtr<FVGSSplatRenderProxy> RenderProxy(CreateRenderProxy(Component));
-		TSharedPtr<FGaussianSplatRenderResource> Resource = Component->Asset->GetResource();
-		const int32 NumSplatsCVar = CVarVGSSplatNumSplats.GetValueOnGameThread();
-
-		ENQUEUE_RENDER_COMMAND(FAddVGSSplatRenderProxy)(
-			[
-				WeakThis = AsWeak(),
-				UniqueID,
-				RenderProxy = MoveTemp(RenderProxy),
-				Resource,
-				NumSplatsCVar
-			](FRHICommandList& RHICmdList) mutable
-			{
-				RenderProxy->NumSplats = uint32(Resource->GetNumSplats());
-				RenderProxy->NumLOD0Splats = uint32(Resource->GetNumLOD0Splats());
-				RenderProxy->LocalBounds = Resource->GetBounds();
-
-				bool bDebugDisableClustering = false;
-				if (NumSplatsCVar > 0 && uint32(NumSplatsCVar) < RenderProxy->NumSplats)
-				{
-					RenderProxy->NumSplats = uint32(NumSplatsCVar);
-					bDebugDisableClustering = true;
-				}
-
-				RenderProxy->GpuBuffer = Resource->GetSplatBuffer();
-				RenderProxy->GpuDataStride = Resource->GetSplatStride();
-				if (!bDebugDisableClustering)
-				{
-					RenderProxy->ClusterBuffer = Resource->GetClusterBuffer();
-					RenderProxy->NumClusters = Resource->GetNumClusters();
-				}
-
-				TSharedPtr<FVGSSplatViewExtension> This = StaticCastWeakPtr<FVGSSplatViewExtension>(WeakThis).Pin();
-				if (This.IsValid())
-				{
-					This->RenderProxy_RenderThread.Add(UniqueID, MoveTemp(RenderProxy));
-				}
-			}
-		);
-	}
-}
-
-void FVGSSplatViewExtension::UnregisterComponent(const UGaussianSplatComponent* Component)
-{
-	RegisteredComponents.Remove(Component);
-
-	// Remove render proxy on render thread
-	const uint32 UniqueID = Component->GetUniqueID(); // bypass asset check
-	ENQUEUE_RENDER_COMMAND(FRemoveVGSSplatRenderProxy)(
-		[
-			WeakThis = AsWeak(),
-			UniqueID
-		](FRHICommandList& RHICmdList)
-		{
-			TSharedPtr<FVGSSplatViewExtension> This = StaticCastWeakPtr<FVGSSplatViewExtension>(WeakThis).Pin();
-			if (This.IsValid())
-			{
-				This->RenderProxy_RenderThread.Remove(UniqueID); // auto-deletes via TUniquePtr
-			}
-		}
-	);
-}
+// VGS CHANGE: no RegisterComponent / UnregisterComponent (Epic's components are Epic's to draw).
 
 void FVGSSplatViewExtension::AddExternalProxySource(FOnCollectVGSSplatProxies::FDelegate&& InSource)
 {

@@ -10,8 +10,8 @@ public class VGSShaders : ModuleRules
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
 		PublicDependencyModuleNames.AddRange(new[] { "Core", "RenderCore", "RHI" });
-		// GaussianSplatShader maps /Plugin/GaussianSplat, whose GaussianSplatShared.h gives
-		// VGSPacked.usf the renderer's record layout.
-		PrivateDependencyModuleNames.AddRange(new[] { "Projects", "GaussianSplatShader" });
+		// The renderer's record layout comes from Shaders/Shared/VGSSplatShared.h, the copy of
+		// Epic's GaussianSplatShared.h (EPIC_RENDERER_COPY.md), under /Plugin/VGS/Shared/.
+		PrivateDependencyModuleNames.AddRange(new[] { "Projects" });
 	}
 }

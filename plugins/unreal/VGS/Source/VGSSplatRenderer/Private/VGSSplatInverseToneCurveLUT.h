@@ -15,9 +15,9 @@ namespace VGSSplat
 	// Selects which baked inverse-tone-curve LUT to sample; cast from bInvertExpandGamut for now.
 	enum class EInverseToneCurveLUTVariant : uint8
 	{
-		/** Inverse filmic tone curve only (asset UE_InverseFilmicTC). */
+		/** Inverse filmic tone curve only (Epic's asset UE_InverseFilmicTC; Resources/InverseToneCurve). */
 		Filmic = 0,
-		/** Inverse filmic tone curve plus gamut expansion (asset UE_InverseFilmicTC_Full). */
+		/** Inverse filmic tone curve plus gamut expansion (UE_InverseFilmicTC_Full). */
 		FilmicExpandGamut = 1,
 	};
 }

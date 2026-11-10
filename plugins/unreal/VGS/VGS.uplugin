@@ -34,11 +34,5 @@
 			"LoadingPhase": "Default",
 			"PlatformAllowList": [ "Win64" ]
 		}
-	],
-	"Plugins": [
-		{
-			"Name": "GaussianSplat",
-			"Enabled": true
-		}
 	]
 }

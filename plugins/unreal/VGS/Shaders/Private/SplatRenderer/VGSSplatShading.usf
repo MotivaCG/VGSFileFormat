@@ -2,13 +2,13 @@
 // What VGS changed is marked "VGS CHANGE"; see plugins/unreal/EPIC_RENDERER_COPY.md.
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-//#include "/Plugin/GaussianSplat/Shared/GaussianSplatShared.h"
+//#include "/Plugin/VGS/Shared/VGSSplatShared.h"
 #include "/Engine/Private/Common.ush"
 #include "/Engine/Private/ColorSpace.ush"
 #include "/Engine/Private/ComputeShaderUtils.ush"
 #define GaussianViewData PrimaryView
 #define GPU_SIMULATION 1
-#include "/Plugin/GaussianSplat/Shared/GaussianSplatShared.h"
+#include "/Plugin/VGS/Shared/VGSSplatShared.h"
 #include "/Plugin/VGS/Private/SplatRenderer/SphericalGaussianCommon.ush"
 
 #include "VGSSplatCommon.ush"
@@ -85,7 +85,9 @@ RWStructuredBuffer<FPackedShadedVGSSplatData> RWShadedVGSSplatBuffer;
 // VGS CHANGE: for a lit proxy (VGSSplatGBuffer.usf), each shaded splat's normal in view space,
 // x and y as two halves, at the same index as its record; z faces the camera. The normal is
 // the capture's own (NormalBuffer, octahedral in the capture's axes, 0 for none) or else the
-// splat's shortest axis turned towards the camera.
+// splat's shortest axis turned towards the camera. HasNormals is 0 for no NormalBuffer, 1 for
+// outward normals, 2 for normals whose side is not known (directions only), which are turned
+// towards the camera as the shortest axis is.
 uint Lit;
 uint HasNormals;
 StructuredBuffer<uint> NormalBuffer;
@@ -110,7 +112,7 @@ uint VGSShadedNormal(uint SplatIndex, FVGSSplatData SplatData)
 	if (Word != 0u)
 	{
 		WorldNormal = mul((float3x3)WorldToLocal, VGSUnpackNormal(Word));
-		bFaceCamera = false;
+		bFaceCamera = HasNormals == 2u;
 	}
 	else
 	{
@@ -166,7 +168,7 @@ uint ComputeSortKey(float4 ClipPosition, float ViewZ)
 // Cluster dispatch
 Buffer<uint> ClusterCountBuffer;
 Buffer<uint> ClusterIndexBuffer;
-StructuredBuffer<FGaussianSplatCluster> ClusterBuffer;
+StructuredBuffer<FVGSSplatCluster> ClusterBuffer;
 
 #ifndef GAUSSIAN_SPLAT_USE_WAVE_OPS
 #define GAUSSIAN_SPLAT_USE_WAVE_OPS 0
@@ -184,10 +186,10 @@ FVGSSplatData UnpackFloatBufferData(int BufferIndex)
 	FVGSSplatData SplatData;
 
 	const uint ReadOffset = BufferIndex * BufferStride;
-	SplatData.Position = asfloat(VGSSplatBuffer.Load3(ReadOffset + FGaussianSplatShared::EFloat_PositionOffset));
-	SplatData.Scale    = asfloat(VGSSplatBuffer.Load3(ReadOffset + FGaussianSplatShared::EFloat_ScaleOffset));
-	SplatData.Rotation = asfloat(VGSSplatBuffer.Load4(ReadOffset + FGaussianSplatShared::EFloat_RotationOffset));
-	SplatData.Opacity  = asfloat(VGSSplatBuffer.Load (ReadOffset + FGaussianSplatShared::EFloat_ColorOpacityOffset + 12u));
+	SplatData.Position = asfloat(VGSSplatBuffer.Load3(ReadOffset + FVGSSplatShared::EFloat_PositionOffset));
+	SplatData.Scale    = asfloat(VGSSplatBuffer.Load3(ReadOffset + FVGSSplatShared::EFloat_ScaleOffset));
+	SplatData.Rotation = asfloat(VGSSplatBuffer.Load4(ReadOffset + FVGSSplatShared::EFloat_RotationOffset));
+	SplatData.Opacity  = asfloat(VGSSplatBuffer.Load (ReadOffset + FVGSSplatShared::EFloat_ColorOpacityOffset + 12u));
 	return SplatData;
 }
 
@@ -197,11 +199,11 @@ FVGSSplatData UnpackQuantizedBufferData(int BufferIndex)
 
 	const uint ReadOffset = BufferIndex * BufferStride;
 	const uint4 QuantizedData = VGSSplatBuffer.Load4(ReadOffset);
-	const uint QuantizedColor = VGSSplatBuffer.Load(ReadOffset + FGaussianSplatShared::EQuantized_ColorOpacityOffset);
-	SplatData.Position = FGaussianSplatShared::Unpack_21_21_21(QuantizedData.xy, PositionScale, PositionBias);
-	SplatData.Scale = FGaussianSplatShared::Unpack_11_11_10_Exp(QuantizedData.z, ScaleScale, ScaleBias);
-	SplatData.Rotation = FGaussianSplatShared::UnpackQuat(QuantizedData.w);
-	SplatData.Opacity = FGaussianSplatShared::Unpack_8_8_8_8(QuantizedColor, ColorScale, ColorBias).w;
+	const uint QuantizedColor = VGSSplatBuffer.Load(ReadOffset + FVGSSplatShared::EQuantized_ColorOpacityOffset);
+	SplatData.Position = FVGSSplatShared::Unpack_21_21_21(QuantizedData.xy, PositionScale, PositionBias);
+	SplatData.Scale = FVGSSplatShared::Unpack_11_11_10_Exp(QuantizedData.z, ScaleScale, ScaleBias);
+	SplatData.Rotation = FVGSSplatShared::UnpackQuat(QuantizedData.w);
+	SplatData.Opacity = FVGSSplatShared::Unpack_8_8_8_8(QuantizedColor, ColorScale, ColorBias).w;
 	return SplatData;
 }
 
@@ -286,10 +288,10 @@ float3 CalculateColor(uint Index, float3 Direction)
 	uint ReadOffset = Index * BufferStride;
 	if (BufferFormat == 0)
 	{
-		const uint ColorOffset = ReadOffset + FGaussianSplatShared::EFloat_ColorOpacityOffset;
+		const uint ColorOffset = ReadOffset + FVGSSplatShared::EFloat_ColorOpacityOffset;
 		Coefs[0] = asfloat(VGSSplatBuffer.Load3(ColorOffset));
 
-		uint SHOffset = ReadOffset + FGaussianSplatShared::EFloat_Stride;
+		uint SHOffset = ReadOffset + FVGSSplatShared::EFloat_Stride;
 		for (int i = 1; i < SHDimension; ++i)
 		{
 			Coefs[i] = asfloat(VGSSplatBuffer.Load3(SHOffset));
@@ -298,23 +300,23 @@ float3 CalculateColor(uint Index, float3 Direction)
 	}
 	else
 	{
-		const uint ColorOffset = ReadOffset + FGaussianSplatShared::EQuantized_ColorOpacityOffset;
-		Coefs[0] = FGaussianSplatShared::Unpack_8_8_8_8(VGSSplatBuffer.Load(ColorOffset), ColorScale, ColorBias).xyz;
+		const uint ColorOffset = ReadOffset + FVGSSplatShared::EQuantized_ColorOpacityOffset;
+		Coefs[0] = FVGSSplatShared::Unpack_8_8_8_8(VGSSplatBuffer.Load(ColorOffset), ColorScale, ColorBias).xyz;
 
 		const float4 SHScale4 = float4(SHScale, 0.0f);
 		const float4 SHBias4 = float4(SHBias, 0.0f);
 
-		uint SHOffset = ReadOffset + FGaussianSplatShared::EQuantized_Stride;
+		uint SHOffset = ReadOffset + FVGSSplatShared::EQuantized_Stride;
 		for (uint i = 1; i < SHDimension; ++i)
 		{
 			const uint PackedSH = VGSSplatBuffer.Load(SHOffset);
-			Coefs[i] = FGaussianSplatShared::Unpack_8_8_8_8(PackedSH, SHScale4, SHBias4).xyz;
+			Coefs[i] = FVGSSplatShared::Unpack_8_8_8_8(PackedSH, SHScale4, SHBias4).xyz;
 
 			SHOffset += 4u;
 		}
 	}
 
-	Color = FGaussianSplatSHConstants::SH_C0 * Coefs[0];
+	Color = FVGSSplatSHConstants::SH_C0 * Coefs[0];
 #if SH_DEGREE >= 1
 	{
 		const float X = Direction.x;
@@ -322,9 +324,9 @@ float3 CalculateColor(uint Index, float3 Direction)
 		const float Z = Direction.z;
 
 		Color = Color
-			- FGaussianSplatSHConstants::SH_C1 * Y * Coefs[1]
-			+ FGaussianSplatSHConstants::SH_C1 * Z * Coefs[2]
-			- FGaussianSplatSHConstants::SH_C1 * X * Coefs[3]
+			- FVGSSplatSHConstants::SH_C1 * Y * Coefs[1]
+			+ FVGSSplatSHConstants::SH_C1 * Z * Coefs[2]
+			- FVGSSplatSHConstants::SH_C1 * X * Coefs[3]
 			;
 #if SH_DEGREE >= 2
 		{
@@ -336,23 +338,23 @@ float3 CalculateColor(uint Index, float3 Direction)
 			const float YZ = Y * Z;
 
 			Color = Color
-				+ FGaussianSplatSHConstants::SH_C2_0 * XY * Coefs[4]
-				+ FGaussianSplatSHConstants::SH_C2_1 * YZ * Coefs[5]
-				+ FGaussianSplatSHConstants::SH_C2_2 * (2.0f * ZZ - XX - YY) * Coefs[6]
-				+ FGaussianSplatSHConstants::SH_C2_3 * XZ * Coefs[7]
-				+ FGaussianSplatSHConstants::SH_C2_4 * (XX - YY) * Coefs[8]
+				+ FVGSSplatSHConstants::SH_C2_0 * XY * Coefs[4]
+				+ FVGSSplatSHConstants::SH_C2_1 * YZ * Coefs[5]
+				+ FVGSSplatSHConstants::SH_C2_2 * (2.0f * ZZ - XX - YY) * Coefs[6]
+				+ FVGSSplatSHConstants::SH_C2_3 * XZ * Coefs[7]
+				+ FVGSSplatSHConstants::SH_C2_4 * (XX - YY) * Coefs[8]
 				;
 
 #if SH_DEGREE >= 3
 			{
 				Color = Color
-					+ FGaussianSplatSHConstants::SH_C3_0 * Y * (3.0f * XX - YY) * Coefs[9]
-					+ FGaussianSplatSHConstants::SH_C3_1 * XY * Z * Coefs[10]
-					+ FGaussianSplatSHConstants::SH_C3_2 * Y * (4.0f * ZZ - XX - YY) * Coefs[11]
-					+ FGaussianSplatSHConstants::SH_C3_3 * Z * (2.0f * ZZ - 3.0f * XX - 3.0f * YY) * Coefs[12]
-					+ FGaussianSplatSHConstants::SH_C3_4 * X * (4.0f * ZZ - XX - YY) * Coefs[13]
-					+ FGaussianSplatSHConstants::SH_C3_5 * Z * (XX - YY) * Coefs[14]
-					+ FGaussianSplatSHConstants::SH_C3_6 * X * (XX - 3.0f * YY) * Coefs[15]
+					+ FVGSSplatSHConstants::SH_C3_0 * Y * (3.0f * XX - YY) * Coefs[9]
+					+ FVGSSplatSHConstants::SH_C3_1 * XY * Z * Coefs[10]
+					+ FVGSSplatSHConstants::SH_C3_2 * Y * (4.0f * ZZ - XX - YY) * Coefs[11]
+					+ FVGSSplatSHConstants::SH_C3_3 * Z * (2.0f * ZZ - 3.0f * XX - 3.0f * YY) * Coefs[12]
+					+ FVGSSplatSHConstants::SH_C3_4 * X * (4.0f * ZZ - XX - YY) * Coefs[13]
+					+ FVGSSplatSHConstants::SH_C3_5 * Z * (XX - YY) * Coefs[14]
+					+ FVGSSplatSHConstants::SH_C3_6 * X * (XX - 3.0f * YY) * Coefs[15]
 					;
 			}
 #endif // SH_DEGREE >= 3
@@ -394,7 +396,7 @@ void MainCS(
 {
 	// Clustering
 	uint LocalClusterCount = 1;
-	FGaussianSplatCluster Cluster = (FGaussianSplatCluster) 0;
+	FVGSSplatCluster Cluster = (FVGSSplatCluster) 0;
 	if (GAUSSIAN_SPLAT_CLUSTERING)
 	{
 		const uint ClusterIndex = GetUnWrappedDispatchGroupId(GroupId);

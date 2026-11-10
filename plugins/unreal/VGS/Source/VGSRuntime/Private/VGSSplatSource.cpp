@@ -270,7 +270,7 @@ void FVGSSplatSource::Collect_RenderThread(FRDGBuilder& GraphBuilder, const FSce
 
 	// The capture keeps its own axes; the turn into Unreal's is in LocalToWorld, so the
 	// harmonics are evaluated in the space they were fitted in (VGSSplatLayout.h).
-	Proxy.SHCoordinateSpace = EGaussianSplatCoordinateSpace::LH_FRU;
+	Proxy.SHCoordinateSpace = EVGSSplatCoordinateSpace::LH_FRU;
 	Proxy.GpuBuffer = SplatBuffer;
 	Proxy.ClusterBuffer = nullptr;
 	Proxy.NumClusters = 0;
