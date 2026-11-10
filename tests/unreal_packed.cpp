@@ -29,7 +29,12 @@ void require(bool condition, const std::string &what) {
 
 struct Errors {
   double position = 0, rotation = 0, scale = 0, dc = 0, opacity = 0, sh = 0;
+  double normal = 0, normalWord = 0; // 1 - cos of the angle, before and after the shader's packing
+  uint64_t normals = 0;              // records compared
   void merge(const Errors &o) {
+    normal = std::max(normal, o.normal);
+    normalWord = std::max(normalWord, o.normalWord);
+    normals += o.normals;
     position = std::max(position, o.position);
     rotation = std::max(rotation, o.rotation);
     scale = std::max(scale, o.scale);
@@ -70,6 +75,21 @@ Errors compare(const vgsb_frame &f, const vgsb_packed_frame &p, double extent) {
     e.scale = std::max({e.scale, relative(r.scale.x, scl[0]), relative(r.scale.y, scl[1]), relative(r.scale.z, scl[2])});
     e.dc = std::max({e.dc, std::fabs(double(r.dc.x - rad[0])), std::fabs(double(r.dc.y - rad[1])), std::fabs(double(r.dc.z - rad[2]))});
     e.opacity = std::max(e.opacity, std::fabs(double(r.opacity - rad[3])));
+    require((f.normals != nullptr) == (c.normals != nullptr), "only one path carries normals");
+    if (f.normals) {
+      require(r.hasNormal, "a live splat without a normal in a capture that has them");
+      const float *n = f.normals + j * 3;
+      // Of the directions alone: a turn by a float quaternion leaves lengths off by 1e-7 or so.
+      const auto angle = [&](const vgspacked::Float3 &v) {
+        const double dot = double(v.x) * n[0] + double(v.y) * n[1] + double(v.z) * n[2];
+        const double lengths = std::sqrt((double(v.x) * v.x + double(v.y) * v.y + double(v.z) * v.z) *
+                                         (double(n[0]) * n[0] + double(n[1]) * n[1] + double(n[2]) * n[2]));
+        return 1.0 - std::min(1.0, dot / std::max(lengths, 1e-30));
+      };
+      e.normal = std::max(e.normal, angle(r.normal));
+      e.normalWord = std::max(e.normalWord, angle(vgspacked::unpackNormal(r.normalWord)));
+      ++e.normals;
+    }
     require(f.sh_coefficients == c.sh_coefficients, "the two paths carry different harmonics");
     for (int k = 0; k < c.sh_coefficients; ++k) {
       const float *s = f.sh + (size_t(k) * f.count + j) * 3;
@@ -122,9 +142,9 @@ int main(int argc, char **argv) {
       require(vgsb_acquire(evaluated, t, -1, &f) == VGSB_OK, std::string("vgsb_acquire: ") + vgsb_last_error());
       require(vgsb_acquire_packed(packed, t, -1, &p) == VGSB_OK, std::string("vgsb_acquire_packed: ") + vgsb_last_error());
       const Errors e = compare(f, p, extent);
-      std::printf("  %7.3f s  chunk %3llu  frame %2u  alpha %.3f  %8llu live  pos %.1e  rot %.1e  scale %.1e  dc %.1e  opacity %.1e  sh %.1e\n",
+      std::printf("  %7.3f s  chunk %3llu  frame %2u  alpha %.3f  %8llu live  pos %.1e  rot %.1e  scale %.1e  dc %.1e  opacity %.1e  sh %.1e  normal %.1e/%.1e\n",
                   t, (unsigned long long)p.chunk->chunk_index, p.frame, p.alpha, (unsigned long long)f.count,
-                  e.position, e.rotation, e.scale, e.dc, e.opacity, e.sh);
+                  e.position, e.rotation, e.scale, e.dc, e.opacity, e.sh, e.normal, e.normalWord);
       worst.merge(e);
     }
     vgsb_release(evaluated);
@@ -138,6 +158,13 @@ int main(int argc, char **argv) {
     require(worst.dc < 1e-4, "colours differ");
     require(worst.opacity < 1e-5, "opacities differ");
     require(worst.sh < 1e-4, "harmonics differ");
+    // The same decode and turn, and the shader's 16-bit packing: within a tenth of a degree.
+    require(worst.normal < 1e-6, "normals differ");
+    require(worst.normalWord < 1e-6, "packed normals differ");
+    if (worst.normals)
+      std::printf("normals: %llu compared\n", (unsigned long long)worst.normals);
+    else
+      std::printf("normals: the capture carries none\n");
 
     // What a frame costs the CPU each way, playing on: evaluated is everything, packed only
     // the basis (and, once a chunk, the packing on a lane, which this does not see).

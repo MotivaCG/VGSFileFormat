@@ -29,6 +29,12 @@ struct Record {
   Float3 dc;       // the SH DC term, not the colour
   float opacity = 0;
   Float3 sh[15];
+  // The outward normal in the capture's axes, when the chunk carries one for the splat, and
+  // the word the shader writes for it: octahedral, 16 bits a component biased so that 0 is
+  // "no normal" (the renderer then takes the shortest axis).
+  bool hasNormal = false;
+  Float3 normal;
+  uint32_t normalWord = 0;
 };
 
 /** What the shader gets besides the chunk's buffers: the instant, and what the component adds. */
@@ -88,6 +94,55 @@ inline uint32_t densityHash(uint32_t record) {
   x *= 0xC2B2AE35u;
   x ^= x >> 16;
   return x;
+}
+
+// vgs::decodeNormal (vgscodec.h): the code is in the splat's axes ordered by scale index,
+// shortest first, ties to the lower axis; a hemi-octahedral map of that axis's hemisphere.
+inline Float3 decodeNormal(uint32_t code, uint32_t scaleIndices) {
+  const uint32_t s[3] = {scaleIndices & 255u, (scaleIndices >> 8) & 255u, (scaleIndices >> 16) & 255u};
+  int a0 = 0, a1 = 1, a2 = 2; // insertion sort by scale index, stable
+  if (s[a1] < s[a0]) std::swap(a0, a1);
+  if (s[a2] < s[a1]) { std::swap(a1, a2); if (s[a1] < s[a0]) std::swap(a0, a1); }
+  const float u = float(code & 255u) / 255.0f * 2 - 1, v = float((code >> 9) & 127u) / 127.0f * 2 - 1;
+  const float px = (u + v) * 0.5f, py = (u - v) * 0.5f;
+  float z = std::max(0.0f, 1 - std::fabs(px) - std::fabs(py));
+  if ((code >> 8) & 1u) z = -z;
+  const float norm = std::max(std::sqrt(px * px + py * py + z * z), 1e-20f);
+  float local[3];
+  local[a1] = px / norm, local[a2] = py / norm, local[a0] = z / norm;
+  return {local[0], local[1], local[2]};
+}
+
+// v turned by q (xyzw): v + 2w (q x v) + 2 q x (q x v), as vgsframe.cpp turns normals.
+inline Float3 rotate(const Float4 &q, const Float3 &v) {
+  const Float3 t = {2 * (q.y * v.z - q.z * v.y), 2 * (q.z * v.x - q.x * v.z), 2 * (q.x * v.y - q.y * v.x)};
+  return {v.x + q.w * t.x + (q.y * t.z - q.z * t.y), v.y + q.w * t.y + (q.z * t.x - q.x * t.z),
+          v.z + q.w * t.z + (q.x * t.y - q.y * t.x)};
+}
+
+// Octahedral, each component in [-1, 1] mapped to 1..65535 so that a word of 0 stays free.
+inline uint32_t packNormal(const Float3 &n) {
+  const float l1 = std::max(std::fabs(n.x) + std::fabs(n.y) + std::fabs(n.z), 1e-20f);
+  float x = n.x / l1, y = n.y / l1;
+  if (n.z < 0) {
+    const float ox = (1 - std::fabs(y)) * (x >= 0 ? 1.0f : -1.0f), oy = (1 - std::fabs(x)) * (y >= 0 ? 1.0f : -1.0f);
+    x = ox, y = oy;
+  }
+  const auto q = [](float value) {
+    return uint32_t(std::min(std::max(value * 0.5f + 0.5f, 0.0f), 1.0f) * 65534.0f + 0.5f) + 1u;
+  };
+  return q(x) | (q(y) << 16);
+}
+
+inline Float3 unpackNormal(uint32_t w) {
+  float x = (float(w & 65535u) - 1.0f) / 65534.0f * 2 - 1, y = (float(w >> 16) - 1.0f) / 65534.0f * 2 - 1;
+  const float z = 1 - std::fabs(x) - std::fabs(y);
+  if (z < 0) {
+    const float ox = (1 - std::fabs(y)) * (x >= 0 ? 1.0f : -1.0f), oy = (1 - std::fabs(x)) * (y >= 0 ? 1.0f : -1.0f);
+    x = ox, y = oy;
+  }
+  const float l = std::max(std::sqrt(x * x + y * y + z * z), 1e-20f);
+  return {x / l, y / l, z / l};
 }
 
 inline Record evaluate(const vgsb_packed_chunk &c, const Instant &at, uint32_t index) {
@@ -165,6 +220,12 @@ inline Record evaluate(const vgsb_packed_chunk &c, const Instant &at, uint32_t i
   }
   const float length = std::max(std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w), 1e-20f);
   r.rotation = {q.x / length, q.y / length, q.z / length, q.w / length};
+
+  if (c.normals && (c.normals[index] & 0x10000u)) {
+    r.hasNormal = true;
+    r.normal = rotate(r.rotation, decodeNormal(c.normals[index] & 0xFFFFu, A[3]));
+    r.normalWord = packNormal(r.normal);
+  }
 
   Float3 sh0 = {c.luts[(C[3] & 255u) * 2 + 1], c.luts[((C[3] >> 8) & 255u) * 2 + 1],
                 c.luts[((C[3] >> 16) & 255u) * 2 + 1]};
