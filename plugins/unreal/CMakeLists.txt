@@ -13,6 +13,9 @@
 # (Binaries/Win64, Intermediate) stays out of it. The staged Source/ is replaced on every
 # build, so a file removed from the tree does not linger there.
 #
+# Content/ holds the editor's assets (the actor's icon), saved by Unreal 5.9 and committed as
+# they are. A running editor keeps vgsbridge.dll open, so it is only replaced when it changed.
+#
 # The version comes from VGS.uplugin, the one place to bump it.
 
 set(plugin VGS)
@@ -22,7 +25,7 @@ file(STRINGS ${plugin_dir}/VGS.uplugin version_line REGEX "\"VersionName\"")
 string(REGEX REPLACE ".*\"VersionName\" *: *\"([^\"]+)\".*" "\\1" plugin_version "${version_line}")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${plugin_dir}/VGS.uplugin)
 
-file(GLOB_RECURSE plugin_sources CONFIGURE_DEPENDS ${plugin_dir}/Source/*)
+file(GLOB_RECURSE plugin_sources CONFIGURE_DEPENDS ${plugin_dir}/Source/* ${plugin_dir}/Content/*)
 
 set(out ${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>)
 set(stage ${out}/${plugin})
@@ -39,13 +42,14 @@ add_custom_target(vgs_unreal_plugin ALL
     COMMAND ${CMAKE_COMMAND} -E make_directory ${stage}/Resources
     COMMAND ${CMAKE_COMMAND} -E copy ${plugin_dir}/VGS.uplugin ${stage}
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${plugin_dir}/Source ${stage}/Source
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${plugin_dir}/Content ${stage}/Content
     COMMAND ${CMAKE_COMMAND} -E copy ${bridge_header} ${stage}/Source/ThirdParty/vgsbridge/include
-    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:vgsbridge> ${third_party_bin}
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:vgsbridge> ${third_party_bin}
     COMMAND ${CMAKE_COMMAND} -E copy ${decoder_license} ${third_party_bin}/LICENSE.md
     COMMAND ${CMAKE_COMMAND} -E copy ${icon} ${stage}/Resources/Icon128.png
     COMMAND ${CMAKE_COMMAND} -E chdir ${out}
             ${CMAKE_COMMAND} -E tar cf ${zip} --format=zip --
-            ${plugin}/VGS.uplugin ${plugin}/Source ${plugin}/Resources ${plugin}/Binaries/ThirdParty
+            ${plugin}/VGS.uplugin ${plugin}/Source ${plugin}/Content ${plugin}/Resources ${plugin}/Binaries/ThirdParty
     DEPENDS vgsbridge ${plugin_dir}/VGS.uplugin ${plugin_sources} ${bridge_header} ${decoder_license} ${icon}
     COMMENT "Assembling the Unreal plugin ${plugin} ${plugin_version}"
     VERBATIM)

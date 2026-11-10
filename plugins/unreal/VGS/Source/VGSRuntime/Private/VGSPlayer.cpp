@@ -115,7 +115,7 @@ namespace VGS
 		return GError;
 	}
 
-	TSharedPtr<FPlayer> FPlayer::Open(const FString& Path, bool bIncludeSH, int32 Slots, FString& OutError)
+	TSharedPtr<FPlayer> FPlayer::Open(const FString& Path, bool bIncludeSH, int32 Slots, int32 Threads, FString& OutError)
 	{
 		const FBridgeApi* Api = GetBridge();
 		if (!Api)
@@ -126,7 +126,7 @@ namespace VGS
 
 		// The bridge maps the file itself and takes UTF-8, so accented paths work.
 		const auto Utf8Path = StringCast<UTF8CHAR>(*Path);
-		vgsb_player* Player = Api->Open(reinterpret_cast<const char*>(Utf8Path.Get()), bIncludeSH ? 1 : 0, FMath::Clamp(Slots, 2, 64), 0);
+		vgsb_player* Player = Api->Open(reinterpret_cast<const char*>(Utf8Path.Get()), bIncludeSH ? 1 : 0, FMath::Clamp(Slots, 2, 64), FMath::Max(Threads, 0));
 		if (!Player)
 		{
 			OutError = FromUtf8(Api->LastError());
@@ -137,6 +137,7 @@ namespace VGS
 		Result->Player = Player;
 		Result->Path = Path;
 		Result->bIncludeSH = bIncludeSH;
+		Result->Threads = FMath::Max(Threads, 0);
 		Api->GetInfo(Player, &Result->Info);
 		return Result;
 	}

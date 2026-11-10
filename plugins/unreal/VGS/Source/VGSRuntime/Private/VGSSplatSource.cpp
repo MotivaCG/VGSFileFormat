@@ -1,7 +1,11 @@
 #include "VGSSplatSource.h"
+#include "VGSStats.h"
 
 #include "RenderGraphBuilder.h"
 #include "SceneView.h"
+
+DECLARE_CYCLE_STAT(TEXT("Queue upload (render thread)"), STAT_VGS_Upload, STATGROUP_VGS);
+DECLARE_MEMORY_STAT(TEXT("Uploaded per frame"), STAT_VGS_UploadBytes, STATGROUP_VGS);
 
 namespace
 {
@@ -28,6 +32,8 @@ void FVGSSplatSource::SetFrame_RenderThread(FVGSPackedFrameRef Frame)
 
 void FVGSSplatSource::Upload_RenderThread(FRDGBuilder& GraphBuilder, const FVGSPackedFrameRef& Frame)
 {
+	SCOPE_CYCLE_COUNTER(STAT_VGS_Upload);
+	SET_MEMORY_STAT(STAT_VGS_UploadBytes, Frame->Bytes.Num());
 	if (Frame->NumSplats == 0 || Frame->Bytes.Num() == 0)
 	{
 		SplatBuffer = nullptr;

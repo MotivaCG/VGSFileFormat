@@ -2,7 +2,7 @@
 
 Plays VGS captures in Unreal Engine 5.9 through Epic's own Gaussian Splat renderer
 (`Engine/Plugins/GaussianSplat`, experimental in 5.9). Phase 1: playback, nothing of
-lighting or shadows. **Not yet compiled or run in Unreal** — see *State* below.
+lighting or shadows. Compiles and loads; not yet seen drawing — see *State* below.
 
 ```
 VGS/                         the plugin as it goes into a project's Plugins folder
@@ -112,12 +112,21 @@ for several captures at once or a tighter budget.
 
 ## State, and what to check first in Unreal
 
-Written against the UE 5.9 sources at `E:\UE_INSTALL\5.9SRC`, whose engine was not built,
-so the Unreal side has **not been compiled**. Every engine call was checked against the
-5.9 headers, but expect a round of compile fixes. Then, in this order:
+2026-11-09: built against the installed UE 5.9.0 (CL 60351404, `E:\UE_INSTALL\UE_5.9`),
+whose GaussianSplat plugin is identical to the 5.9 sources the plugin was written from,
+with no errors or warnings, inside a host project (below). In a headless editor start
+(`-nullrhi`) the module loads and loads `vgsbridge.dll`. Nothing has been drawn yet.
 
-1. The module loads and logs `Loaded ...vgsbridge.dll`; a capture opens (*Status* in the
-   details panel, `LogVGS`).
+The host project is `D:\Trabajos\THE4DSCANNER\UEVGSProject`, outside this tree: a blank C++
+project whose `Plugins\VGS` is a junction to `build_win64\plugins\unreal\Release\VGS`. Its
+`Build.bat` reassembles the plugin with CMake and builds the editor target; `OpenEditor.bat`
+opens it. Remove the junction with `rmdir`, never with a recursive delete, which would
+follow it into the build tree.
+
+What to check, in this order:
+
+1. The module loads and logs `Loaded ...vgsbridge.dll` (done, headless); a capture opens
+   (*Status* in the details panel, `LogVGS`).
 2. It draws, the right way up and the right size (Y Up: the capture's +Z becomes Unreal's
    -X, as Epic turns SPZ files; rotate the actor to face it).
 3. Colours match the editor or Blender (the renderer treats DC + 0.5 as sRGB, as every 3DGS

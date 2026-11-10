@@ -3,16 +3,37 @@
 #include "VGSPlayer.h"
 #include "VGSSplatLayout.h"
 #include "VGSSplatSource.h"
+#include "VGSStats.h"
 
 #include "Async/ParallelFor.h"
+#include "HAL/PlatformTime.h"
 #include "Engine/World.h"
 #include "GaussianSplatViewExtension.h" // GaussianSplat::RegisterExternalProxySource (Internal)
+#include "HAL/IConsoleManager.h"
 #include "Misc/App.h"
 #include "Misc/Paths.h"
 #include "RenderingThread.h"
 #include "SceneInterface.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(VGSCaptureComponent)
+
+// The bridge's own default, half the machine for each of a capture's two lanes, starves
+// inside Unreal: its lanes spawn that many threads per batch against the engine's task
+// workers. Measured 2026-11-09 (Ryzen 9 7900X, 288k splats, SH 2, rendered game): 0 showed
+// 114-140 of 150 frames due and the game ran at 160-180 fps; 1, 2 and 4 showed all 150 at
+// about 300 fps.
+static TAutoConsoleVariable<int32> CVarVGSDecodeThreads(
+	TEXT("vgs.DecodeThreads"),
+	2,
+	TEXT("Cores each decoding lane of a VGS capture may use; a capture has two lanes. Default 2.") LINE_TERMINATOR
+	TEXT("0 lets vgsbridge choose (half the machine), which competes with the engine's own threads.") LINE_TERMINATOR
+	TEXT("Open captures reopen when it changes."),
+	ECVF_Default);
+
+DECLARE_CYCLE_STAT(TEXT("Wait for decoded frame"), STAT_VGS_Wait, STATGROUP_VGS);
+DECLARE_CYCLE_STAT(TEXT("Pack frame"), STAT_VGS_Pack, STATGROUP_VGS);
+DECLARE_DWORD_COUNTER_STAT(TEXT("Splats on screen"), STAT_VGS_Splats, STATGROUP_VGS);
+DECLARE_DWORD_COUNTER_STAT(TEXT("Frames late"), STAT_VGS_Late, STATGROUP_VGS);
 
 namespace
 {
@@ -30,6 +51,9 @@ namespace
 
 	/** Splats per parallel task when packing. */
 	constexpr int32 SplatsPerTask = 16384;
+
+	/** How often, playing, the log gets a summary of what playback cost. */
+	constexpr double SummarySeconds = 5.0;
 }
 
 UVGSCaptureComponent::UVGSCaptureComponent()
@@ -70,7 +94,11 @@ bool UVGSCaptureComponent::EnsurePlayer()
 {
 	if (Player.IsValid())
 	{
-		return true;
+		if (Player->GetThreads() == FMath::Max(CVarVGSDecodeThreads.GetValueOnGameThread(), 0))
+		{
+			return true;
+		}
+		ClosePlayer(TEXT("Reopening with other decode threads"));
 	}
 
 	const FString Path = ResolvePath();
@@ -85,7 +113,7 @@ bool UVGSCaptureComponent::EnsurePlayer()
 	}
 
 	FString Error;
-	Player = VGS::FPlayer::Open(Path, bSphericalHarmonics, Slots, Error);
+	Player = VGS::FPlayer::Open(Path, bSphericalHarmonics, Slots, CVarVGSDecodeThreads.GetValueOnGameThread(), Error);
 	if (!Player.IsValid())
 	{
 		FailedPath = Path;
@@ -107,8 +135,8 @@ bool UVGSCaptureComponent::EnsurePlayer()
 	bFrameDirty = true;
 	Status = TEXT("Opened");
 	UpdateBounds();
-	UE_LOG(LogVGS, Log, TEXT("Opened %s: %lld frames at %.3f fps, up to %lld splats, SH degree %d"),
-		*Path, FrameCount, FrameRate, MaxSplats, SHDegree);
+	UE_LOG(LogVGS, Log, TEXT("Opened %s: %lld frames at %.3f fps, up to %lld splats, SH degree %d, decode threads %d"),
+		*Path, FrameCount, FrameRate, MaxSplats, SHDegree, Player->GetThreads());
 	return true;
 }
 
@@ -252,6 +280,43 @@ void UVGSCaptureComponent::TickComponent(float DeltaTime, ELevelTick TickType, F
 		UpdateFrame(bAdvancing, FMath::Abs(double(DeltaTime) * double(PlayRate)));
 	}
 	PushRenderState();
+	SET_DWORD_STAT(STAT_VGS_Splats, uint32(ShownSplats));
+	LogSummary(bAdvancing, DeltaTime);
+}
+
+void UVGSCaptureComponent::LogSummary(bool bAdvancing, float DeltaTime)
+{
+	const double Now = FPlatformTime::Seconds();
+	if (!bAdvancing || !Player.IsValid())
+	{
+		Summary = FPlaybackSummary();
+		Summary.Start = Now;
+		return;
+	}
+	++Summary.Ticks;
+	Summary.TickMs += double(DeltaTime) * 1000.0;
+	if (Summary.Start <= 0.0)
+	{
+		Summary.Start = Now;
+		return;
+	}
+	const double Span = Now - Summary.Start;
+	if (Span < SummarySeconds)
+	{
+		return;
+	}
+
+	// Due: the capture frames the clock went through, at the capture's rate and speed.
+	const double Due = Span * double(FrameRate) * FMath::Abs(double(PlayRate));
+	const int32 Asked = FMath::Max(Summary.Shown + Summary.Late, 1);
+	UE_LOG(LogVGS, Log,
+		TEXT("%s: %.1f s, game %.1f fps; capture frames due %.0f, shown %d, ticks waiting %d; wait avg %.2f ms max %.1f; pack avg %.2f ms max %.1f; %lld splats, %s"),
+		GetOwner() ? *GetOwner()->GetActorNameOrLabel() : *GetName(), Span, Summary.Ticks / FMath::Max(Summary.TickMs / 1000.0, 1e-6),
+		Due, Summary.Shown, Summary.Late, Summary.WaitMs / Asked, Summary.WaitMaxMs,
+		Summary.PackMs / FMath::Max(Summary.Shown, 1), Summary.PackMaxMs, ShownSplats,
+		GpuLayout == EVGSGpuLayout::Quantized ? TEXT("quantized") : TEXT("float"));
+	Summary = FPlaybackSummary();
+	Summary.Start = Now;
 }
 
 void UVGSCaptureComponent::UpdateFrame(bool bAdvancing, double AdvancePerTick)
@@ -309,10 +374,20 @@ void UVGSCaptureComponent::UpdateFrame(bool bAdvancing, double AdvancePerTick)
 	}
 
 	vgsb_frame Frame = {};
-	const int32 Result = Player->Acquire(Now, bAdvancing ? double(MaxWaitMs) : ExactWaitMs, Frame);
+	const double WaitStart = FPlatformTime::Seconds();
+	int32 Result;
+	{
+		SCOPE_CYCLE_COUNTER(STAT_VGS_Wait);
+		Result = Player->Acquire(Now, bAdvancing ? double(MaxWaitMs) : ExactWaitMs, Frame);
+	}
+	const double WaitMs = (FPlatformTime::Seconds() - WaitStart) * 1000.0;
+	Summary.WaitMs += WaitMs;
+	Summary.WaitMaxMs = FMath::Max(Summary.WaitMaxMs, WaitMs);
 	if (Result == VGSB_TIMEOUT)
 	{
 		// Not decoded yet: the frame before stays on screen, and the request stands.
+		INC_DWORD_STAT(STAT_VGS_Late);
+		++Summary.Late;
 		return;
 	}
 	if (Result != VGSB_OK)
@@ -325,7 +400,15 @@ void UVGSCaptureComponent::UpdateFrame(bool bAdvancing, double AdvancePerTick)
 		return;
 	}
 
-	PackAndSend(Frame);
+	const double PackStart = FPlatformTime::Seconds();
+	{
+		SCOPE_CYCLE_COUNTER(STAT_VGS_Pack);
+		PackAndSend(Frame);
+	}
+	const double PackMs = (FPlatformTime::Seconds() - PackStart) * 1000.0;
+	Summary.PackMs += PackMs;
+	Summary.PackMaxMs = FMath::Max(Summary.PackMaxMs, PackMs);
+	++Summary.Shown;
 	Player->Release();
 
 	ShownSeconds = Now;

@@ -228,6 +228,7 @@ private:
 	EVGSLoopMode EffectiveLoopMode() const;
 
 	void UpdateFrame(bool bAdvancing, double AdvancePerTick);
+	void LogSummary(bool bAdvancing, float DeltaTime);
 	void PackAndSend(const vgsb_frame& Frame);
 	TSharedPtr<FVGSPackedFrame, ESPMode::ThreadSafe> TakeFrameBuffer();
 	void PushRenderState();
@@ -250,6 +251,19 @@ private:
 	FString FailedPath; // a capture that failed to open is not retried every tick
 	TArray<double> ScheduleScratch;
 	TArray<double> LastSchedule;
+
+	/** What playback cost since the last summary in the log. */
+	struct FPlaybackSummary
+	{
+		double Start = 0.0;
+		int32 Ticks = 0;
+		double TickMs = 0.0;
+		int32 Shown = 0;
+		int32 Late = 0;
+		double WaitMs = 0.0, WaitMaxMs = 0.0;
+		double PackMs = 0.0, PackMaxMs = 0.0;
+	};
+	FPlaybackSummary Summary;
 
 	/** What the instant on screen was packed with, so a change from Blueprint repacks it. */
 	float PackedIntensityEV = 0.0f;

@@ -50,7 +50,7 @@ namespace VGS
 	{
 	public:
 		/** Null, with OutError set, if the bridge is missing or the capture does not open. */
-		static TSharedPtr<FPlayer> Open(const FString& Path, bool bIncludeSH, int32 Slots, FString& OutError);
+		static TSharedPtr<FPlayer> Open(const FString& Path, bool bIncludeSH, int32 Slots, int32 Threads, FString& OutError);
 		~FPlayer();
 
 		FPlayer(const FPlayer&) = delete;
@@ -58,6 +58,7 @@ namespace VGS
 
 		const vgsb_info& GetInfo() const { return Info; }
 		const FString& GetPath() const { return Path; }
+		int32 GetThreads() const { return Threads; }
 
 		void Schedule(TConstArrayView<double> Seconds);
 
@@ -79,5 +80,6 @@ namespace VGS
 		FString Path;
 		bool bIncludeSH = true;
 		float Density = 1.0f;
+		int32 Threads = 0;
 	};
 }

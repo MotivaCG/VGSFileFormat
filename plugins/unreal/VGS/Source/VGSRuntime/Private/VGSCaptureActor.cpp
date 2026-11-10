@@ -17,7 +17,7 @@ AVGSCaptureActor::AVGSCaptureActor()
 	Sprite = CreateEditorOnlyDefaultSubobject<UBillboardComponent>(TEXT("Sprite"));
 	if (Sprite)
 	{
-		static ConstructorHelpers::FObjectFinderOptional<UTexture2D> Icon(TEXT("/Engine/EditorResources/S_Actor"));
+		static ConstructorHelpers::FObjectFinderOptional<UTexture2D> Icon(TEXT("/VGS/Icons/S_VGSCapture"));
 		Sprite->Sprite = Icon.Get();
 		Sprite->SetupAttachment(Capture);
 		Sprite->bIsScreenSizeScaled = true;
