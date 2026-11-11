@@ -6,6 +6,7 @@
 #include "VGSStaticSplat.h"
 
 class FRDGBuilder;
+class FRHICommandListBase;
 
 /**
  * An asset's splats on the GPU, in the renderer's buffers: made on the game thread (packing
@@ -19,12 +20,15 @@ public:
 
 	/** Render thread: uploads on the first call, then does nothing. */
 	void Ensure_RenderThread(FRDGBuilder& GraphBuilder);
+	void Ensure_RenderThread(FRHICommandListBase& RHICmdList);
 
 	bool IsEmpty() const { return !Data.IsValid() || Data->NumSplats == 0; }
 
 	// Valid after Ensure_RenderThread.
 	TRefCountPtr<FRDGPooledBuffer> Splats;
+	FShaderResourceViewRHIRef SplatsSRV; // of Splats, for the shadow pass's vertex factory
 	TRefCountPtr<FRDGPooledBuffer> Normals; // null when the asset has none
+	FShaderResourceViewRHIRef NormalsSRV; // of Normals, for the shadow pass's vertex factory
 	TRefCountPtr<FRDGPooledBuffer> Clusters; // null when it has none
 
 	// Valid from construction.

@@ -148,6 +148,13 @@ All marked `VGS CHANGE`; `tools/vgs_renderer_changes.patch` is the exact diff.
     `VGSSplatShading.usf`): a proxy's normals may be directions only (VGSStatic's shortest
     axes), turned towards the camera as the shortest axis is.
 13. **Dithering off by default** (`r.VGSSplat.Lit.Dither` 0): TSR left it speckled.
+14. **Shadow casters** (VGS's own files in the copy's folders:
+    `Internal/VGSSplatShadowVertexFactory.h`, `Private/VGSSplatShadowVertexFactory.cpp`,
+    `Shaders/Private/SplatRenderer/VGSSplatShadowVertexFactory.ush`). A vertex factory that
+    draws a splat buffer into Unreal's shadow depth passes, an octahedron per splat, for
+    primitives whose scene proxy adds its meshes (VGSStatic's). In the renderer module
+    because vertex factory types have to be registered before shaders are compiled
+    (PostConfigInit). Nothing of Epic's renderer changed for it.
 
 ### The LUTs
 

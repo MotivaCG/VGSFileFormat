@@ -80,6 +80,58 @@ std::vector<View> transformedViews(const std::vector<View> &views, const Eigen::
     return out;
 }
 
+std::vector<View> surroundingViews(const Splats &s, int count) {
+    // The opaque splats' extent, per axis between the 1st and 99th percentiles, so that a
+    // few floaters far out do not shrink the subject in every camera.
+    std::vector<float> axes[3];
+    for (size_t i = 0; i < s.count; ++i) {
+        if ((s.use && !s.use[i]) || !(s.opacity[i] > kNormalOccluderOpacity)) continue;
+        const float *p = s.position + i * 3;
+        if (!std::isfinite(p[0]) || !std::isfinite(p[1]) || !std::isfinite(p[2])) continue;
+        for (int c = 0; c < 3; ++c) axes[c].push_back(p[c]);
+    }
+    if (axes[0].empty() || count <= 0) return {};
+    Eigen::Vector3f lo, hi;
+    for (int c = 0; c < 3; ++c) {
+        auto &v = axes[c];
+        const size_t a = v.size() / 100, b = v.size() - 1 - v.size() / 100;
+        std::nth_element(v.begin(), v.begin() + ptrdiff_t(a), v.end());
+        lo[c] = v[a];
+        std::nth_element(v.begin(), v.begin() + ptrdiff_t(b), v.end());
+        hi[c] = v[b];
+    }
+    const Eigen::Vector3f centre = 0.5f * (lo + hi);
+    const float radius = std::max(0.5f * (hi - lo).norm(), 1e-4f);
+    constexpr float kDistance = 3.0f; // in radii: a sphere of the subject's size fills ~40 degrees
+    const int side = kNormalDepthResolution;
+    const float focal = 0.5f * float(side) / std::tan(std::asin(1.0f / kDistance)) * 0.95f;
+
+    std::vector<View> views;
+    views.reserve(size_t(count));
+    const float golden = 3.14159265f * (3.0f - std::sqrt(5.0f));
+    for (int k = 0; k < count; ++k) {
+        const float y = 1.0f - 2.0f * (float(k) + 0.5f) / float(count);
+        const float r = std::sqrt(std::max(0.0f, 1.0f - y * y));
+        const Eigen::Vector3f direction(r * std::cos(golden * float(k)), y, r * std::sin(golden * float(k)));
+        const Eigen::Vector3f eye = centre + direction * (kDistance * radius);
+        // Camera axes: z forward (to the centre), x right, y down.
+        const Eigen::Vector3f forward = -direction;
+        const Eigen::Vector3f helper = std::abs(forward.y()) < 0.9f ? Eigen::Vector3f::UnitY() : Eigen::Vector3f::UnitX();
+        const Eigen::Vector3f right = helper.cross(forward).normalized();
+        const Eigen::Vector3f down = forward.cross(right).normalized();
+        View v;
+        v.worldToCamera.row(0) = right;
+        v.worldToCamera.row(1) = down;
+        v.worldToCamera.row(2) = forward;
+        v.translation = -v.worldToCamera * eye;
+        v.fx = v.fy = focal;
+        v.cx = v.cy = 0.5f * float(side);
+        v.width = v.height = side;
+        views.push_back(v);
+    }
+    return views;
+}
+
 Result computeNormals(const Splats &s, const std::vector<View> &views, float *normalsOut) {
     Result result;
     std::vector<size_t> ids;
@@ -308,6 +360,22 @@ Result computeNormals(const Splats &s, const std::vector<View> &views, float *no
         result.resolved += resolved[size_t(i)] ? 1 : 0;
     }
     return result;
+}
+
+Result estimateNormals(const Splats &s, const std::vector<View> &rig, float *normalsOut) {
+    if (!rig.empty()) {
+        Result r = computeNormals(s, rig, normalsOut);
+        r.rigOpaqueSeen = r.opaqueSeen;
+        if (!r.opaque || 2 * r.opaqueSeen >= r.opaque) return r;
+        const size_t seen = r.opaqueSeen;
+        r = computeNormals(s, surroundingViews(s), normalsOut);
+        r.rigOpaqueSeen = seen;
+        r.surrounding = true;
+        return r;
+    }
+    Result r = computeNormals(s, surroundingViews(s), normalsOut);
+    r.surrounding = true;
+    return r;
 }
 
 } // namespace gaussiannormals

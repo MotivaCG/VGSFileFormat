@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Components/SceneComponent.h"
+#include "Components/PrimitiveComponent.h"
 #include "CoreMinimal.h"
 
 #include "VGSStaticSplatComponent.generated.h"
@@ -55,10 +55,13 @@ enum class EVGSStaticBlendSpace : uint8
  * Nothing changes from frame to frame: the asset is on the GPU once for every component that
  * shows it, and the renderer culls its clusters against each view. A tick only notices
  * settings changed from Blueprint, and costs nothing when they have not.
+ *
+ * A primitive only so that the splats cast shadows (Lighting > Cast Shadow): they are drawn
+ * into Unreal's shadow depth passes as small opaque shapes, from the same GPU copy.
  */
 UCLASS(ClassGroup = Rendering, meta = (BlueprintSpawnableComponent, DisplayName = "VGS Static Splat"),
-	HideCategories = (Mobility, Physics, Collision, Lighting, LOD, Cooking, Navigation))
-class VGSSTATICRUNTIME_API UVGSStaticSplatComponent : public USceneComponent
+	HideCategories = (Mobility, Physics, Collision, LOD, Cooking, Navigation, HLOD, Mobile, RayTracing, VirtualTexture, TextureStreaming, MaterialParameters, PathTracing))
+class VGSSTATICRUNTIME_API UVGSStaticSplatComponent : public UPrimitiveComponent
 {
 	GENERATED_BODY()
 
@@ -126,6 +129,23 @@ public:
 		meta = (ClampMin = "0.0", UIMax = "10.0", Units = "cm", EditCondition = "Lighting == EVGSStaticLighting::Shaded", EditConditionHides))
 	float NormalSmoothing = 2.0f;
 
+	/**
+	 * Where a splat casts a shadow (with Lighting > Cast Shadow on): where its opacity reaches
+	 * this. Lower, faint splats and the fringes of the rest shadow too, and shadows grow; higher,
+	 * only the solid core of each splat does. Changing it costs nothing per frame.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS Static|Lighting", meta = (ClampMin = "0.01", ClampMax = "0.99"))
+	float ShadowOpacityCutoff = 0.3f;
+
+	/**
+	 * How far (cm) each splat's shadow caster is moved inwards, along its normal. The lit
+	 * surface lies among its own splats, and without this would shadow itself in blotches
+	 * when Shaded; more than needed thins the shadows of thin parts (fingers, hair). Without
+	 * normals with a side, "inwards" is away from the asset's centre.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS Static|Lighting", meta = (ClampMin = "0.0", UIMax = "10.0", Units = "cm"))
+	float ShadowInset = 3.0f;
+
 	// Grade of the colours, as in an image editor: on their display (sRGB) values, after the
 	// splats are blended and before Intensity and the tone curve. 1 leaves them as captured.
 	/** Midtones: above 1 brightens them, below 1 darkens them; black and white stay. */
@@ -181,10 +201,11 @@ public:
 	virtual void OnUnregister() override;
 	virtual void BeginDestroy() override;
 	virtual FBoxSphereBounds CalcBounds(const FTransform& LocalToWorld) const override;
+	virtual FPrimitiveSceneProxy* CreateSceneProxy() override;
 #if WITH_EDITOR
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 #endif
-	//~ End UActorComponent / USceneComponent
+	//~ End UActorComponent / USceneComponent / UPrimitiveComponent
 
 protected:
 	virtual void OnUpdateTransform(EUpdateTransformFlags UpdateTransformFlags, ETeleportType Teleport) override;
@@ -203,4 +224,6 @@ private:
 	FDelegateHandle ChangedHandle;
 	/** What was last sent to the render thread, so a tick sends only changes. */
 	TArray<uint8> SentState;
+	/** What the scene proxy (the shadow casters) was made with: it is made again when this changes. */
+	TArray<uint8> ProxyState;
 };

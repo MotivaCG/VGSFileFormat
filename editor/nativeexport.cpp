@@ -615,8 +615,9 @@ gaussiannormals::Result addNormals(vgs::DecodedChunk &c,const std::vector<gaussi
         if (frame.count!=records) throw std::runtime_error("Normals: the decoded frame does not match the chunk.");
         gaussiannormals::Splats splats;splats.count=records;splats.position=frame.position.data();splats.rotation=frame.rotation.data();
         splats.scale=frame.scale.data();splats.opacity=frame.opacity.data();splats.use=frame.active.data();
-        const auto result=gaussiannormals::computeNormals(splats,views,world.data());
+        const auto result=gaussiannormals::estimateNormals(splats,views,world.data());
         if (!round) total=result;
+        total.surrounding=total.surrounding || result.surrounding;
         for (size_t group=1;group<c.groups.size();++group) {
             const auto &indices=get(c,vgs::ScaleIndices,uint32_t(group)).bytes;
             for (size_t row=0;row<c.groups[group].splats;++row) {

@@ -239,12 +239,14 @@ Header readHeader(const uint8_t *data, size_t size) {
     e.size = r.u64();
     e.digest = r.digest();
     const bool known = e.type == MetadataExtra || e.type == ThumbnailExtra ||
-                       e.type == AudioExtra || e.type == MetadataExtra2;
+                       e.type == AudioExtra || e.type == MetadataExtra2 ||
+                       e.type == ProxyMeshExtra;
     if (!e.type || !e.size || e.size > Limit || e.offset != aligned(at) ||
         ((e.type == MetadataExtra || e.type == MetadataExtra2) &&
          e.format != JsonUtf8) ||
         (e.type == ThumbnailExtra && (!e.format || e.format > Webp)) ||
         (e.type == AudioExtra && (!e.format || e.format > Wav)) ||
+        (e.type == ProxyMeshExtra && e.format != Glb) ||
         (!known && e.type < VendorExtraBase))
       throw Error("invalid VGS extra");
     at = add(e.offset, e.size);

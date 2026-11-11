@@ -43,7 +43,9 @@ bool rigFromComment(const Splats &s, NormalRig &rig) {
   return false;
 }
 
-RigNormalsResult rigNormals(const Splats &s, NormalRig rig, std::vector<float> &normals) {
+namespace {
+// The splats as gaussiannormals takes them, and its estimate with `views`.
+RigNormalsResult estimate(const Splats &s, const std::vector<gaussiannormals::View> *views, std::vector<float> &normals) {
   std::vector<float> rotations(s.count * 4); // xyzw, as gaussiannormals takes them
   std::vector<float> opacity(s.count);
   for (size_t i = 0; i < s.count; ++i) {
@@ -61,12 +63,21 @@ RigNormalsResult rigNormals(const Splats &s, NormalRig rig, std::vector<float> &
   in.scale = s.scales.data();
   in.opacity = opacity.data();
   normals.assign(s.count * 3, 0.0f);
-  const gaussiannormals::Result r = gaussiannormals::computeNormals(
-      in, gaussiannormals::rigViews(rig == NormalRig::SmnV1 ? gaussiannormals::Rig::SmnV1 : gaussiannormals::Rig::The4DScanner), normals.data());
+  const gaussiannormals::Result r = gaussiannormals::computeNormals(in, views ? *views : gaussiannormals::surroundingViews(in), normals.data());
   RigNormalsResult result;
   result.opaque = r.opaque;
   result.seen = r.opaqueSeen;
   return result;
+}
+} // namespace
+
+RigNormalsResult rigNormals(const Splats &s, NormalRig rig, std::vector<float> &normals) {
+  const std::vector<gaussiannormals::View> views = gaussiannormals::rigViews(rig == NormalRig::SmnV1 ? gaussiannormals::Rig::SmnV1 : gaussiannormals::Rig::The4DScanner);
+  return estimate(s, &views, normals);
+}
+
+RigNormalsResult surroundingNormals(const Splats &s, std::vector<float> &normals) {
+  return estimate(s, nullptr, normals);
 }
 
 AxisNormalsResult axisNormals(const Splats &s, std::vector<float> &normals, const AxisNormalsSettings &settings) {

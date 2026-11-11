@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-VGS-Editor-Proprietary
-// Copyright (c) 2026 Víctor M. Feliz. All rights reserved.
+// Copyright (c) 2026 VÃ­ctor M. Feliz. All rights reserved.
 //
-// Proprietary software owned by Víctor M. Feliz.
+// Proprietary software owned by VÃ­ctor M. Feliz.
 // ScanMeNow and The4DScanner are licensed for internal use only.
 // No ownership, sale, redistribution, sublicensing or modification rights
 // are granted. All other rights remain reserved to the copyright holder.
@@ -112,10 +112,10 @@ void sourceFile(const QString &path,int frames=3,bool allEmpty=false) {
 // turned inwards for half of them, and that axis on x, y or z at random: what normals must
 // sort out from the cameras alone.
 const Eigen::Vector3f kBallCentre(0,1,0);
-void ballFile(const QString &path,int count=60000) {
+void ballFile(const QString &path,int count=60000,const Eigen::Vector3f &centre=kBallCentre) {
     vgs::Frame f;f.count=uint64_t(count);std::mt19937 random(7);std::normal_distribution<float> gauss;std::uniform_int_distribution<int> pick(0,5);
     for (int i=0;i<count;++i) {
-        Eigen::Vector3f d(gauss(random),gauss(random),gauss(random));d.normalize();const Eigen::Vector3f p=kBallCentre+.4f*d;
+        Eigen::Vector3f d(gauss(random),gauss(random),gauss(random));d.normalize();const Eigen::Vector3f p=centre+.4f*d;
         const int shortest=pick(random)%3;const bool inwards=pick(random)<3;
         // Rotation taking local axis `shortest` to +-d.
         const Eigen::Quaternionf q=Eigen::Quaternionf::FromTwoVectors(Eigen::Vector3f::Unit(shortest),inwards ? -d : d);
@@ -988,22 +988,30 @@ private slots:
         QCOMPARE(int(code[0]),128);QCOMPARE(int(code[1]),129);
     }
     void normalsFaceOutwardsInEveryFrame_data() {
-        QTest::addColumn<bool>("transformed");QTest::newRow("as captured")<<false;QTest::newRow("moved and turned")<<true;
+        // The rig's cameras; cameras all around, asked for; and the rig's, for a capture so far
+        // out of its frame that they see none of it and cameras all around take over.
+        QTest::addColumn<bool>("transformed");QTest::addColumn<int>("rig");QTest::addColumn<bool>("far");QTest::addColumn<QString>("note");
+        QTest::newRow("as captured")<<false<<0<<false<<QStringLiteral("Normals written: the SMNV1 cameras");
+        QTest::newRow("moved and turned")<<true<<0<<false<<QStringLiteral("Normals written: the SMNV1 cameras");
+        QTest::newRow("cameras all around")<<true<<2<<false<<QStringLiteral("decided by cameras all around the splats");
+        QTest::newRow("out of the rig's frame")<<true<<0<<true<<QStringLiteral("cameras all around decided the sides instead");
     }
     void normalsFaceOutwardsInEveryFrame() {
-        QFETCH(bool,transformed);
-        QTemporaryDir dir;const auto source=dir.filePath("ball.vgs");ballFile(source);
+        QFETCH(bool,transformed);QFETCH(int,rig);QFETCH(bool,far);QFETCH(QString,note);
+        // Far: the ball itself 60 m above the rig, where none of its cameras looks.
+        const Eigen::Vector3f ball=far ? Eigen::Vector3f(0,60,0) : kBallCentre;
+        QTemporaryDir dir;const auto source=dir.filePath("ball.vgs");ballFile(source,60000,ball);
         Project project;project.asset=source;project.in=0;project.out=1.0/25;project.modifiers.clear();
-        project.captureSettings.normals=true;project.captureSettings.normalRig=0;
-        if (transformed) {project.transform.position={2,0,-1};project.transform.rotation={0,90,0};project.transform.scale={1.5f,1.5f,1.5f};}
+        project.captureSettings.normals=true;project.captureSettings.normalRig=rig;
+        if (transformed) {project.transform.position={2.f,0,-1};project.transform.rotation={0,90,0};project.transform.scale={1.5f,1.5f,1.5f};}
         const auto path=dir.filePath("normals.vgs");const auto result=exportCaptureFile(project,path);
-        QVERIFY2(result.notes.join(' ').contains("Normals written: the SMNV1 cameras"),qPrintable(result.notes.join(' ')));
+        QVERIFY2(result.notes.join(' ').contains(note),qPrintable(result.notes.join(' ')));
         // Optional, so readers that predate normals still play it.
         QFile file(path);QVERIFY(file.open(QIODevice::ReadOnly));const auto bytes=file.read(1<<20);
         const auto header=vgs::readHeader(reinterpret_cast<const uint8_t *>(bytes.constData()),size_t(bytes.size()));
         bool optional=false;for (const auto &policy:header.policies) if (policy.attribute==vgs::Normals) optional=(policy.flags & vgs::OptionalAttribute)!=0;
         QVERIFY(optional);
-        const QMatrix4x4 model=project.transform.matrix();const QVector3D centre=model.map(QVector3D(kBallCentre.x(),kBallCentre.y(),kBallCentre.z()));
+        const QMatrix4x4 model=project.transform.matrix();const QVector3D centre=model.map(QVector3D(ball.x(),ball.y(),ball.z()));
         auto capture=vgsdec::Capture::openFile(path.toStdString());
         for (double t:{0.0,1.0/25}) {
             const auto &frame=capture.setTime(t,false);QVERIFY(frame.normals);size_t outwards=0,live=0;
@@ -1017,7 +1025,7 @@ private slots:
         // Off by default, and then the capture carries none.
         Project plain=project;plain.captureSettings.normals=false;const auto without=dir.filePath("without.vgs");exportCaptureFile(plain,without);
         auto other=vgsdec::Capture::openFile(without.toStdString());QVERIFY(!other.setTime(0,false).normals);
-        if (!transformed) {
+        if (!transformed && !rig) {
             // MINT cannot hold them: said, and the export goes on.
             const auto mint=exportCaptureFile(project,dir.filePath("normals.mint"));QVERIFY(mint.notes.join(' ').contains("MINT cannot hold normals"));
             qInfo("normals add %lld bytes to %lld",qlonglong(QFileInfo(path).size()-QFileInfo(without).size()),qlonglong(QFileInfo(without).size()));

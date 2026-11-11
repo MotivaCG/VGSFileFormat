@@ -655,7 +655,7 @@ async def save_project(path: str, overwrite: bool = False) -> dict[str, Any]:
 
 @mcp.tool(title="Set metadata and export options", annotations=EDIT)
 async def set_export_settings(patch: dict[str, Any]) -> dict[str, Any]:
-    """Undoably patch exact get_project.captureSettings fields, e.g. title/author/tags, shDegree, playbackMode or normals (bool) with normalRig ('SMNV1'/'THE4DSCANNER'). For PLY, plyFps (1..1000, default 30) retimes playback/range/export while preserving frame indices; plyRowOffset (default 0) shifts birth-event row IDs, reindexes records and clears Erase picks (Undo restores both). Unknown/invalid fields fail. Does not select an output path or launch export. Extension selects output format; plain is legacy."""
+    """Undoably patch exact get_project.captureSettings fields, e.g. title/author/tags, shDegree, playbackMode or normals (bool) with normalRig ('SMNV1'/'THE4DSCANNER', or 'SURROUNDING' for a capture from none of our rigs: cameras all around decide the sides). For PLY, plyFps (1..1000, default 30) retimes playback/range/export while preserving frame indices; plyRowOffset (default 0) shifts birth-event row IDs, reindexes records and clears Erase picks (Undo restores both). Unknown/invalid fields fail. Does not select an output path or launch export. Extension selects output format; plain is legacy."""
     return await _edit("export_settings", patch)
 
 

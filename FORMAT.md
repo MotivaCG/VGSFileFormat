@@ -14,6 +14,9 @@ per-attribute FSE, Pcodec, rANS16 or Raw selection;
 which it has: the header declares the codec per attribute, so both are read by the same
 code. `.pgs` exists for cases where CPU time matters more than bytes.
 
+A third extension is reserved, not yet written by any tool: **`.sgs`, a static capture** (a
+scanned character or prop rather than a performance). See *Static captures* below.
+
 The container holds named, independently paged attributes, not the source's bytes.
 The format-6 `.mint` importer preserves every value needed to render its source,
 including f16 bit patterns used by the frame evaluator, while canonicalizing the
@@ -376,6 +379,7 @@ fetches only its own bytes. A file with none costs nothing beyond `extraCount = 
 | 2 | thumbnail | 1 PNG, 2 JPEG, 3 WebP |
 | 3 | audio | 1 MP3, 2 AAC, 3 Opus, 4 WAV |
 | 4 | second metadata block | 1: a single UTF-8 JSON object |
+| 5 | proxy mesh (reserved: see *Static captures*) | 1: glTF 2.0 binary (`.glb`) |
 | >= 0x8000 | vendor payload | defined by that vendor |
 
 Audio is carried as delivered and is not transcoded: a clip then travels as one file that
@@ -387,13 +391,34 @@ stays in sync - the editor writes the range's first source frame into `startTick
 purpose — block 1 belongs to whoever produced the capture, block 2 to whoever uses it, and
 neither has to parse or preserve the other's.
 
-Types 5..0x7FFF are reserved for future revisions of this specification; a version 5 reader
+Type 5 is reserved as described under *Static captures*: readers accept it in format 1 and
+skip it, so files that carry one later play in readers already in the field. Types
+6..0x7FFF are reserved for future revisions of this specification; a version 5 reader
 rejects them rather than guessing. Vendor payloads must be ignorable: a reader that does not
 know a vendor type skips it and still plays the capture. Metadata keys `creator`, `source`,
 `take`, `capturedAt`, `license` and `units` are reserved by this specification; anything
 else belongs under a vendor-prefixed key. Each extra's bytes are checked against the
 digest in its table entry when they are read: none is needed to reconstruct a frame, so
 none is fetched to open the capture, but none comes back unverified either.
+
+### Static captures: `.sgs` (reserved)
+
+Not written yet; reserved so that nothing written now has to change when it is.
+
+An `.sgs` is this same container holding **one frame**: `frameCount` 1, one chunk of one
+interval, every splat alive for it. Nothing else differs, and a reader of `.vgs` reads it as
+it is; the extension only tells tools that it is a still (an asset to place, as a PLY is)
+rather than a clip, the way `.pgs` tells them how the pages are coded. Its pages may be
+entropy coded or plain; that is still declared per attribute. Being one frame, it carries no
+temporal harmonics layer and no motion samples, and `playbackMode` is ignored.
+
+It may carry a **proxy mesh** (extra type 5, format 1: one glTF 2.0 binary, `.glb`): a
+closed, simplified surface of the subject, in the capture's own space and units, for what
+splats do poorly in an engine: casting shadows into shadow maps, collision, occlusion and
+picking. It is never drawn in place of the splats, and nothing needed to show them is in
+it, so a reader that has no use for it skips it. Only one per file; the extra's digest is in
+the signed table like any other. A capture of more than one frame does not carry one: how a
+mesh would follow a moving performer is left to a later revision.
 
 ### Chunk directory
 

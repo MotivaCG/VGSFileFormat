@@ -74,7 +74,10 @@ CaptureSettingsDialog::CaptureSettingsDialog(const Project &project,PresetStore 
     normals_->setToolTip(tr("Store every splat's outward surface normal in the .vgs, or as nx ny nz in a .ply, for renderers that light splats. Computed at export from the cameras of the rig that captured it. About two bytes per splat before compression; MINT cannot hold them."));
     options->addRow(normals_);
     normalRig_ = new QComboBox; normalRig_->addItem(QStringLiteral("SMNV1"),0); normalRig_->addItem(QStringLiteral("THE4DSCANNER"),1);
-    normalRig_->setToolTip(tr("The studio rig that recorded the capture: its cameras decide which side of each splat faces outwards."));
+    normalRig_->addItem(tr("None of ours (cameras all around)"),2);
+    normalRig_->setToolTip(tr("The studio rig that recorded the capture: its cameras decide which side of each splat faces outwards. "
+                              "For a capture from anywhere else, cameras spread all around it decide instead; they also take over "
+                              "when the rig's cameras see less than half of the splats."));
     options->addRow(tr("Rig"),normalRig_);
     connect(normals_,&QCheckBox::toggled,normalRig_,&QWidget::setEnabled);
     despill_ = new QCheckBox(tr("Apply despill")); options->addRow(despill_);

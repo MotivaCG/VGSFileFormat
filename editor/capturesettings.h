@@ -22,7 +22,7 @@ struct CaptureSettings {
     // Outward normals in the exported .vgs, from the cameras of the rig that captured it:
     // 0 SMNV1, 1 THE4DSCANNER. Off by default; MINT cannot hold them.
     bool normals = false;
-    int normalRig = 0;
+    int normalRig = 0; // 0 SMNV1, 1 THE4DSCANNER, 2 none of ours: cameras all around the splats
     int shDegree = -1,playbackMode = -1; // -1 preserves the source setting.
     // Lossy SH reduction per splat at VGS/PGS export (EncodeOptions::shPruneTolerance):
     // 0 off, otherwise the RMS a splat's dropped bands may differ by.

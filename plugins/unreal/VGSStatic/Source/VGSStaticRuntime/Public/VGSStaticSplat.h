@@ -24,20 +24,31 @@ enum class EVGSStaticNormals : uint8
 	 * facing the camera.
 	 */
 	Axes UMETA(DisplayName = "Shortest axes (PGSR)"),
+	/**
+	 * Worked out at import as with a rig, but with cameras spread all around the splats: for a
+	 * PLY no studio rig of ours captured. Outward, as a rig's.
+	 */
+	Surrounding UMETA(DisplayName = "Estimated with cameras all around"),
 };
 
 /** How normals are worked out for a PLY that has none. */
 UENUM(BlueprintType)
 enum class EVGSStaticNormalMethod : uint8
 {
-	/** With the rig the PLY names (SMNForge writes "comment capture_rig"), or else Shortest Axes. */
-	Auto UMETA(DisplayName = "Rig from the file, else shortest axes"),
+	/** With the rig the PLY names (SMNForge writes "comment capture_rig"), or else cameras all around. */
+	Auto UMETA(DisplayName = "Rig from the file, else cameras all around"),
 	/** The ScanMeNow rig's cameras: for its PLYs, in their own frame (Y up, metres). */
 	SmnV1 UMETA(DisplayName = "SMNV1 rig"),
 	/** The THE4DSCANNER rig's cameras, likewise. */
 	The4DScanner UMETA(DisplayName = "THE4DSCANNER rig"),
 	/** Each splat's shortest axis, as PGSR (for a PLY from anywhere): no rig needed. */
 	ShortestAxes UMETA(DisplayName = "Shortest axes (PGSR)"),
+	/**
+	 * The rig estimate with cameras spread evenly around the splats instead of a rig's: for a PLY
+	 * from anywhere, and the best of these without a rig (closer to the rig's own normals than
+	 * the shortest axes, and outward).
+	 */
+	Surrounding UMETA(DisplayName = "Cameras all around"),
 };
 
 /** How the splats are kept on the GPU. */

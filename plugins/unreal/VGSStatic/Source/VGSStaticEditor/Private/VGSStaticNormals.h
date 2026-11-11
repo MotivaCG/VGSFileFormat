@@ -48,6 +48,10 @@ bool rigFromComment(const Splats &s, NormalRig &rig);
  * 0 where none could be found. */
 RigNormalsResult rigNormals(const Splats &s, NormalRig rig, std::vector<float> &normals);
 
+/* The same estimate with cameras spread all around the splats (gaussiannormals::
+ * surroundingViews) instead of a rig's: for a PLY from anywhere else. Outward too. */
+RigNormalsResult surroundingNormals(const Splats &s, std::vector<float> &normals);
+
 struct AxisNormalsSettings {
   int neighbours = 16;           // the nearest splats a consensus is taken over
   float radiusShare = 0.01f;     // ... no farther than this share of the splats' diagonal

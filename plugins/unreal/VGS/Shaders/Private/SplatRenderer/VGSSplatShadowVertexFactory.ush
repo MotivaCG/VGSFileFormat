@@ -1,0 +1,256 @@
+// VGS: not Epic's. The vertex factory that puts splats into Unreal's shadow depth passes
+// (VGSSplatShadowVertexFactory.cpp): each splat is drawn as an octahedron spanning the
+// ellipse where its opacity reaches VGSSplatShadow.OpacityCutoff, read straight from the
+// renderer's own splat buffer, so casting shadows needs no memory of its own.
+//
+// Each caster is moved Inset inwards along its splat's normal: the surface the lit splats
+// write to the GBuffer lies among their own casters, and would shadow itself in blotches
+// (acne) without it. The normal is the asset's own when it has one with a side; otherwise
+// (directions only, or the shortest axis) the side facing away from the asset's centre.
+//
+// Six vertices per splat (both ends of its three axes) and eight triangles, through an index
+// buffer of a batch of splats: VertexId / 6 is the splat within the batch, VGSShadowFirstSplat
+// where the batch starts. A splat fainter than the cutoff collapses to a point.
+
+#include "/Engine/Private/VertexFactoryCommon.ush"
+
+/** The first splat of this draw's batch. */
+uint VGSShadowFirstSplat;
+
+struct FVertexFactoryInput
+{
+	uint VertexId : SV_VertexID;
+
+	VF_GPUSCENE_DECLARE_INPUT_BLOCK(13)
+	VF_INSTANCED_STEREO_DECLARE_INPUT_BLOCK()
+	VF_MOBILE_MULTI_VIEW_DECLARE_INPUT_BLOCK()
+};
+
+struct FVertexFactoryInterpolantsVSToPS
+{
+	float2 DummyTexCoord : TEXCOORD0;
+};
+
+struct FVertexFactoryIntermediates
+{
+	float3 ComponentPosition; // in the component's space
+	float4 TranslatedWorldPosition;
+	FSceneDataIntermediates SceneData;
+};
+
+FPrimitiveSceneData GetPrimitiveData(FVertexFactoryIntermediates Intermediates)
+{
+	return Intermediates.SceneData.Primitive;
+}
+
+// One row of the rotation matrix of a unit quaternion (x, y, z, w): the direction of a splat's
+// axis, as the renderer's QuaternionToFloat3x3 has it (SphericalGaussianCommon.ush).
+float3 VGSShadowAxis(float4 Q, uint Axis)
+{
+	const float x2 = Q.x + Q.x, y2 = Q.y + Q.y, z2 = Q.z + Q.z;
+	const float xx = Q.x * x2, xy = Q.x * y2, xz = Q.x * z2;
+	const float yy = Q.y * y2, yz = Q.y * z2, zz = Q.z * z2;
+	const float wx = Q.w * x2, wy = Q.w * y2, wz = Q.w * z2;
+	if (Axis == 0u)
+	{
+		return float3(1.0f - (yy + zz), xy + wz, xz - wy);
+	}
+	if (Axis == 1u)
+	{
+		return float3(xy - wz, 1.0f - (xx + zz), yz + wx);
+	}
+	return float3(xz + wy, yz - wx, 1.0f - (xx + yy));
+}
+
+float3 VGSShadowUnpackNormal(uint W)
+{
+	float2 P = (float2(float(W & 65535u), float(W >> 16)) - 1.0f) / 65534.0f * 2.0f - 1.0f;
+	const float Z = 1.0f - abs(P.x) - abs(P.y);
+	if (Z < 0.0f)
+	{
+		P = (1.0f - abs(P.yx)) * float2(P.x >= 0.0f ? 1.0f : -1.0f, P.y >= 0.0f ? 1.0f : -1.0f);
+	}
+	return normalize(float3(P, Z));
+}
+
+// A corner of a splat's octahedron, in the asset's (file) space; Outward, the direction its
+// caster is moved against. The records are the
+// renderer's (VGSSplatShared.h): the float layout, or Epic's quantized one.
+float3 VGSShadowCorner(uint Splat, uint Corner, out float3 Outward)
+{
+	Outward = 0;
+	const uint Offset = Splat * VGSSplatShadow.Stride;
+	float3 Position;
+	float3 Scale;
+	float4 Rotation;
+	float Opacity;
+	if (VGSSplatShadow.BufferFormat == 0u)
+	{
+		Position = asfloat(VGSSplatShadow.Splats.Load3(Offset));
+		Scale = asfloat(VGSSplatShadow.Splats.Load3(Offset + 12u));
+		Rotation = asfloat(VGSSplatShadow.Splats.Load4(Offset + 24u));
+		Opacity = asfloat(VGSSplatShadow.Splats.Load(Offset + 52u));
+	}
+	else
+	{
+		const uint4 Packed = VGSSplatShadow.Splats.Load4(Offset);
+		const uint PackedColor = VGSSplatShadow.Splats.Load(Offset + 16u);
+		const uint Mask21 = (1u << 21) - 1u;
+		const uint Mask11 = (1u << 11) - 1u;
+		const uint Mask10 = (1u << 10) - 1u;
+		const float3 P = float3(float((Packed.y >> 10) & Mask21), float(((Packed.x >> 21) | (Packed.y << 11)) & Mask21), float(Packed.x & Mask21));
+		Position = P * VGSSplatShadow.PositionScale + VGSSplatShadow.PositionBias;
+		const float3 S = float3(float(Packed.z >> 21), float((Packed.z >> 10) & Mask11), float(Packed.z & Mask10));
+		Scale = exp(S * VGSSplatShadow.ScaleScale + VGSSplatShadow.ScaleBias);
+		Rotation.x = float(Packed.w >> 21) * (2.0f / 2047.0f) - 1.0f;
+		Rotation.y = float((Packed.w >> 10) & Mask11) * (2.0f / 2047.0f) - 1.0f;
+		Rotation.z = float(Packed.w & Mask10) * (2.0f / 1023.0f) - 1.0f;
+		Rotation.w = sqrt(max(1.0f - dot(Rotation.xyz, Rotation.xyz), 0.0f));
+		Opacity = float(PackedColor & 0xffu) * VGSSplatShadow.OpacityQuantization.x + VGSSplatShadow.OpacityQuantization.y;
+	}
+
+	Opacity = saturate(Opacity * VGSSplatShadow.OpacityScale);
+	if (Splat >= VGSSplatShadow.NumSplats || Opacity <= VGSSplatShadow.OpacityCutoff)
+	{
+		return Position; // collapsed: its eight triangles have no area
+	}
+
+	// The splat's opacity falls as Opacity * exp(-r^2 / 2), r in standard deviations: it is at
+	// the cutoff at r = sqrt(2 ln(Opacity / Cutoff)). An octahedron's outline seen along an
+	// axis is a rhombus, of 2/pi the area of the ellipse through its corners: the corners go
+	// sqrt(pi / 2) further out, so that the two cover the same area.
+	const float Reach = sqrt(2.0f * log(Opacity / VGSSplatShadow.OpacityCutoff)) * 1.2533141f * VGSSplatShadow.PointScale;
+	const uint Axis = Corner >> 1;
+	const float Sign = (Corner & 1u) ? -1.0f : 1.0f;
+	const float3 Scales = Scale;
+	const float AxisScale = Axis == 0u ? Scales.x : (Axis == 1u ? Scales.y : Scales.z);
+	const float4 Q = Rotation * rsqrt(max(dot(Rotation, Rotation), 1e-12f));
+
+	const uint Word = VGSSplatShadow.HasNormals != 0u ? VGSSplatShadow.Normals[Splat] : 0u;
+	if (Word != 0u)
+	{
+		Outward = VGSShadowUnpackNormal(Word);
+	}
+	else
+	{
+		const uint Shortest = Scales.x <= Scales.y ? (Scales.x <= Scales.z ? 0u : 2u) : (Scales.y <= Scales.z ? 1u : 2u);
+		Outward = VGSShadowAxis(Q, Shortest);
+	}
+	if (Word == 0u || VGSSplatShadow.HasNormals == 2u)
+	{
+		Outward *= dot(Outward, Position - VGSSplatShadow.Center) < 0.0f ? -1.0f : 1.0f;
+	}
+	return Position + VGSShadowAxis(Q, Axis) * (AxisScale * Reach * Sign);
+}
+
+FVertexFactoryIntermediates GetVertexFactoryIntermediates(FVertexFactoryInput Input)
+{
+	FVertexFactoryIntermediates Intermediates;
+	Intermediates.SceneData = VF_GPUSCENE_GET_INTERMEDIATES(Input);
+
+	const uint Splat = VGSShadowFirstSplat + Input.VertexId / 6u;
+	float3 Outward;
+	const float3 FilePosition = VGSShadowCorner(Splat, Input.VertexId % 6u, Outward);
+	Intermediates.ComponentPosition = mul(float4(FilePosition, 1.0f), VGSSplatShadow.FileToComponent).xyz;
+	const float3 ComponentOutward = mul(Outward, (float3x3)VGSSplatShadow.FileToComponent);
+	const float OutwardLength = length(ComponentOutward);
+	if (OutwardLength > 0.0f)
+	{
+		Intermediates.ComponentPosition -= ComponentOutward * (VGSSplatShadow.Inset / OutwardLength);
+	}
+	Intermediates.TranslatedWorldPosition = TransformLocalToTranslatedWorld(Intermediates.ComponentPosition, Intermediates.SceneData.InstanceData.LocalToWorld);
+	return Intermediates;
+}
+
+FMaterialPixelParameters GetMaterialPixelParameters(FVertexFactoryInterpolantsVSToPS Interpolants, float4 SvPosition)
+{
+	FMaterialPixelParameters Result = MakeInitializedMaterialPixelParameters();
+#if NUM_MATERIAL_TEXCOORDS
+	UNROLL
+	for (int CoordinateIndex = 0; CoordinateIndex < NUM_MATERIAL_TEXCOORDS; CoordinateIndex++)
+	{
+		Result.TexCoords[CoordinateIndex] = Interpolants.DummyTexCoord;
+	}
+#endif
+	Result.VertexColor = 1;
+	Result.TwoSidedSign = 1;
+	return Result;
+}
+
+float3 VertexFactoryGetInstanceSpacePosition(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
+{
+	return Intermediates.ComponentPosition;
+}
+
+float3 VertexFactoryGetPreviousInstanceSpacePosition(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
+{
+	return Intermediates.ComponentPosition;
+}
+
+FMaterialVertexParameters GetMaterialVertexParameters(
+	FVertexFactoryInput Input,
+	FVertexFactoryIntermediates Intermediates,
+	float3 WorldPosition,
+	float3x3 TangentToLocal,
+	bool bIsPreviousFrame = false)
+{
+	FMaterialVertexParameters Result = MakeInitializedMaterialVertexParameters();
+	Result.SceneData = Intermediates.SceneData;
+	Result.WorldPosition = WorldPosition;
+	Result.PositionInstanceSpace = Intermediates.ComponentPosition;
+	Result.PositionPrimitiveSpace = Intermediates.ComponentPosition;
+	Result.VertexColor = float4(1, 1, 1, 1);
+	Result.TangentToWorld = mul(TangentToLocal, DFToFloat3x3(Intermediates.SceneData.InstanceData.LocalToWorld));
+	Result.PrevFrameLocalToWorld = Intermediates.SceneData.InstanceData.PrevLocalToWorld;
+	Result.LWCData = MakeMaterialLWCData(Result);
+	return Result;
+}
+
+float4 VertexFactoryGetWorldPosition(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
+{
+	return Intermediates.TranslatedWorldPosition;
+}
+
+float4 VertexFactoryGetPreviousWorldPosition(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
+{
+	return Intermediates.TranslatedWorldPosition;
+}
+
+float4 VertexFactoryGetRasterizedWorldPosition(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates, float4 TranslatedWorldPosition)
+{
+	return TranslatedWorldPosition;
+}
+
+float3 VertexFactoryGetPositionForVertexLighting(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates, float3 TranslatedWorldPosition)
+{
+	return TranslatedWorldPosition;
+}
+
+float3 VertexFactoryGetWorldNormal(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
+{
+	return float3(0, 0, 1);
+}
+
+FVertexFactoryInterpolantsVSToPS VertexFactoryGetInterpolantsVSToPS(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates, FMaterialVertexParameters VertexParameters)
+{
+	FVertexFactoryInterpolantsVSToPS Interpolants;
+	Interpolants.DummyTexCoord = float2(0, 0);
+	return Interpolants;
+}
+
+float3x3 VertexFactoryGetTangentToLocal(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
+{
+	return float3x3(float3(1, 0, 0), float3(0, 1, 0), float3(0, 0, 1));
+}
+
+float4 VertexFactoryGetTranslatedPrimitiveVolumeBounds(FVertexFactoryInterpolantsVSToPS Interpolants)
+{
+	return 0;
+}
+
+uint VertexFactoryGetPrimitiveId(FVertexFactoryInterpolantsVSToPS Interpolants)
+{
+	return 0;
+}
+
+#include "/Engine/Private/VertexFactoryDefaultInterface.ush"

@@ -467,15 +467,20 @@ void despillFrame(vgs::Frame &frame,const CaptureSettings &settings) {CaptureSet
 void despillSh(std::vector<float> &sh,const CaptureSettings &settings) {processSh(sh,settings);}
 // What the rig's cameras saw, in the export's notes. Cameras that see little of it describe
 // another frame: the sides are then guessed.
+// What decided the sides, in the export's notes: the rig's cameras, or cameras all around when
+// it is none of ours, or when the rig's see too little of it (another rig, or another frame).
 static void normalsNote(const gaussiannormals::Result &seen,const CaptureSettings &s,ExportResult *result) {
     if (!seen.opaque) return;
-    const double share=100.0*double(seen.opaqueSeen)/double(seen.opaque);
-    result->notes << (share>=50 ? QStringLiteral("Normals written: the %1 cameras see %2% of the opaque splats.")
-                                : QStringLiteral("Normals written, but the %1 cameras see only %2% of the opaque splats: is it the right rig, and the capture's own frame?"))
-                         .arg(s.normalRig==1 ? QStringLiteral("THE4DSCANNER") : QStringLiteral("SMNV1")).arg(share,0,'f',1);
+    const double share=100.0*double(seen.rigOpaqueSeen)/double(seen.opaque);
+    const QString rig=s.normalRig==1 ? QStringLiteral("THE4DSCANNER") : QStringLiteral("SMNV1");
+    if (s.normalRig==2) result->notes << QStringLiteral("Normals written, their sides decided by cameras all around the splats.");
+    else if (seen.surrounding) result->notes << QStringLiteral("Normals written, but the %1 cameras saw only %2% of the opaque splats (another rig, or not its frame?): "
+                                                               "cameras all around decided the sides instead.").arg(rig).arg(share,0,'f',1);
+    else result->notes << QStringLiteral("Normals written: the %1 cameras see %2% of the opaque splats.").arg(rig).arg(share,0,'f',1);
 }
 // The rig's cameras for data baked with `model`: a rotation with uniform scale moves them.
 static std::vector<gaussiannormals::View> rigViewsFor(const CaptureSettings &s,const QMatrix4x4 &model) {
+    if (s.normalRig==2) return {}; // none of ours: estimateNormals puts cameras all around
     Eigen::Matrix3f linear;for (int i=0;i<3;++i) for (int j=0;j<3;++j) linear(i,j)=model(i,j);
     return gaussiannormals::transformedViews(gaussiannormals::rigViews(s.normalRig==1 ? gaussiannormals::Rig::The4DScanner : gaussiannormals::Rig::SmnV1),
                                              linear,Eigen::Vector3f(model(0,3),model(1,3),model(2,3)));
@@ -487,7 +492,7 @@ static gaussiannormals::Result bakeFrameNormals(vgs::Frame &baked,const Project 
     gaussiannormals::Splats splats;splats.count=size_t(baked.count);splats.position=baked.position.data();splats.rotation=baked.rotation.data();
     splats.scale=baked.scale.data();splats.opacity=baked.opacity.data();splats.use=baked.active.size()==baked.count ? baked.active.data() : nullptr;
     baked.normal.assign(size_t(baked.count)*3,0.f);
-    return gaussiannormals::computeNormals(splats,views,baked.normal.data());
+    return gaussiannormals::estimateNormals(splats,views,baked.normal.data());
 }
 vgs::Frame bakeExportFrame(const vgs::Frame &frame,const Project &project,int degree,const ExportProgress &progress,double frameRate,const std::vector<uint8_t> *pruned) {
     if (degree<0 || degree>3) throw std::runtime_error("Invalid export SH degree.");
@@ -967,11 +972,11 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
     // the transform baked into the data, a rotation with uniform scale.
     const bool normals=s.normals && !mintOutput;
     if (s.normals && mintOutput) result.notes << QStringLiteral("MINT cannot hold normals: they are not written.");
-    std::vector<gaussiannormals::View> normalViews;std::atomic<size_t> normalOpaque{0},normalSeen{0};
+    std::vector<gaussiannormals::View> normalViews;std::atomic<size_t> normalOpaque{0},normalSeen{0};std::atomic<bool> normalSurrounding{false};
     if (normals) normalViews=rigViewsFor(s,project.transform.matrix());
     auto withNormals=[&](vgs::DecodedChunk chunk) {
         if (!normals) return chunk;
-        const auto seen=addNormals(chunk,normalViews,innerProgress);normalOpaque+=seen.opaque;normalSeen+=seen.opaqueSeen;
+        const auto seen=addNormals(chunk,normalViews,innerProgress);normalOpaque+=seen.opaque;normalSeen+=seen.rigOpaqueSeen;if (seen.surrounding) normalSurrounding=true;
         return chunk;
     };
     // The Loop morph: fitted once here for the End and Start frames as the modifiers above it
@@ -1139,7 +1144,7 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
         result.kept+=entry.second.kept;result.removed+=entry.second.removed;result.notes << entry.second.notes;
     }
     if (ply && native) result.notes << plyChunks.check.note();
-    if (normals) {gaussiannormals::Result seen;seen.opaque=normalOpaque;seen.opaqueSeen=normalSeen;normalsNote(seen,s,&result);}
+    if (normals) {gaussiannormals::Result seen;seen.opaque=normalOpaque;seen.rigOpaqueSeen=normalSeen;seen.surrounding=normalSurrounding;normalsNote(seen,s,&result);}
     if (!result.kept) throw std::runtime_error("The selected range contains no Gaussian records after applying active modifiers.");
     if (!temporary.flush()) throw std::runtime_error(temporary.errorString().toStdString());
     if (mintOutput) {
@@ -1393,7 +1398,7 @@ ExportResult exportPlySequence(const Project &projectAsGiven,const QString &dest
     const int digits=std::max(4,int(QString::number(lastWritten).size()));
     for (int frame=first;frame<=lastWritten;++frame) source.protectDestination(plySequenceFile(destination,frame,digits));
     const int degree=project.captureSettings.shDegree<0 ? source.sourceDegree : project.captureSettings.shDegree;
-    ExportResult result;std::vector<uint8_t> keep;int empty=0;size_t seenOpaque=0,seenBy=0;
+    ExportResult result;std::vector<uint8_t> keep;int empty=0;size_t seenOpaque=0,seenBy=0;bool seenAround=false;
     for (int f=first;f<=plainLast;++f) {
         const int percent=int(100.0*(f-first)/std::max(1,lastWritten-first+1));
         report(progress,percent,QStringLiteral("Frame %1 of %2").arg(f-first+1).arg(lastWritten-first+1));
@@ -1403,7 +1408,7 @@ ExportResult exportPlySequence(const Project &projectAsGiven,const QString &dest
         const auto baked=bakeExportFrame(frame,project,degree,[&](int,const QString &message) {return !progress || progress(percent,message);},rate,keep.empty() ? nullptr : &keep);
         if (!baked.count) ++empty;
         auto written=baked;
-        if (project.captureSettings.normals) {const auto seen=bakeFrameNormals(written,project,rate);seenOpaque+=seen.opaque;seenBy+=seen.opaqueSeen;}
+        if (project.captureSettings.normals) {const auto seen=bakeFrameNormals(written,project,rate);seenOpaque+=seen.opaque;seenBy+=seen.rigOpaqueSeen;seenAround|=seen.surrounding;}
         const QString file=plySequenceFile(destination,f,digits);writePly(written,file);
         result.kept+=baked.count;result.removed+=quint64(std::count(frame.active.begin(),frame.active.end(),uint8_t(1)))-baked.count;
         result.bytes+=quint64(QFileInfo(file).size());++result.frames;
@@ -1416,7 +1421,7 @@ ExportResult exportPlySequence(const Project &projectAsGiven,const QString &dest
             report(progress,percent,QStringLiteral("Loop morph frame %1 of %2").arg(k).arg(morphFrames));
             auto written=bakeMorphFrame(morph,k,project,last,degree,progress,(plainLast+k)/rate);
             if (!written.count) ++empty;result.kept+=written.count;
-            if (project.captureSettings.normals) {const auto seen=bakeFrameNormals(written,project,rate);seenOpaque+=seen.opaque;seenBy+=seen.opaqueSeen;}
+            if (project.captureSettings.normals) {const auto seen=bakeFrameNormals(written,project,rate);seenOpaque+=seen.opaque;seenBy+=seen.rigOpaqueSeen;seenAround|=seen.surrounding;}
             const QString file=plySequenceFile(destination,plainLast+k,digits);writePly(written,file);
             result.bytes+=quint64(QFileInfo(file).size());++result.frames;
         }
@@ -1424,7 +1429,7 @@ ExportResult exportPlySequence(const Project &projectAsGiven,const QString &dest
             .arg(QFileInfo(plySequenceFile(destination,firstMorph,digits)).fileName(),QFileInfo(plySequenceFile(destination,lastWritten,digits)).fileName());
     }
     report(progress,100,QStringLiteral("Finishing export"));
-    if (project.captureSettings.normals) {gaussiannormals::Result seen;seen.opaque=seenOpaque;seen.opaqueSeen=seenBy;normalsNote(seen,project.captureSettings,&result);}
+    if (project.captureSettings.normals) {gaussiannormals::Result seen;seen.opaque=seenOpaque;seen.rigOpaqueSeen=seenBy;seen.surrounding=seenAround;normalsNote(seen,project.captureSettings,&result);}
     result.notes << QStringLiteral("%1 .ply files, %2 to %3, numbered by the source's frame.").arg(result.frames)
         .arg(QFileInfo(plySequenceFile(destination,first,digits)).fileName(),QFileInfo(plySequenceFile(destination,lastWritten,digits)).fileName());
     if (empty) result.notes << QStringLiteral("%1 frame(s) kept no Gaussian records and are empty .ply files.").arg(empty);

@@ -32,8 +32,9 @@ public:
 	/**
 	 * How. A studio rig's cameras decide each splat's outward side, but only for a PLY from that
 	 * rig in its own frame (SMNForge names its rig in the file: Auto uses it); if they see less
-	 * than half of the splats the import uses shortest axes instead, and says so. Shortest axes
-	 * (as PGSR) need no rig and suit a PLY from anywhere.
+	 * than half of the splats the import uses cameras all around instead, and says so. Cameras
+	 * all around (the default without a rig) suit a PLY from anywhere; shortest axes (as PGSR)
+	 * are rougher and leave the side to the renderer.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, config, Category = "Normals", meta = (EditCondition = "bEstimateNormals"))
 	EVGSStaticNormalMethod Method = EVGSStaticNormalMethod::Auto;

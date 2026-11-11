@@ -485,13 +485,17 @@ Loading a metadata preset does not modify capture or crop transforms.
 exported `.vgs`, for renderers that light splats (FORMAT.md, Normals); **Rig** names the
 studio that recorded the capture, SMNV1 or THE4DSCANNER, whose cameras are built into the
 editor (`normalrigs.cpp`, from SMNForge's `camera_priors`, both in the capture frame: Y up,
-metres). The method is SMNForge's *Fill Gaussian normals* (`gaussiannormals.cpp`): the
-shortest axis on flat splats, the neighbourhood plane on round ones, the side facing the
-cameras that see the splat through a coarse depth buffer, propagated and smoothed. It runs
-on what is written, with the cameras moved by the capture transform, at one instant per
-splat and chunk; the normal is stored in the splat's own frame, so it turns with it. The
-export notes say how much of the capture the rig's cameras saw: well under half means the
-wrong rig or a capture not in its own frame. On the boxing capture (SMNV1): +2.8% size,
+metres), or *None of ours* for a capture from anywhere else. The method is SMNForge's *Fill
+Gaussian normals* (`gaussiannormals.cpp`, kept the same in both): the shortest axis on flat
+splats, the neighbourhood plane on round ones, the side facing the cameras that see the
+splat through a coarse depth buffer, propagated, outliers given their neighbours' normal,
+and smoothed. Without a rig of ours, or when the rig's cameras see less than half of the
+opaque splats (the wrong rig, or a capture not in its own frame), 42 cameras spread all
+around the splats decide the sides instead (`surroundingViews`, `estimateNormals`); on a
+ScanMeNow PLY 94 % of the normals came within 30 degrees of those its rig gave, side included.
+It runs on what is written, with the cameras moved by the capture transform, at one instant
+per splat and chunk; the normal is stored in the splat's own frame, so it turns with it.
+The export notes say which cameras decided, and how much of the capture the rig's saw. On the boxing capture (SMNV1): +2.8% size,
 1.7 s to 2.3 s, 97.5% of opaque splats seen. A `.ply`, one frame or a sequence, carries them
 as `nx ny nz` (zero otherwise, as 3DGS training writes them), which the PLY importer of
 the Blender build here reads. MINT cannot hold normals; exporting one says so.

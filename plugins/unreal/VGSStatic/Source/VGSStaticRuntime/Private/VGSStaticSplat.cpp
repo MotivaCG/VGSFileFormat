@@ -7,6 +7,7 @@
 #include "EditorFramework/AssetImportData.h"
 #include "RenderGraphBuilder.h"
 #include "RenderGraphUtils.h"
+#include "RHIResourceUtils.h"
 #include "Serialization/CustomVersion.h"
 #include "UObject/AssetRegistryTagsContext.h"
 
@@ -168,6 +169,25 @@ FVGSStaticSplatGpu::FVGSStaticSplatGpu(TSharedPtr<const FVGSStaticSplatData, ESP
 
 void FVGSStaticSplatGpu::Ensure_RenderThread(FRDGBuilder& GraphBuilder)
 {
+	Ensure_RenderThread(GraphBuilder.RHICmdList);
+}
+
+namespace
+{
+	/**
+	 * A buffer made with its data, outside a render graph: the shadow pass's vertex factory
+	 * may need the splats before the splat renderer's graph runs (a character off screen
+	 * whose shadow is on it). Wrapped as a pooled buffer for the renderer.
+	 */
+	TRefCountPtr<FRDGPooledBuffer> MakeBuffer(FRHICommandListBase& RHICmdList, const FRDGBufferDesc& Desc, const void* Data, uint32 Bytes, const TCHAR* Name)
+	{
+		FBufferRHIRef Buffer = UE::RHIResourceUtils::CreateBufferFromArray(RHICmdList, Name, Desc.Usage, Desc.BytesPerElement, Data, Bytes);
+		return new FRDGPooledBuffer(RHICmdList, Buffer, Desc, Desc.NumElements, Name);
+	}
+}
+
+void FVGSStaticSplatGpu::Ensure_RenderThread(FRHICommandListBase& RHICmdList)
+{
 	check(IsInRenderingThread());
 	if (bUploaded || IsEmpty())
 	{
@@ -175,13 +195,19 @@ void FVGSStaticSplatGpu::Ensure_RenderThread(FRDGBuilder& GraphBuilder)
 	}
 	bUploaded = true;
 
-	// The records: a byte address buffer, as the renderer reads them. RDG copies the data, so
-	// nothing here has to outlive the graph.
+	// The records: a byte address buffer, as the renderer reads them, padded to 16 bytes.
 	const TArray<uint8>& Records = bQuantized ? QuantizedRecords : Data->Records;
 	const uint32 Bytes = uint32(Align(uint64(Records.Num()), uint64(16)));
-	FRDGBufferRef SplatBuffer = GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateByteAddressDesc(Bytes), TEXT("VGSStatic.Splats"));
-	GraphBuilder.QueueBufferUpload(SplatBuffer, Records.GetData(), Records.Num());
-	Splats = GraphBuilder.ConvertToExternalBuffer(SplatBuffer);
+	TArray<uint8> Padded;
+	const uint8* Source = Records.GetData();
+	if (Bytes != uint32(Records.Num()))
+	{
+		Padded.SetNumZeroed(Bytes);
+		FMemory::Memcpy(Padded.GetData(), Records.GetData(), Records.Num());
+		Source = Padded.GetData();
+	}
+	Splats = MakeBuffer(RHICmdList, FRDGBufferDesc::CreateByteAddressDesc(Bytes), Source, Bytes, TEXT("VGSStatic.Splats"));
+	SplatsSRV = RHICmdList.CreateShaderResourceView(Splats->GetRHI(), FRHIViewDesc::CreateBufferSRV().SetTypeFromBuffer(Splats->GetRHI()));
 	if (bQuantized)
 	{
 		QuantizedRecords.Empty(); // on the GPU now; the float records stay with the asset
@@ -189,14 +215,13 @@ void FVGSStaticSplatGpu::Ensure_RenderThread(FRDGBuilder& GraphBuilder)
 
 	if (Data->Normals.Num() > 0)
 	{
-		FRDGBufferRef NormalBuffer = CreateStructuredBuffer(GraphBuilder, TEXT("VGSStatic.Normals"), sizeof(uint32), uint32(Data->Normals.Num()),
-			Data->Normals.GetData(), uint32(Data->Normals.Num()) * sizeof(uint32));
-		Normals = GraphBuilder.ConvertToExternalBuffer(NormalBuffer);
+		Normals = MakeBuffer(RHICmdList, FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), uint32(Data->Normals.Num())),
+			Data->Normals.GetData(), uint32(Data->Normals.Num()) * sizeof(uint32), TEXT("VGSStatic.Normals"));
+		NormalsSRV = RHICmdList.CreateShaderResourceView(Normals->GetRHI(), FRHIViewDesc::CreateBufferSRV().SetTypeFromBuffer(Normals->GetRHI()));
 	}
 	if (NumClusters > 0)
 	{
-		FRDGBufferRef ClusterBuffer = CreateStructuredBuffer(GraphBuilder, TEXT("VGSStatic.Clusters"), 48, NumClusters,
-			Data->Clusters.GetData(), uint32(Data->Clusters.Num()));
-		Clusters = GraphBuilder.ConvertToExternalBuffer(ClusterBuffer);
+		Clusters = MakeBuffer(RHICmdList, FRDGBufferDesc::CreateStructuredDesc(48, NumClusters),
+			Data->Clusters.GetData(), uint32(Data->Clusters.Num()), TEXT("VGSStatic.Clusters"));
 	}
 }

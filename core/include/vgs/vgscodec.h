@@ -94,8 +94,13 @@ enum ExtraType : uint32_t {
   // to whoever produced the capture, the other to whoever uses it, and neither
   // has to parse or preserve the other's.
   MetadataExtra2 = 4,  // format 1: one UTF-8 JSON object
+  // Reserved for static captures (.sgs, one frame; FORMAT.md, "Static captures"): a
+  // simplified closed surface of the subject, in the capture's space, for shadows,
+  // collision and picking. Accepted and skipped by readers; nothing writes it yet.
+  ProxyMeshExtra = 5,  // format 1: glTF 2.0 binary (.glb)
   VendorExtraBase = 0x8000
 };
+enum MeshFormat : uint32_t { Glb = 1 };
 enum MetadataFormat : uint32_t { JsonUtf8 = 1 };
 enum ImageFormat : uint32_t { Png = 1, Jpeg = 2, Webp = 3 };
 enum AudioFormat : uint32_t { Mp3 = 1, Aac = 2, Opus = 3, Wav = 4 };

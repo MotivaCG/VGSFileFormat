@@ -282,6 +282,15 @@ void checkFile(const char *path) {
                 100.0 * r.seenShare(), r.opaque, seconds(t));
     compare(normals, true);
   }
+  {
+    t = std::chrono::steady_clock::now();
+    std::vector<float> normals;
+    const auto r = vgsstatic::surroundingNormals(s, normals);
+    std::printf("  normals, surrounding cameras: they see %5.1f%% of %zu opaque splats; %.2f s", 100.0 * r.seenShare(), r.opaque, seconds(t));
+    compare(normals, true);
+    std::printf("  ... the same, either side");
+    compare(normals, false);
+  }
   struct Variant { const char *name; int passes, smoothing, neighbours; float radius; };
   for (const Variant v : {Variant{"PGSR alone", 0, 0, 16, 0.01f}, Variant{"consensus", 2, 0, 16, 0.01f}, Variant{"+ smoothing", 2, 2, 16, 0.01f},
                           Variant{"+ smoothing, 32 / 2 %", 2, 2, 32, 0.02f}, Variant{"+ smoothing x4", 2, 4, 16, 0.01f}}) {

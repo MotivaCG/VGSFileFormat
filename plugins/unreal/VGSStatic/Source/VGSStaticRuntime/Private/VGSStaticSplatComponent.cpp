@@ -3,9 +3,11 @@
 #include "VGSSplatLayout.h"
 #include "VGSStaticSplat.h"
 #include "VGSStaticSplatGpu.h"
+#include "VGSStaticSplatSceneProxy.h"
 #include "VGSStaticSplatSource.h"
 #include "VGSStaticSplatViewExtension.h" // VGSStaticSplat::RegisterExternalProxySource (VGSStaticSplatRenderer)
 
+#include "Engine/CollisionProfile.h"
 #include "Engine/World.h"
 #include "Misc/App.h"
 #include "RenderingThread.h"
@@ -22,6 +24,44 @@ UVGSStaticSplatComponent::UVGSStaticSplatComponent()
 	PrimaryComponentTick.bStartWithTickEnabled = true;
 	PrimaryComponentTick.TickGroup = TG_PostUpdateWork;
 	bTickInEditor = true;
+
+	// A primitive for its shadows only: no collision, navigation or occlusion.
+	SetCollisionProfileName(UCollisionProfile::NoCollision_ProfileName);
+	SetGenerateOverlapEvents(false);
+	SetCanEverAffectNavigation(false);
+	bUseAsOccluder = false;
+	CastShadow = true;
+	bCastDynamicShadow = true;
+	bCastStaticShadow = false;
+	bAffectDynamicIndirectLighting = false;
+	bAffectDistanceFieldLighting = false;
+}
+
+namespace
+{
+	FVGSStaticShadowSettings ShadowSettingsOf(const FMatrix& FileToComponent, const UVGSStaticSplatComponent& Component)
+	{
+		FVGSStaticShadowSettings Settings;
+		Settings.FileToComponent = FMatrix44f(FileToComponent);
+		Settings.PointScale = Component.PointScaleFactor;
+		Settings.OpacityScale = Component.OpacityScale;
+		Settings.OpacityCutoff = Component.ShadowOpacityCutoff;
+		Settings.Inset = Component.ShadowInset;
+		return Settings;
+	}
+}
+
+FPrimitiveSceneProxy* UVGSStaticSplatComponent::CreateSceneProxy()
+{
+	const FVGSStaticShadowSettings Settings = ShadowSettingsOf(FileToComponent(), *this);
+	ProxyState.SetNumUninitialized(sizeof(Settings));
+	FMemory::Memcpy(ProxyState.GetData(), &Settings, sizeof(Settings));
+	TSharedPtr<FVGSStaticSplatGpu, ESPMode::ThreadSafe> Gpu = Splat ? Splat->GetGpu() : nullptr;
+	if (!Gpu.IsValid() || Gpu->IsEmpty())
+	{
+		return nullptr;
+	}
+	return new FVGSStaticSplatSceneProxy(this, MoveTemp(Gpu), Settings);
 }
 
 void UVGSStaticSplatComponent::SetSplat(UVGSStaticSplat* NewSplat)
@@ -33,6 +73,7 @@ void UVGSStaticSplatComponent::SetSplat(UVGSStaticSplat* NewSplat)
 	Splat = NewSplat;
 	RefreshInfo();
 	UpdateBounds();
+	MarkRenderStateDirty();
 	if (Source.IsValid())
 	{
 		ENQUEUE_RENDER_COMMAND(VGSStaticSetGpu)([Target = Source, Gpu = Splat ? Splat->GetGpu() : nullptr](FRHICommandList&)
@@ -89,6 +130,13 @@ FMatrix UVGSStaticSplatComponent::FileToComponent() const
 
 void UVGSStaticSplatComponent::PushRenderState(bool bForce)
 {
+	// The shadow casters' own copy of what shapes them: a new proxy when it changed.
+	const FVGSStaticShadowSettings Shadows = ShadowSettingsOf(FileToComponent(), *this);
+	if (ProxyState.Num() == sizeof(Shadows) && FMemory::Memcmp(ProxyState.GetData(), &Shadows, sizeof(Shadows)) != 0)
+	{
+		MarkRenderStateDirty();
+	}
+
 	if (!Source.IsValid())
 	{
 		return;
@@ -154,7 +202,7 @@ void UVGSStaticSplatComponent::OnSplatChanged(UVGSStaticSplat* Changed)
 		{
 			Target->SetGpu_RenderThread(Gpu);
 		});
-		MarkRenderTransformDirty();
+		MarkRenderStateDirty();
 	}
 }
 
@@ -262,6 +310,7 @@ void UVGSStaticSplatComponent::PostEditChangeProperty(FPropertyChangedEvent& Pro
 		}
 	}
 	UpdateBounds();
+	MarkRenderStateDirty();
 	PushRenderState(false);
 }
 #endif

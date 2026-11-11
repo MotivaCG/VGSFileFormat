@@ -12,7 +12,8 @@ and lighting by the scene, which Epic's own lacks. **The copy is Epic's code and
 taken again for every engine version: [EPIC_RENDERER_COPY.md](EPIC_RENDERER_COPY.md).** It
 no longer needs Epic's GaussianSplat plugin (which only 5.9 has): both plugins build against
 Unreal 5.8 and 5.9 (run and tested in 5.9; 5.6 and 5.7 still to be built). Captures play,
-and can be lit by the scene (*Lighting* Shaded); they cast no shadows. Sixteen captures at
+and can be lit by the scene (*Lighting* Shaded); static characters cast shadows, captures do
+not yet. Sixteen captures at
 once keep their 30 fps — see *State* below.
 
 ```
@@ -175,15 +176,32 @@ many splats, the SH degree, and whether it has normals and where they come from.
     its rig (SMNForge writes `comment capture_rig SMNV1` or `THE4DSCANNER`, and `comment
     normals SMNForge` beside the normals it writes) or the import is told one; if that rig's
     cameras see less than half of the splats the PLY is not in its frame, and
-  - otherwise (a PLY from anywhere else): **shortest axes**, as PGSR takes a splat's normal
-    (Chen et al. 2024), replaced where the splat is round or disagrees with its neighbours
-    by their consensus (16 nearest within 1 % of the size, opacity- and flatness-weighted,
-    sign aside), then smoothed among neighbours within 35 degrees as the editor smooths.
-    Their side is decided on screen, facing the camera, as PGSR does
-    (`FVGSSplatRenderProxy::bNormalsFaceCamera`). On andreavictor (221k splats) against the
-    file's normals: PGSR alone mean |cos| 0.78 (60 % within 30 degrees), with the consensus
-    0.885 (78 %), smoothed 0.91 (84 %), about as close as the editor's estimate with the
-    other rig's cameras (0.91); about a second.
+  - otherwise (a PLY from anywhere else): the same estimate with **cameras all around**
+    instead of a rig's (`gaussiannormals::surroundingViews`: 42 on a Fibonacci sphere about
+    the opaque splats, whichever way is up), which decide each splat's outward side as a
+    rig's would. On andreavictor (221k splats) against the file's normals (the SMNV1 rig's):
+    mean |cos| 0.981 (96.6 % within 30 degrees), with the side 0.917 (94.2 %); 0.35 s.
+  - *Method* Shortest axes keeps the earlier way: as PGSR takes a splat's normal (Chen et
+    al. 2024), replaced where the splat is round or disagrees with its neighbours by their
+    consensus, then smoothed; its side is decided on screen, facing the camera
+    (`FVGSSplatRenderProxy::bNormalsFaceCamera`). Rougher: on andreavictor |cos| 0.91 (84 %).
+  SMNForge and the VGS editor use the same estimate and the same cameras all around, for
+  captures none of our rigs recorded and when a rig's cameras see less than half of them
+  (`gaussiannormals::estimateNormals`; the editor's export settings have *Rig* None of ours).
+- **Shadows.** The component is a primitive whose only part in Unreal's scene is its shadow
+  casters (*Lighting* > *Cast Shadow*, on by default; off per actor costs nothing): in shadow
+  depth passes every splat is drawn as a small opaque octahedron spanning the ellipse where
+  its opacity reaches *Shadow Opacity Cutoff* (0.3), read straight from the asset's GPU
+  copy by `FVGSSplatShadowVertexFactory` (VGS's own, in the renderer copy;
+  `Shaders/Private/SplatRenderer/VGSSplatShadowVertexFactory.ush`), with Unreal's default
+  material. It supports GPU Scene, so virtual shadow maps take it as they take meshes, and
+  every light that casts shadows does: directional (cascaded or virtual), spot, point. Shaded,
+  the character also shadows itself (an arm on the torso); each caster is moved *Shadow
+  Inset* (3 cm) inwards along its normal, or the lit surface, which lies among its own
+  splats, shadows itself in blotches. Memory: one shared index buffer of 512 KB, nothing per
+  asset. Cost on andreavictor (221k splats, one sun, 1280x720): ShadowDepths 0.15 to 0.57 ms
+  with virtual shadow maps, 0.12 to 0.20 ms with cascades (1.8M triangles in one cascade).
+  Levels `/Game/Static/Static_Shadow` (and `_Off`, `_Self`, `_Close`, `_Close_Off`).
 - **Static, so:** uploaded once per asset and shared by every actor showing it; the splats
   are ordered along a Morton curve and cut into clusters of 64 that the renderer culls
   against each view (Epic's cluster record, one level of detail); no tick work beyond
@@ -199,8 +217,8 @@ many splats, the SH degree, and whether it has normals and where they come from.
 - **Test.** `tests/unreal_static.cpp` (ctest `plugin_unreal_static`): synthetic PLYs, binary
   and ASCII, every value read and packed as the renderer reads it, header comments, clusters
   covering every splat, normal words within 0.0007 rad, shortest-axis normals on a sphere
-  with round and turned splats; given a `.ply` it also times reading, building and both
-  estimates. In the host project, `/Game/Static/Static_Self`, `Static_Neon`,
+  with round and turned splats; given a `.ply` it also times reading, building and every
+  estimate (each rig, cameras all around, shortest axes) against the file's normals. In the host project, `/Game/Static/Static_Self`, `Static_Neon`,
   `Static_Neon_File`, `Static_Neon_Axes` and `Static_Rim` show `andreavictor`.
 
 ## Scaling
@@ -303,7 +321,8 @@ From Epic's renderer, which the copy keeps (`VGSSplatRenderPipeline.cpp`,
   Lumen or ray tracing. Splats are composited over translucency, occluded only by opaque
   depth.
 - Shaded: lit as an opaque surface, so faint splats, hair and edges are cut where they
-  cover half a pixel rather than blended, and the capture casts no shadow (it is not in shadow depth passes). The
+  cover half a pixel rather than blended, and a capture casts no shadow (it is not in shadow
+  depth passes; static characters are: see *VGSStatic*). The
   studio's light is already in its colours, so it shows lit twice. Needs the deferred
   renderer (with or without Substrate), hardware rasterization and vertex shaders that read buffers
   (`r.VGSSplat.*` defaults on desktop GPUs); elsewhere a Shaded capture is drawn
@@ -332,6 +351,9 @@ From Epic's renderer, which the copy keeps (`VGSSplatRenderPipeline.cpp`,
   `bTreatAsEngineModule`. Epic's plugin is experimental in 5.9 and may change between engine
   versions, and the copy with it (EPIC_RENDERER_COPY.md).
 
+- Static characters' shadows are splat-shaped: faint splats below *Shadow Opacity Cutoff*
+  cast none, so hair and edges shadow thinner than they look, and a character shadowing
+  another shows dappled where the splats leave gaps.
 - Static characters lit by the scene: thin, faint splats where a shoe meets the floor (the
   scan's contact smear) are written opaque with sideways normals and show as a dark wedge at
   the toe (andreavictor), whichever normals; not addressed yet.

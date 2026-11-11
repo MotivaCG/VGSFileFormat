@@ -277,7 +277,13 @@ bool UVGSStaticSplatFactory::Build(UVGSStaticSplat* Asset, const FString& Filena
 				Fallback = FString::Printf(TEXT(" (the %s rig's cameras saw only %.0f %% of the splats: not its frame)"), RigName(Rig), 100.0 * Result.seenShare());
 			}
 		}
-		if (!bUseRig)
+		if (!bUseRig && Options.Method != EVGSStaticNormalMethod::ShortestAxes)
+		{
+			const vgsstatic::RigNormalsResult Result = vgsstatic::surroundingNormals(Splats, Estimated);
+			Source = EVGSStaticNormals::Surrounding;
+			Note = FString::Printf(TEXT("cameras all around, which see %.1f %% of the opaque splats%s"), 100.0 * Result.seenShare(), *Fallback);
+		}
+		else if (!bUseRig)
 		{
 			vgsstatic::AxisNormalsSettings Settings;
 			Settings.neighbours = FMath::Clamp(Options.Neighbours, 4, 64);

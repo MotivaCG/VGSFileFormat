@@ -1,6 +1,6 @@
 diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatGBuffer.usf b/VGS/Shaders/Private/SplatRenderer/VGSSplatGBuffer.usf
 --- a/VGS/Shaders/Private/SplatRenderer/VGSSplatGBuffer.usf	1970-01-01 01:00:00.000000000 +0100
-+++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatGBuffer.usf	2026-11-11 00:50:31.335863500 +0100
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatGBuffer.usf	2026-11-11 08:50:02.769218100 +0100
 @@ -0,0 +1,295 @@
 +// VGS: not Epic's. Writes a lit capture into Unreal's GBuffer, after the base pass and before
 +// lighting, as an opaque Default Lit surface: every light, the shadows other objects cast on
@@ -299,7 +299,7 @@ diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatGBuffer.usf b/VGS/Shaders/
 +}
 diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatGrade.ush b/VGS/Shaders/Private/SplatRenderer/VGSSplatGrade.ush
 --- a/VGS/Shaders/Private/SplatRenderer/VGSSplatGrade.ush	1970-01-01 01:00:00.000000000 +0100
-+++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatGrade.ush	2026-11-11 00:50:31.335863500 +0100
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatGrade.ush	2026-11-11 08:50:02.769218100 +0100
 @@ -0,0 +1,34 @@
 +// VGS: not Epic's. The capture's colour grade, shared by the composite
 +// (VGSSplatInverseToneCurvePostBlend.usf) and the lit pass (VGSSplatGBuffer.usf).
@@ -336,8 +336,8 @@ diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatGrade.ush b/VGS/Shaders/Pr
 +	return lerp(ColorSRGB, C, smoothstep(0.0f, 0.05f, Opacity));
 +}
 diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatHardwareRasterize.usf b/VGS/Shaders/Private/SplatRenderer/VGSSplatHardwareRasterize.usf
---- a/VGS/Shaders/Private/SplatRenderer/VGSSplatHardwareRasterize.usf	2026-11-10 23:41:35.125116100 +0100
-+++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatHardwareRasterize.usf	2026-11-11 00:50:31.335863500 +0100
+--- a/VGS/Shaders/Private/SplatRenderer/VGSSplatHardwareRasterize.usf	2026-11-11 08:50:02.663562600 +0100
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatHardwareRasterize.usf	2026-11-11 08:50:02.769218100 +0100
 @@ -35,6 +35,13 @@
  #define GAUSSIAN_SPLAT_SUPERSAMPLE 0
  #endif // GAUSSIAN_SPLAT_SUPERSAMPLE
@@ -429,8 +429,8 @@ diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatHardwareRasterize.usf b/VG
  	
  #if WRITE_VELOCITY
 diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatInverseToneCurvePostBlend.usf b/VGS/Shaders/Private/SplatRenderer/VGSSplatInverseToneCurvePostBlend.usf
---- a/VGS/Shaders/Private/SplatRenderer/VGSSplatInverseToneCurvePostBlend.usf	2026-11-10 23:41:35.140368400 +0100
-+++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatInverseToneCurvePostBlend.usf	2026-11-11 00:50:31.332336800 +0100
+--- a/VGS/Shaders/Private/SplatRenderer/VGSSplatInverseToneCurvePostBlend.usf	2026-11-11 08:50:02.664577400 +0100
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatInverseToneCurvePostBlend.usf	2026-11-11 08:50:02.764217000 +0100
 @@ -33,6 +33,13 @@
  // Per-axis grid size of the (cubic) LUT.
  float InverseToneCurveLUTEdge;
@@ -508,8 +508,8 @@ diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatInverseToneCurvePostBlend.
 +	OutColor = float4(Blended * (Intensity * View.PreExposure), Transmittance);
  }
 diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf b/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf
---- a/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf	2026-11-10 23:41:35.130672200 +0100
-+++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf	2026-11-11 00:50:31.334842100 +0100
+--- a/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf	2026-11-11 08:50:02.667605700 +0100
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf	2026-11-11 08:50:02.768217700 +0100
 @@ -70,6 +70,7 @@
  
  // Spherical harmonics
@@ -657,9 +657,269 @@ diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf b/VGS/Shaders/
  			if (GAUSSIAN_SPLAT_WRITE_SORT_KEYS)
  			{
  				// Mark culled splats with sentinel value
+diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatShadowVertexFactory.ush b/VGS/Shaders/Private/SplatRenderer/VGSSplatShadowVertexFactory.ush
+--- a/VGS/Shaders/Private/SplatRenderer/VGSSplatShadowVertexFactory.ush	1970-01-01 01:00:00.000000000 +0100
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatShadowVertexFactory.ush	2026-11-11 08:50:02.770722800 +0100
+@@ -0,0 +1,256 @@
++// VGS: not Epic's. The vertex factory that puts splats into Unreal's shadow depth passes
++// (VGSSplatShadowVertexFactory.cpp): each splat is drawn as an octahedron spanning the
++// ellipse where its opacity reaches VGSSplatShadow.OpacityCutoff, read straight from the
++// renderer's own splat buffer, so casting shadows needs no memory of its own.
++//
++// Each caster is moved Inset inwards along its splat's normal: the surface the lit splats
++// write to the GBuffer lies among their own casters, and would shadow itself in blotches
++// (acne) without it. The normal is the asset's own when it has one with a side; otherwise
++// (directions only, or the shortest axis) the side facing away from the asset's centre.
++//
++// Six vertices per splat (both ends of its three axes) and eight triangles, through an index
++// buffer of a batch of splats: VertexId / 6 is the splat within the batch, VGSShadowFirstSplat
++// where the batch starts. A splat fainter than the cutoff collapses to a point.
++
++#include "/Engine/Private/VertexFactoryCommon.ush"
++
++/** The first splat of this draw's batch. */
++uint VGSShadowFirstSplat;
++
++struct FVertexFactoryInput
++{
++	uint VertexId : SV_VertexID;
++
++	VF_GPUSCENE_DECLARE_INPUT_BLOCK(13)
++	VF_INSTANCED_STEREO_DECLARE_INPUT_BLOCK()
++	VF_MOBILE_MULTI_VIEW_DECLARE_INPUT_BLOCK()
++};
++
++struct FVertexFactoryInterpolantsVSToPS
++{
++	float2 DummyTexCoord : TEXCOORD0;
++};
++
++struct FVertexFactoryIntermediates
++{
++	float3 ComponentPosition; // in the component's space
++	float4 TranslatedWorldPosition;
++	FSceneDataIntermediates SceneData;
++};
++
++FPrimitiveSceneData GetPrimitiveData(FVertexFactoryIntermediates Intermediates)
++{
++	return Intermediates.SceneData.Primitive;
++}
++
++// One row of the rotation matrix of a unit quaternion (x, y, z, w): the direction of a splat's
++// axis, as the renderer's QuaternionToFloat3x3 has it (SphericalGaussianCommon.ush).
++float3 VGSShadowAxis(float4 Q, uint Axis)
++{
++	const float x2 = Q.x + Q.x, y2 = Q.y + Q.y, z2 = Q.z + Q.z;
++	const float xx = Q.x * x2, xy = Q.x * y2, xz = Q.x * z2;
++	const float yy = Q.y * y2, yz = Q.y * z2, zz = Q.z * z2;
++	const float wx = Q.w * x2, wy = Q.w * y2, wz = Q.w * z2;
++	if (Axis == 0u)
++	{
++		return float3(1.0f - (yy + zz), xy + wz, xz - wy);
++	}
++	if (Axis == 1u)
++	{
++		return float3(xy - wz, 1.0f - (xx + zz), yz + wx);
++	}
++	return float3(xz + wy, yz - wx, 1.0f - (xx + yy));
++}
++
++float3 VGSShadowUnpackNormal(uint W)
++{
++	float2 P = (float2(float(W & 65535u), float(W >> 16)) - 1.0f) / 65534.0f * 2.0f - 1.0f;
++	const float Z = 1.0f - abs(P.x) - abs(P.y);
++	if (Z < 0.0f)
++	{
++		P = (1.0f - abs(P.yx)) * float2(P.x >= 0.0f ? 1.0f : -1.0f, P.y >= 0.0f ? 1.0f : -1.0f);
++	}
++	return normalize(float3(P, Z));
++}
++
++// A corner of a splat's octahedron, in the asset's (file) space; Outward, the direction its
++// caster is moved against. The records are the
++// renderer's (VGSSplatShared.h): the float layout, or Epic's quantized one.
++float3 VGSShadowCorner(uint Splat, uint Corner, out float3 Outward)
++{
++	Outward = 0;
++	const uint Offset = Splat * VGSSplatShadow.Stride;
++	float3 Position;
++	float3 Scale;
++	float4 Rotation;
++	float Opacity;
++	if (VGSSplatShadow.BufferFormat == 0u)
++	{
++		Position = asfloat(VGSSplatShadow.Splats.Load3(Offset));
++		Scale = asfloat(VGSSplatShadow.Splats.Load3(Offset + 12u));
++		Rotation = asfloat(VGSSplatShadow.Splats.Load4(Offset + 24u));
++		Opacity = asfloat(VGSSplatShadow.Splats.Load(Offset + 52u));
++	}
++	else
++	{
++		const uint4 Packed = VGSSplatShadow.Splats.Load4(Offset);
++		const uint PackedColor = VGSSplatShadow.Splats.Load(Offset + 16u);
++		const uint Mask21 = (1u << 21) - 1u;
++		const uint Mask11 = (1u << 11) - 1u;
++		const uint Mask10 = (1u << 10) - 1u;
++		const float3 P = float3(float((Packed.y >> 10) & Mask21), float(((Packed.x >> 21) | (Packed.y << 11)) & Mask21), float(Packed.x & Mask21));
++		Position = P * VGSSplatShadow.PositionScale + VGSSplatShadow.PositionBias;
++		const float3 S = float3(float(Packed.z >> 21), float((Packed.z >> 10) & Mask11), float(Packed.z & Mask10));
++		Scale = exp(S * VGSSplatShadow.ScaleScale + VGSSplatShadow.ScaleBias);
++		Rotation.x = float(Packed.w >> 21) * (2.0f / 2047.0f) - 1.0f;
++		Rotation.y = float((Packed.w >> 10) & Mask11) * (2.0f / 2047.0f) - 1.0f;
++		Rotation.z = float(Packed.w & Mask10) * (2.0f / 1023.0f) - 1.0f;
++		Rotation.w = sqrt(max(1.0f - dot(Rotation.xyz, Rotation.xyz), 0.0f));
++		Opacity = float(PackedColor & 0xffu) * VGSSplatShadow.OpacityQuantization.x + VGSSplatShadow.OpacityQuantization.y;
++	}
++
++	Opacity = saturate(Opacity * VGSSplatShadow.OpacityScale);
++	if (Splat >= VGSSplatShadow.NumSplats || Opacity <= VGSSplatShadow.OpacityCutoff)
++	{
++		return Position; // collapsed: its eight triangles have no area
++	}
++
++	// The splat's opacity falls as Opacity * exp(-r^2 / 2), r in standard deviations: it is at
++	// the cutoff at r = sqrt(2 ln(Opacity / Cutoff)). An octahedron's outline seen along an
++	// axis is a rhombus, of 2/pi the area of the ellipse through its corners: the corners go
++	// sqrt(pi / 2) further out, so that the two cover the same area.
++	const float Reach = sqrt(2.0f * log(Opacity / VGSSplatShadow.OpacityCutoff)) * 1.2533141f * VGSSplatShadow.PointScale;
++	const uint Axis = Corner >> 1;
++	const float Sign = (Corner & 1u) ? -1.0f : 1.0f;
++	const float3 Scales = Scale;
++	const float AxisScale = Axis == 0u ? Scales.x : (Axis == 1u ? Scales.y : Scales.z);
++	const float4 Q = Rotation * rsqrt(max(dot(Rotation, Rotation), 1e-12f));
++
++	const uint Word = VGSSplatShadow.HasNormals != 0u ? VGSSplatShadow.Normals[Splat] : 0u;
++	if (Word != 0u)
++	{
++		Outward = VGSShadowUnpackNormal(Word);
++	}
++	else
++	{
++		const uint Shortest = Scales.x <= Scales.y ? (Scales.x <= Scales.z ? 0u : 2u) : (Scales.y <= Scales.z ? 1u : 2u);
++		Outward = VGSShadowAxis(Q, Shortest);
++	}
++	if (Word == 0u || VGSSplatShadow.HasNormals == 2u)
++	{
++		Outward *= dot(Outward, Position - VGSSplatShadow.Center) < 0.0f ? -1.0f : 1.0f;
++	}
++	return Position + VGSShadowAxis(Q, Axis) * (AxisScale * Reach * Sign);
++}
++
++FVertexFactoryIntermediates GetVertexFactoryIntermediates(FVertexFactoryInput Input)
++{
++	FVertexFactoryIntermediates Intermediates;
++	Intermediates.SceneData = VF_GPUSCENE_GET_INTERMEDIATES(Input);
++
++	const uint Splat = VGSShadowFirstSplat + Input.VertexId / 6u;
++	float3 Outward;
++	const float3 FilePosition = VGSShadowCorner(Splat, Input.VertexId % 6u, Outward);
++	Intermediates.ComponentPosition = mul(float4(FilePosition, 1.0f), VGSSplatShadow.FileToComponent).xyz;
++	const float3 ComponentOutward = mul(Outward, (float3x3)VGSSplatShadow.FileToComponent);
++	const float OutwardLength = length(ComponentOutward);
++	if (OutwardLength > 0.0f)
++	{
++		Intermediates.ComponentPosition -= ComponentOutward * (VGSSplatShadow.Inset / OutwardLength);
++	}
++	Intermediates.TranslatedWorldPosition = TransformLocalToTranslatedWorld(Intermediates.ComponentPosition, Intermediates.SceneData.InstanceData.LocalToWorld);
++	return Intermediates;
++}
++
++FMaterialPixelParameters GetMaterialPixelParameters(FVertexFactoryInterpolantsVSToPS Interpolants, float4 SvPosition)
++{
++	FMaterialPixelParameters Result = MakeInitializedMaterialPixelParameters();
++#if NUM_MATERIAL_TEXCOORDS
++	UNROLL
++	for (int CoordinateIndex = 0; CoordinateIndex < NUM_MATERIAL_TEXCOORDS; CoordinateIndex++)
++	{
++		Result.TexCoords[CoordinateIndex] = Interpolants.DummyTexCoord;
++	}
++#endif
++	Result.VertexColor = 1;
++	Result.TwoSidedSign = 1;
++	return Result;
++}
++
++float3 VertexFactoryGetInstanceSpacePosition(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
++{
++	return Intermediates.ComponentPosition;
++}
++
++float3 VertexFactoryGetPreviousInstanceSpacePosition(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
++{
++	return Intermediates.ComponentPosition;
++}
++
++FMaterialVertexParameters GetMaterialVertexParameters(
++	FVertexFactoryInput Input,
++	FVertexFactoryIntermediates Intermediates,
++	float3 WorldPosition,
++	float3x3 TangentToLocal,
++	bool bIsPreviousFrame = false)
++{
++	FMaterialVertexParameters Result = MakeInitializedMaterialVertexParameters();
++	Result.SceneData = Intermediates.SceneData;
++	Result.WorldPosition = WorldPosition;
++	Result.PositionInstanceSpace = Intermediates.ComponentPosition;
++	Result.PositionPrimitiveSpace = Intermediates.ComponentPosition;
++	Result.VertexColor = float4(1, 1, 1, 1);
++	Result.TangentToWorld = mul(TangentToLocal, DFToFloat3x3(Intermediates.SceneData.InstanceData.LocalToWorld));
++	Result.PrevFrameLocalToWorld = Intermediates.SceneData.InstanceData.PrevLocalToWorld;
++	Result.LWCData = MakeMaterialLWCData(Result);
++	return Result;
++}
++
++float4 VertexFactoryGetWorldPosition(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
++{
++	return Intermediates.TranslatedWorldPosition;
++}
++
++float4 VertexFactoryGetPreviousWorldPosition(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
++{
++	return Intermediates.TranslatedWorldPosition;
++}
++
++float4 VertexFactoryGetRasterizedWorldPosition(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates, float4 TranslatedWorldPosition)
++{
++	return TranslatedWorldPosition;
++}
++
++float3 VertexFactoryGetPositionForVertexLighting(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates, float3 TranslatedWorldPosition)
++{
++	return TranslatedWorldPosition;
++}
++
++float3 VertexFactoryGetWorldNormal(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
++{
++	return float3(0, 0, 1);
++}
++
++FVertexFactoryInterpolantsVSToPS VertexFactoryGetInterpolantsVSToPS(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates, FMaterialVertexParameters VertexParameters)
++{
++	FVertexFactoryInterpolantsVSToPS Interpolants;
++	Interpolants.DummyTexCoord = float2(0, 0);
++	return Interpolants;
++}
++
++float3x3 VertexFactoryGetTangentToLocal(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
++{
++	return float3x3(float3(1, 0, 0), float3(0, 1, 0), float3(0, 0, 1));
++}
++
++float4 VertexFactoryGetTranslatedPrimitiveVolumeBounds(FVertexFactoryInterpolantsVSToPS Interpolants)
++{
++	return 0;
++}
++
++uint VertexFactoryGetPrimitiveId(FVertexFactoryInterpolantsVSToPS Interpolants)
++{
++	return 0;
++}
++
++#include "/Engine/Private/VertexFactoryDefaultInterface.ush"
 diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatTileRasterize.usf b/VGS/Shaders/Private/SplatRenderer/VGSSplatTileRasterize.usf
---- a/VGS/Shaders/Private/SplatRenderer/VGSSplatTileRasterize.usf	2026-11-10 23:41:35.115799400 +0100
-+++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatTileRasterize.usf	2026-11-11 00:50:31.333842600 +0100
+--- a/VGS/Shaders/Private/SplatRenderer/VGSSplatTileRasterize.usf	2026-11-11 08:50:02.669608500 +0100
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatTileRasterize.usf	2026-11-11 08:50:02.767216900 +0100
 @@ -83,6 +83,8 @@
  		}
  	}
@@ -671,8 +931,8 @@ diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatTileRasterize.usf b/VGS/Sh
  	RWColorTexture[Pixel].a = OutColor.a * RWColorTexture[Pixel].a;
  }
 diff -ruN a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatRenderPipeline.h b/VGS/Source/VGSSplatRenderer/Internal/VGSSplatRenderPipeline.h
---- a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatRenderPipeline.h	2026-11-10 23:41:35.044098900 +0100
-+++ b/VGS/Source/VGSSplatRenderer/Internal/VGSSplatRenderPipeline.h	2026-11-11 00:50:31.309435900 +0100
+--- a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatRenderPipeline.h	2026-11-11 08:50:02.590408900 +0100
++++ b/VGS/Source/VGSSplatRenderer/Internal/VGSSplatRenderPipeline.h	2026-11-11 08:50:02.727821400 +0100
 @@ -54,6 +54,35 @@
  	float OpacityScale = 1.0f;
  
@@ -744,8 +1004,86 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatRenderPipeline.h b/VGS/
 +		const FLitTargets& Targets
 +	);
  }
+diff -ruN a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatShadowVertexFactory.h b/VGS/Source/VGSSplatRenderer/Internal/VGSSplatShadowVertexFactory.h
+--- a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatShadowVertexFactory.h	1970-01-01 01:00:00.000000000 +0100
++++ b/VGS/Source/VGSSplatRenderer/Internal/VGSSplatShadowVertexFactory.h	2026-11-11 08:50:02.729838800 +0100
+@@ -0,0 +1,74 @@
++// VGS: not Epic's. Splats in Unreal's shadow depth passes, so that they cast shadows.
++#pragma once
++
++#include "CoreMinimal.h"
++#include "RenderResource.h"
++#include "ShaderParameterMacros.h"
++#include "VertexFactory.h"
++
++class FMeshElementCollector;
++class FPrimitiveSceneProxy;
++class FMaterialRenderProxy;
++
++BEGIN_GLOBAL_SHADER_PARAMETER_STRUCT(FVGSSplatShadowParameters, VGSSPLATRENDERER_API)
++	SHADER_PARAMETER_SRV(ByteAddressBuffer, Splats)
++	SHADER_PARAMETER_SRV(StructuredBuffer<uint>, Normals) // the renderer's normal words; a dummy when HasNormals is 0
++	SHADER_PARAMETER(FMatrix44f, FileToComponent) // the asset's axes and units to the component's (row vectors)
++	SHADER_PARAMETER(FVector3f, PositionScale) // the quantized layout's, as the renderer's proxy has them
++	SHADER_PARAMETER(uint32, NumSplats)
++	SHADER_PARAMETER(FVector3f, PositionBias)
++	SHADER_PARAMETER(uint32, Stride)
++	SHADER_PARAMETER(FVector3f, ScaleScale)
++	SHADER_PARAMETER(uint32, BufferFormat) // 0 float records, 1 quantized
++	SHADER_PARAMETER(FVector3f, ScaleBias)
++	SHADER_PARAMETER(float, PointScale)
++	SHADER_PARAMETER(FVector2f, OpacityQuantization) // scale and bias of the quantized opacity
++	SHADER_PARAMETER(float, OpacityScale)
++	SHADER_PARAMETER(float, OpacityCutoff)
++	SHADER_PARAMETER(FVector3f, Center) // of the asset, in its own space: what "inwards" means without a normal's side
++	SHADER_PARAMETER(uint32, HasNormals) // 0 none (shortest axes), 1 with their side, 2 directions only
++	SHADER_PARAMETER(float, Inset) // component units the casters are moved inwards, along their normal
++END_GLOBAL_SHADER_PARAMETER_STRUCT()
++
++/**
++ * Draws splats into shadow depth maps as small opaque octahedra
++ * (Shaders/Private/SplatRenderer/VGSSplatShadowVertexFactory.ush), straight from the
++ * renderer's splat buffer: no memory of their own beyond one shared index buffer of 512 KB.
++ * Supports GPU Scene, so virtual shadow maps take them as they take meshes.
++ *
++ * Its shaders are compiled for Unreal's default material only, which draws them.
++ */
++class VGSSPLATRENDERER_API FVGSSplatShadowVertexFactory : public FVertexFactory
++{
++	DECLARE_VERTEX_FACTORY_TYPE(FVGSSplatShadowVertexFactory);
++
++public:
++	explicit FVGSSplatShadowVertexFactory(ERHIFeatureLevel::Type InFeatureLevel);
++
++	virtual void InitRHI(FRHICommandListBase& RHICmdList) override;
++	virtual void ReleaseRHI() override;
++
++	static bool ShouldCompilePermutation(const FVertexFactoryShaderPermutationParameters& Parameters);
++	static void ModifyCompilationEnvironment(const FVertexFactoryShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment);
++
++	/** Render thread: what the next draws read. Call again when any of it changes. */
++	void SetParameters(FRHICommandListBase& RHICmdList, const FVGSSplatShadowParameters& Parameters);
++
++	/**
++	 * Adds this proxy's splats, NumSplats of them, to a view's shadow casters: a batch of
++	 * draws (one per SplatsPerDraw splats) drawing nothing in the view itself, as long as the
++	 * proxy's view relevance keeps it out of the main and depth passes.
++	 */
++	void AddShadowMeshes(const FPrimitiveSceneProxy& Proxy, int32 ViewIndex, FMeshElementCollector& Collector, bool bReverseCulling) const;
++
++	/** Splats per draw: as many as 16-bit indices reach, six vertices each. */
++	static constexpr uint32 SplatsPerDraw = 10920;
++
++	bool HasParameters() const { return UniformBuffer.IsValid() && NumSplats > 0; }
++
++private:
++	TUniformBufferRef<FVGSSplatShadowParameters> UniformBuffer;
++	uint32 NumSplats = 0;
++
++	friend class FVGSSplatShadowVertexFactoryShaderParameters;
++};
 diff -ruN a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatTransform.h b/VGS/Source/VGSSplatRenderer/Internal/VGSSplatTransform.h
---- a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatTransform.h	2026-11-10 23:41:35.047844700 +0100
+--- a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatTransform.h	2026-11-11 08:50:02.596151500 +0100
 +++ b/VGS/Source/VGSSplatRenderer/Internal/VGSSplatTransform.h	1970-01-01 01:00:00.000000000 +0100
 @@ -1,15 +0,0 @@
 -// VGS: a copy of Epic's GaussianSplat renderer (UE 5.9.0, CL 60351404), renamed by plugins/unreal/tools/copy_epic_splat_renderer.py.
@@ -764,8 +1102,8 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatTransform.h b/VGS/Sourc
 -	VGSSPLATRENDERER_API FMatrix44f GetComponentLocalToWorld(const UGaussianSplatComponent& Component);
 -}
 diff -ruN a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatViewExtension.h b/VGS/Source/VGSSplatRenderer/Internal/VGSSplatViewExtension.h
---- a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatViewExtension.h	2026-11-10 23:41:35.038593200 +0100
-+++ b/VGS/Source/VGSSplatRenderer/Internal/VGSSplatViewExtension.h	2026-11-11 00:50:31.309435900 +0100
+--- a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatViewExtension.h	2026-11-11 08:50:02.600658700 +0100
++++ b/VGS/Source/VGSSplatRenderer/Internal/VGSSplatViewExtension.h	2026-11-11 08:50:02.728324500 +0100
 @@ -9,10 +9,10 @@
  #include "Containers/SortedMap.h"
  #include "Containers/SortedSet.h"
@@ -806,8 +1144,8 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatViewExtension.h b/VGS/S
  };
  
 diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUT.cpp b/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUT.cpp
---- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUT.cpp	2026-11-10 23:41:35.001077700 +0100
-+++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUT.cpp	2026-11-11 00:50:31.313186400 +0100
+--- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUT.cpp	2026-11-11 08:50:02.605669700 +0100
++++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUT.cpp	2026-11-11 08:50:02.740447700 +0100
 @@ -5,11 +5,12 @@
  #include "VGSSplatInverseToneCurveLUT.h"
  #include "VGSSplatInverseToneCurveLUTCache.h"
@@ -1040,8 +1378,8 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUT.cpp 
  	}
  }
 diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUT.h b/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUT.h
---- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUT.h	2026-11-10 23:41:35.005077600 +0100
-+++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUT.h	2026-11-11 00:50:31.310438300 +0100
+--- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUT.h	2026-11-11 08:50:02.609324100 +0100
++++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUT.h	2026-11-11 08:50:02.731355000 +0100
 @@ -15,9 +15,9 @@
  	// Selects which baked inverse-tone-curve LUT to sample; cast from bInvertExpandGamut for now.
  	enum class EInverseToneCurveLUTVariant : uint8
@@ -1055,8 +1393,8 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUT.h b/
  	};
  }
 diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUTCache.h b/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUTCache.h
---- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUTCache.h	2026-11-10 23:41:35.029698600 +0100
-+++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUTCache.h	2026-11-11 00:50:31.310438300 +0100
+--- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUTCache.h	2026-11-11 08:50:02.614343800 +0100
++++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUTCache.h	2026-11-11 08:50:02.732355900 +0100
 @@ -6,35 +6,34 @@
  
  #include "CoreMinimal.h"
@@ -1107,8 +1445,8 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUTCache
  	};
  }
 diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp b/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp
---- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp	2026-11-10 23:41:35.033701300 +0100
-+++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp	2026-11-11 00:50:31.314270300 +0100
+--- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp	2026-11-11 08:50:02.630257000 +0100
++++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp	2026-11-11 08:50:02.745123200 +0100
 @@ -26,6 +26,15 @@
  #include "BlueNoise.h"
  #include "SystemTextures.h"
@@ -1618,8 +1956,8 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp b/VGS
  	FRDGBuilder& GraphBuilder,
  	const FSceneView& View,
 diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRendererModule.cpp b/VGS/Source/VGSSplatRenderer/Private/VGSSplatRendererModule.cpp
---- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRendererModule.cpp	2026-11-10 23:41:35.010595800 +0100
-+++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatRendererModule.cpp	2026-11-11 00:50:31.312180900 +0100
+--- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRendererModule.cpp	2026-11-11 08:50:02.643920200 +0100
++++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatRendererModule.cpp	2026-11-11 08:50:02.734352700 +0100
 @@ -6,10 +6,8 @@
  
  #include "VGSSplatInverseToneCurveLUTCache.h"
@@ -1653,9 +1991,235 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRendererModule.cpp b/VGS
  	InverseToneCurveLUTCache.Reset();
  
  	RenderStats.Reset();
+diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatShadowVertexFactory.cpp b/VGS/Source/VGSSplatRenderer/Private/VGSSplatShadowVertexFactory.cpp
+--- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatShadowVertexFactory.cpp	1970-01-01 01:00:00.000000000 +0100
++++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatShadowVertexFactory.cpp	2026-11-11 08:50:02.741597000 +0100
+@@ -0,0 +1,222 @@
++// VGS: not Epic's. See VGSSplatShadowVertexFactory.h.
++#include "VGSSplatShadowVertexFactory.h"
++
++#include "DataDrivenShaderPlatformInfo.h"
++#include "Materials/Material.h"
++#include "Materials/MaterialRenderProxy.h"
++#include "MaterialDomain.h"
++#include "MeshDrawShaderBindings.h"
++#include "MeshMaterialShader.h"
++#include "PrimitiveSceneProxy.h"
++#include "RenderUtils.h"
++#include "RHIResourceUtils.h"
++#include "Runtime/Launch/Resources/Version.h"
++#include "SceneManagement.h"
++
++IMPLEMENT_GLOBAL_SHADER_PARAMETER_STRUCT(FVGSSplatShadowParameters, "VGSSplatShadow");
++
++namespace
++{
++	/**
++	 * The index buffer every draw shares: SplatsPerDraw octahedra of six vertices (vertex
++	 * 2a + s is the end of axis a, s 0 the + end and 1 the - end) and eight faces, one per
++	 * octant, wound outwards for a right-handed frame of axes.
++	 */
++	class FVGSSplatShadowIndexBuffer : public FIndexBuffer
++	{
++	public:
++		virtual void InitRHI(FRHICommandListBase& RHICmdList) override
++		{
++			TArray<uint16> Indices;
++			Indices.Reserve(FVGSSplatShadowVertexFactory::SplatsPerDraw * 24);
++			for (uint32 Splat = 0; Splat < FVGSSplatShadowVertexFactory::SplatsPerDraw; ++Splat)
++			{
++				const uint32 Base = Splat * 6;
++				for (uint32 Octant = 0; Octant < 8; ++Octant)
++				{
++					const uint32 SX = Octant & 1, SY = (Octant >> 1) & 1, SZ = (Octant >> 2) & 1;
++					const uint16 A = uint16(Base + 0 + SX), B = uint16(Base + 2 + SY), C = uint16(Base + 4 + SZ);
++					// (+x, +y, +z) wound A B C faces outwards; each axis flipped mirrors it.
++					if (((SX + SY + SZ) & 1) == 0)
++					{
++						Indices.Append({ A, B, C });
++					}
++					else
++					{
++						Indices.Append({ A, C, B });
++					}
++				}
++			}
++			IndexBufferRHI = UE::RHIResourceUtils::CreateIndexBufferFromArray(RHICmdList, TEXT("VGSSplatShadow.Indices"), EBufferUsageFlags::Static, MakeConstArrayView(Indices));
++		}
++	};
++	TGlobalResource<FVGSSplatShadowIndexBuffer> GVGSSplatShadowIndexBuffer;
++
++	/** Bound as the normals when there are none: one zero word. */
++	class FVGSSplatShadowNoNormals : public FRenderResource
++	{
++	public:
++		FBufferRHIRef Buffer;
++		FShaderResourceViewRHIRef SRV;
++
++		virtual void InitRHI(FRHICommandListBase& RHICmdList) override
++		{
++			const uint32 Zero[4] = {};
++			Buffer = UE::RHIResourceUtils::CreateBufferFromArray(RHICmdList, TEXT("VGSSplatShadow.NoNormals"),
++				EBufferUsageFlags::Static | EBufferUsageFlags::StructuredBuffer | EBufferUsageFlags::ShaderResource, sizeof(uint32), Zero, sizeof(Zero));
++			SRV = RHICmdList.CreateShaderResourceView(Buffer, FRHIViewDesc::CreateBufferSRV().SetTypeFromBuffer(Buffer));
++		}
++		virtual void ReleaseRHI() override
++		{
++			SRV.SafeRelease();
++			Buffer.SafeRelease();
++		}
++	};
++	TGlobalResource<FVGSSplatShadowNoNormals> GVGSSplatShadowNoNormals;
++}
++
++/** Binds the parameters, and where each draw's batch of splats starts. */
++class FVGSSplatShadowVertexFactoryShaderParameters : public FVertexFactoryShaderParameters
++{
++	DECLARE_TYPE_LAYOUT(FVGSSplatShadowVertexFactoryShaderParameters, NonVirtual);
++
++public:
++	void Bind(const FShaderParameterMap& ParameterMap)
++	{
++		FirstSplat.Bind(ParameterMap, TEXT("VGSShadowFirstSplat"));
++	}
++
++	void GetElementShaderBindings(
++		const FSceneInterface* Scene,
++		const FSceneView* View,
++		const FMeshMaterialShader* Shader,
++		const EVertexInputStreamType InputStreamType,
++		ERHIFeatureLevel::Type FeatureLevel,
++		const FVertexFactory* InVertexFactory,
++		const FMeshBatchElement& BatchElement,
++		FMeshDrawSingleShaderBindings& ShaderBindings,
++		FVertexInputStreamArray& VertexStreams) const
++	{
++		const FVGSSplatShadowVertexFactory* VertexFactory = static_cast<const FVGSSplatShadowVertexFactory*>(InVertexFactory);
++		ShaderBindings.Add(Shader->GetUniformBufferParameter<FVGSSplatShadowParameters>(), VertexFactory->UniformBuffer);
++		ShaderBindings.Add(FirstSplat, uint32(BatchElement.UserIndex));
++	}
++
++private:
++	LAYOUT_FIELD(FShaderParameter, FirstSplat);
++};
++
++IMPLEMENT_TYPE_LAYOUT(FVGSSplatShadowVertexFactoryShaderParameters);
++IMPLEMENT_VERTEX_FACTORY_PARAMETER_TYPE(FVGSSplatShadowVertexFactory, SF_Vertex, FVGSSplatShadowVertexFactoryShaderParameters);
++
++FVGSSplatShadowVertexFactory::FVGSSplatShadowVertexFactory(ERHIFeatureLevel::Type InFeatureLevel)
++	: FVertexFactory(InFeatureLevel)
++{
++}
++
++void FVGSSplatShadowVertexFactory::InitRHI(FRHICommandListBase& RHICmdList)
++{
++	// No vertex data: everything is read from the splat buffer by vertex index. Only the
++	// stream of GPU Scene instance ids, which the engine supplies.
++	FVertexStream NullStream;
++	NullStream.VertexBuffer = nullptr;
++	NullStream.Stride = 0;
++	NullStream.Offset = 0;
++	NullStream.VertexStreamUsage = EVertexStreamUsage::ManualFetch;
++	check(Streams.Num() == 0);
++	Streams.Add(NullStream);
++
++	FVertexDeclarationElementList Elements;
++#if ENGINE_MAJOR_VERSION > 5 || ENGINE_MINOR_VERSION >= 9
++	AddPrimitiveIdStreamElement(EVertexInputStreamType::Default, Elements, 13);
++#else
++	AddPrimitiveIdStreamElement(EVertexInputStreamType::Default, Elements, 13, 13);
++#endif
++	InitDeclaration(Elements);
++}
++
++void FVGSSplatShadowVertexFactory::ReleaseRHI()
++{
++	UniformBuffer.SafeRelease();
++	FVertexFactory::ReleaseRHI();
++}
++
++bool FVGSSplatShadowVertexFactory::ShouldCompilePermutation(const FVertexFactoryShaderPermutationParameters& Parameters)
++{
++	// Drawn with the default material only, on desktop shader models.
++	return Parameters.MaterialParameters.bIsSpecialEngineMaterial
++		&& Parameters.MaterialParameters.MaterialDomain == MD_Surface
++		&& IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5)
++		&& IsPCPlatform(Parameters.Platform);
++}
++
++void FVGSSplatShadowVertexFactory::ModifyCompilationEnvironment(const FVertexFactoryShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
++{
++	FVertexFactory::ModifyCompilationEnvironment(Parameters, OutEnvironment);
++#if ENGINE_MAJOR_VERSION > 5 || ENGINE_MINOR_VERSION >= 9
++	const bool bSceneData = Parameters.VertexFactoryType->SupportsGPUScene(GetMaxSupportedFeatureLevel(Parameters.Platform));
++#else
++	const bool bSceneData = Parameters.VertexFactoryType->SupportsPrimitiveIdStream() && UseGPUScene(Parameters.Platform);
++#endif
++	OutEnvironment.SetDefine(TEXT("VF_SUPPORTS_PRIMITIVE_SCENE_DATA"), bSceneData);
++}
++
++void FVGSSplatShadowVertexFactory::SetParameters(FRHICommandListBase& RHICmdList, const FVGSSplatShadowParameters& Parameters)
++{
++	NumSplats = Parameters.NumSplats;
++	FVGSSplatShadowParameters Bound = Parameters;
++	if (!Bound.Normals)
++	{
++		Bound.Normals = GVGSSplatShadowNoNormals.SRV;
++		Bound.HasNormals = 0;
++	}
++	UniformBuffer = TUniformBufferRef<FVGSSplatShadowParameters>::CreateUniformBufferImmediate(Bound, UniformBuffer_MultiFrame);
++}
++
++void FVGSSplatShadowVertexFactory::AddShadowMeshes(const FPrimitiveSceneProxy& Proxy, int32 ViewIndex, FMeshElementCollector& Collector, bool bReverseCulling) const
++{
++	if (!HasParameters())
++	{
++		return;
++	}
++	const FMaterialRenderProxy* Material = UMaterial::GetDefaultMaterial(MD_Surface)->GetRenderProxy();
++	for (uint32 First = 0; First < NumSplats; First += SplatsPerDraw)
++	{
++		const uint32 Count = FMath::Min(SplatsPerDraw, NumSplats - First);
++		FMeshBatch& Mesh = Collector.AllocateMesh();
++		Mesh.VertexFactory = this;
++		Mesh.MaterialRenderProxy = Material;
++		Mesh.Type = PT_TriangleList;
++		Mesh.CastShadow = true;
++		Mesh.bUseAsOccluder = false;
++		Mesh.bUseForDepthPass = false;
++		Mesh.bUseForMaterial = false; // shadows only: the splat renderer draws them in the view
++		Mesh.ReverseCulling = bReverseCulling;
++		Mesh.bCanApplyViewModeOverrides = false;
++		Mesh.DepthPriorityGroup = SDPG_World;
++
++		FMeshBatchElement& Element = Mesh.Elements[0];
++		Element.IndexBuffer = &GVGSSplatShadowIndexBuffer;
++		Element.FirstIndex = 0;
++		Element.NumPrimitives = Count * 8;
++		Element.MinVertexIndex = 0;
++		Element.MaxVertexIndex = Count * 6 - 1;
++		Element.NumInstances = 1;
++		Element.UserIndex = int32(First);
++		Element.PrimitiveUniformBuffer = Proxy.GetUniformBuffer();
++		Collector.AddMesh(ViewIndex, Mesh);
++	}
++}
++
++// GPU Scene, so that virtual shadow maps draw the splats (they take only such vertex factories).
++#if ENGINE_MAJOR_VERSION > 5 || ENGINE_MINOR_VERSION >= 9
++static constexpr EVertexFactoryFlags GVGSSplatShadowGPUSceneFlag = EVertexFactoryFlags::SupportsGPUSceneNonMobile;
++#else
++static constexpr EVertexFactoryFlags GVGSSplatShadowGPUSceneFlag = EVertexFactoryFlags::SupportsPrimitiveIdStream;
++#endif
++
++IMPLEMENT_VERTEX_FACTORY_TYPE(FVGSSplatShadowVertexFactory, "/Plugin/VGS/Private/SplatRenderer/VGSSplatShadowVertexFactory.ush",
++	EVertexFactoryFlags::UsedWithMaterials
++	| EVertexFactoryFlags::SupportsDynamicLighting
++	| GVGSSplatShadowGPUSceneFlag
++);
 diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatViewExtension.cpp b/VGS/Source/VGSSplatRenderer/Private/VGSSplatViewExtension.cpp
---- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatViewExtension.cpp	2026-11-10 23:41:35.014606300 +0100
-+++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatViewExtension.cpp	2026-11-11 00:50:31.313186400 +0100
+--- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatViewExtension.cpp	2026-11-11 08:50:02.657026600 +0100
++++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatViewExtension.cpp	2026-11-11 08:50:02.739447600 +0100
 @@ -3,9 +3,10 @@
  // Copyright Epic Games, Inc. All Rights Reserved.
  
@@ -1994,8 +2558,8 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatViewExtension.cpp b/VGS/
  void FVGSSplatViewExtension::AddExternalProxySource(FOnCollectVGSSplatProxies::FDelegate&& InSource)
  {
 diff -ruN a/VGS/Source/VGSSplatRenderer/VGSSplatRenderer.Build.cs b/VGS/Source/VGSSplatRenderer/VGSSplatRenderer.Build.cs
---- a/VGS/Source/VGSSplatRenderer/VGSSplatRenderer.Build.cs	2026-11-10 23:41:35.056924900 +0100
-+++ b/VGS/Source/VGSSplatRenderer/VGSSplatRenderer.Build.cs	2026-11-11 00:50:31.314270300 +0100
+--- a/VGS/Source/VGSSplatRenderer/VGSSplatRenderer.Build.cs	2026-11-11 08:50:02.584781000 +0100
++++ b/VGS/Source/VGSSplatRenderer/VGSSplatRenderer.Build.cs	2026-11-11 08:50:02.746129600 +0100
 @@ -10,6 +10,10 @@
  		{
  			PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
