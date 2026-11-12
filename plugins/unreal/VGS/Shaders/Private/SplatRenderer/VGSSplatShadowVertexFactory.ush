@@ -1,7 +1,8 @@
 // VGS: not Epic's. The vertex factory that puts splats into Unreal's shadow depth passes
-// (VGSSplatShadowVertexFactory.cpp): each splat is drawn as an octahedron spanning the
-// ellipse where its opacity reaches VGSSplatShadow.OpacityCutoff, read straight from the
-// renderer's own splat buffer, so casting shadows needs no memory of its own.
+// (VGSSplatShadowVertexFactory.cpp), with r.VGSSplat.Shadow.Method 2: each splat is drawn as
+// an octahedron spanning the ellipse where its opacity reaches a cutoff of its own, drawn at
+// random, read straight from the renderer's own splat buffer, so casting shadows needs no
+// memory of its own.
 //
 // Each caster is moved Inset inwards along its splat's normal: the surface the lit splats
 // write to the GBuffer lies among their own casters, and would shadow itself in blotches
@@ -10,7 +11,7 @@
 //
 // Six vertices per splat (both ends of its three axes) and eight triangles, through an index
 // buffer of a batch of splats: VertexId / 6 is the splat within the batch, VGSShadowFirstSplat
-// where the batch starts. A splat fainter than the cutoff collapses to a point.
+// where the batch starts. A splat fainter than its cutoff collapses to a point.
 
 #include "/Engine/Private/VertexFactoryCommon.ush"
 
@@ -110,7 +111,18 @@ float3 VGSShadowCorner(uint Splat, uint Corner, out float3 Outward)
 	}
 
 	Opacity = saturate(Opacity * VGSSplatShadow.OpacityScale);
-	if (Splat >= VGSSplatShadow.NumSplats || Opacity <= VGSSplatShadow.OpacityCutoff)
+	// Each splat its own cutoff, uniform in (MinCutoff, 1) from a hash of its index. A point at
+	// r then lies inside with probability Opacity * exp(-r^2 / 2) (less the sliver below
+	// MinCutoff), the splat's own opacity there, and a ray crossing several splats passes all of
+	// them with the product of their transmittances: the shadow's density is the splats', on
+	// average over neighbouring splats, instead of all or nothing at one cutoff. MinCutoff
+	// bounds the octahedra at 2.8 standard deviations.
+	const float MinCutoff = 0.02f;
+	uint H = Splat * 747796405u + 2891336453u;
+	H = ((H >> ((H >> 28u) + 4u)) ^ H) * 277803737u;
+	H = (H >> 22u) ^ H;
+	const float Cutoff = lerp(MinCutoff, 1.0f, float(H >> 8) * (1.0f / 16777216.0f));
+	if (Splat >= VGSSplatShadow.NumSplats || Opacity <= Cutoff)
 	{
 		return Position; // collapsed: its eight triangles have no area
 	}
@@ -119,7 +131,7 @@ float3 VGSShadowCorner(uint Splat, uint Corner, out float3 Outward)
 	// the cutoff at r = sqrt(2 ln(Opacity / Cutoff)). An octahedron's outline seen along an
 	// axis is a rhombus, of 2/pi the area of the ellipse through its corners: the corners go
 	// sqrt(pi / 2) further out, so that the two cover the same area.
-	const float Reach = sqrt(2.0f * log(Opacity / VGSSplatShadow.OpacityCutoff)) * 1.2533141f * VGSSplatShadow.PointScale;
+	const float Reach = sqrt(2.0f * log(Opacity / Cutoff)) * 1.2533141f * VGSSplatShadow.PointScale;
 	const uint Axis = Corner >> 1;
 	const float Sign = (Corner & 1u) ? -1.0f : 1.0f;
 	const float3 Scales = Scale;

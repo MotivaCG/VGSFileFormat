@@ -22,6 +22,9 @@ public class VGSStaticEditor : ModuleRules
 			"PropertyEditor",
 			"ToolMenus",
 			"Projects",
+			"MeshDescription", // the shadow proxy mesh
+			"StaticMeshDescription",
+			"PhysicsCore",
 			"Eigen", // the normals estimate (Private/Normals, the VGS editor's)
 			"VGSStaticRuntime"
 		});

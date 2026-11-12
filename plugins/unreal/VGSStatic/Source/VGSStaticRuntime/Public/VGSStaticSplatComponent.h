@@ -5,6 +5,7 @@
 
 #include "VGSStaticSplatComponent.generated.h"
 
+class UStaticMeshComponent;
 class UVGSStaticSplat;
 class FVGSStaticSplatSource;
 
@@ -37,6 +38,25 @@ enum class EVGSStaticLighting : uint8
 	Shaded UMETA(DisplayName = "Shaded"),
 };
 
+/** What casts the actor's shadows. */
+UENUM(BlueprintType)
+enum class EVGSStaticShadowCaster : uint8
+{
+	/**
+	 * The asset's shadow proxy, a hidden mesh of where the splats are opaque made at import:
+	 * shadows from every light (sun, spot, point, rect), solid and clean, as any mesh casts
+	 * them, at no cost per splat. Shaded, the character also shadows itself (an arm on the
+	 * body), its edges a little grainy where the splats and the proxy part. When the asset has
+	 * no proxy, the splats cast as below.
+	 */
+	ProxyMesh UMETA(DisplayName = "Proxy Mesh"),
+	/**
+	 * The splats themselves, as the project's Shadow Method says (Project Settings > Plugins >
+	 * VGSStatic): by default softly, from the sun only, without self-shadowing.
+	 */
+	Splats UMETA(DisplayName = "Splats (project's Shadow Method)"),
+};
+
 /** How splats are blended over each other: the way they were trained. */
 UENUM(BlueprintType)
 enum class EVGSStaticBlendSpace : uint8
@@ -56,8 +76,11 @@ enum class EVGSStaticBlendSpace : uint8
  * shows it, and the renderer culls its clusters against each view. A tick only notices
  * settings changed from Blueprint, and costs nothing when they have not.
  *
- * A primitive only so that the splats cast shadows (Lighting > Cast Shadow): they are drawn
- * into Unreal's shadow depth passes as small opaque shapes, from the same GPU copy.
+ * Its shadows (Lighting > Cast Shadow) come from the asset's shadow proxy, a hidden mesh
+ * attached to it, by default (Shadow Caster); otherwise from the splats, as the project's
+ * Shadow Method says (Project Settings > Plugins > VGSStatic): into the splat renderer's own
+ * shadow map of the directional light, or into Unreal's shadow depth passes as small opaque
+ * shapes, from the same GPU copy. It is a primitive for the latter.
  */
 UCLASS(ClassGroup = Rendering, meta = (BlueprintSpawnableComponent, DisplayName = "VGS Static Splat"),
 	HideCategories = (Mobility, Physics, Collision, LOD, Cooking, Navigation, HLOD, Mobile, RayTracing, VirtualTexture, TextureStreaming, MaterialParameters, PathTracing))
@@ -130,21 +153,29 @@ public:
 	float NormalSmoothing = 2.0f;
 
 	/**
-	 * Where a splat casts a shadow (with Lighting > Cast Shadow on): where its opacity reaches
-	 * this. Lower, faint splats and the fringes of the rest shadow too, and shadows grow; higher,
-	 * only the solid core of each splat does. Changing it costs nothing per frame.
+	 * What casts the actor's shadows: the asset's shadow proxy mesh (every light), or the splats
+	 * (as the project's Shadow Method says). Cast Shadow, under Lighting, turns them off.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS Static|Lighting", meta = (ClampMin = "0.01", ClampMax = "0.99"))
-	float ShadowOpacityCutoff = 0.3f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS Static|Lighting")
+	EVGSStaticShadowCaster ShadowCaster = EVGSStaticShadowCaster::ProxyMesh;
 
 	/**
-	 * How far (cm) each splat's shadow caster is moved inwards, along its normal. The lit
+	 * Only when the splats cast with the project's Shadow Method "Unreal Shadow Maps" (Project
+	 * Settings > Plugins > VGSStatic): how far (cm) each splat's shadow caster is moved inwards,
+	 * along its normal. The lit
 	 * surface lies among its own splats, and without this would shadow itself in blotches
 	 * when Shaded; more than needed thins the shadows of thin parts (fingers, hair). Without
 	 * normals with a side, "inwards" is away from the asset's centre.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS Static|Lighting", meta = (ClampMin = "0.0", UIMax = "10.0", Units = "cm"))
 	float ShadowInset = 3.0f;
+
+	/**
+	 * Blocks everything (BlockAll) with the asset's shadow proxy mesh, as a mesh with its own
+	 * triangles as collision: characters walk around it, traces hit it. Off, nothing collides.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS Static|Collision", meta = (DisplayName = "Proxy Collision"))
+	bool bProxyCollision = false;
 
 	// Grade of the colours, as in an image editor: on their display (sRGB) values, after the
 	// splats are blended and before Intensity and the tone curve. 1 leaves them as captured.
@@ -195,6 +226,15 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "VGS Static")
 	void SetSplat(UVGSStaticSplat* NewSplat);
 
+	/** From a PLY's axes and units to a component's, for an Up Axis and Unit Scale. */
+	static FMatrix FileToComponent(EVGSStaticUpAxis InUpAxis, float InUnitScale);
+
+	/**
+	 * Where the asset's shadow proxy goes in this component: the proxy is made for the default
+	 * Up Axis and Unit Scale (Y up, 100), and turned and scaled for others.
+	 */
+	FTransform ProxyToComponent() const;
+
 	//~ Begin UActorComponent / USceneComponent
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 	virtual void OnRegister() override;
@@ -214,6 +254,10 @@ protected:
 
 private:
 	FMatrix FileToComponent() const;
+	/** Whether the shadow proxy casts this actor's shadows (and the splats do not). */
+	bool ProxyCastsShadows() const;
+	/** Makes, sets up or removes the hidden mesh component that shows the asset's proxy to Unreal. */
+	void UpdateProxyComponent();
 	void RefreshInfo();
 	void PushRenderState(bool bForce);
 	void RegisterSource();
@@ -226,4 +270,10 @@ private:
 	TArray<uint8> SentState;
 	/** What the scene proxy (the shadow casters) was made with: it is made again when this changes. */
 	TArray<uint8> ProxyState;
+	/** Whether the scene proxy was made with the shadow proxy casting instead of the splats. */
+	bool bProxyStateUsesMesh = false;
+
+	/** The asset's shadow proxy in the scene: casts shadows, collides when asked, never drawn. Not saved. */
+	UPROPERTY(Transient, DuplicateTransient)
+	TObjectPtr<UStaticMeshComponent> ProxyComponent;
 };

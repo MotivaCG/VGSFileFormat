@@ -85,6 +85,9 @@ public:
 	bool bNormalsFaceCamera = false;
 	float InverseToneCurveStrength = 0.0f;
 	bool bInvertExpandGamutLUT = true;
+	// VGS CHANGE: casts a shadow (its component's Cast Shadow), for the renderer's own shadow
+	// map (VGSSplatLightShadow.h); Unreal's shadow maps take it through its scene proxy.
+	bool bCastShadow = false;
 
 	bool HasClusters() const { return NumClusters > 0 && ClusterBuffer.IsValid(); }
 	uint32 GetNumLOD0Splats() const { return NumLOD0Splats > 0 ? FMath::Min(NumLOD0Splats, NumSplats) : NumSplats; }

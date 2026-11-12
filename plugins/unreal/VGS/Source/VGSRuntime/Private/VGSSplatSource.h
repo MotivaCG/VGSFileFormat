@@ -2,11 +2,14 @@
 
 #include "CoreMinimal.h"
 #include "VGSSplatRenderPipeline.h" // FVGSSplatRenderProxy (VGSSplatRenderer, the copy of Epic's renderer)
+#include "VGSSplatShadowVertexFactory.h" // VGSSplatRenderer
 #include "RenderGraphResources.h"
 #include "VGSSplatLayout.h"
 
 class FRDGBuilder;
 class FSceneView;
+class FPrimitiveSceneProxy;
+class FMeshElementCollector;
 
 /** One decoded instant, already in the renderer's layout. Built on the game thread, read on the render thread. */
 struct FVGSPackedFrame
@@ -67,6 +70,10 @@ struct FVGSRenderState
 	float Roughness = 0.8f;
 	float Specular = 0.5f;
 	float NormalSmoothing = 2.0f;
+	/** For the shadow casters: capture axes and metres to the component's, and how they cast. */
+	FMatrix44f CaptureToComponent = FMatrix44f::Identity;
+	float ShadowInset = 3.0f; // cm
+	bool bCastShadow = true;
 };
 
 /**
@@ -74,22 +81,33 @@ struct FVGSRenderState
  * component of Epic's behind it, which is what VGSSplat::RegisterExternalProxySource is for
  * (the copy of Epic's GaussianSplat::RegisterExternalProxySource, which Niagara uses).
  *
- * Render thread only, apart from construction. The renderer calls Collect once per view,
- * inside its post-process pass; the first call of a frame uploads a new instant if the game
- * thread sent one, and every call appends the one proxy this object owns. The binding is
- * made with CreateSP and expires with this object, so the component releases its
- * reference on the render thread and nothing has to unregister.
+ * Render thread only, apart from construction. The renderer calls Prepare at the start of
+ * every view family, before shadow depths: the first call of a frame uploads or evaluates a
+ * new instant if the game thread sent one, and points the shadow casters at it. Then Collect
+ * once per view, inside its post-process pass (or the lit pass), which appends the one proxy
+ * this object owns (and uploads, if no Prepare came first). The bindings are made with
+ * CreateSP and expire with this object, so the component releases its reference on the
+ * render thread and nothing has to unregister.
  */
 class FVGSSplatSource : public TSharedFromThis<FVGSSplatSource, ESPMode::ThreadSafe>
 {
 public:
+	~FVGSSplatSource();
+
 	void SetState_RenderThread(const FVGSRenderState& State);
 	void SetFrame_RenderThread(FVGSPackedFrameRef Frame);
 	void SetGpuFrame_RenderThread(FVGSGpuFrameRef Frame);
 
+	void Prepare_RenderThread(FRDGBuilder& GraphBuilder);
 	void Collect_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& View, TArray<const FVGSSplatRenderProxy*>& OutProxies);
 
+	/** The instant's splats as shadow casters, for the component's scene proxy (FVGSCaptureSceneProxy). */
+	void AddShadowMeshes_RenderThread(const FPrimitiveSceneProxy& SceneProxy, const FSceneView& View, int32 ViewIndex, FMeshElementCollector& Collector, bool bReverseCulling) const;
+
 private:
+	/** Uploads or evaluates the instant the game thread sent, if any; true if it did. */
+	bool Advance_RenderThread(FRDGBuilder& GraphBuilder);
+	void UpdateShadows_RenderThread(FRDGBuilder& GraphBuilder);
 	void Upload_RenderThread(FRDGBuilder& GraphBuilder, const FVGSPackedFrameRef& Frame);
 	void Evaluate_RenderThread(FRDGBuilder& GraphBuilder, const FVGSGpuFrameRef& Frame);
 	void UploadChunk_RenderThread(FRDGBuilder& GraphBuilder, const FVGSPackedChunkRef& Chunk);
@@ -117,4 +135,7 @@ private:
 	uint32 UploadedSplats = 0;
 	/** Each record's normal, beside SplatBuffer; null when the capture carries none. */
 	TRefCountPtr<FRDGPooledBuffer> NormalBuffer;
+
+	/** Draws the instant into shadow depth maps; made on the first Prepare. */
+	TUniquePtr<FVGSSplatShadowVertexFactory> ShadowVertexFactory;
 };

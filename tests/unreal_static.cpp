@@ -1,16 +1,21 @@
 // The VGSStatic Unreal plugin's import, without Unreal: VGSStaticPly.h reads a Gaussian splat
 // PLY and builds what the asset keeps (records in cluster order, normal words, clusters);
 // VGSStaticNormals.h works out normals for a PLY that has none (a rig's cameras, or each
-// splat's shortest axis as PGSR, corrected by its neighbours).
+// splat's shortest axis as PGSR, corrected by its neighbours); VGSStaticProxy.h makes the
+// shadow proxy mesh of where the splats are opaque.
 //
 //   vgs_unreal_static                 synthetic PLYs, binary and ASCII: every value read and
 //                                     packed as the renderer reads it, header comments,
-//                                     clusters, normal words; shortest-axis normals on a sphere
-//   vgs_unreal_static some.ply        also reads a real one, builds it, and works out normals
-//                                     both ways (against the file's, if it has them)
+//                                     clusters, normal words; shortest-axis normals on a sphere;
+//                                     the shadow proxy of a sphere of splats and a floater
+//   vgs_unreal_static some.ply        also reads a real one, builds it, works out normals
+//                                     both ways (against the file's, if it has them) and its
+//                                     shadow proxy
+//   vgs_unreal_static some.ply x.obj  ... and writes that proxy to x.obj
 #include "VGSStaticNormals.h"
 #include "VGSStaticNormals.inl"
 #include "VGSStaticPly.h"
+#include "VGSStaticProxy.h"
 
 #include <chrono>
 #include <cmath>
@@ -18,6 +23,7 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <random>
 #include <sstream>
 #include <string>
@@ -349,6 +355,117 @@ void checkAxisNormals() {
   }
 }
 
+// What a proxy mesh is: closed (every edge in an even number of triangles), its signed
+// volume (positive when the triangles face outwards), its vertices' distance from a point.
+struct MeshCheck {
+  bool closed = true;
+  double volume = 0.0;
+};
+
+MeshCheck checkMesh(const vgsstatic::ProxyMesh &m) {
+  MeshCheck r;
+  std::map<std::pair<uint32_t, uint32_t>, int> edges;
+  const auto &P = m.positions;
+  for (size_t t = 0; t < m.indices.size(); t += 3) {
+    const uint32_t i[3] = {m.indices[t], m.indices[t + 1], m.indices[t + 2]};
+    for (int k = 0; k < 3; ++k) ++edges[std::minmax(i[k], i[(k + 1) % 3])];
+    const float *a = &P[size_t(i[0]) * 3], *b = &P[size_t(i[1]) * 3], *c = &P[size_t(i[2]) * 3];
+    r.volume += (double(a[0]) * (double(b[1]) * c[2] - double(b[2]) * c[1]) - double(a[1]) * (double(b[0]) * c[2] - double(b[2]) * c[0]) +
+                 double(a[2]) * (double(b[0]) * c[1] - double(b[1]) * c[0])) / 6.0;
+  }
+  for (const auto &e : edges)
+    if (e.second % 2) r.closed = false;
+  return r;
+}
+
+void writeObj(const vgsstatic::ProxyMesh &m, const char *path) {
+  std::ofstream out(path);
+  for (size_t i = 0; i < m.positions.size(); i += 3) out << "v " << m.positions[i] << ' ' << m.positions[i + 1] << ' ' << m.positions[i + 2] << '\n';
+  for (size_t t = 0; t < m.indices.size(); t += 3) out << "f " << m.indices[t] + 1 << ' ' << m.indices[t + 1] + 1 << ' ' << m.indices[t + 2] + 1 << '\n';
+}
+
+// A hollow sphere of flat splats (radius 0.3, as a character's skin is a shell) and two stray
+// splats: the proxy is one closed surface around the sphere, facing out, its inside
+// filled, the stray left out; with an inset it is that much smaller.
+void checkProxy() {
+  std::mt19937 rng(9);
+  std::normal_distribution<float> g;
+  vgsstatic::Splats s;
+  const float R = 0.3f;
+  for (int i = 0; i < 30000; ++i) {
+    Eigen::Vector3f d(g(rng), g(rng), g(rng));
+    d.normalize();
+    s.positions.insert(s.positions.end(), {R * d.x(), R * d.y(), R * d.z()});
+    const Eigen::Quaternionf q = Eigen::Quaternionf::FromTwoVectors(Eigen::Vector3f::UnitZ(), d);
+    s.rotations.insert(s.rotations.end(), {q.w(), q.x(), q.y(), q.z()});
+    s.scales.insert(s.scales.end(), {0.01f, 0.01f, 0.001f});
+    s.radiance.insert(s.radiance.end(), {0.0f, 0.0f, 0.0f, 0.9f});
+  }
+  // strays, opaque and big enough to be solid on their own: one far off, outside the grid,
+  // and one 7 cm from the sphere, a floater inside it
+  for (float x : {0.6f, 0.37f}) {
+    s.positions.insert(s.positions.end(), {x, 0.0f, 0.0f});
+    s.rotations.insert(s.rotations.end(), {1.0f, 0.0f, 0.0f, 0.0f});
+    s.scales.insert(s.scales.end(), {0.01f, 0.01f, 0.01f});
+    s.radiance.insert(s.radiance.end(), {0.0f, 0.0f, 0.0f, 1.0f});
+  }
+  s.count = s.positions.size() / 3;
+
+  for (float inset : {0.0f, 0.02f}) {
+    vgsstatic::ProxySettings settings;
+    settings.inset = inset;
+    vgsstatic::ProxyMesh m;
+    const auto t = std::chrono::steady_clock::now();
+    const bool built = vgsstatic::buildProxy(s, settings, m);
+    EXPECT(built, "a proxy for the sphere");
+    if (!built) continue;
+    const MeshCheck c = checkMesh(m);
+    double mean = 0.0, far = 0.0, lo = 1e9, hi = 0.0;
+    for (size_t i = 0; i < m.positions.size(); i += 3) {
+      const double r = std::sqrt(double(m.positions[i]) * m.positions[i] + double(m.positions[i + 1]) * m.positions[i + 1] +
+                                 double(m.positions[i + 2]) * m.positions[i + 2]);
+      mean += r;
+      lo = std::min(lo, r);
+      hi = std::max(hi, r);
+      far = std::max(far, double(m.positions[i]));
+    }
+    mean /= double(m.positions.size() / 3);
+    const double expected = R - inset;
+    std::printf("proxy of a sphere, inset %.2f: %zu vertices, %zu triangles, voxel %.3f, grid %dx%dx%d, %zu solid, %zu filled inside, %zu floaters; "
+                "radius mean %.4f (%.4f to %.4f), volume %.4f (sphere %.4f); %.2f s\n",
+                inset, m.positions.size() / 3, m.indices.size() / 3, m.voxel, m.dims[0], m.dims[1], m.dims[2], m.solid, m.insideFilled,
+                m.floaterPieces, mean, lo, hi, c.volume, 4.18879 * expected * expected * expected, seconds(t));
+    EXPECT(c.closed, "the proxy is closed");
+    EXPECT(c.volume > 0.0, "its triangles face outwards (volume %.4f)", c.volume);
+    // The splats are 1 mm thick and the voxels take each splat's nearest point: the surface
+    // lies within about a voxel outside the sphere's.
+    EXPECT(std::fabs(mean - expected) < 0.012, "mean radius %.4f, about %.4f", mean, expected);
+    EXPECT(lo > expected - 0.02 && hi < expected + 0.025, "radius %.4f to %.4f", lo, hi);
+    EXPECT(std::fabs(c.volume / (4.18879 * expected * expected * expected) - 1.0) < 0.2, "the inside is filled: volume %.4f", c.volume);
+    EXPECT(far < 0.34 && m.floaterPieces == 1, "the stray splats are left out (x up to %.3f, %zu floaters)", far, m.floaterPieces);
+  }
+}
+
+// A real PLY's shadow proxy, with the import's settings (a PLY in metres): how long, how big.
+void checkFileProxy(const char *path, const char *obj) {
+  std::ifstream in(path, std::ios::binary);
+  const std::vector<uint8_t> file((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  vgsstatic::Splats s;
+  if (!vgsstatic::readPly(file.data(), file.size(), s).empty()) return;
+  vgsstatic::ProxyMesh m;
+  const auto t = std::chrono::steady_clock::now();
+  const bool built = vgsstatic::buildProxy(s, vgsstatic::ProxySettings(), m);
+  EXPECT(built, "%s: a proxy", path);
+  if (!built) return;
+  const MeshCheck c = checkMesh(m);
+  std::printf("  shadow proxy: %zu vertices, %zu triangles, voxel %.4f, grid %dx%dx%d, %zu solid voxels, %zu filled inside, %zu floaters (%zu voxels), "
+              "%s, volume %.4f; %.2f s\n",
+              m.positions.size() / 3, m.indices.size() / 3, m.voxel, m.dims[0], m.dims[1], m.dims[2], m.solid, m.insideFilled, m.floaterPieces,
+              m.floaterVoxels, c.closed ? "closed" : "NOT closed", c.volume, seconds(t));
+  EXPECT(c.closed && c.volume > 0.0, "%s: the proxy is closed and faces outwards", path);
+  if (obj) writeObj(m, obj);
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -360,7 +477,12 @@ int main(int argc, char **argv) {
   checkRejected();
   checkNormalWords();
   checkAxisNormals();
-  for (int i = 1; i < argc; ++i) checkFile(argv[i]);
+  checkProxy();
+  for (int i = 1; i < argc; ++i)
+    if (std::strstr(argv[i], ".obj") == nullptr) {
+      checkFile(argv[i]);
+      checkFileProxy(argv[i], i + 1 < argc && std::strstr(argv[i + 1], ".obj") ? argv[i + 1] : nullptr);
+    }
   std::printf(failures ? "%d FAILED\n" : "all passed\n", failures);
   return failures ? 1 : 0;
 }

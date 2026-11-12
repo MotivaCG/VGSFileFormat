@@ -70,6 +70,7 @@ void FVGSStaticSplatSource::Collect_RenderThread(FRDGBuilder& GraphBuilder, cons
 	Proxy.Roughness = Look.Roughness;
 	Proxy.Specular = Look.Specular;
 	Proxy.NormalSmoothing = Look.NormalSmoothing;
+	Proxy.bCastShadow = Look.bCastShadow != 0;
 	Proxy.bVisible = true;
 	OutProxies.Add(&Proxy);
 }

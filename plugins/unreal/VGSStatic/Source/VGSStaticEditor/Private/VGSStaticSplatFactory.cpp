@@ -3,10 +3,16 @@
 #include "VGSStaticImportOptions.h"
 #include "VGSStaticNormals.h"
 #include "VGSStaticPly.h"
+#include "VGSStaticProxy.h"
 #include "VGSStaticSplat.h"
+#include "VGSStaticSplatComponent.h"
 
 #include "Editor.h"
 #include "EditorFramework/AssetImportData.h"
+#include "Engine/StaticMesh.h"
+#include "MeshDescription.h"
+#include "PhysicsEngine/BodySetup.h"
+#include "StaticMeshAttributes.h"
 #include "AssetImportTask.h"
 #include "Subsystems/ImportSubsystem.h"
 #include "Framework/Application/SlateApplication.h"
@@ -116,6 +122,120 @@ namespace
 		return Result;
 	}
 
+	/** Lets go of the asset's shadow proxy, if it has one. */
+	void RemoveShadowProxy(UVGSStaticSplat* Asset)
+	{
+		if (UStaticMesh* Old = Asset->ShadowProxy)
+		{
+			// Out of the package, so that its name is free for the next one; components still
+			// showing it let go of it when they see the asset changed.
+			Old->Rename(nullptr, GetTransientPackage(), REN_DontCreateRedirectors | REN_NonTransactional);
+			Asset->ShadowProxy = nullptr;
+		}
+		Asset->ShadowProxyNote.Reset();
+	}
+
+	/**
+	 * Makes the asset's shadow proxy from its splats (VGSStaticProxy.h), as a static mesh in the
+	 * asset's package, or lets go of it when not asked for. The mesh is in the component's
+	 * space at its default axes (Y up, 100 units a file unit); a component with others turns
+	 * it (UVGSStaticSplatComponent::ProxyToComponent). It keeps the whole surface and is
+	 * reduced when built (its LOD 0 Reduction Settings), so that it can be reduced again.
+	 */
+	void BuildShadowProxy(UVGSStaticSplat* Asset, const vgsstatic::Splats& Splats, const UVGSStaticImportOptions& Options)
+	{
+		if (!Options.bMakeShadowProxy)
+		{
+			RemoveShadowProxy(Asset);
+			return;
+		}
+		const double Start = FPlatformTime::Seconds();
+		vgsstatic::ProxySettings Settings;
+		Settings.voxel = FMath::Clamp(Options.ProxyVoxelSize, 0.1f, 20.0f) / 100.0f; // centimetres, for a PLY in metres
+		Settings.opacity = FMath::Clamp(Options.ProxyOpacity, 0.01f, 0.99f);
+		Settings.inset = FMath::Clamp(Options.ProxyInset, 0.0f, 20.0f) / 100.0f;
+		vgsstatic::ProxyMesh Proxy;
+		if (!vgsstatic::buildProxy(Splats, Settings, Proxy))
+		{
+			RemoveShadowProxy(Asset);
+			Asset->ShadowProxyNote = TEXT("None: no splat is opaque enough");
+			return;
+		}
+		const double Made = FPlatformTime::Seconds();
+
+		const FMatrix ToComponent = UVGSStaticSplatComponent::FileToComponent(EVGSStaticUpAxis::Y, 100.0f);
+		const int32 NumVertices = int32(Proxy.positions.size() / 3);
+		const int32 NumTriangles = int32(Proxy.indices.size() / 3);
+		FMeshDescription Description;
+		FStaticMeshAttributes Attributes(Description);
+		Attributes.Register();
+		Description.ReserveNewVertices(NumVertices);
+		Description.ReserveNewVertexInstances(NumTriangles * 3);
+		Description.ReserveNewTriangles(NumTriangles);
+		Description.ReserveNewPolygons(NumTriangles);
+		Description.ReserveNewEdges(NumTriangles * 3 / 2);
+		const FPolygonGroupID Group = Description.CreatePolygonGroup();
+		Attributes.GetPolygonGroupMaterialSlotNames()[Group] = TEXT("Proxy");
+		TVertexAttributesRef<FVector3f> Positions = Attributes.GetVertexPositions();
+		for (int32 V = 0; V < NumVertices; ++V)
+		{
+			const float* P = &Proxy.positions[size_t(V) * 3];
+			Positions[Description.CreateVertex()] = FVector3f(FVector(ToComponent.TransformPosition(FVector(P[0], P[1], P[2]))));
+		}
+		// Counter-clockwise from outside in the file's right-handed axes; the turn into Unreal's
+		// mirrors them, which is what Unreal takes as facing out.
+		for (int32 T = 0; T < NumTriangles; ++T)
+		{
+			TArray<FVertexInstanceID, TInlineAllocator<3>> Corners;
+			for (int32 K = 0; K < 3; ++K)
+			{
+				Corners.Add(Description.CreateVertexInstance(FVertexID(int32(Proxy.indices[size_t(T) * 3 + K]))));
+			}
+			Description.CreateTriangle(Group, Corners);
+		}
+
+		UStaticMesh* Mesh = Asset->ShadowProxy;
+		if (!Mesh)
+		{
+			// An import over an existing asset remakes it in place, its proxy left behind under
+			// the same name: out of the way.
+			if (UStaticMesh* Stale = FindObject<UStaticMesh>(Asset, TEXT("ShadowProxy")))
+			{
+				Stale->Rename(nullptr, GetTransientPackage(), REN_DontCreateRedirectors | REN_NonTransactional);
+			}
+			Mesh = NewObject<UStaticMesh>(Asset, TEXT("ShadowProxy"), RF_Public | RF_Transactional);
+		}
+		Mesh->Modify();
+		Mesh->SetNumSourceModels(1);
+		FStaticMeshSourceModel& SourceModel = Mesh->GetSourceModel(0);
+		SourceModel.BuildSettings.bRecomputeNormals = true;
+		SourceModel.BuildSettings.bRecomputeTangents = false;
+		SourceModel.BuildSettings.bGenerateLightmapUVs = false;
+		SourceModel.BuildSettings.bRemoveDegenerates = true;
+		SourceModel.ReductionSettings.TerminationCriterion = EStaticMeshReductionTerimationCriterion::Triangles;
+		SourceModel.ReductionSettings.PercentTriangles = FMath::Min(1.0f, float(FMath::Max(Options.ProxyTriangles, 500)) / float(NumTriangles));
+		SourceModel.ReductionSettings.PercentVertices = 1.0f;
+		Mesh->CreateMeshDescription(0, MoveTemp(Description));
+		Mesh->CommitMeshDescription(0);
+		Mesh->GetStaticMaterials().Reset();
+		Mesh->GetStaticMaterials().Add(FStaticMaterial(nullptr, TEXT("Proxy"), TEXT("Proxy")));
+		// Collision, when a component asks for it, against the triangles themselves.
+		if (!Mesh->GetBodySetup())
+		{
+			Mesh->CreateBodySetup();
+		}
+		Mesh->GetBodySetup()->CollisionTraceFlag = CTF_UseComplexAsSimple;
+		Mesh->Build(true);
+		Mesh->PostEditChange();
+		Asset->ShadowProxy = Mesh;
+
+		const FStaticMeshRenderData* Render = Mesh->GetRenderData();
+		const int32 Kept = Render && Render->LODResources.Num() ? Render->LODResources[0].GetNumTriangles() : 0;
+		Asset->ShadowProxyNote = FString::Printf(TEXT("%d triangles (reduced from %d), %.2g cm voxels, opacity %.2g, %.2g cm inside the splats; %llu floating pieces left out; %.2f s (%.2f s the mesh, the rest building it)"),
+			Kept, NumTriangles, Proxy.voxel * 100.0f, Settings.opacity, Settings.inset * 100.0f, uint64(Proxy.floaterPieces),
+			FPlatformTime::Seconds() - Start, Made - Start);
+	}
+
 	/** Reads the start of a file: enough for a PLY header. */
 	FString ReadHead(const FString& Filename)
 	{
@@ -211,7 +331,7 @@ UObject* UVGSStaticSplatFactory::FactoryCreateFile(UClass* InClass, UObject* InP
 
 bool UVGSStaticSplatFactory::Build(UVGSStaticSplat* Asset, const FString& Filename, const UVGSStaticImportOptions& Options, FFeedbackContext* Warn)
 {
-	FScopedSlowTask Task(4.0f, FText::Format(LOCTEXT("Importing", "Importing {0}"), FText::FromString(FPaths::GetCleanFilename(Filename))));
+	FScopedSlowTask Task(5.0f, FText::Format(LOCTEXT("Importing", "Importing {0}"), FText::FromString(FPaths::GetCleanFilename(Filename))));
 	Task.MakeDialog();
 
 	const double Start = FPlatformTime::Seconds();
@@ -312,6 +432,15 @@ bool UVGSStaticSplatFactory::Build(UVGSStaticSplat* Asset, const FString& Filena
 	Data->Bounds = FBox3f(FVector3f(Built.boundsMin[0], Built.boundsMin[1], Built.boundsMin[2]), FVector3f(Built.boundsMax[0], Built.boundsMax[1], Built.boundsMax[2]));
 
 	Asset->Modify();
+	Task.EnterProgressFrame(1.0f, LOCTEXT("Proxy", "Making the shadow proxy"));
+	const double ProxyStart = FPlatformTime::Seconds();
+	BuildShadowProxy(Asset, Splats, Options);
+	const double ProxyDone = FPlatformTime::Seconds();
+	Asset->bMakeShadowProxy = Options.bMakeShadowProxy;
+	Asset->ProxyVoxelSize = Options.ProxyVoxelSize;
+	Asset->ProxyOpacity = Options.ProxyOpacity;
+	Asset->ProxyInset = Options.ProxyInset;
+	Asset->ProxyTriangles = Options.ProxyTriangles;
 	Asset->NumSplats = int32(Built.count);
 	Asset->SHDegree = FMath::Max(vgsunreal::shDegree(Built.shCoefficients), 0);
 	Asset->NumClusters = int32(Built.clusters.size());
@@ -330,10 +459,11 @@ bool UVGSStaticSplatFactory::Build(UVGSStaticSplat* Asset, const FString& Filena
 	Asset->MarkPackageDirty();
 
 	const double End = FPlatformTime::Seconds();
-	UE_LOG(LogVGSStatic, Display, TEXT("%s: %d splats (%d dropped), SH degree %d, %d clusters; normals %s%s%s. %.2f s: reading %.2f, normals %.2f, the rest %.2f"),
+	UE_LOG(LogVGSStatic, Display, TEXT("%s: %d splats (%d dropped), SH degree %d, %d clusters; normals %s%s%s; shadow proxy: %s. %.2f s: reading %.2f, normals %.2f, shadow proxy %.2f, the rest %.2f"),
 		*Filename, Asset->NumSplats, Asset->DroppedSplats, Asset->SHDegree, Asset->NumClusters,
 		*StaticEnum<EVGSStaticNormals>()->GetDisplayNameTextByValue(int64(Asset->Normals)).ToString(),
-		Asset->NormalsNote.IsEmpty() ? TEXT("") : TEXT(", "), *Asset->NormalsNote, End - Start, Read - Start, NormalsDone - Read, End - NormalsDone);
+		Asset->NormalsNote.IsEmpty() ? TEXT("") : TEXT(", "), *Asset->NormalsNote, Asset->ShadowProxyNote.IsEmpty() ? TEXT("none") : *Asset->ShadowProxyNote,
+		End - Start, Read - Start, NormalsDone - Read, ProxyDone - ProxyStart, End - NormalsDone - (ProxyDone - ProxyStart));
 	return true;
 }
 
@@ -377,6 +507,11 @@ EReimportResult::Type UVGSStaticSplatFactory::Reimport(UObject* Obj)
 	Options->Neighbours = Asset->NormalNeighbours;
 	Options->RadiusPercent = Asset->NormalRadiusPercent;
 	Options->GpuLayout = Asset->GpuLayout;
+	Options->bMakeShadowProxy = Asset->bMakeShadowProxy;
+	Options->ProxyVoxelSize = Asset->ProxyVoxelSize;
+	Options->ProxyOpacity = Asset->ProxyOpacity;
+	Options->ProxyInset = Asset->ProxyInset;
+	Options->ProxyTriangles = Asset->ProxyTriangles;
 	return Build(Asset, Filename, *Options, GWarn) ? EReimportResult::Succeeded : EReimportResult::Failed;
 }
 

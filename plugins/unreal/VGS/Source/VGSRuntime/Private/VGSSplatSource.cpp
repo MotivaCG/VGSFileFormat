@@ -4,6 +4,7 @@
 #include "VGSStats.h"
 
 #include "GlobalShader.h"
+#include "PrimitiveSceneProxy.h"
 #include "RenderGraphBuilder.h"
 #include "RenderGraphUtils.h"
 #include "SceneView.h"
@@ -141,6 +142,7 @@ void FVGSSplatSource::Evaluate_RenderThread(FRDGBuilder& GraphBuilder, const FVG
 			GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateByteAddressDesc(Capacity), TEXT("VGS.Splats")));
 	}
 	FRDGBufferRef Output = GraphBuilder.RegisterExternalBuffer(SplatBuffer);
+	GraphBuilder.UseInternalAccessMode(Output); // left readable for the shadows by an earlier Prepare of this graph
 	FRDGBufferRef Basis = CreateStructuredBuffer(GraphBuilder, TEXT("VGS.Basis"), sizeof(FVector4f), uint32(FMath::Max(Frame->Basis.Num(), 1)),
 		Frame->Basis.GetData(), uint32(Frame->Basis.Num()) * sizeof(FVector4f));
 
@@ -200,7 +202,9 @@ void FVGSSplatSource::Evaluate_RenderThread(FRDGBuilder& GraphBuilder, const FVG
 			NormalBuffer = GraphBuilder.ConvertToExternalBuffer(
 				GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), Capacity / sizeof(uint32)), TEXT("VGS.SplatNormals")));
 		}
-		P->RWNormalBuffer = GraphBuilder.CreateUAV(GraphBuilder.RegisterExternalBuffer(NormalBuffer));
+		FRDGBufferRef Normals = GraphBuilder.RegisterExternalBuffer(NormalBuffer);
+		GraphBuilder.UseInternalAccessMode(Normals);
+		P->RWNormalBuffer = GraphBuilder.CreateUAV(Normals);
 	}
 	else
 	{
@@ -247,20 +251,110 @@ void FVGSSplatSource::Upload_RenderThread(FRDGBuilder& GraphBuilder, const FVGSP
 	SetLayout(Frame->NumSplats, Frame->SHDegree, Frame->Stride, Frame->bQuantized, &Frame->Quantization);
 }
 
-void FVGSSplatSource::Collect_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& View, TArray<const FVGSSplatRenderProxy*>& OutProxies)
+FVGSSplatSource::~FVGSSplatSource()
 {
-	// Once per frame of the game, not per view: the first view uploads, the rest reuse it.
+	if (ShadowVertexFactory.IsValid())
+	{
+		ShadowVertexFactory->ReleaseResource();
+	}
+}
+
+bool FVGSSplatSource::Advance_RenderThread(FRDGBuilder& GraphBuilder)
+{
+	// Once per frame of the game, not per view family or view: the first uploads, the rest
+	// reuse it.
+	bool bAdvanced = false;
 	if (PendingFrame.IsValid())
 	{
 		FVGSPackedFrameRef Frame = MoveTemp(PendingFrame);
 		PendingFrame.Reset();
 		Upload_RenderThread(GraphBuilder, Frame);
+		bAdvanced = true;
 	}
 	if (PendingGpuFrame.IsValid())
 	{
 		FVGSGpuFrameRef Frame = MoveTemp(PendingGpuFrame);
 		PendingGpuFrame.Reset();
 		Evaluate_RenderThread(GraphBuilder, Frame);
+		bAdvanced = true;
+	}
+	return bAdvanced;
+}
+
+void FVGSSplatSource::Prepare_RenderThread(FRDGBuilder& GraphBuilder)
+{
+	Advance_RenderThread(GraphBuilder);
+	UpdateShadows_RenderThread(GraphBuilder);
+}
+
+void FVGSSplatSource::UpdateShadows_RenderThread(FRDGBuilder& GraphBuilder)
+{
+	if (!State.bVisible || !SplatBuffer.IsValid() || UploadedSplats == 0)
+	{
+		if (ShadowVertexFactory.IsValid())
+		{
+			ShadowVertexFactory->ClearSplats();
+		}
+		return;
+	}
+
+	// Shadow depth passes read the splats outside RDG, through the shadow vertex factory's
+	// uniform buffer: RDG keeps them readable for the rest of the graph (the splat renderer
+	// only reads them too) and leaves them so at its end, for the frames of the game where
+	// the capture does not move on. The next upload or evaluation takes them back.
+	GraphBuilder.UseExternalAccessMode(GraphBuilder.RegisterExternalBuffer(SplatBuffer), ERHIAccess::SRVMask);
+	if (NormalBuffer.IsValid())
+	{
+		GraphBuilder.UseExternalAccessMode(GraphBuilder.RegisterExternalBuffer(NormalBuffer), ERHIAccess::SRVMask);
+	}
+
+	FRHICommandListBase& RHICmdList = GraphBuilder.RHICmdList;
+	if (!ShadowVertexFactory.IsValid())
+	{
+		ShadowVertexFactory = MakeUnique<FVGSSplatShadowVertexFactory>(GMaxRHIFeatureLevel);
+		ShadowVertexFactory->InitResource(RHICmdList);
+	}
+
+	FVGSSplatShadowParameters Parameters;
+	FMemory::Memzero(Parameters);
+	Parameters.Splats = SplatBuffer->GetSRV(RHICmdList, FRHIBufferSRVCreateInfo());
+	Parameters.FileToComponent = State.CaptureToComponent;
+	Parameters.NumSplats = UploadedSplats;
+	Parameters.Stride = Proxy.GpuDataStride;
+	Parameters.BufferFormat = Proxy.BufferFormat;
+	Parameters.PositionScale = Proxy.PositionScale;
+	Parameters.PositionBias = Proxy.PositionBias;
+	Parameters.ScaleScale = Proxy.ScaleScale;
+	Parameters.ScaleBias = Proxy.ScaleBias;
+	Parameters.OpacityQuantization = FVector2f(Proxy.ColorScale.W, Proxy.ColorBias.W);
+	Parameters.PointScale = State.PointScaleFactor;
+	Parameters.OpacityScale = State.OpacityScale;
+	if (NormalBuffer.IsValid())
+	{
+		// The editor's normals, written with their outward side.
+		Parameters.Normals = NormalBuffer->GetSRV(RHICmdList, FRHIBufferSRVCreateInfo());
+		Parameters.HasNormals = 1u;
+	}
+	Parameters.Center = State.LocalBounds.IsValid ? State.LocalBounds.GetCenter() : FVector3f::ZeroVector;
+	Parameters.Inset = FMath::Max(State.ShadowInset, 0.0f);
+	ShadowVertexFactory->SetParameters(RHICmdList, Parameters);
+}
+
+void FVGSSplatSource::AddShadowMeshes_RenderThread(const FPrimitiveSceneProxy& SceneProxy, const FSceneView& View, int32 ViewIndex, FMeshElementCollector& Collector, bool bReverseCulling) const
+{
+	if (ShadowVertexFactory.IsValid())
+	{
+		ShadowVertexFactory->AddShadowMeshes(SceneProxy, View, ViewIndex, Collector, bReverseCulling);
+	}
+}
+
+void FVGSSplatSource::Collect_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& View, TArray<const FVGSSplatRenderProxy*>& OutProxies)
+{
+	// Normally done in Prepare, before the view family; a view the renderer drew without
+	// preparing still shows the latest instant, and the shadows of the next frame cast it.
+	if (Advance_RenderThread(GraphBuilder))
+	{
+		UpdateShadows_RenderThread(GraphBuilder);
 	}
 
 	if (!State.bVisible || !SplatBuffer.IsValid() || UploadedSplats == 0)
@@ -291,6 +385,7 @@ void FVGSSplatSource::Collect_RenderThread(FRDGBuilder& GraphBuilder, const FSce
 	Proxy.Specular = State.Specular;
 	Proxy.NormalSmoothing = State.NormalSmoothing;
 	Proxy.NormalBuffer = NormalBuffer;
+	Proxy.bCastShadow = State.bCastShadow;
 	Proxy.bVisible = true;
 	OutProxies.Add(&Proxy);
 }

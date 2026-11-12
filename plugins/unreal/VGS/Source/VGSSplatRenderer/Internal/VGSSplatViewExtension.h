@@ -28,10 +28,21 @@ namespace VGSSplat { struct FLitTargets; } // VGS CHANGE
  */
 DECLARE_MULTICAST_DELEGATE_ThreeParams(FOnCollectVGSSplatProxies, FRDGBuilder&, const FSceneView&, TArray<const FVGSSplatRenderProxy*>&);
 
+/**
+ * VGS CHANGE: broadcast on the render thread at the start of every view family's rendering
+ * (PreRenderViewFamily_RenderThread), before shadow depths are drawn, so that a source whose
+ * splats change can write them where its shadow casters read them. Bound and expiring as
+ * FOnCollectVGSSplatProxies.
+ */
+DECLARE_MULTICAST_DELEGATE_OneParam(FOnPrepareVGSSplatSources, FRDGBuilder&);
+
 namespace VGSSplat
 {
 	/** Binds a source to the splat renderer of World. Callable from the game thread or a game thread task; no-op for worlds without one. */
 	UE_API void RegisterExternalProxySource(UWorld* World, FOnCollectVGSSplatProxies::FDelegate&& Source);
+
+	/** VGS CHANGE: as above, with what the source does before each view family is drawn. */
+	UE_API void RegisterExternalProxySource(UWorld* World, FOnCollectVGSSplatProxies::FDelegate&& Source, FOnPrepareVGSSplatSources::FDelegate&& Prepare);
 
 	/** The splat renderer of World, or null if it has none. Not exported; callers in other modules use the entry points above. */
 	FVGSSplatViewExtension* FindViewExtension(UWorld* World);
@@ -47,9 +58,13 @@ public:
 	virtual void SubscribeToPostProcessingPass(EPostProcessingPass PassId, const FSceneView& View, FAfterPassCallbackDelegateArray& InOutPassCallbacks, bool bIsPassEnabled) override;
 	// VGS CHANGE: lit proxies go into the GBuffer here, after the base pass and before lighting.
 	virtual void PostRenderBasePassDeferred_RenderThread(FRDGBuilder& GraphBuilder, FSceneView& InView, const FRenderTargetBindingSlots& RenderTargets, TRDGUniformBufferRef<FSceneTextureUniformParameters> SceneTextures) override;
+	// VGS CHANGE: sources prepare their splats here, before shadow depths.
+	virtual void PreRenderViewFamily_RenderThread(FRDGBuilder& GraphBuilder, FSceneViewFamily& InViewFamily) override;
+	// VGS CHANGE: the splats' own shadow of the directional light, onto the lit scene (VGSSplatLightShadow.h).
+	virtual void PrePostProcessPass_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& View, const FPostProcessingInputs& Inputs) override;
 
 	// VGS CHANGE: no RegisterComponent / UnregisterComponent; only external sources are drawn.
-	void AddExternalProxySource(FOnCollectVGSSplatProxies::FDelegate&& InSource);
+	void AddExternalProxySource(FOnCollectVGSSplatProxies::FDelegate&& InSource, FOnPrepareVGSSplatSources::FDelegate&& InPrepare = FOnPrepareVGSSplatSources::FDelegate());
 
 protected:
 	virtual bool IsActiveThisFrame_Internal(const FSceneViewExtensionContext& Context) const override;
@@ -60,6 +75,7 @@ protected:
 
 private:
 	FOnCollectVGSSplatProxies ExternalProxySources_RenderThread;
+	FOnPrepareVGSSplatSources PrepareSources_RenderThread; // VGS CHANGE
 };
 
 #undef UE_API

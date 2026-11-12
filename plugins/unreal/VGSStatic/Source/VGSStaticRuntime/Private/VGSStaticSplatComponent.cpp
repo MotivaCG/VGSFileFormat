@@ -7,7 +7,9 @@
 #include "VGSStaticSplatSource.h"
 #include "VGSStaticSplatViewExtension.h" // VGSStaticSplat::RegisterExternalProxySource (VGSStaticSplatRenderer)
 
+#include "Components/StaticMeshComponent.h"
 #include "Engine/CollisionProfile.h"
+#include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "Misc/App.h"
 #include "RenderingThread.h"
@@ -45,7 +47,6 @@ namespace
 		Settings.FileToComponent = FMatrix44f(FileToComponent);
 		Settings.PointScale = Component.PointScaleFactor;
 		Settings.OpacityScale = Component.OpacityScale;
-		Settings.OpacityCutoff = Component.ShadowOpacityCutoff;
 		Settings.Inset = Component.ShadowInset;
 		return Settings;
 	}
@@ -56,8 +57,11 @@ FPrimitiveSceneProxy* UVGSStaticSplatComponent::CreateSceneProxy()
 	const FVGSStaticShadowSettings Settings = ShadowSettingsOf(FileToComponent(), *this);
 	ProxyState.SetNumUninitialized(sizeof(Settings));
 	FMemory::Memcpy(ProxyState.GetData(), &Settings, sizeof(Settings));
+	// The scene proxy only puts the splats into Unreal's shadow maps: none when the shadow
+	// proxy mesh casts instead.
+	bProxyStateUsesMesh = ProxyCastsShadows();
 	TSharedPtr<FVGSStaticSplatGpu, ESPMode::ThreadSafe> Gpu = Splat ? Splat->GetGpu() : nullptr;
-	if (!Gpu.IsValid() || Gpu->IsEmpty())
+	if (bProxyStateUsesMesh || !Gpu.IsValid() || Gpu->IsEmpty())
 	{
 		return nullptr;
 	}
@@ -109,9 +113,14 @@ void UVGSStaticSplatComponent::RefreshInfo()
 
 FMatrix UVGSStaticSplatComponent::FileToComponent() const
 {
+	return FileToComponent(UpAxis, UnitScale);
+}
+
+FMatrix UVGSStaticSplatComponent::FileToComponent(EVGSStaticUpAxis InUpAxis, float InUnitScale)
+{
 	float Rows[3][3] = {};
-	const float S = UnitScale;
-	if (UpAxis == EVGSStaticUpAxis::YDown)
+	const float S = InUnitScale;
+	if (InUpAxis == EVGSStaticUpAxis::YDown)
 	{
 		Rows[0][1] = S;  // file +X (right)   -> Unreal +Y (right)
 		Rows[1][2] = -S; // file +Y (down)    -> Unreal -Z
@@ -119,7 +128,7 @@ FMatrix UVGSStaticSplatComponent::FileToComponent() const
 	}
 	else
 	{
-		vgsunreal::captureToUnreal(UpAxis == EVGSStaticUpAxis::Z ? vgsunreal::UpAxis::Z : vgsunreal::UpAxis::Y, S, Rows);
+		vgsunreal::captureToUnreal(InUpAxis == EVGSStaticUpAxis::Z ? vgsunreal::UpAxis::Z : vgsunreal::UpAxis::Y, S, Rows);
 	}
 	return FMatrix(
 		FPlane(Rows[0][0], Rows[0][1], Rows[0][2], 0.0),
@@ -128,14 +137,100 @@ FMatrix UVGSStaticSplatComponent::FileToComponent() const
 		FPlane(0.0, 0.0, 0.0, 1.0));
 }
 
+FTransform UVGSStaticSplatComponent::ProxyToComponent() const
+{
+	// Both are mirrors (a right-handed file into Unreal's left-handed axes): what is left is a
+	// turn and a uniform scale, which a transform holds.
+	return FTransform(FileToComponent(EVGSStaticUpAxis::Y, 100.0f).Inverse() * FileToComponent());
+}
+
+bool UVGSStaticSplatComponent::ProxyCastsShadows() const
+{
+	return ShadowCaster == EVGSStaticShadowCaster::ProxyMesh && Splat && Splat->ShadowProxy;
+}
+
+void UVGSStaticSplatComponent::UpdateProxyComponent()
+{
+	UStaticMesh* Mesh = Splat ? Splat->ShadowProxy.Get() : nullptr;
+	const bool bShadows = ProxyCastsShadows() && CastShadow && bCastDynamicShadow;
+	const bool bCollision = Mesh && bProxyCollision;
+	UWorld* World = GetWorld();
+	if (!(bShadows || bCollision) || !IsRegistered() || !World || IsTemplate())
+	{
+		if (ProxyComponent)
+		{
+			ProxyComponent->DestroyComponent();
+			ProxyComponent = nullptr;
+		}
+		return;
+	}
+	if (!ProxyComponent)
+	{
+		AActor* Owner = GetOwner();
+		ProxyComponent = NewObject<UStaticMeshComponent>(Owner ? static_cast<UObject*>(Owner) : static_cast<UObject*>(this), NAME_None,
+			RF_Transient | RF_TextExportTransient | RF_DuplicateTransient);
+		ProxyComponent->SetupAttachment(this);
+		ProxyComponent->SetMobility(EComponentMobility::Movable);
+		// Never drawn, not even into the depth pass: only its shadow and its collision are seen.
+		ProxyComponent->SetRenderInMainPass(false);
+		ProxyComponent->SetRenderInDepthPass(false);
+		ProxyComponent->bCastDynamicShadow = true;
+		ProxyComponent->bCastStaticShadow = false;
+		// It lies a little inside the splats; from both sides it still casts if an inset turned
+		// a thin part inside out.
+		ProxyComponent->bCastShadowAsTwoSided = true;
+		ProxyComponent->bSelectable = false;
+		ProxyComponent->SetCanEverAffectNavigation(false);
+		ProxyComponent->SetGenerateOverlapEvents(false);
+		ProxyComponent->SetStaticMesh(Mesh);
+		ProxyComponent->SetRelativeTransform(ProxyToComponent());
+		ProxyComponent->SetCastShadow(bShadows);
+		ProxyComponent->SetCollisionProfileName(bCollision ? UCollisionProfile::BlockAll_ProfileName : UCollisionProfile::NoCollision_ProfileName);
+		if (Owner)
+		{
+			ProxyComponent->RegisterComponent();
+		}
+		else
+		{
+			ProxyComponent->RegisterComponentWithWorld(World);
+		}
+	}
+	ProxyComponent->SetStaticMesh(Mesh);
+	const FTransform Relative = ProxyToComponent();
+	if (!ProxyComponent->GetRelativeTransform().Equals(Relative))
+	{
+		ProxyComponent->SetRelativeTransform(Relative);
+	}
+	if (ProxyComponent->CastShadow != bShadows)
+	{
+		ProxyComponent->SetCastShadow(bShadows);
+	}
+	const FName Profile = bCollision ? UCollisionProfile::BlockAll_ProfileName : UCollisionProfile::NoCollision_ProfileName;
+	if (ProxyComponent->GetCollisionProfileName() != Profile)
+	{
+		ProxyComponent->SetCollisionProfileName(Profile);
+	}
+	// Hidden with the splats: no shadow then.
+	if (ProxyComponent->GetVisibleFlag() != GetVisibleFlag())
+	{
+		ProxyComponent->SetVisibility(GetVisibleFlag());
+	}
+	if (ProxyComponent->bHiddenInGame != bHiddenInGame)
+	{
+		ProxyComponent->SetHiddenInGame(bHiddenInGame);
+	}
+}
+
 void UVGSStaticSplatComponent::PushRenderState(bool bForce)
 {
 	// The shadow casters' own copy of what shapes them: a new proxy when it changed.
 	const FVGSStaticShadowSettings Shadows = ShadowSettingsOf(FileToComponent(), *this);
-	if (ProxyState.Num() == sizeof(Shadows) && FMemory::Memcmp(ProxyState.GetData(), &Shadows, sizeof(Shadows)) != 0)
+	if ((ProxyState.Num() == sizeof(Shadows) && FMemory::Memcmp(ProxyState.GetData(), &Shadows, sizeof(Shadows)) != 0)
+		|| bProxyStateUsesMesh != ProxyCastsShadows())
 	{
 		MarkRenderStateDirty();
 	}
+	UpdateProxyComponent();
 
 	if (!Source.IsValid())
 	{
@@ -161,6 +256,7 @@ void UVGSStaticSplatComponent::PushRenderState(bool bForce)
 	Look.Roughness = FMath::Clamp(Roughness, 0.0f, 1.0f);
 	Look.Specular = FMath::Clamp(Specular, 0.0f, 1.0f);
 	Look.NormalSmoothing = FMath::Max(NormalSmoothing, 0.0f);
+	Look.bCastShadow = CastShadow && bCastDynamicShadow && !ProxyCastsShadows() ? 1u : 0u;
 	Look.Grade = FVector3f(FMath::Max(Gamma, 0.05f), FMath::Max(Contrast, 0.0f), FMath::Max(Saturation, 0.0f));
 	{
 		// The grade works on sRGB values, so the tint (a linear colour, as the picker gives it)
@@ -251,11 +347,17 @@ void UVGSStaticSplatComponent::OnRegister()
 	Super::OnRegister();
 	RefreshInfo();
 	RegisterSource();
+	UpdateProxyComponent();
 }
 
 void UVGSStaticSplatComponent::OnUnregister()
 {
 	ReleaseSource();
+	if (ProxyComponent)
+	{
+		ProxyComponent->DestroyComponent();
+		ProxyComponent = nullptr;
+	}
 	Super::OnUnregister();
 }
 

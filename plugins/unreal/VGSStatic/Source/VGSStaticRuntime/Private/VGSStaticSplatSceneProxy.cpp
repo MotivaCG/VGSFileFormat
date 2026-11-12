@@ -58,7 +58,6 @@ void FVGSStaticSplatSceneProxy::CreateRenderThreadResources(FRHICommandListBase&
 	}
 	Parameters.PointScale = Settings.PointScale;
 	Parameters.OpacityScale = Settings.OpacityScale;
-	Parameters.OpacityCutoff = FMath::Clamp(Settings.OpacityCutoff, 0.01f, 0.99f);
 	Parameters.Normals = Gpu->NormalsSRV;
 	Parameters.HasNormals = Gpu->NormalsSRV.IsValid() ? (Gpu->bNormalsFaceCamera ? 2u : 1u) : 0u;
 	Parameters.Center = Gpu->Bounds.IsValid ? FVector3f(Gpu->Bounds.GetCenter()) : FVector3f::ZeroVector;
@@ -91,7 +90,7 @@ void FVGSStaticSplatSceneProxy::GetDynamicMeshElements(const TArray<const FScene
 	{
 		if (VisibilityMap & (1u << ViewIndex))
 		{
-			VertexFactory.AddShadowMeshes(*this, ViewIndex, Collector, bReverseCulling);
+			VertexFactory.AddShadowMeshes(*this, *Views[ViewIndex], ViewIndex, Collector, bReverseCulling);
 		}
 	}
 }

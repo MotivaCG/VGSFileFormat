@@ -23,6 +23,8 @@
 #include "SceneRendering.h" // VGS CHANGE: FViewInfo, for the lit pass
 #include "SceneTextures.h" // VGS CHANGE
 #include "Substrate/Substrate.h" // VGS CHANGE: its material buffer, for the lit pass
+#include "VGSSplatLightShadow.h" // VGS CHANGE
+#include "VGSSplatShadowVertexFactory.h" // VGS CHANGE: VGSSplat::GetShadowMethod
 
 #define INVALID_ID 0xFFFFFFFF
 
@@ -286,17 +288,43 @@ void FVGSSplatViewExtension::Render(FRDGBuilder& GraphBuilder, const FSceneView&
 
 // VGS CHANGE: no RegisterComponent / UnregisterComponent (Epic's components are Epic's to draw).
 
-void FVGSSplatViewExtension::AddExternalProxySource(FOnCollectVGSSplatProxies::FDelegate&& InSource)
+void FVGSSplatViewExtension::AddExternalProxySource(FOnCollectVGSSplatProxies::FDelegate&& InSource, FOnPrepareVGSSplatSources::FDelegate&& InPrepare)
 {
 	ENQUEUE_RENDER_COMMAND(FAddVGSSplatExternalProxySource)(
-		[WeakThis = AsWeak(), Source = MoveTemp(InSource)](FRHICommandList&) mutable
+		[WeakThis = AsWeak(), Source = MoveTemp(InSource), Prepare = MoveTemp(InPrepare)](FRHICommandList&) mutable
 		{
 			if (TSharedPtr<FVGSSplatViewExtension> This = StaticCastWeakPtr<FVGSSplatViewExtension>(WeakThis).Pin())
 			{
 				This->ExternalProxySources_RenderThread.Add(MoveTemp(Source));
+				if (Prepare.IsBound()) // VGS CHANGE
+				{
+					This->PrepareSources_RenderThread.Add(MoveTemp(Prepare));
+				}
 			}
 		}
 	);
+}
+
+// VGS CHANGE: before anything of the family is drawn, shadow depths included.
+void FVGSSplatViewExtension::PreRenderViewFamily_RenderThread(FRDGBuilder& GraphBuilder, FSceneViewFamily& InViewFamily)
+{
+	if (VGSSplat::IsEnabled() && InViewFamily.Scene)
+	{
+		PrepareSources_RenderThread.Broadcast(GraphBuilder);
+	}
+}
+
+// VGS CHANGE: with r.VGSSplat.Shadow.Method 0 or 1, the casting proxies' own shadow map of the
+// directional light, taken off the lit scene before post-processing.
+void FVGSSplatViewExtension::PrePostProcessPass_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& View, const FPostProcessingInputs& Inputs)
+{
+	if (!VGSSplat::IsEnabled() || !VGSSplat::UsesSplatShadowMap() || View.Family == nullptr || View.Family->Scene == nullptr)
+	{
+		return;
+	}
+	TArray<const FVGSSplatRenderProxy*> Proxies;
+	ExternalProxySources_RenderThread.Broadcast(GraphBuilder, View, Proxies);
+	VGSSplat::RenderLightShadow(GraphBuilder, View, Inputs, Proxies);
 }
 
 FVGSSplatViewExtension* VGSSplat::FindViewExtension(UWorld* World)
@@ -310,5 +338,14 @@ void VGSSplat::RegisterExternalProxySource(UWorld* World, FOnCollectVGSSplatProx
 	if (FVGSSplatViewExtension* Extension = FindViewExtension(World))
 	{
 		Extension->AddExternalProxySource(MoveTemp(Source));
+	}
+}
+
+// VGS CHANGE
+void VGSSplat::RegisterExternalProxySource(UWorld* World, FOnCollectVGSSplatProxies::FDelegate&& Source, FOnPrepareVGSSplatSources::FDelegate&& Prepare)
+{
+	if (FVGSSplatViewExtension* Extension = FindViewExtension(World))
+	{
+		Extension->AddExternalProxySource(MoveTemp(Source), MoveTemp(Prepare));
 	}
 }

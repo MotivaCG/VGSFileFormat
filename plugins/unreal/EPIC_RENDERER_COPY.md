@@ -151,10 +151,30 @@ All marked `VGS CHANGE`; `tools/vgs_renderer_changes.patch` is the exact diff.
 14. **Shadow casters** (VGS's own files in the copy's folders:
     `Internal/VGSSplatShadowVertexFactory.h`, `Private/VGSSplatShadowVertexFactory.cpp`,
     `Shaders/Private/SplatRenderer/VGSSplatShadowVertexFactory.ush`). A vertex factory that
-    draws a splat buffer into Unreal's shadow depth passes, an octahedron per splat, for
-    primitives whose scene proxy adds its meshes (VGSStatic's). In the renderer module
-    because vertex factory types have to be registered before shaders are compiled
-    (PostConfigInit). Nothing of Epic's renderer changed for it.
+    draws a splat buffer into Unreal's shadow depth passes, an octahedron per splat at a
+    random opacity cutoff, for primitives whose scene proxy adds its meshes (the capture's and
+    VGSStatic's), with `r.VGSSplat.Shadow.Method` 2, or 1 for every light but the main
+    directional one (whose shadow views it recognises by their direction). In the renderer
+    module because vertex
+    factory types have to be registered before shaders are compiled (PostConfigInit). Its
+    parameters can change every frame (updated in place).
+15. **Sources prepared before shadows** (`VGSSplatViewExtension.h/.cpp`):
+    `FOnPrepareVGSSplatSources`, broadcast from `PreRenderViewFamily_RenderThread`, and a
+    `RegisterExternalProxySource` that takes it besides the collect delegate. A capture
+    uploads or evaluates its instant there, before shadow depth passes, so that its shadows
+    cast the frame on screen; Epic's sources are collected only inside the view's pass.
+16. **The splats' own shadow map** (VGS's own files: `Internal/VGSSplatLightShadow.h`,
+    `Private/VGSSplatLightShadow.cpp`, `Shaders/Private/SplatRenderer/VGSSplatLightShadow.usf`;
+    `FVGSSplatRenderProxy::bCastShadow`; `PrePostProcessPass_RenderThread` in the view
+    extension). With `r.VGSSplat.Shadow.Method` 0 (the default) or 1: the casting proxies
+    drawn from the main directional light (`VGSSplat::FindMainLight`: the atmosphere's sun,
+    otherwise the brightest that casts shadows) as Gaussians into an order-independent map (transmittance,
+    nearest and farthest depth), and that light's direct contribution, recomputed from the
+    GBuffer, taken off the lit scene behind them, before post-processing.
+17. **Project settings** (`Private/VGSSplatSettings.h/.cpp`, a `UDeveloperSettings`; the
+    `DeveloperSettings` module in the build rules): the shadow method, self-shadowing and the
+    map's texel size, softness and bias, under Project Settings > Plugins > the plugin's
+    name, written to the `r.VGSSplat.Shadow.*` console variables.
 
 ### The LUTs
 

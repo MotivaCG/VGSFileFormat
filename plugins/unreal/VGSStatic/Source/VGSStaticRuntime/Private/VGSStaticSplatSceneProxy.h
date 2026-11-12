@@ -13,7 +13,6 @@ struct FVGSStaticShadowSettings
 	FMatrix44f FileToComponent = FMatrix44f::Identity;
 	float PointScale = 1.0f;
 	float OpacityScale = 1.0f;
-	float OpacityCutoff = 0.5f;
 	float Inset = 0.0f; // component units
 };
 

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Components/SceneComponent.h"
+#include "Components/PrimitiveComponent.h"
 #include "CoreMinimal.h"
 #include "Engine/EngineTypes.h"
 
@@ -102,15 +102,20 @@ enum class EVGSGpuLayout : uint8
  * The capture streams from its .vgs file: vgsbridge decodes it on threads of its own, ahead
  * of the time this component will ask for, and every new instant is uploaded to the GPU and
  * handed to the renderer as one more source of splats. The splats are drawn as the
- * renderer draws any splat: lit by nothing, casting no shadow, composited before depth of
- * field (see plugins/unreal/README.md).
+ * renderer draws any splat, composited before depth of field, or lit by the scene (Lighting
+ * Shaded; see plugins/unreal/README.md).
+ *
+ * A primitive only so that the splats cast shadows (Lighting > Cast Shadow), as the project's
+ * Shadow Method says (Project Settings > Plugins > VGS): by default into the splat renderer's
+ * own shadow map of the directional light; or each instant into Unreal's shadow depth passes
+ * as small opaque shapes, from the same GPU buffer.
  *
  * Time runs with the world's (so it pauses and dilates with it), snapped to the capture's
  * own frames, which is what lets the bridge have each frame decoded before it is due.
  */
 UCLASS(ClassGroup = Rendering, meta = (BlueprintSpawnableComponent, DisplayName = "VGS Capture"),
-	HideCategories = (Mobility, Physics, Collision, Lighting, LOD, Cooking, Navigation))
-class VGSRUNTIME_API UVGSCaptureComponent : public USceneComponent
+	HideCategories = (Mobility, Physics, Collision, LOD, Cooking, Navigation, HLOD, Mobile, RayTracing, VirtualTexture, TextureStreaming, MaterialParameters, PathTracing))
+class VGSRUNTIME_API UVGSCaptureComponent : public UPrimitiveComponent
 {
 	GENERATED_BODY()
 
@@ -220,6 +225,16 @@ public:
 		meta = (ClampMin = "0.0", UIMax = "10.0", Units = "cm", EditCondition = "Lighting == EVGSLighting::Shaded", EditConditionHides))
 	float NormalSmoothing = 2.0f;
 
+	/**
+	 * Only with the project's Shadow Method "Unreal Shadow Maps" (Project Settings > Plugins >
+	 * VGS): how far (cm) each splat's shadow caster is moved inwards, along its normal. The lit
+	 * surface lies among its own splats, and without this would shadow itself in blotches
+	 * when Shaded; more than needed thins the shadows of thin parts (fingers, hair). Without
+	 * normals, "inwards" is away from the capture's centre.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Lighting", meta = (ClampMin = "0.0", UIMax = "10.0", Units = "cm"))
+	float ShadowInset = 3.0f;
+
 	// Grade of the capture's colours, as in an image editor: on its display (sRGB) values,
 	// after the splats are blended and before Intensity and the tone curve. 1 leaves them as
 	// captured. A few operations per pixel in the composite, which runs anyway.
@@ -318,7 +333,7 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "VGS")
 	void Reload();
 
-	//~ Begin UActorComponent / USceneComponent
+	//~ Begin UActorComponent / USceneComponent / UPrimitiveComponent
 	virtual void BeginPlay() override;
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 	virtual void OnRegister() override;
@@ -326,10 +341,11 @@ public:
 	virtual void OnComponentDestroyed(bool bDestroyingHierarchy) override;
 	virtual void BeginDestroy() override;
 	virtual FBoxSphereBounds CalcBounds(const FTransform& LocalToWorld) const override;
+	virtual FPrimitiveSceneProxy* CreateSceneProxy() override;
 #if WITH_EDITOR
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 #endif
-	//~ End UActorComponent / USceneComponent
+	//~ End UActorComponent / USceneComponent / UPrimitiveComponent
 
 protected:
 	virtual void OnUpdateTransform(EUpdateTransformFlags UpdateTransformFlags, ETeleportType Teleport) override;

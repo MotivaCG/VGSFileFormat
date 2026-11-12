@@ -30,6 +30,7 @@ struct FVGSStaticLook
 	float Roughness;
 	float Specular;
 	float NormalSmoothing;
+	uint32 bCastShadow;
 };
 
 /**

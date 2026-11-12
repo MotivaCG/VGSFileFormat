@@ -12,8 +12,8 @@ and lighting by the scene, which Epic's own lacks. **The copy is Epic's code and
 taken again for every engine version: [EPIC_RENDERER_COPY.md](EPIC_RENDERER_COPY.md).** It
 no longer needs Epic's GaussianSplat plugin (which only 5.9 has): both plugins build against
 Unreal 5.8 and 5.9 (run and tested in 5.9; 5.6 and 5.7 still to be built). Captures play,
-and can be lit by the scene (*Lighting* Shaded); static characters cast shadows, captures do
-not yet. Sixteen captures at
+can be lit by the scene (*Lighting* Shaded) and cast shadows, as static characters do.
+Sixteen captures at
 once keep their 30 fps — see *State* below.
 
 ```
@@ -37,7 +37,8 @@ VGSStatic/                   the static plugin's own files (the shared ones are 
   Source/VGSStaticRuntime/   the asset, its GPU copy, the component and actor; VGSStaticPly.h
                              (plain C++: reading a PLY, clusters, normal words)
   Source/VGSStaticEditor/    the PLY importer and its dialog, reimport, placing the asset;
-                             VGSStaticNormals.h/.inl (normals for PLYs without them)
+                             VGSStaticNormals.h/.inl (normals for PLYs without them);
+                             VGSStaticProxy.h (plain C++: the shadow proxy mesh)
 CMakeLists.txt               assembles both plugins (VGS with the bridge beside it) and their zips
 EPIC_RENDERER_COPY.md        what of Epic's is copied, what changed, how to update it
 tools/                       the copy script, the patch of VGS's changes to the copy, the
@@ -150,6 +151,59 @@ only its own sources; Epic's plugin, where it is enabled, draws its assets untou
   Substrate's blendable GBuffer through `EncodeGBuffer`. Lighting costs about 0.55 ms a frame at
   1920x1080 on an RTX 4070 (one paused capture of 535k splats: 5.65 ms self-illuminated, 6.20
   ms shaded).
+- **Shadows** (*Lighting* > *Cast Shadow* per actor, on by default, shaded or
+  self-illuminated). How, for the whole project: Project Settings > Plugins > **VGS**
+  (`UVGSSplatSettings`, written to the `r.VGSSplat.Shadow.*` console variables; VGSStatic has
+  the same page, *VGSStatic*, for its own actors):
+  Every light lights a Shaded actor whichever the method, and every mesh's shadow falls on
+  it; the method is only about the shadows the splats cast. In the order the settings list
+  them (`r.VGSSplat.Shadow.Method` 0 to 3):
+  - *Splat Shadow Map (sun only)*, the default (`VGSSplatLightShadow.cpp/.usf`): the casting
+    actors are drawn from the main directional light (`VGSSplat::FindMainLight`: of the
+    directional lights that cast shadows, the one marked *Atmosphere Sun Light* with index 0,
+    otherwise the brightest; not Unreal's own pick, which is whichever was added first) into
+    a shadow map of the splats' own, fitted to them, as
+    Gaussians with their real opacity: transmittance multiplied, and the nearest and farthest
+    depth along the light, so no sorting. Before post-processing, the light's direct
+    contribution (diffuse and GGX specular from the GBuffer, over the atmosphere's
+    transmittance) is taken off every pixel behind the splats, in proportion to what they
+    block, with a penumbra that widens with the distance behind them by the light's *Source
+    Angle* (*Shadow Softness*). A pixel within the splats' depth is the capture itself: left
+    alone unless *Self Shadowing* is on, so lit characters show no blotches. *Shadow Texel
+    Size* 0.5 cm (up to 2048 texels a side). Cost on the carrito playing (283k splats, 1280x720):
+    the map 0.98 ms at 0.5 cm (640x640), 0.60 ms at 1 cm, about 0.4 ms of it per splat
+    (vertex work) and the rest fill; the composite 0.03 ms, whatever the screen resolution.
+    Only that one light; spot, point and rect lights get no splat shadows. Where the splats'
+    shadow falls on another object's shadow the pixel ends darker than the skylight alone
+    leaves it (the direct light taken off was not there). With Substrate's own material
+    buffer, the colour is darkened by a fixed 60 % instead.
+  - *Splat Shadow Map (sun) + Unreal Shadow Maps (other lights)*: both, the second for every
+    light but the main one. A shadow depth view looks along its light
+    (`FProjectedShadowInfo::ModifyViewForShadow` turns it so, for billboards), so the
+    casters leave out the views looking along the main light; with the sun alone the image is
+    the first method's (mean difference 0.24 of 255). Level `/Game/Stress/Lit` (a red point
+    light beside the sun) shows the point light's shadow added.
+  - *Unreal Shadow Maps (all lights)*: the component is a primitive whose only part in
+    Unreal's scene is its shadow casters, drawn as VGSStatic's are (below, with the same
+    *Shadow Inset*), from the instant on the GPU. For the shadows to cast the frame on screen,
+    the instant is uploaded or evaluated before the frame's shadow depths, when the renderer
+    starts each view family (`FOnPrepareVGSSplatSources`, `FVGSSplatSource::Prepare_RenderThread`),
+    rather than in the view's own pass; RDG keeps the buffer readable from then on
+    (`UseExternalAccessMode`), since the shadow vertex factory reads it outside the graph.
+    Virtual shadow maps cache nothing of it (*Shadow Cache Invalidation Behavior* Always): it
+    changes every frame. Grainy and frayed, and Shaded characters shadow themselves in
+    blotches. Cost on the carrito playing (288k splats, one sun, 1280x720): ShadowDepths 0.15
+    to 0.57 ms with virtual shadow maps, 0.17 to 0.80 ms with cascades (9M triangles over the
+    cascades).
+  - *No Shadows*.
+
+  Gracia (docs/research/gracia-20260521) casts its own shadows from one directional light
+  only, with up to four cascades; nothing of it was found for spot or point lights.
+
+  Levels `/Game/Stress/Shadow` (and `_Off`, `_Self`, `_Play`); the method can be tried in
+  `-ExecCmds` with `r.VGSSplat.Shadow.Method 0/1/2/3`. EEVEE (Blender's splats) does the second
+  way with a per-pixel random cutoff, which its accumulation of many samples smooths;
+  Unreal's shadow maps keep no history, so it stays grainy here.
 
 - **Normals in the details panel**: *Normals* (under *Capture*) says whether the capture has
   them (on the GPU path), or not, or that they are not used on the CPU path.
@@ -188,20 +242,50 @@ many splats, the SH degree, and whether it has normals and where they come from.
   SMNForge and the VGS editor use the same estimate and the same cameras all around, for
   captures none of our rigs recorded and when a rig's cameras see less than half of them
   (`gaussiannormals::estimateNormals`; the editor's export settings have *Rig* None of ours).
-- **Shadows.** The component is a primitive whose only part in Unreal's scene is its shadow
-  casters (*Lighting* > *Cast Shadow*, on by default; off per actor costs nothing): in shadow
-  depth passes every splat is drawn as a small opaque octahedron spanning the ellipse where
-  its opacity reaches *Shadow Opacity Cutoff* (0.3), read straight from the asset's GPU
-  copy by `FVGSSplatShadowVertexFactory` (VGS's own, in the renderer copy;
-  `Shaders/Private/SplatRenderer/VGSSplatShadowVertexFactory.ush`), with Unreal's default
-  material. It supports GPU Scene, so virtual shadow maps take it as they take meshes, and
-  every light that casts shadows does: directional (cascaded or virtual), spot, point. Shaded,
-  the character also shadows itself (an arm on the torso); each caster is moved *Shadow
-  Inset* (3 cm) inwards along its normal, or the lit surface, which lies among its own
-  splats, shadows itself in blotches. Memory: one shared index buffer of 512 KB, nothing per
-  asset. Cost on andreavictor (221k splats, one sun, 1280x720): ShadowDepths 0.15 to 0.57 ms
-  with virtual shadow maps, 0.12 to 0.20 ms with cascades (1.8M triangles in one cascade).
-  Levels `/Game/Static/Static_Shadow` (and `_Off`, `_Self`, `_Close`, `_Close_Off`).
+- **Shadow proxy** (the default *Shadow Caster*). The import makes a closed mesh of where the
+  splats are opaque (`VGSStaticProxy.h`, plain C++, checked by `tests/unreal_static.cpp`) and
+  keeps it in the asset as a static mesh (*Shadow Proxy* > *Mesh*, in the asset's package).
+  Each component attaches a hidden `UStaticMeshComponent` with it (transient, made on
+  register): never drawn, not even into depth, it casts the character's shadows from every
+  light as any mesh does, and with *Proxy Collision* it blocks everything (its triangles as
+  collision). The splats then cast nothing themselves.
+  - Made as PlayCanvas splat-transform's collision mesh starts (MIT; its GPU voxelisation and
+    block clean-up, ported to the CPU on a dense grid): every 1 cm voxel adds up its splats'
+    opacity·exp(-d²/2) at its point nearest each one, solid where 1 - exp(-sum) reaches 0.3;
+    lone voxels go and single holes close. Then this plugin's: pieces under 0.5 % of the
+    largest go (floaters), what the outside cannot reach is filled (the splats are a shell),
+    surface nets on the occupancy blurred over 3x3x3 voxels, Taubin smoothing, and 2 cm
+    inwards along the normals so that the lit splats are not inside their own caster.
+  - On andreavictor (221k splats): 117,000 triangles in 0.3 s, reduced by Unreal to 20,000
+    when the mesh is built (its LOD 0 *Reduction Settings*, about 10 s on import). gs2mesh
+    (`3dgs2mesh/gs2mesh_cpp`) with only the PLY takes about 60 s: it renders about a thousand
+    views of the splats twice and fuses each into a TSDF, then reduces and unwraps, for a
+    textured millimetre surface; splat-transform's command line about 1.5 s.
+  - Import options *Shadow Proxy* (voxel size, opacity, inset, triangles; centimetres for a
+    PLY in metres), kept by the asset for reimport. The mesh is made for the default *Up Axis*
+    and *Unit Scale*; a component with others turns and scales it (`ProxyToComponent`).
+  - Seen: floor shadows like the splats' own shadow map; every light's (level
+    `/Game/Static/Static_Shadow_Point`, the sun and an orange point light); Shaded, the
+    character also shadows itself, with somewhat grainy edges where the splats lie in front of
+    and behind the proxy. Collision: 14 of 15 traces through the character hit with *Proxy
+    Collision*, none without.
+- **Shadows** from the splats (*Shadow Caster* *Splats*, or an asset without a proxy), as
+  captures' (above; Project Settings > Plugins > *VGSStatic*), by default in
+  the splats' own shadow map. With *Unreal Shadow Maps* the component is a primitive whose
+  only part in Unreal's scene is its shadow casters (*Lighting* > *Cast Shadow*, on by
+  default; off per actor costs nothing): in shadow depth passes every splat is drawn as a
+  small opaque octahedron spanning the ellipse where its opacity reaches a cutoff of its own,
+  drawn at random (so that on average the shadow is as dense as the splats), read straight
+  from the asset's GPU copy by `FVGSSplatShadowVertexFactory` (VGS's own, in the renderer
+  copy; `Shaders/Private/SplatRenderer/VGSSplatShadowVertexFactory.ush`), with Unreal's
+  default material. It supports GPU Scene, so virtual shadow maps take it as they take
+  meshes, and every light that casts shadows does: directional (cascaded or virtual), spot,
+  point. Shaded, the character also shadows itself (an arm on the torso); each caster is
+  moved *Shadow Inset* (3 cm) inwards along its normal, or the lit surface, which lies among
+  its own splats, shadows itself in blotches. Memory: one shared index buffer of 512 KB,
+  nothing per asset. Cost on andreavictor (221k splats, one sun, 1280x720): ShadowDepths 0.15
+  to 0.57 ms with virtual shadow maps, 0.12 to 0.20 ms with cascades (1.8M triangles in one
+  cascade). Levels `/Game/Static/Static_Shadow` (and `_Off`, `_Self`, `_Close`, `_Close_Off`).
 - **Static, so:** uploaded once per asset and shared by every actor showing it; the splats
   are ordered along a Morton curve and cut into clusters of 64 that the renderer culls
   against each view (Epic's cluster record, one level of detail); no tick work beyond
@@ -317,12 +401,12 @@ What to check, in this order:
 From Epic's renderer, which the copy keeps (`VGSSplatRenderPipeline.cpp`,
 `VGSSplatViewExtension.cpp`):
 
-- Self-illuminated (the default), no lighting and no shadows, cast or received; no fog,
+- Self-illuminated (the default), no lighting and no shadows received (they are cast); no fog,
   Lumen or ray tracing. Splats are composited over translucency, occluded only by opaque
   depth.
 - Shaded: lit as an opaque surface, so faint splats, hair and edges are cut where they
-  cover half a pixel rather than blended, and a capture casts no shadow (it is not in shadow
-  depth passes; static characters are: see *VGSStatic*). The
+  cover half a pixel rather than blended, and its shadows are splat-shaped (see *Known
+  limits*). The
   studio's light is already in its colours, so it shows lit twice. Needs the deferred
   renderer (with or without Substrate), hardware rasterization and vertex shaders that read buffers
   (`r.VGSSplat.*` defaults on desktop GPUs); elsewhere a Shaded capture is drawn
@@ -351,9 +435,14 @@ From Epic's renderer, which the copy keeps (`VGSSplatRenderPipeline.cpp`,
   `bTreatAsEngineModule`. Epic's plugin is experimental in 5.9 and may change between engine
   versions, and the copy with it (EPIC_RENDERER_COPY.md).
 
-- Static characters' shadows are splat-shaped: faint splats below *Shadow Opacity Cutoff*
-  cast none, so hair and edges shadow thinner than they look, and a character shadowing
-  another shows dappled where the splats leave gaps.
+- Shadows (captures' and static characters'): the default *Splat Shadow Map* is for the
+  main directional light only, and is not seen by translucency, fog or Lumen; *Unreal Shadow
+  Maps* (alone, or for the other lights) reach every light but are grainy, and a character
+  shadowing another shows dappled where the splats leave gaps.
+- A static character's shadow proxy cannot leave out its own splats: Shaded, it always
+  shadows itself (Unreal has no per-receiver exclusion), with grainy edges. Thin parts
+  thinner than twice the inset (2 cm) cast from a surface turned inside out. Its sizes assume
+  a PLY in metres.
 - Static characters lit by the scene: thin, faint splats where a shoe meets the floor (the
   scan's contact smear) are written opaque with sideways normals and show as a dark wedge at
   the toe (andreavictor), whichever normals; not addressed yet.

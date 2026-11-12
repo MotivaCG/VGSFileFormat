@@ -12,8 +12,26 @@
 #include "RHIResourceUtils.h"
 #include "Runtime/Launch/Resources/Version.h"
 #include "SceneManagement.h"
+#include "SceneInterface.h"
+#include "SceneView.h"
+#include "VGSSplatLightShadow.h"
 
 IMPLEMENT_GLOBAL_SHADER_PARAMETER_STRUCT(FVGSSplatShadowParameters, "VGSSplatShadow");
+
+static TAutoConsoleVariable<int32> CVarVGSSplatShadowMethod(
+	TEXT("r.VGSSplat.Shadow.Method"),
+	0,
+	TEXT("How splats cast shadows (the project's settings set it).\n")
+	TEXT("0: the splat renderer's own shadow map of the main directional light, composited onto the lit scene (default).\n")
+	TEXT("1: that for the main directional light, and Unreal's shadow maps (as 2) for every other light.\n")
+	TEXT("2: in Unreal's shadow maps, for every light: each splat an opaque octahedron where its opacity reaches a cutoff of its own, drawn at random.\n")
+	TEXT("3: none."),
+	ECVF_RenderThreadSafe);
+
+VGSSplat::EShadowMethod VGSSplat::GetShadowMethod()
+{
+	return EShadowMethod(FMath::Clamp(CVarVGSSplatShadowMethod.GetValueOnAnyThread(), 0, 3));
+}
 
 namespace
 {
@@ -170,14 +188,40 @@ void FVGSSplatShadowVertexFactory::SetParameters(FRHICommandListBase& RHICmdList
 		Bound.Normals = GVGSSplatShadowNoNormals.SRV;
 		Bound.HasNormals = 0;
 	}
-	UniformBuffer = TUniformBufferRef<FVGSSplatShadowParameters>::CreateUniformBufferImmediate(Bound, UniformBuffer_MultiFrame);
+	if (UniformBuffer.IsValid())
+	{
+		// In place, in order with the commands already recorded: draws of earlier frames keep
+		// what they were given, and a capture that plays changes this every frame.
+		UniformBuffer.UpdateUniformBufferImmediate(RHICmdList, Bound);
+	}
+	else
+	{
+		UniformBuffer = TUniformBufferRef<FVGSSplatShadowParameters>::CreateUniformBufferImmediate(Bound, UniformBuffer_MultiFrame);
+	}
 }
 
-void FVGSSplatShadowVertexFactory::AddShadowMeshes(const FPrimitiveSceneProxy& Proxy, int32 ViewIndex, FMeshElementCollector& Collector, bool bReverseCulling) const
+void FVGSSplatShadowVertexFactory::ClearSplats()
 {
-	if (!HasParameters())
+	NumSplats = 0;
+}
+
+void FVGSSplatShadowVertexFactory::AddShadowMeshes(const FPrimitiveSceneProxy& Proxy, const FSceneView& View, int32 ViewIndex, FMeshElementCollector& Collector, bool bReverseCulling) const
+{
+	const VGSSplat::EShadowMethod Method = VGSSplat::GetShadowMethod();
+	if (!HasParameters() || (Method != VGSSplat::EShadowMethod::UnrealShadowMaps && Method != VGSSplat::EShadowMethod::Mixed))
 	{
 		return;
+	}
+	if (Method == VGSSplat::EShadowMethod::Mixed && View.Family && View.Family->Scene && View.Family->Scene->GetRenderScene())
+	{
+		// A shadow depth view looks along its light (FProjectedShadowInfo::ModifyViewForShadow
+		// turns it so, for billboards): the main directional light's views are the ones looking
+		// along its direction, which the splats' own shadow map covers.
+		const FLightSceneInfo* MainLight = VGSSplat::FindMainLight(*View.Family->Scene->GetRenderScene());
+		if (MainLight && FMath::Abs(FVector::DotProduct(View.GetViewDirection(), VGSSplat::GetMainLightDirection(*MainLight))) > 0.99999)
+		{
+			return;
+		}
 	}
 	const FMaterialRenderProxy* Material = UMaterial::GetDefaultMaterial(MD_Surface)->GetRenderProxy();
 	for (uint32 First = 0; First < NumSplats; First += SplatsPerDraw)

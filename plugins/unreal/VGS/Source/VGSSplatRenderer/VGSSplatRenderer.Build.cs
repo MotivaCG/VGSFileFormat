@@ -25,6 +25,7 @@ namespace UnrealBuildTool.Rules
 					"RenderCore",
 					"RHI",
 					"Projects",
+					"DeveloperSettings", // VGS CHANGE: the project's settings (VGSSplatSettings.h)
 					// VGS CHANGE: no GaussianSplat or GaussianSplatShader: what the renderer used of
 					// them is copied (VGSSplatCommon.h, VGSSplatCluster.h, Shaders/Shared), so the
 					// plugin does not need Epic's GaussianSplat plugin, which only Unreal 5.9 has.

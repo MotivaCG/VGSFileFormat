@@ -1,0 +1,298 @@
+// VGS: not Epic's. The splat renderer's own shadow of the scene's directional light
+// (VGSSplatLightShadow.cpp, r.VGSSplat.Shadow.Method 0 or 1), instead of drawing splats into
+// Unreal's shadow maps.
+//
+// Map (VGS_LIGHT_SHADOW_MAP): every casting splat seen from the light, orthographic, as the
+// Gaussian it is - its footprint's covariance projected across the light, its opacity falling
+// off as exp(-d^2 / 2). Two targets, order independent: the transmittance, multiplied
+// (1 - alpha of each splat), and the nearest and farthest depth along the light of the splats
+// opaque enough to count (min blended as (depth, -depth), half floats).
+//
+// Composite (VGS_LIGHT_SHADOW_COMPOSITE): after the scene is lit, a pixel behind the splats
+// (farther along the light than the farthest of them, or than the nearest with self-shadowing)
+// loses the light's direct contribution in proportion to how much the splats block, recomputed
+// from its GBuffer (diffuse and GGX specular, as Unreal's deferred lighting has it). The
+// penumbra widens with the distance behind the splats, by the light's source angle. A pixel
+// within the splats' own depth is the capture itself (or what stands inside it): it is left
+// alone unless self-shadowing is on.
+
+#include "/Engine/Private/Common.ush"
+
+#if VGS_LIGHT_SHADOW_MAP
+
+ByteAddressBuffer Splats;
+float4x4 LocalToLight; // row vectors: the asset's space to the light's (x, y across it, z along it)
+float3 PositionScale;
+uint NumSplats;
+float3 PositionBias;
+uint Stride;
+float3 ScaleScale;
+uint BufferFormat;
+float3 ScaleBias;
+float PointScale;
+float2 OpacityQuantization;
+float OpacityScale;
+float DepthOpacity; // a splat at least this opaque where it covers a texel counts for the depths
+float4 LightToClip; // light x, y to clip x, y: scale, bias
+float Dilation; // light units squared, added to every footprint: no splat thinner than a texel
+
+// One row of the rotation matrix of a unit quaternion (x, y, z, w), as QuaternionToFloat3x3.
+float3 VGSLightAxis(float4 Q, uint Axis)
+{
+	const float x2 = Q.x + Q.x, y2 = Q.y + Q.y, z2 = Q.z + Q.z;
+	const float xx = Q.x * x2, xy = Q.x * y2, xz = Q.x * z2;
+	const float yy = Q.y * y2, yz = Q.y * z2, zz = Q.z * z2;
+	const float wx = Q.w * x2, wy = Q.w * y2, wz = Q.w * z2;
+	if (Axis == 0u)
+	{
+		return float3(1.0f - (yy + zz), xy + wz, xz - wy);
+	}
+	if (Axis == 1u)
+	{
+		return float3(xy - wz, 1.0f - (xx + zz), yz + wx);
+	}
+	return float3(xz + wy, yz - wx, 1.0f - (xx + yy));
+}
+
+// The renderer's records (VGSSplatShared.h): the float layout, or Epic's quantized one.
+void VGSLightLoadSplat(uint Splat, out float3 Position, out float3 Scale, out float4 Rotation, out float Opacity)
+{
+	const uint Offset = Splat * Stride;
+	if (BufferFormat == 0u)
+	{
+		Position = asfloat(Splats.Load3(Offset));
+		Scale = asfloat(Splats.Load3(Offset + 12u));
+		Rotation = asfloat(Splats.Load4(Offset + 24u));
+		Opacity = asfloat(Splats.Load(Offset + 52u));
+	}
+	else
+	{
+		const uint4 Packed = Splats.Load4(Offset);
+		const uint PackedColor = Splats.Load(Offset + 16u);
+		const uint Mask21 = (1u << 21) - 1u;
+		const uint Mask11 = (1u << 11) - 1u;
+		const uint Mask10 = (1u << 10) - 1u;
+		const float3 P = float3(float((Packed.y >> 10) & Mask21), float(((Packed.x >> 21) | (Packed.y << 11)) & Mask21), float(Packed.x & Mask21));
+		Position = P * PositionScale + PositionBias;
+		const float3 S = float3(float(Packed.z >> 21), float((Packed.z >> 10) & Mask11), float(Packed.z & Mask10));
+		Scale = exp(S * ScaleScale + ScaleBias);
+		Rotation.x = float(Packed.w >> 21) * (2.0f / 2047.0f) - 1.0f;
+		Rotation.y = float((Packed.w >> 10) & Mask11) * (2.0f / 2047.0f) - 1.0f;
+		Rotation.z = float(Packed.w & Mask10) * (2.0f / 1023.0f) - 1.0f;
+		Rotation.w = sqrt(max(1.0f - dot(Rotation.xyz, Rotation.xyz), 0.0f));
+		Opacity = float(PackedColor & 0xffu) * OpacityQuantization.x + OpacityQuantization.y;
+	}
+}
+
+// Six vertices a splat, two triangles of a quad over its footprint out to where it fades
+// below 1/255. Q is the position in the footprint's standard deviations.
+void MainVS(
+	uint VertexId : SV_VertexID,
+	out float4 OutPosition : SV_Position,
+	out float2 OutQ : TEXCOORD0,
+	out nointerpolation float2 OutOpacityDepth : TEXCOORD1)
+{
+	OutPosition = float4(2.0f, 2.0f, 0.5f, 1.0f); // outside: culled
+	OutQ = 0;
+	OutOpacityDepth = 0;
+
+	const uint Splat = VertexId / 6u;
+	if (Splat >= NumSplats)
+	{
+		return;
+	}
+	float3 Position;
+	float3 Scale;
+	float4 Rotation;
+	float Opacity;
+	VGSLightLoadSplat(Splat, Position, Scale, Rotation, Opacity);
+	Opacity = saturate(Opacity * OpacityScale);
+	if (Opacity < 2.0f / 255.0f)
+	{
+		return;
+	}
+
+	const float3 Centre = mul(float4(Position, 1.0f), LocalToLight).xyz;
+	const float4 Q = Rotation * rsqrt(max(dot(Rotation, Rotation), 1e-12f));
+	const float3x3 ToLight = (float3x3)LocalToLight;
+	const float3 B0 = mul(VGSLightAxis(Q, 0u) * (Scale.x * PointScale), ToLight);
+	const float3 B1 = mul(VGSLightAxis(Q, 1u) * (Scale.y * PointScale), ToLight);
+	const float3 B2 = mul(VGSLightAxis(Q, 2u) * (Scale.z * PointScale), ToLight);
+	// The footprint's covariance across the light: the 3D one, projected.
+	const float A = B0.x * B0.x + B1.x * B1.x + B2.x * B2.x + Dilation;
+	const float B = B0.x * B0.y + B1.x * B1.y + B2.x * B2.y;
+	const float C = B0.y * B0.y + B1.y * B1.y + B2.y * B2.y + Dilation;
+	const float Mid = 0.5f * (A + C);
+	const float Radius = sqrt(max(0.25f * (A - C) * (A - C) + B * B, 0.0f));
+	const float Lambda1 = Mid + Radius;
+	const float Lambda2 = max(Mid - Radius, 1e-12f);
+	const float2 E1 = abs(B) > 1e-12f ? normalize(float2(B, Lambda1 - A)) : (A >= C ? float2(1.0f, 0.0f) : float2(0.0f, 1.0f));
+	const float2 E2 = float2(-E1.y, E1.x);
+
+	const float Reach = sqrt(2.0f * log(Opacity * 255.0f));
+	const uint Corner = VertexId % 6u;
+	const float2 Corners[6] = { float2(-1, -1), float2(1, -1), float2(1, 1), float2(-1, -1), float2(1, 1), float2(-1, 1) };
+	const float2 K = Corners[Corner] * Reach;
+	const float2 Offset = K.x * sqrt(Lambda1) * E1 + K.y * sqrt(Lambda2) * E2;
+	OutPosition = float4((Centre.xy + Offset) * LightToClip.xy + LightToClip.zw, 0.5f, 1.0f);
+	OutQ = K;
+	OutOpacityDepth = float2(Opacity, Centre.z);
+}
+
+void MainPS(
+	float4 SvPosition : SV_Position,
+	float2 Q : TEXCOORD0,
+	nointerpolation float2 OpacityDepth : TEXCOORD1,
+	out float4 OutTransmittance : SV_Target0,
+	out float4 OutDepths : SV_Target1)
+{
+	const float Alpha = min(OpacityDepth.x * exp(-0.5f * dot(Q, Q)), 0.995f);
+	if (Alpha < 1.0f / 255.0f)
+	{
+		discard;
+	}
+	OutTransmittance = 1.0f - Alpha;
+	OutDepths = Alpha >= DepthOpacity ? float4(OpacityDepth.y, -OpacityDepth.y, 0.0f, 0.0f) : float4(60000.0f, 60000.0f, 0.0f, 0.0f);
+}
+
+#endif // VGS_LIGHT_SHADOW_MAP
+
+#if VGS_LIGHT_SHADOW_COMPOSITE
+
+#include "/Engine/Private/Random.ush"
+#include "/Engine/Private/DeferredShadingCommon.ush"
+#include "/Engine/Private/BRDF.ush"
+
+Texture2D SceneColorCopy;
+Texture2D SceneDepth;
+Texture2D GBufferA;
+Texture2D GBufferB;
+Texture2D GBufferC;
+Texture2D<float> TransmittanceMap;
+Texture2D<float2> DepthMap;
+SamplerState BilinearSampler;
+float3 LightOrigin; // translated world
+float3 LightX;
+float3 LightY;
+float3 LightZ; // the way the light goes
+float3 ToLight; // the main light (VGSSplat::FindMainLight): towards it
+float3 LightColor; // its colour over pi, past the atmosphere
+float4 LightToUV; // light x, y to the maps' UV: scale, bias
+float MapSize; // texels
+float Bias; // light units: how far behind the splats a receiver must be
+float PenumbraPerDepth; // UV of penumbra radius per light unit behind the nearest splat
+uint SelfShadow;
+uint HasGBuffer; // 0 (Substrate's own material buffer): darken by FallbackStrength instead
+float FallbackStrength;
+
+void MainPS(float4 SvPosition : SV_Position, out float4 OutColor : SV_Target0)
+{
+	const int2 Pixel = int2(SvPosition.xy);
+	const float4 Color = SceneColorCopy.Load(int3(Pixel, 0));
+	OutColor = Color;
+
+	const float DeviceZ = SceneDepth.Load(int3(Pixel, 0)).r;
+	if (DeviceZ <= 0.0f)
+	{
+		return; // nothing there: sky
+	}
+	const float Depth = ConvertFromDeviceZ(DeviceZ);
+	const float2 ScreenPosition = SvPositionToScreenPosition(SvPosition).xy;
+	const float3 TranslatedWorld = mul(float4(ScreenPosition * Depth, Depth, 1.0f), View.ScreenToTranslatedWorld).xyz;
+	const float3 D = TranslatedWorld - LightOrigin;
+	const float3 L = float3(dot(D, LightX), dot(D, LightY), dot(D, LightZ));
+	const float2 UV = L.xy * LightToUV.xy + LightToUV.zw;
+	if (any(UV <= 0.0f) || any(UV >= 1.0f))
+	{
+		return;
+	}
+
+	// The splats' depths about this texel: the nearest and the farthest of the 3x3 around it,
+	// so that edges where only faint splats reach still know where the capture is.
+	const int2 Texel = int2(UV * MapSize);
+	float Nearest = 1e30f;
+	float Farthest = -1e30f;
+	UNROLL
+	for (int Y = -1; Y <= 1; ++Y)
+	{
+		UNROLL
+		for (int X = -1; X <= 1; ++X)
+		{
+			const float2 Depths = DepthMap.Load(int3(clamp(Texel + int2(X, Y), 0, int(MapSize) - 1), 0));
+			if (Depths.x < 59000.0f)
+			{
+				Nearest = min(Nearest, Depths.x);
+				Farthest = max(Farthest, -Depths.y);
+			}
+		}
+	}
+	if (Nearest >= 59000.0f)
+	{
+		return;
+	}
+	const float Behind = L.z - (SelfShadow != 0u ? Nearest : Farthest) - Bias;
+	if (Behind <= 0.0f)
+	{
+		return;
+	}
+
+	// Penumbra: a disc that widens with the distance behind the nearest splats.
+	const float RadiusUV = max(PenumbraPerDepth * (L.z - Nearest), 1.0f / MapSize);
+	const float Rotation = InterleavedGradientNoise(SvPosition.xy, View.StateFrameIndexMod8) * 2.0f * PI;
+	float Transmittance = 0.0f;
+	const int Taps = 16;
+	UNROLL
+	for (int Tap = 0; Tap < Taps; ++Tap)
+	{
+		const float R = sqrt((float(Tap) + 0.5f) / float(Taps));
+		const float Angle = float(Tap) * 2.39996323f + Rotation;
+		Transmittance += TransmittanceMap.SampleLevel(BilinearSampler, UV + RadiusUV * R * float2(cos(Angle), sin(Angle)), 0);
+	}
+	Transmittance /= float(Taps);
+	float Occlusion = 1.0f - Transmittance;
+	if (SelfShadow != 0u)
+	{
+		// Within the capture, the splats in front of a point build up with depth.
+		Occlusion *= saturate(Behind / max(0.5f * (Farthest - Nearest), Bias));
+	}
+	if (Occlusion <= 0.0f)
+	{
+		return;
+	}
+
+	if (HasGBuffer == 0u)
+	{
+		OutColor.rgb = Color.rgb * (1.0f - Occlusion * FallbackStrength);
+		return;
+	}
+	const float4 Zero = 0;
+	FGBufferData GBuffer = DecodeGBufferData(
+		GBufferA.Load(int3(Pixel, 0)), GBufferB.Load(int3(Pixel, 0)), GBufferC.Load(int3(Pixel, 0)),
+		Zero, Zero, Zero, Zero, 0.0f, 0u, Depth, true, false);
+	if (GBuffer.ShadingModelID == SHADINGMODELID_UNLIT)
+	{
+		return;
+	}
+	// The light's direct contribution here, as the deferred lighting computed it (before the
+	// shadows Unreal's own casters put on it, which this cannot know: where both fall, the
+	// pixel can end darker than the skylight alone would leave it).
+	const float3 N = GBuffer.WorldNormal;
+		const float3 V = normalize(View.TranslatedWorldCameraOrigin - TranslatedWorld);
+	const float NoL = saturate(dot(N, ToLight));
+	if (NoL <= 0.0f)
+	{
+		return;
+	}
+	const float3 H = normalize(V + ToLight);
+	const float NoV = saturate(abs(dot(N, V)) + 1e-5f);
+	const float NoH = saturate(dot(N, H));
+	const float VoH = saturate(dot(V, H));
+	const float3 DiffuseColor = GBuffer.BaseColor - GBuffer.BaseColor * GBuffer.Metallic;
+	const float3 SpecularColor = ComputeF0(GBuffer.Specular, GBuffer.BaseColor, GBuffer.Metallic);
+	const float A2 = Pow4(max(GBuffer.Roughness, 0.02f));
+	const float3 Specular = D_GGX(A2, NoH) * Vis_SmithJointApprox(A2, NoV, NoL) * F_Schlick(SpecularColor, VoH);
+	const float3 Direct = LightColor * NoL * (DiffuseColor + PI * Specular);
+	OutColor.rgb = max(Color.rgb - Occlusion * Direct * View.PreExposure, 0.0f);
+}
+
+#endif // VGS_LIGHT_SHADOW_COMPOSITE

@@ -1,11 +1,13 @@
 #include "VGSCaptureComponent.h"
 
+#include "VGSCaptureSceneProxy.h"
 #include "VGSPlayer.h"
 #include "VGSSplatLayout.h"
 #include "VGSSplatSource.h"
 #include "VGSStats.h"
 
 #include "Async/ParallelFor.h"
+#include "Engine/CollisionProfile.h"
 #include "HAL/PlatformTime.h"
 #include "Engine/World.h"
 #include "VGSSplatViewExtension.h" // VGSSplat::RegisterExternalProxySource (VGSSplatRenderer)
@@ -107,6 +109,19 @@ UVGSCaptureComponent::UVGSCaptureComponent()
 	// After movement and animation, so the transform handed to the renderer is this frame's.
 	PrimaryComponentTick.TickGroup = TG_PostUpdateWork;
 	bTickInEditor = true;
+
+	// A primitive for its shadows only: no collision, navigation or occlusion.
+	SetCollisionProfileName(UCollisionProfile::NoCollision_ProfileName);
+	SetGenerateOverlapEvents(false);
+	SetCanEverAffectNavigation(false);
+	bUseAsOccluder = false;
+	CastShadow = true;
+	bCastDynamicShadow = true;
+	bCastStaticShadow = false;
+	bAffectDynamicIndirectLighting = false;
+	bAffectDistanceFieldLighting = false;
+	// The casters change with every frame of the capture: virtual shadow maps cache nothing of them.
+	ShadowCacheInvalidationBehavior = EShadowCacheInvalidationBehavior::Always;
 }
 
 // ---- the capture ------------------------------------------------------------------------
@@ -744,6 +759,9 @@ void UVGSCaptureComponent::PushRenderState()
 	State.Roughness = FMath::Clamp(Roughness, 0.0f, 1.0f);
 	State.Specular = FMath::Clamp(Specular, 0.0f, 1.0f);
 	State.NormalSmoothing = FMath::Max(NormalSmoothing, 0.0f);
+	State.CaptureToComponent = FMatrix44f(CaptureToComponent());
+	State.ShadowInset = ShadowInset;
+	State.bCastShadow = CastShadow && bCastDynamicShadow;
 	State.Grade = FVector3f(FMath::Max(Gamma, 0.05f), FMath::Max(Contrast, 0.0f), FMath::Max(Saturation, 0.0f));
 	{
 		// The grade works on sRGB values, so the tint (a linear colour, as the picker gives it)
@@ -777,7 +795,8 @@ void UVGSCaptureComponent::RegisterSource()
 
 	Source = MakeShared<FVGSSplatSource, ESPMode::ThreadSafe>();
 	VGSSplat::RegisterExternalProxySource(World,
-		FOnCollectVGSSplatProxies::FDelegate::CreateSP(Source.ToSharedRef(), &FVGSSplatSource::Collect_RenderThread));
+		FOnCollectVGSSplatProxies::FDelegate::CreateSP(Source.ToSharedRef(), &FVGSSplatSource::Collect_RenderThread),
+		FOnPrepareVGSSplatSources::FDelegate::CreateSP(Source.ToSharedRef(), &FVGSSplatSource::Prepare_RenderThread));
 
 	// Registered again after an edit: show what was on screen without waiting for a new frame.
 	if (ShownFrame.IsValid())
@@ -849,6 +868,17 @@ FBoxSphereBounds UVGSCaptureComponent::CalcBounds(const FTransform& LocalToWorld
 		return FBoxSphereBounds(Box.TransformBy(CaptureToComponent() * LocalToWorld.ToMatrixWithScale()));
 	}
 	return FBoxSphereBounds(LocalToWorld.GetLocation(), FVector(50.0), 50.0);
+}
+
+FPrimitiveSceneProxy* UVGSCaptureComponent::CreateSceneProxy()
+{
+	// Made after OnRegister, which made the source; without one (a template, a world that
+	// does not render) there is nothing to cast.
+	if (!Source.IsValid())
+	{
+		return nullptr;
+	}
+	return new FVGSCaptureSceneProxy(this, Source, CaptureToComponent().Determinant() < 0.0);
 }
 
 #if WITH_EDITOR

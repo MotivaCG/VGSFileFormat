@@ -1,6 +1,6 @@
 diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatGBuffer.usf b/VGS/Shaders/Private/SplatRenderer/VGSSplatGBuffer.usf
 --- a/VGS/Shaders/Private/SplatRenderer/VGSSplatGBuffer.usf	1970-01-01 01:00:00.000000000 +0100
-+++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatGBuffer.usf	2026-11-11 08:50:02.769218100 +0100
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatGBuffer.usf	2026-11-12 00:05:37.979902800 +0100
 @@ -0,0 +1,295 @@
 +// VGS: not Epic's. Writes a lit capture into Unreal's GBuffer, after the base pass and before
 +// lighting, as an opaque Default Lit surface: every light, the shadows other objects cast on
@@ -299,7 +299,7 @@ diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatGBuffer.usf b/VGS/Shaders/
 +}
 diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatGrade.ush b/VGS/Shaders/Private/SplatRenderer/VGSSplatGrade.ush
 --- a/VGS/Shaders/Private/SplatRenderer/VGSSplatGrade.ush	1970-01-01 01:00:00.000000000 +0100
-+++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatGrade.ush	2026-11-11 08:50:02.769218100 +0100
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatGrade.ush	2026-11-12 00:05:37.978904400 +0100
 @@ -0,0 +1,34 @@
 +// VGS: not Epic's. The capture's colour grade, shared by the composite
 +// (VGSSplatInverseToneCurvePostBlend.usf) and the lit pass (VGSSplatGBuffer.usf).
@@ -336,8 +336,8 @@ diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatGrade.ush b/VGS/Shaders/Pr
 +	return lerp(ColorSRGB, C, smoothstep(0.0f, 0.05f, Opacity));
 +}
 diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatHardwareRasterize.usf b/VGS/Shaders/Private/SplatRenderer/VGSSplatHardwareRasterize.usf
---- a/VGS/Shaders/Private/SplatRenderer/VGSSplatHardwareRasterize.usf	2026-11-11 08:50:02.663562600 +0100
-+++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatHardwareRasterize.usf	2026-11-11 08:50:02.769218100 +0100
+--- a/VGS/Shaders/Private/SplatRenderer/VGSSplatHardwareRasterize.usf	2026-11-11 13:56:29.557286500 +0100
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatHardwareRasterize.usf	2026-11-12 00:05:37.978904400 +0100
 @@ -35,6 +35,13 @@
  #define GAUSSIAN_SPLAT_SUPERSAMPLE 0
  #endif // GAUSSIAN_SPLAT_SUPERSAMPLE
@@ -429,8 +429,8 @@ diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatHardwareRasterize.usf b/VG
  	
  #if WRITE_VELOCITY
 diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatInverseToneCurvePostBlend.usf b/VGS/Shaders/Private/SplatRenderer/VGSSplatInverseToneCurvePostBlend.usf
---- a/VGS/Shaders/Private/SplatRenderer/VGSSplatInverseToneCurvePostBlend.usf	2026-11-11 08:50:02.664577400 +0100
-+++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatInverseToneCurvePostBlend.usf	2026-11-11 08:50:02.764217000 +0100
+--- a/VGS/Shaders/Private/SplatRenderer/VGSSplatInverseToneCurvePostBlend.usf	2026-11-11 13:56:29.558333800 +0100
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatInverseToneCurvePostBlend.usf	2026-11-12 00:05:37.973875000 +0100
 @@ -33,6 +33,13 @@
  // Per-axis grid size of the (cubic) LUT.
  float InverseToneCurveLUTEdge;
@@ -507,9 +507,311 @@ diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatInverseToneCurvePostBlend.
 -	OutColor = float4(Blended * View.PreExposure, Transmittance);
 +	OutColor = float4(Blended * (Intensity * View.PreExposure), Transmittance);
  }
+diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatLightShadow.usf b/VGS/Shaders/Private/SplatRenderer/VGSSplatLightShadow.usf
+--- a/VGS/Shaders/Private/SplatRenderer/VGSSplatLightShadow.usf	1970-01-01 01:00:00.000000000 +0100
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatLightShadow.usf	2026-11-12 00:05:37.979902800 +0100
+@@ -0,0 +1,298 @@
++// VGS: not Epic's. The splat renderer's own shadow of the scene's directional light
++// (VGSSplatLightShadow.cpp, r.VGSSplat.Shadow.Method 0 or 1), instead of drawing splats into
++// Unreal's shadow maps.
++//
++// Map (VGS_LIGHT_SHADOW_MAP): every casting splat seen from the light, orthographic, as the
++// Gaussian it is - its footprint's covariance projected across the light, its opacity falling
++// off as exp(-d^2 / 2). Two targets, order independent: the transmittance, multiplied
++// (1 - alpha of each splat), and the nearest and farthest depth along the light of the splats
++// opaque enough to count (min blended as (depth, -depth), half floats).
++//
++// Composite (VGS_LIGHT_SHADOW_COMPOSITE): after the scene is lit, a pixel behind the splats
++// (farther along the light than the farthest of them, or than the nearest with self-shadowing)
++// loses the light's direct contribution in proportion to how much the splats block, recomputed
++// from its GBuffer (diffuse and GGX specular, as Unreal's deferred lighting has it). The
++// penumbra widens with the distance behind the splats, by the light's source angle. A pixel
++// within the splats' own depth is the capture itself (or what stands inside it): it is left
++// alone unless self-shadowing is on.
++
++#include "/Engine/Private/Common.ush"
++
++#if VGS_LIGHT_SHADOW_MAP
++
++ByteAddressBuffer Splats;
++float4x4 LocalToLight; // row vectors: the asset's space to the light's (x, y across it, z along it)
++float3 PositionScale;
++uint NumSplats;
++float3 PositionBias;
++uint Stride;
++float3 ScaleScale;
++uint BufferFormat;
++float3 ScaleBias;
++float PointScale;
++float2 OpacityQuantization;
++float OpacityScale;
++float DepthOpacity; // a splat at least this opaque where it covers a texel counts for the depths
++float4 LightToClip; // light x, y to clip x, y: scale, bias
++float Dilation; // light units squared, added to every footprint: no splat thinner than a texel
++
++// One row of the rotation matrix of a unit quaternion (x, y, z, w), as QuaternionToFloat3x3.
++float3 VGSLightAxis(float4 Q, uint Axis)
++{
++	const float x2 = Q.x + Q.x, y2 = Q.y + Q.y, z2 = Q.z + Q.z;
++	const float xx = Q.x * x2, xy = Q.x * y2, xz = Q.x * z2;
++	const float yy = Q.y * y2, yz = Q.y * z2, zz = Q.z * z2;
++	const float wx = Q.w * x2, wy = Q.w * y2, wz = Q.w * z2;
++	if (Axis == 0u)
++	{
++		return float3(1.0f - (yy + zz), xy + wz, xz - wy);
++	}
++	if (Axis == 1u)
++	{
++		return float3(xy - wz, 1.0f - (xx + zz), yz + wx);
++	}
++	return float3(xz + wy, yz - wx, 1.0f - (xx + yy));
++}
++
++// The renderer's records (VGSSplatShared.h): the float layout, or Epic's quantized one.
++void VGSLightLoadSplat(uint Splat, out float3 Position, out float3 Scale, out float4 Rotation, out float Opacity)
++{
++	const uint Offset = Splat * Stride;
++	if (BufferFormat == 0u)
++	{
++		Position = asfloat(Splats.Load3(Offset));
++		Scale = asfloat(Splats.Load3(Offset + 12u));
++		Rotation = asfloat(Splats.Load4(Offset + 24u));
++		Opacity = asfloat(Splats.Load(Offset + 52u));
++	}
++	else
++	{
++		const uint4 Packed = Splats.Load4(Offset);
++		const uint PackedColor = Splats.Load(Offset + 16u);
++		const uint Mask21 = (1u << 21) - 1u;
++		const uint Mask11 = (1u << 11) - 1u;
++		const uint Mask10 = (1u << 10) - 1u;
++		const float3 P = float3(float((Packed.y >> 10) & Mask21), float(((Packed.x >> 21) | (Packed.y << 11)) & Mask21), float(Packed.x & Mask21));
++		Position = P * PositionScale + PositionBias;
++		const float3 S = float3(float(Packed.z >> 21), float((Packed.z >> 10) & Mask11), float(Packed.z & Mask10));
++		Scale = exp(S * ScaleScale + ScaleBias);
++		Rotation.x = float(Packed.w >> 21) * (2.0f / 2047.0f) - 1.0f;
++		Rotation.y = float((Packed.w >> 10) & Mask11) * (2.0f / 2047.0f) - 1.0f;
++		Rotation.z = float(Packed.w & Mask10) * (2.0f / 1023.0f) - 1.0f;
++		Rotation.w = sqrt(max(1.0f - dot(Rotation.xyz, Rotation.xyz), 0.0f));
++		Opacity = float(PackedColor & 0xffu) * OpacityQuantization.x + OpacityQuantization.y;
++	}
++}
++
++// Six vertices a splat, two triangles of a quad over its footprint out to where it fades
++// below 1/255. Q is the position in the footprint's standard deviations.
++void MainVS(
++	uint VertexId : SV_VertexID,
++	out float4 OutPosition : SV_Position,
++	out float2 OutQ : TEXCOORD0,
++	out nointerpolation float2 OutOpacityDepth : TEXCOORD1)
++{
++	OutPosition = float4(2.0f, 2.0f, 0.5f, 1.0f); // outside: culled
++	OutQ = 0;
++	OutOpacityDepth = 0;
++
++	const uint Splat = VertexId / 6u;
++	if (Splat >= NumSplats)
++	{
++		return;
++	}
++	float3 Position;
++	float3 Scale;
++	float4 Rotation;
++	float Opacity;
++	VGSLightLoadSplat(Splat, Position, Scale, Rotation, Opacity);
++	Opacity = saturate(Opacity * OpacityScale);
++	if (Opacity < 2.0f / 255.0f)
++	{
++		return;
++	}
++
++	const float3 Centre = mul(float4(Position, 1.0f), LocalToLight).xyz;
++	const float4 Q = Rotation * rsqrt(max(dot(Rotation, Rotation), 1e-12f));
++	const float3x3 ToLight = (float3x3)LocalToLight;
++	const float3 B0 = mul(VGSLightAxis(Q, 0u) * (Scale.x * PointScale), ToLight);
++	const float3 B1 = mul(VGSLightAxis(Q, 1u) * (Scale.y * PointScale), ToLight);
++	const float3 B2 = mul(VGSLightAxis(Q, 2u) * (Scale.z * PointScale), ToLight);
++	// The footprint's covariance across the light: the 3D one, projected.
++	const float A = B0.x * B0.x + B1.x * B1.x + B2.x * B2.x + Dilation;
++	const float B = B0.x * B0.y + B1.x * B1.y + B2.x * B2.y;
++	const float C = B0.y * B0.y + B1.y * B1.y + B2.y * B2.y + Dilation;
++	const float Mid = 0.5f * (A + C);
++	const float Radius = sqrt(max(0.25f * (A - C) * (A - C) + B * B, 0.0f));
++	const float Lambda1 = Mid + Radius;
++	const float Lambda2 = max(Mid - Radius, 1e-12f);
++	const float2 E1 = abs(B) > 1e-12f ? normalize(float2(B, Lambda1 - A)) : (A >= C ? float2(1.0f, 0.0f) : float2(0.0f, 1.0f));
++	const float2 E2 = float2(-E1.y, E1.x);
++
++	const float Reach = sqrt(2.0f * log(Opacity * 255.0f));
++	const uint Corner = VertexId % 6u;
++	const float2 Corners[6] = { float2(-1, -1), float2(1, -1), float2(1, 1), float2(-1, -1), float2(1, 1), float2(-1, 1) };
++	const float2 K = Corners[Corner] * Reach;
++	const float2 Offset = K.x * sqrt(Lambda1) * E1 + K.y * sqrt(Lambda2) * E2;
++	OutPosition = float4((Centre.xy + Offset) * LightToClip.xy + LightToClip.zw, 0.5f, 1.0f);
++	OutQ = K;
++	OutOpacityDepth = float2(Opacity, Centre.z);
++}
++
++void MainPS(
++	float4 SvPosition : SV_Position,
++	float2 Q : TEXCOORD0,
++	nointerpolation float2 OpacityDepth : TEXCOORD1,
++	out float4 OutTransmittance : SV_Target0,
++	out float4 OutDepths : SV_Target1)
++{
++	const float Alpha = min(OpacityDepth.x * exp(-0.5f * dot(Q, Q)), 0.995f);
++	if (Alpha < 1.0f / 255.0f)
++	{
++		discard;
++	}
++	OutTransmittance = 1.0f - Alpha;
++	OutDepths = Alpha >= DepthOpacity ? float4(OpacityDepth.y, -OpacityDepth.y, 0.0f, 0.0f) : float4(60000.0f, 60000.0f, 0.0f, 0.0f);
++}
++
++#endif // VGS_LIGHT_SHADOW_MAP
++
++#if VGS_LIGHT_SHADOW_COMPOSITE
++
++#include "/Engine/Private/Random.ush"
++#include "/Engine/Private/DeferredShadingCommon.ush"
++#include "/Engine/Private/BRDF.ush"
++
++Texture2D SceneColorCopy;
++Texture2D SceneDepth;
++Texture2D GBufferA;
++Texture2D GBufferB;
++Texture2D GBufferC;
++Texture2D<float> TransmittanceMap;
++Texture2D<float2> DepthMap;
++SamplerState BilinearSampler;
++float3 LightOrigin; // translated world
++float3 LightX;
++float3 LightY;
++float3 LightZ; // the way the light goes
++float3 ToLight; // the main light (VGSSplat::FindMainLight): towards it
++float3 LightColor; // its colour over pi, past the atmosphere
++float4 LightToUV; // light x, y to the maps' UV: scale, bias
++float MapSize; // texels
++float Bias; // light units: how far behind the splats a receiver must be
++float PenumbraPerDepth; // UV of penumbra radius per light unit behind the nearest splat
++uint SelfShadow;
++uint HasGBuffer; // 0 (Substrate's own material buffer): darken by FallbackStrength instead
++float FallbackStrength;
++
++void MainPS(float4 SvPosition : SV_Position, out float4 OutColor : SV_Target0)
++{
++	const int2 Pixel = int2(SvPosition.xy);
++	const float4 Color = SceneColorCopy.Load(int3(Pixel, 0));
++	OutColor = Color;
++
++	const float DeviceZ = SceneDepth.Load(int3(Pixel, 0)).r;
++	if (DeviceZ <= 0.0f)
++	{
++		return; // nothing there: sky
++	}
++	const float Depth = ConvertFromDeviceZ(DeviceZ);
++	const float2 ScreenPosition = SvPositionToScreenPosition(SvPosition).xy;
++	const float3 TranslatedWorld = mul(float4(ScreenPosition * Depth, Depth, 1.0f), View.ScreenToTranslatedWorld).xyz;
++	const float3 D = TranslatedWorld - LightOrigin;
++	const float3 L = float3(dot(D, LightX), dot(D, LightY), dot(D, LightZ));
++	const float2 UV = L.xy * LightToUV.xy + LightToUV.zw;
++	if (any(UV <= 0.0f) || any(UV >= 1.0f))
++	{
++		return;
++	}
++
++	// The splats' depths about this texel: the nearest and the farthest of the 3x3 around it,
++	// so that edges where only faint splats reach still know where the capture is.
++	const int2 Texel = int2(UV * MapSize);
++	float Nearest = 1e30f;
++	float Farthest = -1e30f;
++	UNROLL
++	for (int Y = -1; Y <= 1; ++Y)
++	{
++		UNROLL
++		for (int X = -1; X <= 1; ++X)
++		{
++			const float2 Depths = DepthMap.Load(int3(clamp(Texel + int2(X, Y), 0, int(MapSize) - 1), 0));
++			if (Depths.x < 59000.0f)
++			{
++				Nearest = min(Nearest, Depths.x);
++				Farthest = max(Farthest, -Depths.y);
++			}
++		}
++	}
++	if (Nearest >= 59000.0f)
++	{
++		return;
++	}
++	const float Behind = L.z - (SelfShadow != 0u ? Nearest : Farthest) - Bias;
++	if (Behind <= 0.0f)
++	{
++		return;
++	}
++
++	// Penumbra: a disc that widens with the distance behind the nearest splats.
++	const float RadiusUV = max(PenumbraPerDepth * (L.z - Nearest), 1.0f / MapSize);
++	const float Rotation = InterleavedGradientNoise(SvPosition.xy, View.StateFrameIndexMod8) * 2.0f * PI;
++	float Transmittance = 0.0f;
++	const int Taps = 16;
++	UNROLL
++	for (int Tap = 0; Tap < Taps; ++Tap)
++	{
++		const float R = sqrt((float(Tap) + 0.5f) / float(Taps));
++		const float Angle = float(Tap) * 2.39996323f + Rotation;
++		Transmittance += TransmittanceMap.SampleLevel(BilinearSampler, UV + RadiusUV * R * float2(cos(Angle), sin(Angle)), 0);
++	}
++	Transmittance /= float(Taps);
++	float Occlusion = 1.0f - Transmittance;
++	if (SelfShadow != 0u)
++	{
++		// Within the capture, the splats in front of a point build up with depth.
++		Occlusion *= saturate(Behind / max(0.5f * (Farthest - Nearest), Bias));
++	}
++	if (Occlusion <= 0.0f)
++	{
++		return;
++	}
++
++	if (HasGBuffer == 0u)
++	{
++		OutColor.rgb = Color.rgb * (1.0f - Occlusion * FallbackStrength);
++		return;
++	}
++	const float4 Zero = 0;
++	FGBufferData GBuffer = DecodeGBufferData(
++		GBufferA.Load(int3(Pixel, 0)), GBufferB.Load(int3(Pixel, 0)), GBufferC.Load(int3(Pixel, 0)),
++		Zero, Zero, Zero, Zero, 0.0f, 0u, Depth, true, false);
++	if (GBuffer.ShadingModelID == SHADINGMODELID_UNLIT)
++	{
++		return;
++	}
++	// The light's direct contribution here, as the deferred lighting computed it (before the
++	// shadows Unreal's own casters put on it, which this cannot know: where both fall, the
++	// pixel can end darker than the skylight alone would leave it).
++	const float3 N = GBuffer.WorldNormal;
++		const float3 V = normalize(View.TranslatedWorldCameraOrigin - TranslatedWorld);
++	const float NoL = saturate(dot(N, ToLight));
++	if (NoL <= 0.0f)
++	{
++		return;
++	}
++	const float3 H = normalize(V + ToLight);
++	const float NoV = saturate(abs(dot(N, V)) + 1e-5f);
++	const float NoH = saturate(dot(N, H));
++	const float VoH = saturate(dot(V, H));
++	const float3 DiffuseColor = GBuffer.BaseColor - GBuffer.BaseColor * GBuffer.Metallic;
++	const float3 SpecularColor = ComputeF0(GBuffer.Specular, GBuffer.BaseColor, GBuffer.Metallic);
++	const float A2 = Pow4(max(GBuffer.Roughness, 0.02f));
++	const float3 Specular = D_GGX(A2, NoH) * Vis_SmithJointApprox(A2, NoV, NoL) * F_Schlick(SpecularColor, VoH);
++	const float3 Direct = LightColor * NoL * (DiffuseColor + PI * Specular);
++	OutColor.rgb = max(Color.rgb - Occlusion * Direct * View.PreExposure, 0.0f);
++}
++
++#endif // VGS_LIGHT_SHADOW_COMPOSITE
 diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf b/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf
---- a/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf	2026-11-11 08:50:02.667605700 +0100
-+++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf	2026-11-11 08:50:02.768217700 +0100
+--- a/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf	2026-11-11 13:56:29.561345200 +0100
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf	2026-11-12 00:05:37.977904500 +0100
 @@ -70,6 +70,7 @@
  
  // Spherical harmonics
@@ -659,12 +961,13 @@ diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf b/VGS/Shaders/
  				// Mark culled splats with sentinel value
 diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatShadowVertexFactory.ush b/VGS/Shaders/Private/SplatRenderer/VGSSplatShadowVertexFactory.ush
 --- a/VGS/Shaders/Private/SplatRenderer/VGSSplatShadowVertexFactory.ush	1970-01-01 01:00:00.000000000 +0100
-+++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatShadowVertexFactory.ush	2026-11-11 08:50:02.770722800 +0100
-@@ -0,0 +1,256 @@
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatShadowVertexFactory.ush	2026-11-12 00:05:37.979902800 +0100
+@@ -0,0 +1,268 @@
 +// VGS: not Epic's. The vertex factory that puts splats into Unreal's shadow depth passes
-+// (VGSSplatShadowVertexFactory.cpp): each splat is drawn as an octahedron spanning the
-+// ellipse where its opacity reaches VGSSplatShadow.OpacityCutoff, read straight from the
-+// renderer's own splat buffer, so casting shadows needs no memory of its own.
++// (VGSSplatShadowVertexFactory.cpp), with r.VGSSplat.Shadow.Method 2: each splat is drawn as
++// an octahedron spanning the ellipse where its opacity reaches a cutoff of its own, drawn at
++// random, read straight from the renderer's own splat buffer, so casting shadows needs no
++// memory of its own.
 +//
 +// Each caster is moved Inset inwards along its splat's normal: the surface the lit splats
 +// write to the GBuffer lies among their own casters, and would shadow itself in blotches
@@ -673,7 +976,7 @@ diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatShadowVertexFactory.ush b/
 +//
 +// Six vertices per splat (both ends of its three axes) and eight triangles, through an index
 +// buffer of a batch of splats: VertexId / 6 is the splat within the batch, VGSShadowFirstSplat
-+// where the batch starts. A splat fainter than the cutoff collapses to a point.
++// where the batch starts. A splat fainter than its cutoff collapses to a point.
 +
 +#include "/Engine/Private/VertexFactoryCommon.ush"
 +
@@ -773,7 +1076,18 @@ diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatShadowVertexFactory.ush b/
 +	}
 +
 +	Opacity = saturate(Opacity * VGSSplatShadow.OpacityScale);
-+	if (Splat >= VGSSplatShadow.NumSplats || Opacity <= VGSSplatShadow.OpacityCutoff)
++	// Each splat its own cutoff, uniform in (MinCutoff, 1) from a hash of its index. A point at
++	// r then lies inside with probability Opacity * exp(-r^2 / 2) (less the sliver below
++	// MinCutoff), the splat's own opacity there, and a ray crossing several splats passes all of
++	// them with the product of their transmittances: the shadow's density is the splats', on
++	// average over neighbouring splats, instead of all or nothing at one cutoff. MinCutoff
++	// bounds the octahedra at 2.8 standard deviations.
++	const float MinCutoff = 0.02f;
++	uint H = Splat * 747796405u + 2891336453u;
++	H = ((H >> ((H >> 28u) + 4u)) ^ H) * 277803737u;
++	H = (H >> 22u) ^ H;
++	const float Cutoff = lerp(MinCutoff, 1.0f, float(H >> 8) * (1.0f / 16777216.0f));
++	if (Splat >= VGSSplatShadow.NumSplats || Opacity <= Cutoff)
 +	{
 +		return Position; // collapsed: its eight triangles have no area
 +	}
@@ -782,7 +1096,7 @@ diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatShadowVertexFactory.ush b/
 +	// the cutoff at r = sqrt(2 ln(Opacity / Cutoff)). An octahedron's outline seen along an
 +	// axis is a rhombus, of 2/pi the area of the ellipse through its corners: the corners go
 +	// sqrt(pi / 2) further out, so that the two cover the same area.
-+	const float Reach = sqrt(2.0f * log(Opacity / VGSSplatShadow.OpacityCutoff)) * 1.2533141f * VGSSplatShadow.PointScale;
++	const float Reach = sqrt(2.0f * log(Opacity / Cutoff)) * 1.2533141f * VGSSplatShadow.PointScale;
 +	const uint Axis = Corner >> 1;
 +	const float Sign = (Corner & 1u) ? -1.0f : 1.0f;
 +	const float3 Scales = Scale;
@@ -918,8 +1232,8 @@ diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatShadowVertexFactory.ush b/
 +
 +#include "/Engine/Private/VertexFactoryDefaultInterface.ush"
 diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatTileRasterize.usf b/VGS/Shaders/Private/SplatRenderer/VGSSplatTileRasterize.usf
---- a/VGS/Shaders/Private/SplatRenderer/VGSSplatTileRasterize.usf	2026-11-11 08:50:02.669608500 +0100
-+++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatTileRasterize.usf	2026-11-11 08:50:02.767216900 +0100
+--- a/VGS/Shaders/Private/SplatRenderer/VGSSplatTileRasterize.usf	2026-11-11 13:56:29.562351300 +0100
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatTileRasterize.usf	2026-11-12 00:05:37.976900500 +0100
 @@ -83,6 +83,8 @@
  		}
  	}
@@ -930,10 +1244,49 @@ diff -ruN a/VGS/Shaders/Private/SplatRenderer/VGSSplatTileRasterize.usf b/VGS/Sh
 +	RWColorTexture[Pixel].rgb = OutColor.rgb + RWColorTexture[Pixel].rgb * OutColor.a;
  	RWColorTexture[Pixel].a = OutColor.a * RWColorTexture[Pixel].a;
  }
+diff -ruN a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatLightShadow.h b/VGS/Source/VGSSplatRenderer/Internal/VGSSplatLightShadow.h
+--- a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatLightShadow.h	1970-01-01 01:00:00.000000000 +0100
++++ b/VGS/Source/VGSSplatRenderer/Internal/VGSSplatLightShadow.h	2026-11-12 00:05:37.948444200 +0100
+@@ -0,0 +1,35 @@
++// VGS: not Epic's. The splat renderer's own shadow of the scene's directional light.
++#pragma once
++
++#include "CoreMinimal.h"
++#include "RenderGraphFwd.h"
++
++class FLightSceneInfo;
++class FScene;
++class FSceneView;
++class FVGSSplatRenderProxy;
++struct FPostProcessingInputs;
++
++namespace VGSSplat
++{
++	/**
++	 * The light the splats' own shadow map is drawn from: of the scene's directional lights
++	 * that cast dynamic shadows, the atmosphere's sun (Atmosphere Sun Light, index 0) if one
++	 * is, otherwise the brightest; null if none casts shadows.
++	 */
++	const FLightSceneInfo* FindMainLight(const FScene& Scene);
++
++	/** The way the main light goes (unit). */
++	FVector GetMainLightDirection(const FLightSceneInfo& Light);
++
++	/**
++	 * With r.VGSSplat.Shadow.Method 0 or 1: draws the casting proxies (bCastShadow) from the
++	 * main directional light (FindMainLight) into a shadow map of their own, as Gaussians with
++	 * their real opacity,
++	 * and takes that light's direct contribution off the lit scene behind them
++	 * (Shaders/Private/SplatRenderer/VGSSplatLightShadow.usf). Before post-processing, so the
++	 * captures that are not lit (composited later) are never darkened; lit ones only with
++	 * r.VGSSplat.Shadow.Self 1.
++	 */
++	void RenderLightShadow(FRDGBuilder& GraphBuilder, const FSceneView& View, const FPostProcessingInputs& Inputs, TConstArrayView<const FVGSSplatRenderProxy*> Proxies);
++}
 diff -ruN a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatRenderPipeline.h b/VGS/Source/VGSSplatRenderer/Internal/VGSSplatRenderPipeline.h
---- a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatRenderPipeline.h	2026-11-11 08:50:02.590408900 +0100
-+++ b/VGS/Source/VGSSplatRenderer/Internal/VGSSplatRenderPipeline.h	2026-11-11 08:50:02.727821400 +0100
-@@ -54,6 +54,35 @@
+--- a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatRenderPipeline.h	2026-11-11 13:56:29.481777600 +0100
++++ b/VGS/Source/VGSSplatRenderer/Internal/VGSSplatRenderPipeline.h	2026-11-12 00:05:37.950460400 +0100
+@@ -54,8 +54,40 @@
  	float OpacityScale = 1.0f;
  
  	bool bVisible = true;
@@ -968,8 +1321,13 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatRenderPipeline.h b/VGS/
 +	bool bNormalsFaceCamera = false;
  	float InverseToneCurveStrength = 0.0f;
  	bool bInvertExpandGamutLUT = true;
++	// VGS CHANGE: casts a shadow (its component's Cast Shadow), for the renderer's own shadow
++	// map (VGSSplatLightShadow.h); Unreal's shadow maps take it through its scene proxy.
++	bool bCastShadow = false;
  
-@@ -84,4 +113,34 @@
+ 	bool HasClusters() const { return NumClusters > 0 && ClusterBuffer.IsValid(); }
+ 	uint32 GetNumLOD0Splats() const { return NumLOD0Splats > 0 ? FMath::Min(NumLOD0Splats, NumSplats) : NumSplats; }
+@@ -84,4 +116,34 @@
  		FRDGTextureRef SceneDepthTexture,
  		FRDGTextureRef SceneVelocityTexture
  	);
@@ -1006,8 +1364,8 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatRenderPipeline.h b/VGS/
  }
 diff -ruN a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatShadowVertexFactory.h b/VGS/Source/VGSSplatRenderer/Internal/VGSSplatShadowVertexFactory.h
 --- a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatShadowVertexFactory.h	1970-01-01 01:00:00.000000000 +0100
-+++ b/VGS/Source/VGSSplatRenderer/Internal/VGSSplatShadowVertexFactory.h	2026-11-11 08:50:02.729838800 +0100
-@@ -0,0 +1,74 @@
++++ b/VGS/Source/VGSSplatRenderer/Internal/VGSSplatShadowVertexFactory.h	2026-11-12 00:05:37.950460400 +0100
+@@ -0,0 +1,106 @@
 +// VGS: not Epic's. Splats in Unreal's shadow depth passes, so that they cast shadows.
 +#pragma once
 +
@@ -1019,6 +1377,7 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatShadowVertexFactory.h b
 +class FMeshElementCollector;
 +class FPrimitiveSceneProxy;
 +class FMaterialRenderProxy;
++class FSceneView;
 +
 +BEGIN_GLOBAL_SHADER_PARAMETER_STRUCT(FVGSSplatShadowParameters, VGSSPLATRENDERER_API)
 +	SHADER_PARAMETER_SRV(ByteAddressBuffer, Splats)
@@ -1034,15 +1393,37 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatShadowVertexFactory.h b
 +	SHADER_PARAMETER(float, PointScale)
 +	SHADER_PARAMETER(FVector2f, OpacityQuantization) // scale and bias of the quantized opacity
 +	SHADER_PARAMETER(float, OpacityScale)
-+	SHADER_PARAMETER(float, OpacityCutoff)
 +	SHADER_PARAMETER(FVector3f, Center) // of the asset, in its own space: what "inwards" means without a normal's side
 +	SHADER_PARAMETER(uint32, HasNormals) // 0 none (shortest axes), 1 with their side, 2 directions only
 +	SHADER_PARAMETER(float, Inset) // component units the casters are moved inwards, along their normal
 +END_GLOBAL_SHADER_PARAMETER_STRUCT()
 +
++namespace VGSSplat
++{
++	/**
++	 * How splats cast shadows (r.VGSSplat.Shadow.Method, which the project's settings set,
++	 * UVGSSplatSettings), in the order the settings list them:
++	 * 0 the splat renderer's own shadow map of the main directional light, composited onto the
++	 *   lit scene (VGSSplatLightShadow.h), the default;
++	 * 1 that for the main directional light, and Unreal's shadow maps for every other light;
++	 * 2 Unreal's shadow maps for every light, as octahedra at a random cutoff each (this vertex
++	 *   factory);
++	 * 3 none.
++	 */
++	enum class EShadowMethod : int32 { SplatShadowMap = 0, Mixed = 1, UnrealShadowMaps = 2, None = 3 };
++	VGSSPLATRENDERER_API EShadowMethod GetShadowMethod();
++
++	/** True if the splat renderer's own shadow map is drawn (methods 0 and 1). */
++	inline bool UsesSplatShadowMap()
++	{
++		const EShadowMethod Method = GetShadowMethod();
++		return Method == EShadowMethod::SplatShadowMap || Method == EShadowMethod::Mixed;
++	}
++}
++
 +/**
-+ * Draws splats into shadow depth maps as small opaque octahedra
-+ * (Shaders/Private/SplatRenderer/VGSSplatShadowVertexFactory.ush), straight from the
++ * Draws splats into shadow depth maps as small opaque octahedra, each at a random opacity
++ * cutoff (Shaders/Private/SplatRenderer/VGSSplatShadowVertexFactory.ush), straight from the
 + * renderer's splat buffer: no memory of their own beyond one shared index buffer of 512 KB.
 + * Supports GPU Scene, so virtual shadow maps take them as they take meshes.
 + *
@@ -1061,15 +1442,24 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatShadowVertexFactory.h b
 +	static bool ShouldCompilePermutation(const FVertexFactoryShaderPermutationParameters& Parameters);
 +	static void ModifyCompilationEnvironment(const FVertexFactoryShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment);
 +
-+	/** Render thread: what the next draws read. Call again when any of it changes. */
++	/**
++	 * Render thread: what the next draws read. Call again when any of it changes, even every
++	 * frame (the parameters are updated in place, in order with recorded commands), before the
++	 * frame's shadow depth passes gather their meshes.
++	 */
 +	void SetParameters(FRHICommandListBase& RHICmdList, const FVGSSplatShadowParameters& Parameters);
++
++	/** Render thread: casts nothing until SetParameters is called again. */
++	void ClearSplats();
 +
 +	/**
 +	 * Adds this proxy's splats, NumSplats of them, to a view's shadow casters: a batch of
 +	 * draws (one per SplatsPerDraw splats) drawing nothing in the view itself, as long as the
-+	 * proxy's view relevance keeps it out of the main and depth passes.
++	 * proxy's view relevance keeps it out of the main and depth passes. Nothing unless the
++	 * method draws into Unreal's shadow maps; with Mixed, nothing for the main directional
++	 * light's shadow views, which the splats' own shadow map covers.
 +	 */
-+	void AddShadowMeshes(const FPrimitiveSceneProxy& Proxy, int32 ViewIndex, FMeshElementCollector& Collector, bool bReverseCulling) const;
++	void AddShadowMeshes(const FPrimitiveSceneProxy& Proxy, const FSceneView& View, int32 ViewIndex, FMeshElementCollector& Collector, bool bReverseCulling) const;
 +
 +	/** Splats per draw: as many as 16-bit indices reach, six vertices each. */
 +	static constexpr uint32 SplatsPerDraw = 10920;
@@ -1083,7 +1473,7 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatShadowVertexFactory.h b
 +	friend class FVGSSplatShadowVertexFactoryShaderParameters;
 +};
 diff -ruN a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatTransform.h b/VGS/Source/VGSSplatRenderer/Internal/VGSSplatTransform.h
---- a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatTransform.h	2026-11-11 08:50:02.596151500 +0100
+--- a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatTransform.h	2026-11-11 13:56:29.486801300 +0100
 +++ b/VGS/Source/VGSSplatRenderer/Internal/VGSSplatTransform.h	1970-01-01 01:00:00.000000000 +0100
 @@ -1,15 +0,0 @@
 -// VGS: a copy of Epic's GaussianSplat renderer (UE 5.9.0, CL 60351404), renamed by plugins/unreal/tools/copy_epic_splat_renderer.py.
@@ -1102,8 +1492,8 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatTransform.h b/VGS/Sourc
 -	VGSSPLATRENDERER_API FMatrix44f GetComponentLocalToWorld(const UGaussianSplatComponent& Component);
 -}
 diff -ruN a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatViewExtension.h b/VGS/Source/VGSSplatRenderer/Internal/VGSSplatViewExtension.h
---- a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatViewExtension.h	2026-11-11 08:50:02.600658700 +0100
-+++ b/VGS/Source/VGSSplatRenderer/Internal/VGSSplatViewExtension.h	2026-11-11 08:50:02.728324500 +0100
+--- a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatViewExtension.h	2026-11-11 13:56:29.492330000 +0100
++++ b/VGS/Source/VGSSplatRenderer/Internal/VGSSplatViewExtension.h	2026-11-12 00:05:37.950460400 +0100
 @@ -9,10 +9,10 @@
  #include "Containers/SortedMap.h"
  #include "Containers/SortedSet.h"
@@ -1116,17 +1506,45 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatViewExtension.h b/VGS/S
  
  #define UE_API VGSSPLATRENDERER_API
  
-@@ -45,21 +45,20 @@
+@@ -28,11 +28,22 @@
+  */
+ DECLARE_MULTICAST_DELEGATE_ThreeParams(FOnCollectVGSSplatProxies, FRDGBuilder&, const FSceneView&, TArray<const FVGSSplatRenderProxy*>&);
+ 
++/**
++ * VGS CHANGE: broadcast on the render thread at the start of every view family's rendering
++ * (PreRenderViewFamily_RenderThread), before shadow depths are drawn, so that a source whose
++ * splats change can write them where its shadow casters read them. Bound and expiring as
++ * FOnCollectVGSSplatProxies.
++ */
++DECLARE_MULTICAST_DELEGATE_OneParam(FOnPrepareVGSSplatSources, FRDGBuilder&);
++
+ namespace VGSSplat
+ {
+ 	/** Binds a source to the splat renderer of World. Callable from the game thread or a game thread task; no-op for worlds without one. */
+ 	UE_API void RegisterExternalProxySource(UWorld* World, FOnCollectVGSSplatProxies::FDelegate&& Source);
+ 
++	/** VGS CHANGE: as above, with what the source does before each view family is drawn. */
++	UE_API void RegisterExternalProxySource(UWorld* World, FOnCollectVGSSplatProxies::FDelegate&& Source, FOnPrepareVGSSplatSources::FDelegate&& Prepare);
++
+ 	/** The splat renderer of World, or null if it has none. Not exported; callers in other modules use the entry points above. */
+ 	FVGSSplatViewExtension* FindViewExtension(UWorld* World);
+ }
+@@ -45,22 +56,26 @@
  
  	virtual void SetupViewFamily(FSceneViewFamily& InViewFamily) override;
  	virtual void SubscribeToPostProcessingPass(EPostProcessingPass PassId, const FSceneView& View, FAfterPassCallbackDelegateArray& InOutPassCallbacks, bool bIsPassEnabled) override;
 +	// VGS CHANGE: lit proxies go into the GBuffer here, after the base pass and before lighting.
 +	virtual void PostRenderBasePassDeferred_RenderThread(FRDGBuilder& GraphBuilder, FSceneView& InView, const FRenderTargetBindingSlots& RenderTargets, TRDGUniformBufferRef<FSceneTextureUniformParameters> SceneTextures) override;
++	// VGS CHANGE: sources prepare their splats here, before shadow depths.
++	virtual void PreRenderViewFamily_RenderThread(FRDGBuilder& GraphBuilder, FSceneViewFamily& InViewFamily) override;
++	// VGS CHANGE: the splats' own shadow of the directional light, onto the lit scene (VGSSplatLightShadow.h).
++	virtual void PrePostProcessPass_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& View, const FPostProcessingInputs& Inputs) override;
  
 -	void RegisterComponent(const UGaussianSplatComponent* InComponent);
 -	void UnregisterComponent(const UGaussianSplatComponent* InComponent);
+-	void AddExternalProxySource(FOnCollectVGSSplatProxies::FDelegate&& InSource);
 +	// VGS CHANGE: no RegisterComponent / UnregisterComponent; only external sources are drawn.
- 	void AddExternalProxySource(FOnCollectVGSSplatProxies::FDelegate&& InSource);
++	void AddExternalProxySource(FOnCollectVGSSplatProxies::FDelegate&& InSource, FOnPrepareVGSSplatSources::FDelegate&& InPrepare = FOnPrepareVGSSplatSources::FDelegate());
  
  protected:
  	virtual bool IsActiveThisFrame_Internal(const FSceneViewExtensionContext& Context) const override;
@@ -1141,11 +1559,13 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatViewExtension.h b/VGS/S
 -	TSortedSet<uint32> Components_GameThread;
 -	TSortedMap<uint32, TUniquePtr<FVGSSplatRenderProxy>> RenderProxy_RenderThread;
  	FOnCollectVGSSplatProxies ExternalProxySources_RenderThread;
++	FOnPrepareVGSSplatSources PrepareSources_RenderThread; // VGS CHANGE
  };
  
+ #undef UE_API
 diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUT.cpp b/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUT.cpp
---- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUT.cpp	2026-11-11 08:50:02.605669700 +0100
-+++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUT.cpp	2026-11-11 08:50:02.740447700 +0100
+--- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUT.cpp	2026-11-11 13:56:29.497946700 +0100
++++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUT.cpp	2026-11-12 00:05:37.954159300 +0100
 @@ -5,11 +5,12 @@
  #include "VGSSplatInverseToneCurveLUT.h"
  #include "VGSSplatInverseToneCurveLUTCache.h"
@@ -1378,8 +1798,8 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUT.cpp 
  	}
  }
 diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUT.h b/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUT.h
---- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUT.h	2026-11-11 08:50:02.609324100 +0100
-+++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUT.h	2026-11-11 08:50:02.731355000 +0100
+--- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUT.h	2026-11-11 13:56:29.500962700 +0100
++++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUT.h	2026-11-12 00:05:37.951465400 +0100
 @@ -15,9 +15,9 @@
  	// Selects which baked inverse-tone-curve LUT to sample; cast from bInvertExpandGamut for now.
  	enum class EInverseToneCurveLUTVariant : uint8
@@ -1393,8 +1813,8 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUT.h b/
  	};
  }
 diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUTCache.h b/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUTCache.h
---- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUTCache.h	2026-11-11 08:50:02.614343800 +0100
-+++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUTCache.h	2026-11-11 08:50:02.732355900 +0100
+--- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUTCache.h	2026-11-11 13:56:29.505980400 +0100
++++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUTCache.h	2026-11-12 00:05:37.951465400 +0100
 @@ -6,35 +6,34 @@
  
  #include "CoreMinimal.h"
@@ -1444,9 +1864,381 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUTCache
 +		TSortedMap<EInverseToneCurveLUTVariant, FSlot> Slots;
  	};
  }
+diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatLightShadow.cpp b/VGS/Source/VGSSplatRenderer/Private/VGSSplatLightShadow.cpp
+--- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatLightShadow.cpp	1970-01-01 01:00:00.000000000 +0100
++++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatLightShadow.cpp	2026-11-12 00:05:37.955780400 +0100
+@@ -0,0 +1,368 @@
++// VGS: not Epic's. See VGSSplatLightShadow.h.
++#include "VGSSplatLightShadow.h"
++
++#include "VGSSplatRenderPipeline.h"
++
++#include "CommonRenderResources.h"
++#include "DataDrivenShaderPlatformInfo.h"
++#include "GlobalShader.h"
++#include "LightSceneInfo.h"
++#include "LightSceneProxy.h"
++#include "PixelShaderUtils.h"
++#include "PostProcess/PostProcessInputs.h"
++#include "RenderGraphUtils.h"
++#include "RenderUtils.h"
++#include "RHIStaticStates.h"
++#include "ScenePrivate.h"
++#include "SceneRendering.h"
++#include "SceneTexturesConfig.h"
++#include "ShaderParameterStruct.h"
++#include "Substrate/Substrate.h"
++#include "SystemTextures.h"
++
++static TAutoConsoleVariable<float> CVarVGSSplatShadowTexelSize(
++	TEXT("r.VGSSplat.Shadow.TexelSize"),
++	0.5f,
++	TEXT("With r.VGSSplat.Shadow.Method 0 or 1: the size (cm) of a texel of the splats' own shadow map, which covers all the casting splats\n")
++	TEXT("(up to r.VGSSplat.Shadow.MaxMapSize texels a side; coarser beyond)."),
++	ECVF_RenderThreadSafe);
++
++static TAutoConsoleVariable<int32> CVarVGSSplatShadowMaxMapSize(
++	TEXT("r.VGSSplat.Shadow.MaxMapSize"),
++	2048,
++	TEXT("With r.VGSSplat.Shadow.Method 0 or 1: the largest side of the splats' own shadow map, in texels."),
++	ECVF_RenderThreadSafe);
++
++static TAutoConsoleVariable<int32> CVarVGSSplatShadowSelf(
++	TEXT("r.VGSSplat.Shadow.Self"),
++	0,
++	TEXT("With r.VGSSplat.Shadow.Method 0 or 1: 1 also shadows the lit captures themselves (self-shadowing); 0 only what is behind them."),
++	ECVF_RenderThreadSafe);
++
++static TAutoConsoleVariable<float> CVarVGSSplatShadowBias(
++	TEXT("r.VGSSplat.Shadow.Bias"),
++	3.0f,
++	TEXT("With r.VGSSplat.Shadow.Method 0 or 1: how far (cm) behind the splats a surface must be to be shadowed."),
++	ECVF_RenderThreadSafe);
++
++static TAutoConsoleVariable<float> CVarVGSSplatShadowSoftness(
++	TEXT("r.VGSSplat.Shadow.Softness"),
++	1.0f,
++	TEXT("With r.VGSSplat.Shadow.Method 0 or 1: the penumbra, as a multiple of what the light's source angle gives."),
++	ECVF_RenderThreadSafe);
++
++static TAutoConsoleVariable<float> CVarVGSSplatShadowDepthOpacity(
++	TEXT("r.VGSSplat.Shadow.DepthOpacity"),
++	0.1f,
++	TEXT("With r.VGSSplat.Shadow.Method 0 or 1: how opaque a splat must be over a texel to say where the capture is along the light."),
++	ECVF_RenderThreadSafe);
++
++BEGIN_SHADER_PARAMETER_STRUCT(FVGSSplatLightShadowMapParameters, )
++	SHADER_PARAMETER_RDG_BUFFER_SRV(ByteAddressBuffer, Splats)
++	SHADER_PARAMETER(FMatrix44f, LocalToLight)
++	SHADER_PARAMETER(FVector3f, PositionScale)
++	SHADER_PARAMETER(uint32, NumSplats)
++	SHADER_PARAMETER(FVector3f, PositionBias)
++	SHADER_PARAMETER(uint32, Stride)
++	SHADER_PARAMETER(FVector3f, ScaleScale)
++	SHADER_PARAMETER(uint32, BufferFormat)
++	SHADER_PARAMETER(FVector3f, ScaleBias)
++	SHADER_PARAMETER(float, PointScale)
++	SHADER_PARAMETER(FVector2f, OpacityQuantization)
++	SHADER_PARAMETER(float, OpacityScale)
++	SHADER_PARAMETER(float, DepthOpacity)
++	SHADER_PARAMETER(FVector4f, LightToClip)
++	SHADER_PARAMETER(float, Dilation)
++	RENDER_TARGET_BINDING_SLOTS()
++END_SHADER_PARAMETER_STRUCT()
++
++class FVGSSplatLightShadowMapVS : public FGlobalShader
++{
++public:
++	DECLARE_GLOBAL_SHADER(FVGSSplatLightShadowMapVS);
++	using FParameters = FVGSSplatLightShadowMapParameters;
++	SHADER_USE_PARAMETER_STRUCT(FVGSSplatLightShadowMapVS, FGlobalShader);
++
++	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
++	{
++		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
++	}
++	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
++	{
++		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
++		OutEnvironment.SetDefine(TEXT("VGS_LIGHT_SHADOW_MAP"), 1);
++	}
++};
++IMPLEMENT_GLOBAL_SHADER(FVGSSplatLightShadowMapVS, "/Plugin/VGS/Private/SplatRenderer/VGSSplatLightShadow.usf", "MainVS", SF_Vertex);
++
++class FVGSSplatLightShadowMapPS : public FGlobalShader
++{
++public:
++	DECLARE_GLOBAL_SHADER(FVGSSplatLightShadowMapPS);
++	using FParameters = FVGSSplatLightShadowMapParameters;
++	SHADER_USE_PARAMETER_STRUCT(FVGSSplatLightShadowMapPS, FGlobalShader);
++
++	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
++	{
++		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
++	}
++	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
++	{
++		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
++		OutEnvironment.SetDefine(TEXT("VGS_LIGHT_SHADOW_MAP"), 1);
++	}
++};
++IMPLEMENT_GLOBAL_SHADER(FVGSSplatLightShadowMapPS, "/Plugin/VGS/Private/SplatRenderer/VGSSplatLightShadow.usf", "MainPS", SF_Pixel);
++
++class FVGSSplatLightShadowCompositePS : public FGlobalShader
++{
++public:
++	DECLARE_GLOBAL_SHADER(FVGSSplatLightShadowCompositePS);
++	SHADER_USE_PARAMETER_STRUCT(FVGSSplatLightShadowCompositePS, FGlobalShader);
++
++	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
++		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
++		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SceneColorCopy)
++		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SceneDepth)
++		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, GBufferA)
++		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, GBufferB)
++		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, GBufferC)
++		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float>, TransmittanceMap)
++		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float2>, DepthMap)
++		SHADER_PARAMETER_SAMPLER(SamplerState, BilinearSampler)
++		SHADER_PARAMETER(FVector3f, LightOrigin)
++		SHADER_PARAMETER(FVector3f, LightX)
++		SHADER_PARAMETER(FVector3f, LightY)
++		SHADER_PARAMETER(FVector3f, LightZ)
++		SHADER_PARAMETER(FVector3f, ToLight)
++		SHADER_PARAMETER(FVector3f, LightColor)
++		SHADER_PARAMETER(FVector4f, LightToUV)
++		SHADER_PARAMETER(float, MapSize)
++		SHADER_PARAMETER(float, Bias)
++		SHADER_PARAMETER(float, PenumbraPerDepth)
++		SHADER_PARAMETER(uint32, SelfShadow)
++		SHADER_PARAMETER(uint32, HasGBuffer)
++		SHADER_PARAMETER(float, FallbackStrength)
++		RENDER_TARGET_BINDING_SLOTS()
++	END_SHADER_PARAMETER_STRUCT()
++
++	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
++	{
++		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
++	}
++	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
++	{
++		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
++		OutEnvironment.SetDefine(TEXT("VGS_LIGHT_SHADOW_COMPOSITE"), 1);
++	}
++};
++IMPLEMENT_GLOBAL_SHADER(FVGSSplatLightShadowCompositePS, "/Plugin/VGS/Private/SplatRenderer/VGSSplatLightShadow.usf", "MainPS", SF_Pixel);
++
++const FLightSceneInfo* VGSSplat::FindMainLight(const FScene& Scene)
++{
++	const FLightSceneInfo* Brightest = nullptr;
++	float BrightestLuminance = -1.0f;
++	for (const FLightSceneInfo* Light : Scene.DirectionalLights)
++	{
++		if (Light == nullptr || Light->Proxy == nullptr || !Light->Proxy->CastsDynamicShadow())
++		{
++			continue;
++		}
++		if (Light->Proxy->IsUsedAsAtmosphereSunLight() && Light->Proxy->GetAtmosphereSunLightIndex() == 0)
++		{
++			return Light;
++		}
++		const float Luminance = Light->Proxy->GetColor().GetLuminance();
++		if (Luminance > BrightestLuminance)
++		{
++			Brightest = Light;
++			BrightestLuminance = Luminance;
++		}
++	}
++	return Brightest;
++}
++
++FVector VGSSplat::GetMainLightDirection(const FLightSceneInfo& Light)
++{
++	return Light.Proxy->GetDirection().GetSafeNormal();
++}
++
++void VGSSplat::RenderLightShadow(FRDGBuilder& GraphBuilder, const FSceneView& View, const FPostProcessingInputs& Inputs, TConstArrayView<const FVGSSplatRenderProxy*> Proxies)
++{
++	if (!View.bIsViewInfo || !Inputs.SceneTextures || View.Family == nullptr || View.Family->Scene == nullptr
++		|| View.GetFeatureLevel() < ERHIFeatureLevel::SM5)
++	{
++		return;
++	}
++	const FViewInfo& ViewInfo = static_cast<const FViewInfo&>(View);
++	if (!ViewInfo.CachedViewUniformShaderParameters.IsValid())
++	{
++		return;
++	}
++	const FScene* Scene = View.Family->Scene->GetRenderScene();
++	const FLightSceneInfo* MainLight = Scene ? VGSSplat::FindMainLight(*Scene) : nullptr;
++	if (MainLight == nullptr)
++	{
++		return;
++	}
++	// Its colour over pi, past the atmosphere, as the view's DirectionalLightColor has it
++	// (FViewInfo::SetupUniformBufferParameters), whichever light that one is.
++	const FLinearColor LightColor = MainLight->Proxy->GetAtmosphereTransmittanceTowardSun() * MainLight->Proxy->GetColor() / PI;
++	if (LightColor.GetMax() <= 0.0f)
++	{
++		return;
++	}
++	const FVector3f ToLight = FVector3f(-VGSSplat::GetMainLightDirection(*MainLight));
++
++	TArray<const FVGSSplatRenderProxy*, TInlineAllocator<8>> Casters;
++	FBox Bounds(ForceInit);
++	for (const FVGSSplatRenderProxy* Proxy : Proxies)
++	{
++		if (Proxy && Proxy->bVisible && Proxy->bCastShadow && Proxy->GpuBuffer.IsValid() && Proxy->NumSplats > 0 && Proxy->LocalBounds.IsValid)
++		{
++			Casters.Add(Proxy);
++			Bounds += FBox(FVector(Proxy->LocalBounds.Min), FVector(Proxy->LocalBounds.Max)).TransformBy(FMatrix(Proxy->LocalToWorld));
++		}
++	}
++	if (Casters.IsEmpty())
++	{
++		return;
++	}
++	RDG_EVENT_SCOPE(GraphBuilder, "VGSSplat.LightShadow");
++
++	// The light's frame: z the way it goes, from the casters' centre.
++	const FVector Z = -FVector(ToLight).GetSafeNormal();
++	FVector X, Y;
++	Z.FindBestAxisVectors(X, Y);
++	const FVector Origin = Bounds.GetCenter();
++	const FMatrix WorldToLight = FTranslationMatrix(-Origin) * FMatrix(
++		FPlane(X.X, Y.X, Z.X, 0.0),
++		FPlane(X.Y, Y.Y, Z.Y, 0.0),
++		FPlane(X.Z, Y.Z, Z.Z, 0.0),
++		FPlane(0.0, 0.0, 0.0, 1.0));
++	double Half = 0.0;
++	for (int32 Corner = 0; Corner < 8; ++Corner)
++	{
++		const FVector P((Corner & 1) ? Bounds.Max.X : Bounds.Min.X, (Corner & 2) ? Bounds.Max.Y : Bounds.Min.Y, (Corner & 4) ? Bounds.Max.Z : Bounds.Min.Z);
++		const FVector L = WorldToLight.TransformPosition(P);
++		Half = FMath::Max(Half, FMath::Max(FMath::Abs(L.X), FMath::Abs(L.Y)));
++	}
++	Half = Half * 1.05 + 10.0; // the splats reach past their centres' bounds
++	// Texels of a fixed size in the world, as long as the map stays within its largest side: the
++	// map's cost is its fill, the splats' footprints in texels.
++	const double WantedTexel = FMath::Max(double(CVarVGSSplatShadowTexelSize.GetValueOnRenderThread()), 0.05);
++	const int32 MaxSize = FMath::Clamp(CVarVGSSplatShadowMaxMapSize.GetValueOnRenderThread(), 256, 8192);
++	const int32 Size = FMath::Clamp(Align(FMath::CeilToInt(2.0 * Half / WantedTexel), 64), 256, MaxSize);
++	const double Texel = 2.0 * Half / Size;
++
++	FRDGTextureRef TransmittanceMap = GraphBuilder.CreateTexture(
++		FRDGTextureDesc::Create2D(FIntPoint(Size), PF_R16F, FClearValueBinding(FLinearColor::White), TexCreate_RenderTargetable | TexCreate_ShaderResource),
++		TEXT("VGSSplat.LightShadow.Transmittance"));
++	// Depths from the casters' centre, in half floats: a few hundred units, to a fraction of one.
++	const FLinearColor Far(60000.0f, 60000.0f, 0.0f, 0.0f);
++	FRDGTextureRef DepthMap = GraphBuilder.CreateTexture(
++		FRDGTextureDesc::Create2D(FIntPoint(Size), PF_G16R16F, FClearValueBinding(Far), TexCreate_RenderTargetable | TexCreate_ShaderResource),
++		TEXT("VGSSplat.LightShadow.Depths"));
++	AddClearRenderTargetPass(GraphBuilder, TransmittanceMap, FLinearColor::White);
++	AddClearRenderTargetPass(GraphBuilder, DepthMap, Far);
++
++	FGlobalShaderMap* ShaderMap = GetGlobalShaderMap(View.GetShaderPlatform());
++	TShaderMapRef<FVGSSplatLightShadowMapVS> MapVS(ShaderMap);
++	TShaderMapRef<FVGSSplatLightShadowMapPS> MapPS(ShaderMap);
++	const float DepthOpacity = FMath::Clamp(CVarVGSSplatShadowDepthOpacity.GetValueOnRenderThread(), 0.01f, 0.99f);
++	for (const FVGSSplatRenderProxy* Proxy : Casters)
++	{
++		FVGSSplatLightShadowMapParameters* Params = GraphBuilder.AllocParameters<FVGSSplatLightShadowMapParameters>();
++		Params->Splats = GraphBuilder.CreateSRV(GraphBuilder.RegisterExternalBuffer(Proxy->GpuBuffer));
++		Params->LocalToLight = FMatrix44f(FMatrix(Proxy->LocalToWorld) * WorldToLight);
++		Params->PositionScale = Proxy->PositionScale;
++		Params->NumSplats = Proxy->NumSplats;
++		Params->PositionBias = Proxy->PositionBias;
++		Params->Stride = Proxy->GpuDataStride;
++		Params->ScaleScale = Proxy->ScaleScale;
++		Params->BufferFormat = Proxy->BufferFormat;
++		Params->ScaleBias = Proxy->ScaleBias;
++		Params->PointScale = Proxy->PointScaleFactor;
++		Params->OpacityQuantization = FVector2f(Proxy->ColorScale.W, Proxy->ColorBias.W);
++		Params->OpacityScale = Proxy->OpacityScale;
++		Params->DepthOpacity = DepthOpacity;
++		Params->LightToClip = FVector4f(float(1.0 / Half), float(1.0 / Half), 0.0f, 0.0f);
++		Params->Dilation = float(0.25 * Texel * Texel);
++		Params->RenderTargets[0] = FRenderTargetBinding(TransmittanceMap, ERenderTargetLoadAction::ELoad);
++		Params->RenderTargets[1] = FRenderTargetBinding(DepthMap, ERenderTargetLoadAction::ELoad);
++
++		const uint32 NumSplats = Proxy->NumSplats;
++		GraphBuilder.AddPass(
++			RDG_EVENT_NAME("VGSSplat.LightShadow.Map %u splats %dx%d", NumSplats, Size, Size),
++			Params,
++			ERDGPassFlags::Raster,
++			[Params, MapVS, MapPS, Size, NumSplats](FRHICommandList& RHICmdList)
++			{
++				FGraphicsPipelineStateInitializer PSO;
++				RHICmdList.ApplyCachedRenderTargets(PSO);
++				// Transmittance multiplied; depths (d, -d) min blended: the nearest and farthest.
++				PSO.BlendState = TStaticBlendState<
++					CW_RED, BO_Add, BF_Zero, BF_SourceColor, BO_Add, BF_Zero, BF_One,
++					CW_RG, BO_Min, BF_One, BF_One, BO_Min, BF_One, BF_One>::GetRHI();
++				PSO.RasterizerState = TStaticRasterizerState<FM_Solid, CM_None>::GetRHI();
++				PSO.DepthStencilState = TStaticDepthStencilState<false, CF_Always>::GetRHI();
++				PSO.BoundShaderState.VertexDeclarationRHI = GEmptyVertexDeclaration.VertexDeclarationRHI;
++				PSO.BoundShaderState.VertexShaderRHI = MapVS.GetVertexShader();
++				PSO.BoundShaderState.PixelShaderRHI = MapPS.GetPixelShader();
++				PSO.PrimitiveType = PT_TriangleList;
++				SetGraphicsPipelineState(RHICmdList, PSO, 0);
++				SetShaderParameters(RHICmdList, MapVS, MapVS.GetVertexShader(), *Params);
++				SetShaderParameters(RHICmdList, MapPS, MapPS.GetPixelShader(), *Params);
++				RHICmdList.SetViewport(0.0f, 0.0f, 0.0f, float(Size), float(Size), 1.0f);
++				RHICmdList.DrawPrimitive(0, NumSplats * 2, 1);
++			});
++	}
++
++	// Composite onto the lit scene, from a copy of it.
++	const FSceneTextureUniformParameters& SceneTextures = *Inputs.SceneTextures->GetContents();
++	FRDGTextureRef SceneColor = SceneTextures.SceneColorTexture;
++	FRDGTextureRef SceneDepth = SceneTextures.SceneDepthTexture;
++	if (!SceneColor || !SceneDepth || SceneColor->Desc.NumSamples > 1)
++	{
++		return;
++	}
++	FRDGTextureRef SceneColorCopy = GraphBuilder.CreateTexture(
++		FRDGTextureDesc::Create2D(SceneColor->Desc.Extent, SceneColor->Desc.Format, FClearValueBinding::None, TexCreate_ShaderResource | TexCreate_RenderTargetable),
++		TEXT("VGSSplat.LightShadow.SceneColor"));
++	AddCopyTexturePass(GraphBuilder, SceneColor, SceneColorCopy);
++
++	const bool bSubstrateMaterial = Substrate::IsSubstrateEnabled() && !Substrate::IsSubstrateBlendableGBufferEnabled(View.GetShaderPlatform());
++	const bool bGBuffer = !bSubstrateMaterial && SceneTextures.GBufferATexture && SceneTextures.GBufferBTexture && SceneTextures.GBufferCTexture;
++	FRDGTextureRef Black = GSystemTextures.GetBlackDummy(GraphBuilder);
++
++	const float SourceAngle = MainLight->Proxy->GetLightSourceAngle(); // degrees
++	const double PenumbraRadius = 0.5 * FMath::Tan(FMath::DegreesToRadians(FMath::Clamp(double(SourceAngle), 0.0, 30.0)));
++
++	FVGSSplatLightShadowCompositePS::FParameters* Params = GraphBuilder.AllocParameters<FVGSSplatLightShadowCompositePS::FParameters>();
++	Params->View = View.ViewUniformBuffer;
++	Params->SceneColorCopy = SceneColorCopy;
++	Params->SceneDepth = SceneDepth;
++	Params->GBufferA = bGBuffer ? SceneTextures.GBufferATexture : Black;
++	Params->GBufferB = bGBuffer ? SceneTextures.GBufferBTexture : Black;
++	Params->GBufferC = bGBuffer ? SceneTextures.GBufferCTexture : Black;
++	Params->TransmittanceMap = TransmittanceMap;
++	Params->DepthMap = DepthMap;
++	Params->BilinearSampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
++	Params->LightOrigin = FVector3f(Origin + View.ViewMatrices.GetPreViewTranslation());
++	Params->LightX = FVector3f(X);
++	Params->LightY = FVector3f(Y);
++	Params->LightZ = FVector3f(Z);
++	Params->ToLight = ToLight;
++	Params->LightColor = FVector3f(LightColor.R, LightColor.G, LightColor.B);
++	Params->LightToUV = FVector4f(float(0.5 / Half), float(-0.5 / Half), 0.5f, 0.5f);
++	Params->MapSize = float(Size);
++	Params->Bias = float(FMath::Max(double(CVarVGSSplatShadowBias.GetValueOnRenderThread()), 2.0 * Texel));
++	Params->PenumbraPerDepth = float(PenumbraRadius * FMath::Max(CVarVGSSplatShadowSoftness.GetValueOnRenderThread(), 0.0f) / (2.0 * Half));
++	Params->SelfShadow = CVarVGSSplatShadowSelf.GetValueOnRenderThread() != 0 ? 1u : 0u;
++	Params->HasGBuffer = bGBuffer ? 1u : 0u;
++	Params->FallbackStrength = 0.6f;
++	Params->RenderTargets[0] = FRenderTargetBinding(SceneColor, ERenderTargetLoadAction::ELoad);
++
++	TShaderMapRef<FVGSSplatLightShadowCompositePS> CompositePS(ShaderMap);
++	FPixelShaderUtils::AddFullscreenPass(GraphBuilder, ShaderMap, RDG_EVENT_NAME("VGSSplat.LightShadow.Composite"), CompositePS, Params, ViewInfo.ViewRect);
++}
 diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp b/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp
---- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp	2026-11-11 08:50:02.630257000 +0100
-+++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp	2026-11-11 08:50:02.745123200 +0100
+--- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp	2026-11-11 13:56:29.523128400 +0100
++++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp	2026-11-12 00:05:37.955780400 +0100
 @@ -26,6 +26,15 @@
  #include "BlueNoise.h"
  #include "SystemTextures.h"
@@ -1956,8 +2748,8 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp b/VGS
  	FRDGBuilder& GraphBuilder,
  	const FSceneView& View,
 diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRendererModule.cpp b/VGS/Source/VGSSplatRenderer/Private/VGSSplatRendererModule.cpp
---- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRendererModule.cpp	2026-11-11 08:50:02.643920200 +0100
-+++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatRendererModule.cpp	2026-11-11 08:50:02.734352700 +0100
+--- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRendererModule.cpp	2026-11-11 13:56:29.536199300 +0100
++++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatRendererModule.cpp	2026-11-12 00:05:37.952655200 +0100
 @@ -6,10 +6,8 @@
  
  #include "VGSSplatInverseToneCurveLUTCache.h"
@@ -1991,10 +2783,176 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRendererModule.cpp b/VGS
  	InverseToneCurveLUTCache.Reset();
  
  	RenderStats.Reset();
+diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatSettings.cpp b/VGS/Source/VGSSplatRenderer/Private/VGSSplatSettings.cpp
+--- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatSettings.cpp	1970-01-01 01:00:00.000000000 +0100
++++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatSettings.cpp	2026-11-12 00:05:37.954159300 +0100
+@@ -0,0 +1,57 @@
++// VGS: not Epic's. See VGSSplatSettings.h.
++#include "VGSSplatSettings.h"
++
++#include "HAL/IConsoleManager.h"
++
++#include UE_INLINE_GENERATED_CPP_BY_NAME(VGSSplatSettings)
++
++void UVGSSplatSettings::PostInitProperties()
++{
++	Super::PostInitProperties();
++	if (IsTemplate())
++	{
++		ApplyToConsoleVariables();
++	}
++}
++
++#if WITH_EDITOR
++FText UVGSSplatSettings::GetSectionText() const
++{
++	return FText::FromString(VGSSPLAT_PLUGIN_NAME);
++}
++
++FText UVGSSplatSettings::GetSectionDescription() const
++{
++	return FText::FromString(TEXT("How the plugin's splats cast shadows, for the whole project."));
++}
++
++void UVGSSplatSettings::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
++{
++	Super::PostEditChangeProperty(PropertyChangedEvent);
++	ApplyToConsoleVariables();
++}
++#endif
++
++void UVGSSplatSettings::ApplyToConsoleVariables() const
++{
++	IConsoleManager& Console = IConsoleManager::Get();
++	auto SetInt = [&Console](const TCHAR* Name, int32 Value)
++	{
++		if (IConsoleVariable* CVar = Console.FindConsoleVariable(Name))
++		{
++			CVar->Set(Value, ECVF_SetByProjectSetting);
++		}
++	};
++	auto SetFloat = [&Console](const TCHAR* Name, float Value)
++	{
++		if (IConsoleVariable* CVar = Console.FindConsoleVariable(Name))
++		{
++			CVar->Set(Value, ECVF_SetByProjectSetting);
++		}
++	};
++	SetInt(TEXT("r.VGSSplat.Shadow.Method"), int32(ShadowMethod));
++	SetInt(TEXT("r.VGSSplat.Shadow.Self"), bSelfShadow ? 1 : 0);
++	SetFloat(TEXT("r.VGSSplat.Shadow.TexelSize"), ShadowTexelSize);
++	SetFloat(TEXT("r.VGSSplat.Shadow.Softness"), ShadowSoftness);
++	SetFloat(TEXT("r.VGSSplat.Shadow.Bias"), ShadowBias);
++}
+diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatSettings.h b/VGS/Source/VGSSplatRenderer/Private/VGSSplatSettings.h
+--- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatSettings.h	1970-01-01 01:00:00.000000000 +0100
++++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatSettings.h	2026-11-12 00:05:37.954159300 +0100
+@@ -0,0 +1,101 @@
++// VGS: not Epic's. The project's settings for the splat renderer (Project Settings > Plugins),
++// written to the console variables the renderer reads.
++#pragma once
++
++#include "CoreMinimal.h"
++#include "Engine/DeveloperSettings.h"
++#include "VGSSplatSettings.generated.h"
++
++/**
++ * How splats cast shadows (r.VGSSplat.Shadow.Method, the same numbers). Every light lights a
++ * Shaded actor whichever this is, and every mesh's shadow falls on it; this is only about the
++ * shadows the splats cast.
++ */
++UENUM()
++enum class EVGSSplatShadowMethod : uint8
++{
++	/**
++	 * Recommended. The splats cast shadows from the main directional light only (the sun: the
++	 * one marked Atmosphere Sun Light, otherwise the brightest that casts shadows). They are
++	 * drawn from it into a shadow map of their own, as soft Gaussians with their real opacity,
++	 * and that light is taken off what lies behind them: solid, clean shadows with a penumbra,
++	 * and no blotches on the characters. Spot, point and rect lights get no shadow from the
++	 * splats. About 0.6 to 1 ms for 300,000 splats, whatever the screen resolution.
++	 */
++	SplatShadowMap = 0 UMETA(DisplayName = "Splat Shadow Map (sun only)"),
++
++	/**
++	 * The sun as Splat Shadow Map (clean shadows), and every other light that casts shadows
++	 * (spot, point, rect, other directional lights) as Unreal Shadow Maps (grainy shadows). The
++	 * cost of both: about 0.6 to 1 ms for 300,000 splats, plus about 0.4 ms per other light.
++	 */
++	Mixed = 1 UMETA(DisplayName = "Splat Shadow Map (sun) + Unreal Shadow Maps (other lights)"),
++
++	/**
++	 * The splats go into Unreal's own shadow maps (virtual or cascaded) as small opaque shapes,
++	 * each at a random opacity: shadows from every light that casts them, the sun included, but
++	 * grainy and frayed, and Shaded characters shadow themselves in blotches (each actor's
++	 * Shadow Inset reduces them). About 0.4 ms for 300,000 splats per light.
++	 */
++	UnrealShadowMaps = 2 UMETA(DisplayName = "Unreal Shadow Maps (all lights)"),
++
++	/** The splats cast no shadows at all, whatever each actor's Cast Shadow says. Costs nothing. */
++	None = 3 UMETA(DisplayName = "No Shadows"),
++};
++
++UCLASS(config = Engine, defaultconfig)
++class UVGSSplatSettings : public UDeveloperSettings
++{
++	GENERATED_BODY()
++
++public:
++	/** How splats cast shadows, for every actor of the plugin in the project. */
++	UPROPERTY(config, EditAnywhere, Category = "Shadows")
++	EVGSSplatShadowMethod ShadowMethod = EVGSSplatShadowMethod::SplatShadowMap;
++
++	/**
++	 * In the sun's shadow from the splats' own shadow map, Shaded actors also shadow themselves:
++	 * an arm on the body, one person on another. Off, only what lies behind them is shadowed,
++	 * and each keeps the shading its normals give it. Self-illuminated actors are never darkened.
++	 */
++	UPROPERTY(config, EditAnywhere, Category = "Shadows",
++		meta = (DisplayName = "Self Shadowing", EditCondition = "ShadowMethod == EVGSSplatShadowMethod::SplatShadowMap || ShadowMethod == EVGSSplatShadowMethod::Mixed"))
++	bool bSelfShadow = false;
++
++	/**
++	 * The size of a texel of the splats' shadow map, which covers every casting actor (up to
++	 * 2048 texels a side, coarser beyond). Smaller is sharper and costs more: for 300,000 splats
++	 * about 1 ms at 0.5 cm, 0.6 ms at 1 cm.
++	 */
++	UPROPERTY(config, EditAnywhere, Category = "Shadows",
++		meta = (DisplayName = "Shadow Texel Size", Units = "cm", ClampMin = "0.05", UIMin = "0.25", UIMax = "2.0",
++			EditCondition = "ShadowMethod == EVGSSplatShadowMethod::SplatShadowMap || ShadowMethod == EVGSSplatShadowMethod::Mixed"))
++	float ShadowTexelSize = 0.5f;
++
++	/** The penumbra, as a multiple of what the light's Source Angle gives: 0 is a hard edge. */
++	UPROPERTY(config, EditAnywhere, Category = "Shadows",
++		meta = (DisplayName = "Shadow Softness", ClampMin = "0.0", UIMax = "4.0",
++			EditCondition = "ShadowMethod == EVGSSplatShadowMethod::SplatShadowMap || ShadowMethod == EVGSSplatShadowMethod::Mixed"))
++	float ShadowSoftness = 1.0f;
++
++	/**
++	 * How far behind the splats a surface must be to be shadowed. Raise it if the ground right
++	 * under an actor shows dark specks; lower it if the shadow does not reach the feet.
++	 */
++	UPROPERTY(config, EditAnywhere, Category = "Shadows", AdvancedDisplay,
++		meta = (DisplayName = "Shadow Bias", Units = "cm", ClampMin = "0.0", UIMax = "20.0",
++			EditCondition = "ShadowMethod == EVGSSplatShadowMethod::SplatShadowMap || ShadowMethod == EVGSSplatShadowMethod::Mixed"))
++	float ShadowBias = 3.0f;
++
++	virtual FName GetCategoryName() const override { return TEXT("Plugins"); }
++	virtual void PostInitProperties() override;
++#if WITH_EDITOR
++	virtual FText GetSectionText() const override;
++	virtual FText GetSectionDescription() const override;
++	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
++#endif
++
++private:
++	/** Sets the console variables (as project settings: the console still overrides them). */
++	void ApplyToConsoleVariables() const;
++};
 diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatShadowVertexFactory.cpp b/VGS/Source/VGSSplatRenderer/Private/VGSSplatShadowVertexFactory.cpp
 --- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatShadowVertexFactory.cpp	1970-01-01 01:00:00.000000000 +0100
-+++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatShadowVertexFactory.cpp	2026-11-11 08:50:02.741597000 +0100
-@@ -0,0 +1,222 @@
++++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatShadowVertexFactory.cpp	2026-11-12 00:05:37.954159300 +0100
+@@ -0,0 +1,266 @@
 +// VGS: not Epic's. See VGSSplatShadowVertexFactory.h.
 +#include "VGSSplatShadowVertexFactory.h"
 +
@@ -2009,8 +2967,26 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatShadowVertexFactory.cpp 
 +#include "RHIResourceUtils.h"
 +#include "Runtime/Launch/Resources/Version.h"
 +#include "SceneManagement.h"
++#include "SceneInterface.h"
++#include "SceneView.h"
++#include "VGSSplatLightShadow.h"
 +
 +IMPLEMENT_GLOBAL_SHADER_PARAMETER_STRUCT(FVGSSplatShadowParameters, "VGSSplatShadow");
++
++static TAutoConsoleVariable<int32> CVarVGSSplatShadowMethod(
++	TEXT("r.VGSSplat.Shadow.Method"),
++	0,
++	TEXT("How splats cast shadows (the project's settings set it).\n")
++	TEXT("0: the splat renderer's own shadow map of the main directional light, composited onto the lit scene (default).\n")
++	TEXT("1: that for the main directional light, and Unreal's shadow maps (as 2) for every other light.\n")
++	TEXT("2: in Unreal's shadow maps, for every light: each splat an opaque octahedron where its opacity reaches a cutoff of its own, drawn at random.\n")
++	TEXT("3: none."),
++	ECVF_RenderThreadSafe);
++
++VGSSplat::EShadowMethod VGSSplat::GetShadowMethod()
++{
++	return EShadowMethod(FMath::Clamp(CVarVGSSplatShadowMethod.GetValueOnAnyThread(), 0, 3));
++}
 +
 +namespace
 +{
@@ -2167,14 +3143,40 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatShadowVertexFactory.cpp 
 +		Bound.Normals = GVGSSplatShadowNoNormals.SRV;
 +		Bound.HasNormals = 0;
 +	}
-+	UniformBuffer = TUniformBufferRef<FVGSSplatShadowParameters>::CreateUniformBufferImmediate(Bound, UniformBuffer_MultiFrame);
++	if (UniformBuffer.IsValid())
++	{
++		// In place, in order with the commands already recorded: draws of earlier frames keep
++		// what they were given, and a capture that plays changes this every frame.
++		UniformBuffer.UpdateUniformBufferImmediate(RHICmdList, Bound);
++	}
++	else
++	{
++		UniformBuffer = TUniformBufferRef<FVGSSplatShadowParameters>::CreateUniformBufferImmediate(Bound, UniformBuffer_MultiFrame);
++	}
 +}
 +
-+void FVGSSplatShadowVertexFactory::AddShadowMeshes(const FPrimitiveSceneProxy& Proxy, int32 ViewIndex, FMeshElementCollector& Collector, bool bReverseCulling) const
++void FVGSSplatShadowVertexFactory::ClearSplats()
 +{
-+	if (!HasParameters())
++	NumSplats = 0;
++}
++
++void FVGSSplatShadowVertexFactory::AddShadowMeshes(const FPrimitiveSceneProxy& Proxy, const FSceneView& View, int32 ViewIndex, FMeshElementCollector& Collector, bool bReverseCulling) const
++{
++	const VGSSplat::EShadowMethod Method = VGSSplat::GetShadowMethod();
++	if (!HasParameters() || (Method != VGSSplat::EShadowMethod::UnrealShadowMaps && Method != VGSSplat::EShadowMethod::Mixed))
 +	{
 +		return;
++	}
++	if (Method == VGSSplat::EShadowMethod::Mixed && View.Family && View.Family->Scene && View.Family->Scene->GetRenderScene())
++	{
++		// A shadow depth view looks along its light (FProjectedShadowInfo::ModifyViewForShadow
++		// turns it so, for billboards): the main directional light's views are the ones looking
++		// along its direction, which the splats' own shadow map covers.
++		const FLightSceneInfo* MainLight = VGSSplat::FindMainLight(*View.Family->Scene->GetRenderScene());
++		if (MainLight && FMath::Abs(FVector::DotProduct(View.GetViewDirection(), VGSSplat::GetMainLightDirection(*MainLight))) > 0.99999)
++		{
++			return;
++		}
 +	}
 +	const FMaterialRenderProxy* Material = UMaterial::GetDefaultMaterial(MD_Surface)->GetRenderProxy();
 +	for (uint32 First = 0; First < NumSplats; First += SplatsPerDraw)
@@ -2218,8 +3220,8 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatShadowVertexFactory.cpp 
 +	| GVGSSplatShadowGPUSceneFlag
 +);
 diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatViewExtension.cpp b/VGS/Source/VGSSplatRenderer/Private/VGSSplatViewExtension.cpp
---- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatViewExtension.cpp	2026-11-11 08:50:02.657026600 +0100
-+++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatViewExtension.cpp	2026-11-11 08:50:02.739447600 +0100
+--- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatViewExtension.cpp	2026-11-11 13:56:29.550761200 +0100
++++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatViewExtension.cpp	2026-11-12 00:05:37.954159300 +0100
 @@ -3,9 +3,10 @@
  // Copyright Epic Games, Inc. All Rights Reserved.
  
@@ -2233,7 +3235,7 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatViewExtension.cpp b/VGS/
  
  #include "SceneView.h"
  #include "SceneInterface.h"
-@@ -13,27 +14,30 @@
+@@ -13,27 +14,32 @@
  
  #include "ScreenPass.h"
  #include "PostProcess/PostProcessMaterialInputs.h"
@@ -2247,6 +3249,8 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatViewExtension.cpp b/VGS/
 +#include "SceneRendering.h" // VGS CHANGE: FViewInfo, for the lit pass
 +#include "SceneTextures.h" // VGS CHANGE
 +#include "Substrate/Substrate.h" // VGS CHANGE: its material buffer, for the lit pass
++#include "VGSSplatLightShadow.h" // VGS CHANGE
++#include "VGSSplatShadowVertexFactory.h" // VGS CHANGE: VGSSplat::GetShadowMethod
  
  #define INVALID_ID 0xFFFFFFFF
  
@@ -2272,7 +3276,7 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatViewExtension.cpp b/VGS/
  	}
  }
  
-@@ -44,51 +48,6 @@
+@@ -44,51 +50,6 @@
  
  FVGSSplatViewExtension::~FVGSSplatViewExtension()
  {
@@ -2324,7 +3328,7 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatViewExtension.cpp b/VGS/
  }
  
  void FVGSSplatViewExtension::SetupViewFamily(FSceneViewFamily& InViewFamily)
-@@ -97,52 +56,7 @@
+@@ -97,52 +58,7 @@
  	{
  		FModuleManager::GetModuleChecked<FVGSSplatRendererModule>("VGSSplatRenderer").GetRenderStats_RenderThread().UpdateRegistration();
  	});
@@ -2378,7 +3382,7 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatViewExtension.cpp b/VGS/
  }
  
  void FVGSSplatViewExtension::SubscribeToPostProcessingPass(EPostProcessingPass PassId, const FSceneView& View, FAfterPassCallbackDelegateArray& InOutPassCallbacks, bool bIsPassEnabled)
-@@ -150,7 +64,7 @@
+@@ -150,7 +66,7 @@
  	//if (PassId == EPostProcessingPass::VisualizeDepthOfField)
  	if (PassId == EPostProcessingPass::BeforeDOF)
  	{
@@ -2387,7 +3391,7 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatViewExtension.cpp b/VGS/
  		{
  			InOutPassCallbacks.Add(FAfterPassCallbackDelegate::CreateRaw(this, &FVGSSplatViewExtension::PostProcessPass_RenderThread));
  		}
-@@ -250,17 +164,60 @@
+@@ -250,17 +166,60 @@
  	return MoveTemp(Output);
  }
  
@@ -2455,7 +3459,7 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatViewExtension.cpp b/VGS/
  	ExternalProxySources_RenderThread.Broadcast(GraphBuilder, View, Proxies);
  
  	TSortedMap<VGSSplat::EInverseToneCurveLUTVariant, FRHITexture*> LUTRHI;
-@@ -272,6 +229,13 @@
+@@ -272,6 +231,13 @@
  		{
  			continue;
  		}
@@ -2469,7 +3473,7 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatViewExtension.cpp b/VGS/
  
  		FRHITexture* ProxyLUTRHI = nullptr;
  		if (RenderProxy->InverseToneCurveStrength > 0.0f)
-@@ -312,83 +276,15 @@
+@@ -312,97 +278,55 @@
  	});
  
  	VGSSplat::FRenderStats& RenderStats = Module.GetRenderStats_RenderThread();
@@ -2536,7 +3540,8 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatViewExtension.cpp b/VGS/
 -void FVGSSplatViewExtension::UnregisterComponent(const UGaussianSplatComponent* Component)
 -{
 -	RegisteredComponents.Remove(Component);
--
++// VGS CHANGE: no RegisterComponent / UnregisterComponent (Epic's components are Epic's to draw).
+ 
 -	// Remove render proxy on render thread
 -	const uint32 UniqueID = Component->GetUniqueID(); // bypass asset check
 -	ENQUEUE_RENDER_COMMAND(FRemoveVGSSplatRenderProxy)(
@@ -2553,13 +3558,67 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/Private/VGSSplatViewExtension.cpp b/VGS/
 -		}
 -	);
 -}
-+// VGS CHANGE: no RegisterComponent / UnregisterComponent (Epic's components are Epic's to draw).
- 
- void FVGSSplatViewExtension::AddExternalProxySource(FOnCollectVGSSplatProxies::FDelegate&& InSource)
+-
+-void FVGSSplatViewExtension::AddExternalProxySource(FOnCollectVGSSplatProxies::FDelegate&& InSource)
++void FVGSSplatViewExtension::AddExternalProxySource(FOnCollectVGSSplatProxies::FDelegate&& InSource, FOnPrepareVGSSplatSources::FDelegate&& InPrepare)
  {
+ 	ENQUEUE_RENDER_COMMAND(FAddVGSSplatExternalProxySource)(
+-		[WeakThis = AsWeak(), Source = MoveTemp(InSource)](FRHICommandList&) mutable
++		[WeakThis = AsWeak(), Source = MoveTemp(InSource), Prepare = MoveTemp(InPrepare)](FRHICommandList&) mutable
+ 		{
+ 			if (TSharedPtr<FVGSSplatViewExtension> This = StaticCastWeakPtr<FVGSSplatViewExtension>(WeakThis).Pin())
+ 			{
+ 				This->ExternalProxySources_RenderThread.Add(MoveTemp(Source));
++				if (Prepare.IsBound()) // VGS CHANGE
++				{
++					This->PrepareSources_RenderThread.Add(MoveTemp(Prepare));
++				}
+ 			}
+ 		}
+ 	);
+ }
+ 
++// VGS CHANGE: before anything of the family is drawn, shadow depths included.
++void FVGSSplatViewExtension::PreRenderViewFamily_RenderThread(FRDGBuilder& GraphBuilder, FSceneViewFamily& InViewFamily)
++{
++	if (VGSSplat::IsEnabled() && InViewFamily.Scene)
++	{
++		PrepareSources_RenderThread.Broadcast(GraphBuilder);
++	}
++}
++
++// VGS CHANGE: with r.VGSSplat.Shadow.Method 0 or 1, the casting proxies' own shadow map of the
++// directional light, taken off the lit scene before post-processing.
++void FVGSSplatViewExtension::PrePostProcessPass_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& View, const FPostProcessingInputs& Inputs)
++{
++	if (!VGSSplat::IsEnabled() || !VGSSplat::UsesSplatShadowMap() || View.Family == nullptr || View.Family->Scene == nullptr)
++	{
++		return;
++	}
++	TArray<const FVGSSplatRenderProxy*> Proxies;
++	ExternalProxySources_RenderThread.Broadcast(GraphBuilder, View, Proxies);
++	VGSSplat::RenderLightShadow(GraphBuilder, View, Inputs, Proxies);
++}
++
+ FVGSSplatViewExtension* VGSSplat::FindViewExtension(UWorld* World)
+ {
+ 	UVGSSplatSubsystem* Subsystem = UWorld::GetSubsystem<UVGSSplatSubsystem>(World);
+@@ -416,3 +340,12 @@
+ 		Extension->AddExternalProxySource(MoveTemp(Source));
+ 	}
+ }
++
++// VGS CHANGE
++void VGSSplat::RegisterExternalProxySource(UWorld* World, FOnCollectVGSSplatProxies::FDelegate&& Source, FOnPrepareVGSSplatSources::FDelegate&& Prepare)
++{
++	if (FVGSSplatViewExtension* Extension = FindViewExtension(World))
++	{
++		Extension->AddExternalProxySource(MoveTemp(Source), MoveTemp(Prepare));
++	}
++}
 diff -ruN a/VGS/Source/VGSSplatRenderer/VGSSplatRenderer.Build.cs b/VGS/Source/VGSSplatRenderer/VGSSplatRenderer.Build.cs
---- a/VGS/Source/VGSSplatRenderer/VGSSplatRenderer.Build.cs	2026-11-11 08:50:02.584781000 +0100
-+++ b/VGS/Source/VGSSplatRenderer/VGSSplatRenderer.Build.cs	2026-11-11 08:50:02.746129600 +0100
+--- a/VGS/Source/VGSSplatRenderer/VGSSplatRenderer.Build.cs	2026-11-11 13:56:29.476774900 +0100
++++ b/VGS/Source/VGSSplatRenderer/VGSSplatRenderer.Build.cs	2026-11-12 00:05:37.956786300 +0100
 @@ -10,6 +10,10 @@
  		{
  			PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
@@ -2571,12 +3630,13 @@ diff -ruN a/VGS/Source/VGSSplatRenderer/VGSSplatRenderer.Build.cs b/VGS/Source/V
  			PublicDependencyModuleNames.AddRange(new[] { "Core" });
  
  			PrivateDependencyModuleNames.AddRange(
-@@ -21,11 +25,19 @@
+@@ -21,11 +25,20 @@
  					"RenderCore",
  					"RHI",
  					"Projects",
 -					"GaussianSplat",
 -					"GaussianSplatShader"
++					"DeveloperSettings", // VGS CHANGE: the project's settings (VGSSplatSettings.h)
 +					// VGS CHANGE: no GaussianSplat or GaussianSplatShader: what the renderer used of
 +					// them is copied (VGSSplatCommon.h, VGSSplatCluster.h, Shaders/Shared), so the
 +					// plugin does not need Epic's GaussianSplat plugin, which only Unreal 5.9 has.

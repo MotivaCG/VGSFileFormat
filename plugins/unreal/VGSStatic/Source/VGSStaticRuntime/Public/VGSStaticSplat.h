@@ -6,6 +6,7 @@
 #include "VGSStaticSplat.generated.h"
 
 class UAssetImportData;
+class UStaticMesh;
 class FVGSStaticSplatGpu;
 
 /** Where an asset's normals come from. */
@@ -83,6 +84,9 @@ struct FVGSStaticSplatData
  * component, which says how it is drawn (exposure, grade, lighting).
  *
  * One GPU copy serves every component that shows it.
+ *
+ * It also keeps its shadow proxy, made at import: a hidden mesh of where the splats are
+ * opaque, which components cast shadows from (and can collide with) instead of the splats.
  */
 UCLASS(BlueprintType, hidecategories = Object)
 class VGSSTATICRUNTIME_API UVGSStaticSplat : public UObject
@@ -118,6 +122,19 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Normals", meta = (DisplayName = "How"))
 	FString NormalsNote;
 
+	/**
+	 * A closed mesh of where the splats are opaque, made at import, a little inside them (in
+	 * this asset's package). Components cast their shadows from it, from every light as any
+	 * mesh does, and can collide with it (their Shadow Caster and Proxy Collision); it is never
+	 * drawn. Its triangles are reduced when it is built: Reduction Settings in its own editor.
+	 */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Shadow Proxy", meta = (DisplayName = "Mesh"))
+	TObjectPtr<UStaticMesh> ShadowProxy;
+
+	/** How the proxy was made, in words. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Shadow Proxy", meta = (DisplayName = "How"))
+	FString ShadowProxyNote;
+
 #if WITH_EDITORONLY_DATA
 	UPROPERTY(VisibleAnywhere, Instanced, Category = "Import Settings")
 	TObjectPtr<UAssetImportData> AssetImportData;
@@ -140,6 +157,22 @@ public:
 	/** Shortest axes: ... no farther than this share of the splats' size (their bounds' diagonal). */
 	UPROPERTY(EditAnywhere, Category = "Import Settings", meta = (ClampMin = "0.05", ClampMax = "10", Units = "Percent", EditCondition = "bEstimateNormals"))
 	float NormalRadiusPercent = 1.0f;
+
+	/** Make the shadow proxy mesh (reimport does the same). The sizes below are for a PLY in metres. */
+	UPROPERTY(EditAnywhere, Category = "Import Settings")
+	bool bMakeShadowProxy = true;
+
+	UPROPERTY(EditAnywhere, Category = "Import Settings", meta = (DisplayName = "Proxy Voxel Size", ClampMin = "0.1", ClampMax = "20", Units = "cm", EditCondition = "bMakeShadowProxy"))
+	float ProxyVoxelSize = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Import Settings", meta = (DisplayName = "Proxy Opacity", ClampMin = "0.01", ClampMax = "0.99", EditCondition = "bMakeShadowProxy"))
+	float ProxyOpacity = 0.3f;
+
+	UPROPERTY(EditAnywhere, Category = "Import Settings", meta = (DisplayName = "Proxy Inset", ClampMin = "0", ClampMax = "20", Units = "cm", EditCondition = "bMakeShadowProxy"))
+	float ProxyInset = 2.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Import Settings", meta = (DisplayName = "Proxy Triangles", ClampMin = "500", EditCondition = "bMakeShadowProxy"))
+	int32 ProxyTriangles = 20000;
 #endif
 
 	/** The splats, or null for an asset with none. */

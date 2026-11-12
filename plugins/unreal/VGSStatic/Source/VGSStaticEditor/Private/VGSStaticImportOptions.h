@@ -49,4 +49,41 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, config, Category = "Splats", meta = (DisplayName = "GPU Layout"))
 	EVGSStaticGpuLayout GpuLayout = EVGSStaticGpuLayout::Float;
+
+	/**
+	 * Make a shadow proxy: a hidden mesh of where the splats are opaque, kept in the asset.
+	 * Components cast their shadows from it instead of from the splats (their Shadow Caster):
+	 * from every light, as any mesh, at no cost per splat; they can also collide with it.
+	 * Takes well under a second. The sizes below are for a PLY in metres (centimetres in
+	 * Unreal at the component's Unit Scale of 100).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, config, Category = "Shadow Proxy", meta = (DisplayName = "Make Shadow Proxy"))
+	bool bMakeShadowProxy = true;
+
+	/** The detail of the proxy: smaller follows fingers and hair better, and makes more triangles to reduce. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, config, Category = "Shadow Proxy",
+		meta = (DisplayName = "Voxel Size", ClampMin = "0.1", ClampMax = "20", Units = "cm", EditCondition = "bMakeShadowProxy"))
+	float ProxyVoxelSize = 1.0f;
+
+	/**
+	 * How opaque the splats must make a voxel for it to be inside the proxy: lower takes in
+	 * more of the hair's and the edges' haze (larger shadows), higher less.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, config, Category = "Shadow Proxy",
+		meta = (DisplayName = "Opacity", ClampMin = "0.01", ClampMax = "0.99", EditCondition = "bMakeShadowProxy"))
+	float ProxyOpacity = 0.3f;
+
+	/**
+	 * How far the proxy lies inside the splats. The lit splats would shadow themselves in
+	 * blotches if they were inside their own shadow caster; more than needed thins the shadows
+	 * of thin parts (fingers, hair).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, config, Category = "Shadow Proxy",
+		meta = (DisplayName = "Inset", ClampMin = "0", ClampMax = "20", Units = "cm", EditCondition = "bMakeShadowProxy"))
+	float ProxyInset = 2.0f;
+
+	/** The triangles the proxy is reduced to (it is first made with several times more). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, config, Category = "Shadow Proxy",
+		meta = (DisplayName = "Triangles", ClampMin = "500", EditCondition = "bMakeShadowProxy"))
+	int32 ProxyTriangles = 20000;
 };
