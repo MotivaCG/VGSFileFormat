@@ -59,7 +59,7 @@ struct AxisNormalsSettings {
   float agreeCos = 0.6427876f;   // a flat splat keeps its axis within 50 degrees of its neighbours'
   float consensus = 0.6f;        // neighbours agree: their main direction holds this share of the weight
   int passes = 2;                // of the consensus above
-  int smoothingPasses = 2;       // then averaged with the neighbours within smoothCos, as the VGS editor does
+  int smoothingPasses = 2;       // then averaged with the neighbours within smoothCos
   float smoothCos = 0.8191520f;  // 35 degrees
 };
 

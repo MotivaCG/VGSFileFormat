@@ -30,7 +30,17 @@ constexpr int kNormalSignPropagationPasses = 4;
 constexpr int kNormalSmoothingPasses = 4;
 constexpr float kAxisTrustCos = 0.8660254f;        // cos 30
 constexpr float kAxisDistrustCos = 0.5f;           // cos 60
-constexpr float kSmoothingMaxAngleCos = 0.8191520f; // cos 35
+// The smoothing weighs each neighbour by its opacity times cos^8 of its angle to the splat
+// (0.76 at 15 degrees, 0.20 at 35, 0.004 at 60), so creases stay sharp. It
+// replaced a hard cut that took every neighbour within 35 degrees and none beyond. On splat
+// solids with known normals (scratch test, noise as on andreavictor) the error at a 40 degree
+// crease went from 15.9 to 13.9 degrees, 60: 17.7 to 17.0, round 2 cm: 8.4 to 8.0; flat and
+// round 12 cm unchanged (2.6, 3.0). Cos^4 smoothed flat parts more but rounded creases
+// (60: 21.3); a weight falling with distance only helped very thin parts and cost elsewhere.
+inline float smoothingWeight(float facing) {
+    const float f2 = std::max(facing, 0.0f) * std::max(facing, 0.0f), f4 = f2 * f2;
+    return f4 * f4;
+}
 // Not SMNForge's: outlier correction before the smoothing (see computeNormals), over the
 // nearest neighbours only, and smoothing over a wider neighbourhood than the estimate's. On
 // maria_simbo_carrito (THE4DSCANNER rig) splats more than 60 degrees from their neighbours'
@@ -314,7 +324,7 @@ Result computeNormals(const Splats &s, const std::vector<View> &views, float *no
         }
         if (changed == 0) break;
     }
-    // Outliers first: the smoothing below only listens to neighbours within 35 degrees, so a
+    // Outliers first: the smoothing below hardly listens to neighbours beyond 35 degrees, so a
     // splat whose normal is far off - its axis across the surface, or its side turned - is
     // never corrected by it and shows lit as a dark speck. Where the neighbours agree among
     // themselves and the splat disagrees with them, it takes theirs.
@@ -336,15 +346,14 @@ Result computeNormals(const Splats &s, const std::vector<View> &views, float *no
             if (consensus.dot(previous[size_t(i)]) < kOutlierMaxAngleCos) normal[size_t(i)] = consensus;
         });
     }
-    // Smoothing among neighbours already facing within 35 degrees, so creases stay sharp.
+    // Smoothing, mostly among neighbours already facing the same way (smoothingWeight).
     for (int pass = 0; pass < kNormalSmoothingPasses; ++pass) {
         const std::vector<Eigen::Vector3f> previous = normal;
         parallelFor(count, [&](int i) {
             Eigen::Vector3f average = Eigen::Vector3f::Zero();
             const size_t *hood = smoothHood(i);
             for (int j = 0; j < smoothingNeighbors; ++j)
-                if (previous[hood[j]].dot(previous[size_t(i)]) >= kSmoothingMaxAngleCos)
-                    average += alpha[hood[j]] * previous[hood[j]];
+                average += alpha[hood[j]] * smoothingWeight(previous[hood[j]].dot(previous[size_t(i)])) * previous[hood[j]];
             if (average.squaredNorm() <= 1e-12f) return;
             average.normalize();
             if (average.dot(previous[size_t(i)]) < 0.0f) average = -average;

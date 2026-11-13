@@ -156,8 +156,9 @@ AxisNormalsResult axisNormals(const Splats &s, std::vector<float> &normals, cons
     current.swap(next);
   }
 
-  // Then smoothed, as the VGS editor smooths its normals: each the main direction of itself
-  // and those of its neighbours within smoothCos of it, so creases stay sharp.
+  // Then smoothed: each the main direction of itself and those of its neighbours within
+  // smoothCos of it, so creases stay sharp (the VGS editor's smoothing before it weighed
+  // neighbours by cos^8 instead).
   for (int pass = 0; pass < settings.smoothingPasses; ++pass) {
     for (size_t i = 0; i < s.count; ++i) {
       const float own = s.radiance[i * 4 + 3];
