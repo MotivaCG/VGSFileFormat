@@ -71,7 +71,7 @@ struct FVertexOutput
 	float4 Color : TEXCOORD1;
 	nointerpolation uint SplatIndex : TEXCOORD2;
 #if VGS_LIT
-	nointerpolation float2 ViewNormalXY : TEXCOORD3; // VGS CHANGE
+	nointerpolation float3 ViewNormal : TEXCOORD3; // VGS CHANGE
 #endif // VGS_LIT
 };
 
@@ -87,7 +87,7 @@ FVertexOutput CreateVGSSplatVertex(FShadedVGSSplatData SplatData, uint VertexID,
 		Output.Color = 0;
 		Output.SplatIndex = 0;
 #if VGS_LIT
-		Output.ViewNormalXY = 0;
+		Output.ViewNormal = 0;
 #endif // VGS_LIT
 		return Output;
 	}
@@ -110,7 +110,7 @@ FVertexOutput CreateVGSSplatVertex(FShadedVGSSplatData SplatData, uint VertexID,
 	Output.Color = SplatData.Color;
 	Output.SplatIndex = SplatIndex;
 #if VGS_LIT
-	Output.ViewNormalXY = 0; // set by MainVS
+	Output.ViewNormal = 0; // set by MainVS
 #endif // VGS_LIT
 
 	return Output;
@@ -146,7 +146,7 @@ FVertexOutput MainVS(
 
 	FVertexOutput Output = CreateVGSSplatVertex(UnpackShadedVGSSplat(PackedSplatData), VertexID, SplatIndex);
 #if VGS_LIT && !GAUSSIAN_SPLAT_VERTEX_ATTRIBUTE_FETCH && !GAUSSIAN_SPLAT_GATHER_SHADED_SPLATS
-	Output.ViewNormalXY = VGSSplatUnpackHalf2(ShadedNormalBuffer[SplatIndex]); // VGS CHANGE
+	Output.ViewNormal = VGSSplatUnpackOctNormal(ShadedNormalBuffer[SplatIndex]); // VGS CHANGE
 #endif
 	return Output;
 }
@@ -191,6 +191,9 @@ void MainPS(
 	, out float OutDepth : SV_Target1
 #elif WRITE_EXPECTED_DEPTH
 	, out float4 OutDepthMoments : SV_Target1
+#if VGS_LIT
+	, out float4 OutNormalZ : SV_Target2 // VGS CHANGE: the normal's z, blended as the moments
+#endif // VGS_LIT
 #endif
 #if WRITE_VELOCITY
 	, out float4 OutVelocity : SV_Target1
@@ -234,7 +237,8 @@ void MainPS(
 #elif WRITE_EXPECTED_DEPTH
 	float LinearZ = ConvertFromDeviceZ(Input.Position.z) / ExpectedDepthScale;
 #if VGS_LIT
-	OutDepthMoments = float4(LinearZ, Input.ViewNormalXY, 1.0f) * SrcAlpha; // VGS CHANGE
+	OutDepthMoments = float4(LinearZ, Input.ViewNormal.xy, 1.0f) * SrcAlpha; // VGS CHANGE
+	OutNormalZ = float4(Input.ViewNormal.z, 0.0f, 0.0f, 1.0f) * SrcAlpha;
 #else
 	OutDepthMoments = float4(LinearZ * SrcAlpha, 0.0f, 0.0f, SrcAlpha);
 #endif // VGS_LIT

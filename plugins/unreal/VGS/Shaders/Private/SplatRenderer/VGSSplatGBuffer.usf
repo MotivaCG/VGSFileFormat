@@ -59,6 +59,10 @@ void FSubstratePixelHeader::UpdateAllBSDFWithBottomUpOperatorVisit_FullySimplifi
 
 Texture2D<float4> SplatColorTexture;
 Texture2D<float4> DepthMomentsTexture;
+Texture2D<float4> NormalZTexture; // the normals' z, weighted as the moments' x and y
+uint SmoothingMode;         // 0: neighbours near the pixel's depth; 1: near its local plane
+float SmoothingTolerance;   // how far off they may lie, a share of the distance ...
+float SmoothingBias;        // ... plus this, in Unreal units
 
 float ExpectedDepthScale;
 uint BlendInSRGB;       // the colour target holds sRGB values (VGSSplatShading.usf), else linear
@@ -71,16 +75,22 @@ uint Dither;            // 0: written where coverage reaches one half, no dither
 float NormalSmoothing;  // the bilateral filter's radius, in Unreal units; 0 leaves each pixel's own normal
 
 // The splats' mean view-space normal at a pixel, and how much they cover it.
-float3 VGSPixelViewNormal(float4 Moments, float Coverage)
+// The weighted mean of the splats' normals: x, y and z each averaged, then normalised. (Not x
+// and y with z made up from them, which lost z's sign and pulled every average towards the
+// camera.) Normals that cancel out leave the one facing the camera.
+float3 VGSPixelViewNormal(int2 Pixel, float4 Moments)
 {
-	const float2 XY = Moments.gb / Coverage;
-	return normalize(float3(XY, -sqrt(saturate(1.0f - dot(XY, XY)))));
+	const float3 Sum = float3(Moments.gb, NormalZTexture.Load(int3(Pixel, 0)).r);
+	const float Length2 = dot(Sum, Sum);
+	return Length2 > 1e-12f ? Sum * rsqrt(Length2) : float3(0.0f, 0.0f, -1.0f);
 }
 
 // The normal averaged with the neighbours' on the same surface: one splat's normal is noisy
 // (a splat is a blob as often as a patch of surface), so lit directly the capture looks
-// crumpled and specked. Neighbours count by how much the splats cover them and by how close
-// they lie in depth, so the average does not cross a silhouette.
+// crumpled and specked. Neighbours count by how much the splats cover them, by how close they
+// lie in depth (or to the local plane), so the average does not cross a silhouette, and by
+// default by how alike their normal is, so that a fold or an arm over the torso is not averaged
+// away (r.VGSSplat.Lit.NormalSmoothing.Mode).
 float3 VGSSmoothedViewNormal(int2 PixelXY, float3 Normal, float Depth)
 {
 	// The radius on screen at this depth, so the capture is smoothed alike near and far.
@@ -90,7 +100,30 @@ float3 VGSSmoothedViewNormal(int2 PixelXY, float3 Normal, float Depth)
 		return Normal;
 	}
 	const float Step = Radius / 2.0f;
-	const float Tolerance = 0.015f * Depth + 0.5f; // in Unreal units: 1.5 % of the distance
+	const float Tolerance = SmoothingTolerance * Depth + SmoothingBias;
+	// The local plane: the depth's slope across the pixel, from its neighbours on the side
+	// closer in depth (the other side may be past a silhouette).
+	// Modes: bit 0, the local plane instead of the pixel's depth; bit 1, neighbours also count by
+	// how alike their normal is (a joint bilateral: an arm and the torso behind it differ).
+	float2 Slope = 0.0f;
+	if ((SmoothingMode & 1u) != 0u)
+	{
+		// Over one tap's spacing, not one pixel: the depth jitters by millimetres from pixel to
+		// pixel, which a one-pixel slope turns into a wildly wrong plane.
+		const int Baseline = max(int(round(Step)), 1);
+		float Side[4];
+		const int2 Offsets[4] = { int2(-1, 0), int2(1, 0), int2(0, -1), int2(0, 1) };
+		for (int i = 0; i < 4; ++i)
+		{
+			const float4 M = DepthMomentsTexture.Load(int3(PixelXY + Offsets[i] * Baseline, 0));
+			const float C = 1.0f - M.a;
+			Side[i] = C >= 0.25f ? M.r / C * ExpectedDepthScale - Depth : 1e9f;
+		}
+		const float Dx = abs(Side[0]) < abs(Side[1]) ? -Side[0] : Side[1];
+		const float Dy = abs(Side[2]) < abs(Side[3]) ? -Side[2] : Side[3];
+		// A step larger than the tolerance is a silhouette, not a slope.
+		Slope = float2(abs(Dx) < 4.0f * Tolerance ? Dx : 0.0f, abs(Dy) < 4.0f * Tolerance ? Dy : 0.0f) / float(Baseline);
+	}
 	float3 Sum = Normal;
 	for (int y = -2; y <= 2; ++y)
 	{
@@ -108,10 +141,19 @@ float3 VGSSmoothedViewNormal(int2 PixelXY, float3 Normal, float Depth)
 				continue;
 			}
 			const float TapDepth = Moments.r / Coverage * ExpectedDepthScale;
-			const float DepthWeight = saturate(1.0f - abs(TapDepth - Depth) / Tolerance);
+			const float Expected = Depth + dot(Slope, float2(Tap - PixelXY));
+			const float DepthWeight = saturate(1.0f - abs(TapDepth - Expected) / Tolerance);
 			const float Distance2 = float(x * x + y * y);
-			const float Weight = Coverage * DepthWeight * exp(-0.5f * Distance2 / 2.0f);
-			Sum += VGSPixelViewNormal(Moments, Coverage) * Weight;
+			const float3 TapNormal = VGSPixelViewNormal(Tap, Moments);
+			float NormalWeight = 1.0f;
+			if ((SmoothingMode & 2u) != 0u)
+			{
+				// 1 alike, about a half at 30 degrees apart, nearly nothing past 60.
+				const float Alike = saturate(dot(TapNormal, Normal));
+				NormalWeight = Alike * Alike * Alike * Alike;
+			}
+			const float Weight = Coverage * DepthWeight * NormalWeight * exp(-0.5f * Distance2 / 2.0f);
+			Sum += TapNormal * Weight;
 		}
 	}
 	return normalize(Sum);
@@ -186,7 +228,7 @@ void MainPS(
 	}
 
 	const float Depth = Moments.r * InvCoverage * ExpectedDepthScale;
-	float3 ViewNormal = VGSPixelViewNormal(Moments, Coverage);
+	float3 ViewNormal = VGSPixelViewNormal(Pixel.xy, Moments);
 	if (NormalSmoothing > 0.0f)
 	{
 		ViewNormal = VGSSmoothedViewNormal(int2(SvPosition.xy), ViewNormal, Depth);

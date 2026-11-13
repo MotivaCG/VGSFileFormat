@@ -12,15 +12,19 @@
  *   1. density: each voxel adds up its splats' opacity * exp(-d^2 / 2), d the Mahalanobis
  *      distance from a splat's centre to the voxel's point nearest that centre; the voxel is
  *      solid where 1 - exp(-sum) reaches the opacity cutoff (light through the splats, as
- *      Beer-Lambert);
+ *      Beer-Lambert). Unlike splat-transform, "nearest" is in the splat's own metric for an
+ *      elongated splat: the nearest point in metres can lie off a thin splat that crosses
+ *      the voxel, which then misses it;
  *   2. clean: a solid voxel with no solid face neighbour goes, an empty one with six is filled;
  *   3. floaters: pieces far smaller than the largest go;
  *   4. inside: what the outside cannot reach through empty voxels is solid, so the splats' shell
  *      becomes one surface instead of an outer and an inner one;
- *   5. surface: surface nets on the occupancy blurred over 3x3x3 voxels (no stair steps), then
- *      Taubin smoothing, which does not shrink it;
+ *   5. surface: surface nets on the occupancy, the vertices placed where the occupancy blurred
+ *      over 3x3x3 voxels crosses one half (no stair steps; a part one voxel thin, which the
+ *      blur would erase, keeps its surface), then Taubin smoothing, which does not shrink it;
  *   6. inset: moved inwards along the vertex normals, so that the lit splats are not inside
- *      their own shadow caster (they would shadow themselves in blotches).
+ *      their own shadow caster (they would shadow themselves in blotches); no more than 45 %
+ *      of the solid's thickness behind each vertex, so that thin parts do not turn inside out.
  *
  * Why not a TSDF from rendered depth (gs2mesh): that renders hundreds of views, twice, and
  * fuses each into the volume, for a millimetre surface to texture; a shadow caster needs one
@@ -44,7 +48,7 @@ namespace vgsstatic {
 struct ProxySettings {
   float voxel = 0.01f;          // in the file's units: 1 cm for a PLY in metres
   float opacity = 0.3f;         // a voxel is solid from this opacity
-  float inset = 0.02f;          // file units the surface is moved inwards
+  float inset = 0.04f;          // file units the surface is moved inwards (at most 45 % of the thickness)
   float floaterShare = 0.005f;  // pieces with fewer solid voxels than this share of the largest go
   int smoothing = 4;            // Taubin passes
   size_t maxVoxels = 24u << 20; // past this many the voxel grows (and the result says so)
@@ -128,8 +132,10 @@ inline bool buildProxy(const Splats &s, const ProxySettings &settings, ProxyMesh
   struct G {
     float c[3];
     float m[9]; // rows: the splat's axes divided by its scales (world offset -> scaled local)
+    float A[6]; // m^T m (xx, yy, zz, xy, xz, yz): d^2 = offset^T A offset
     float e[3]; // half extents of the box beyond which it adds less than eps
     float opacity, reach2;
+    bool elongated; // far from round: its nearest point in a voxel is not the nearest in metres
   };
   std::vector<G> gs;
   gs.reserve(s.count);
@@ -147,6 +153,9 @@ inline bool buildProxy(const Splats &s, const ProxySettings &settings, ProxyMesh
     for (int k = 0; k < 3; ++k) sc[k] = std::max(s.scales[i * 3 + k], 1e-7f);
     for (int r = 0; r < 3; ++r)
       for (int c = 0; c < 3; ++c) g.m[r * 3 + c] = R[c * 3 + r] / sc[r];
+    const auto mtm = [&](int i, int j) { return g.m[i] * g.m[j] + g.m[3 + i] * g.m[3 + j] + g.m[6 + i] * g.m[6 + j]; };
+    g.A[0] = mtm(0, 0), g.A[1] = mtm(1, 1), g.A[2] = mtm(2, 2), g.A[3] = mtm(0, 1), g.A[4] = mtm(0, 2), g.A[5] = mtm(1, 2);
+    g.elongated = std::max(sc[0], std::max(sc[1], sc[2])) > 1.5f * std::min(sc[0], std::min(sc[1], sc[2]));
     g.opacity = a;
     g.reach2 = 2.0f * std::log(a / eps);
     const float reach = std::sqrt(g.reach2);
@@ -163,18 +172,24 @@ inline bool buildProxy(const Splats &s, const ProxySettings &settings, ProxyMesh
   // (a splat far from the rest would stretch it; such floaters are dropped in step 3 anyway)
   float lo[3], hi[3];
   {
-    std::vector<float> axis[3];
+    // Each splat's own reach where it adds an eighth of what makes a voxel solid, not only
+    // its centre: a long splat reaches well past it.
+    std::vector<float> lows[3], highs[3];
     for (const G &g : gs)
-      if (g.opacity * 8.0f > sigmaCut)
-        for (int k = 0; k < 3; ++k) axis[k].push_back(g.c[k]);
-    if (axis[0].empty()) return false;
+      if (g.opacity * 8.0f > sigmaCut) {
+        const float share = std::sqrt(2.0f * std::log(g.opacity * 8.0f / sigmaCut) / g.reach2);
+        for (int k = 0; k < 3; ++k) {
+          lows[k].push_back(g.c[k] - share * g.e[k]);
+          highs[k].push_back(g.c[k] + share * g.e[k]);
+        }
+      }
+    if (lows[0].empty()) return false;
     for (int k = 0; k < 3; ++k) {
-      std::vector<float> &a = axis[k];
-      const size_t n = a.size(), cut = n / 1000; // 0.1 % at each end
-      std::nth_element(a.begin(), a.begin() + cut, a.end());
-      const float qlo = a[cut];
-      std::nth_element(a.begin(), a.begin() + (n - 1 - cut), a.end());
-      const float qhi = a[n - 1 - cut];
+      const size_t n = lows[k].size(), cut = n / 1000; // 0.1 % at each end
+      std::nth_element(lows[k].begin(), lows[k].begin() + cut, lows[k].end());
+      const float qlo = lows[k][cut];
+      std::nth_element(highs[k].begin(), highs[k].begin() + (n - 1 - cut), highs[k].end());
+      const float qhi = highs[k][n - 1 - cut];
       const float margin = 0.1f * (qhi - qlo) + 4.0f * settings.voxel;
       lo[k] = qlo - margin;
       hi[k] = qhi + margin;
@@ -228,11 +243,21 @@ inline bool buildProxy(const Splats &s, const ProxySettings &settings, ProxyMesh
           float *row = &density[grid.at(0, y, z)];
           for (int x = r0[0]; x <= r1[0]; ++x) {
             const float vx = origin[0] + float(x) * voxel;
-            const float dx = std::min(std::max(g.c[0], vx), vx + voxel) - g.c[0];
-            const float l0 = g.m[0] * dx + g.m[1] * dy + g.m[2] * dz;
-            const float l1 = g.m[3] * dx + g.m[4] * dy + g.m[5] * dz;
-            const float l2 = g.m[6] * dx + g.m[7] * dy + g.m[8] * dz;
-            const float d2 = l0 * l0 + l1 * l1 + l2 * l2;
+            float d[3] = {std::min(std::max(g.c[0], vx), vx + voxel) - g.c[0], dy, dz};
+            if (g.elongated) {
+              // The voxel's point of highest density is its nearest to the centre in the
+              // splat's own metric, not in metres: for a thin splat across the voxel they
+              // differ, and the nearest in metres can miss it. Coordinate descent on the
+              // convex quadratic d^T A d within the voxel (each step exact, then clamped).
+              const float lo3[3] = {vx - g.c[0], origin[1] + float(y) * voxel - g.c[1], vz - g.c[2]};
+              for (int sweep = 0; sweep < 3; ++sweep) {
+                d[0] = std::min(std::max(-(g.A[3] * d[1] + g.A[4] * d[2]) / g.A[0], lo3[0]), lo3[0] + voxel);
+                d[1] = std::min(std::max(-(g.A[3] * d[0] + g.A[5] * d[2]) / g.A[1], lo3[1]), lo3[1] + voxel);
+                d[2] = std::min(std::max(-(g.A[4] * d[0] + g.A[5] * d[1]) / g.A[2], lo3[2]), lo3[2] + voxel);
+              }
+            }
+            const float d2 = g.A[0] * d[0] * d[0] + g.A[1] * d[1] * d[1] + g.A[2] * d[2] * d[2] +
+                             2.0f * (g.A[3] * d[0] * d[1] + g.A[4] * d[0] * d[2] + g.A[5] * d[1] * d[2]);
             if (d2 < g.reach2) row[x] += g.opacity * std::exp(-0.5f * d2);
           }
         }
@@ -331,8 +356,8 @@ inline bool buildProxy(const Splats &s, const ProxySettings &settings, ProxyMesh
   // ---- 5. surface nets on the blurred occupancy ([1 2 1] / 4 along each axis)
   std::vector<float> &field = density; // reused
   {
+    // v stays: it says inside or out; the blurred field only places the surface between.
     for (size_t i = 0; i < v.size(); ++i) field[i] = float(v[i]);
-    std::vector<uint8_t>().swap(v);
     std::vector<float> tmp(field.size(), 0.0f);
     const size_t stride[3] = {1, size_t(grid.n[0]), size_t(grid.n[0]) * size_t(grid.n[1])};
     for (int axis = 0; axis < 3; ++axis) {
@@ -363,18 +388,23 @@ inline bool buildProxy(const Splats &s, const ProxySettings &settings, ProxyMesh
     for (int y = 0; y < cy; ++y)
       for (int x = 0; x < cx; ++x) {
         float f[8];
+        bool solid[8];
         int inside = 0;
         for (int k = 0; k < 8; ++k) {
-          f[k] = field[grid.at(x + corner[k][0], y + corner[k][1], z + corner[k][2])];
-          inside += f[k] > iso;
+          const size_t i = grid.at(x + corner[k][0], y + corner[k][1], z + corner[k][2]);
+          f[k] = field[i];
+          solid[k] = v[i] != 0;
+          inside += solid[k];
         }
         if (inside == 0 || inside == 8) continue;
         float sum[3] = {0, 0, 0};
         int crossings = 0;
         for (const auto &e : edge) {
+          if (solid[e[0]] == solid[e[1]]) continue;
+          // Where the blurred field crosses one half between them; a part one voxel thin,
+          // which the blur leaves below one half, is kept, its surface halfway.
           const float a = f[e[0]], b = f[e[1]];
-          if ((a > iso) == (b > iso)) continue;
-          const float t = (iso - a) / (b - a);
+          const float t = (a > iso) != (b > iso) ? std::min(std::max((iso - a) / (b - a), 0.05f), 0.95f) : 0.5f;
           for (int k = 0; k < 3; ++k) sum[k] += float(corner[e[0]][k]) + t * float(corner[e[1]][k] - corner[e[0]][k]);
           ++crossings;
         }
@@ -403,18 +433,17 @@ inline bool buildProxy(const Splats &s, const ProxySettings &settings, ProxyMesh
   for (int z = 1; z < cz; ++z)
     for (int y = 1; y < cy; ++y)
       for (int x = 1; x < cx; ++x) {
-        const bool in = field[grid.at(x, y, z)] > iso;
+        const bool in = v[grid.at(x, y, z)] != 0;
         // +x edge: cells (x, y-1..y, z-1..z), counter-clockwise seen from +x (y, then z)
-        if (in != (field[grid.at(x + 1, y, z)] > iso))
+        if (in != (v[grid.at(x + 1, y, z)] != 0))
           quad(cellAt(x, y - 1, z - 1), cellAt(x, y, z - 1), cellAt(x, y, z), cellAt(x, y - 1, z), !in);
         // +y edge: cells (x-1..x, y, z-1..z), counter-clockwise seen from +y (z, then x)
-        if (in != (field[grid.at(x, y + 1, z)] > iso))
+        if (in != (v[grid.at(x, y + 1, z)] != 0))
           quad(cellAt(x - 1, y, z - 1), cellAt(x - 1, y, z), cellAt(x, y, z), cellAt(x, y, z - 1), !in);
         // +z edge: cells (x-1..x, y-1..y, z), counter-clockwise seen from +z (x, then y)
-        if (in != (field[grid.at(x, y, z + 1)] > iso))
+        if (in != (v[grid.at(x, y, z + 1)] != 0))
           quad(cellAt(x - 1, y - 1, z), cellAt(x, y - 1, z), cellAt(x, y, z), cellAt(x - 1, y, z), !in);
       }
-  std::vector<float>().swap(field);
   std::vector<int32_t>().swap(cellVertex);
   if (T.empty()) {
     out.positions.clear();
@@ -469,8 +498,28 @@ inline bool buildProxy(const Splats &s, const ProxySettings &settings, ProxyMesh
     }
     for (size_t i = 0; i < nv; ++i) {
       const float l = std::sqrt(N[i * 3] * N[i * 3] + N[i * 3 + 1] * N[i * 3 + 1] + N[i * 3 + 2] * N[i * 3 + 2]);
-      if (l > 0.0f)
-        for (int k = 0; k < 3; ++k) P[i * 3 + k] -= settings.inset * N[i * 3 + k] / l;
+      if (!(l > 0.0f)) continue;
+      const float n[3] = {N[i * 3] / l, N[i * 3 + 1] / l, N[i * 3 + 2] / l};
+      // No more than 45 % of how thick the solid is behind the vertex, measured along the
+      // inward normal through the occupancy: a full inset would turn a part thinner than
+      // twice the inset (a finger, a shoe's edge) inside out, its two sides crossing.
+      float thickness = 0.0f;
+      bool entered = false;
+      const float step = 0.25f * voxel, limit = 2.5f * settings.inset + 2.0f * voxel;
+      for (float t = 0.0f; t <= limit; t += step) {
+        int c[3];
+        bool inGrid = true;
+        for (int k = 0; k < 3; ++k) {
+          c[k] = int(std::floor((P[i * 3 + k] - t * n[k] - origin[k]) / voxel));
+          inGrid = inGrid && c[k] >= 0 && c[k] < grid.n[k];
+        }
+        const bool solid = inGrid && v[grid.at(c[0], c[1], c[2])] != 0;
+        if (solid) entered = true;
+        else if (entered) break;
+        thickness = t;
+      }
+      const float inset = std::min(settings.inset, 0.45f * thickness);
+      for (int k = 0; k < 3; ++k) P[i * 3 + k] -= inset * n[k];
     }
   }
   return true;

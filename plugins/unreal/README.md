@@ -252,11 +252,22 @@ many splats, the SH degree, and whether it has normals and where they come from.
   - Made as PlayCanvas splat-transform's collision mesh starts (MIT; its GPU voxelisation and
     block clean-up, ported to the CPU on a dense grid): every 1 cm voxel adds up its splats'
     opacity·exp(-d²/2) at its point nearest each one, solid where 1 - exp(-sum) reaches 0.3;
-    lone voxels go and single holes close. Then this plugin's: pieces under 0.5 % of the
-    largest go (floaters), what the outside cannot reach is filled (the splats are a shell),
-    surface nets on the occupancy blurred over 3x3x3 voxels, Taubin smoothing, and 2 cm
-    inwards along the normals so that the lit splats are not inside their own caster.
-  - On andreavictor (221k splats): 117,000 triangles in 0.3 s, reduced by Unreal to 20,000
+    lone voxels go and single holes close. Then this plugin's:
+    - For an elongated splat, "nearest" is in its own metric (a few steps of coordinate
+      descent within the voxel). The nearest point in metres can miss a thin splat lying
+      across the voxel: a thin diagonal splat found 4 voxels that way and 61 this way, and
+      andreavictor 5 % more solid voxels.
+    - The grid's bounds come from each splat's reach, not its centre.
+    - Pieces under 0.5 % of the largest go (floaters).
+    - What the outside cannot reach is filled (the splats are a shell).
+    - Surface nets on the occupancy, the vertices placed where the occupancy blurred over 3x3x3
+      voxels crosses one half. The blur alone would erase parts one voxel thin.
+    - Taubin smoothing.
+    - The surface goes 4 cm inwards along the normals, but never more than 45 % of the
+      thickness behind each vertex, so that thin parts are not turned inside out. With 2 cm
+      the dress still showed self-shadow specks under virtual shadow maps; with 4 cm they are
+      gone, and the feet still meet their shadow.
+  - On andreavictor (221k splats): 125,000 triangles in 0.6 s, reduced by Unreal to 20,000
     when the mesh is built (its LOD 0 *Reduction Settings*, about 10 s on import). gs2mesh
     (`3dgs2mesh/gs2mesh_cpp`) with only the PLY takes about 60 s: it renders about a thousand
     views of the splats twice and fuses each into a TSDF, then reduces and unwraps, for a
@@ -440,9 +451,12 @@ From Epic's renderer, which the copy keeps (`VGSSplatRenderPipeline.cpp`,
   Maps* (alone, or for the other lights) reach every light but are grainy, and a character
   shadowing another shows dappled where the splats leave gaps.
 - A static character's shadow proxy cannot leave out its own splats: Shaded, it always
-  shadows itself (Unreal has no per-receiver exclusion), with grainy edges. Thin parts
-  thinner than twice the inset (2 cm) cast from a surface turned inside out. Its sizes assume
-  a PLY in metres.
+  shadows itself (Unreal has no per-receiver exclusion). Its sizes assume a PLY in metres.
+- The splats' own shadow map takes the sun's light off after Unreal has lit the scene. It
+  cannot tell whether Unreal had already shadowed a pixel (a wall's shadow over the
+  splats'), and takes the light off again there. With Substrate it only darkens the whole
+  pixel by 0.6, indirect and emissive light included. Both need the shadow inside Unreal's
+  lighting (a light function or the light's shadow mask), not after it.
 - Static characters lit by the scene: thin, faint splats where a shoe meets the floor (the
   scan's contact smear) are written opaque with sideways normals and show as a dark wedge at
   the toe (andreavictor), whichever normals; not addressed yet.

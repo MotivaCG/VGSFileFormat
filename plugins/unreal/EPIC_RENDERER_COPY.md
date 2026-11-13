@@ -175,6 +175,24 @@ All marked `VGS CHANGE`; `tools/vgs_renderer_changes.patch` is the exact diff.
     `DeveloperSettings` module in the build rules): the shadow method, self-shadowing and the
     map's texel size, softness and bias, under Project Settings > Plugins > the plugin's
     name, written to the `r.VGSSplat.Shadow.*` console variables.
+18. **Whole lit normals** (2026-11-12, after an outside review). A lit splat's view-space
+    normal is packed octahedral over the whole sphere (`VGSSplatPackOctNormal` in
+    `VGSSplatCommon.ush`) instead of its x and y as halves. The raster pass writes its z,
+    weighted as the moments, into a third target (`VGSSplat.NormalZ`, RGBA16F, the same UNDER
+    blend; `RasterizeHardware`'s `OutNormalZ`). `VGSSplatGBuffer.usf` normalises the weighted
+    sum of x, y and z. Before, it rebuilt z as `-sqrt(1 - x² - y²)`, which lost z's sign and
+    pulled every average towards the camera.
+    The normal smoothing counts neighbours by depth, or by the local plane, and by default
+    also by how alike their normal is (`r.VGSSplat.Lit.NormalSmoothing.Mode` 0 to 3, default
+    2; `.Tolerance` 0.015 of the distance, `.Bias` 0.5 cm). Measured on andreavictor, mode 2
+    smooths flat parts as the old filter did (0.51 against 0.50 degrees of residual noise)
+    and changes folds and an arm over the torso half as much (8.4 against 15.3 degrees). The
+    plane modes were noisier (1.1 to 1.6).
+19. **Faint splats in the shadow map** (`VGSSplatLightShadow.*`): the depth target is RGBA16F
+    with a second nearest/farthest pair over every splat, not only those at least
+    `DepthOpacity` opaque. A texel only faint splats reach (hair, fringes) now casts when they
+    block more than a tenth of the light together. Before, it cast nothing: twenty splats at
+    0.05 block 64 % of the light.
 
 ### The LUTs
 

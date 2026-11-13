@@ -214,7 +214,7 @@ public:
 	/** Unreal's Specular: 0.5 is the usual dielectric, 0 no highlights at all. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Lighting",
 		meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "Lighting == EVGSLighting::Shaded", EditConditionHides))
-	float Specular = 0.3f;
+	float Specular = 0.02f;
 
 	/**
 	 * Averages the normal over this distance (cm) on screen, among neighbours at the same depth:

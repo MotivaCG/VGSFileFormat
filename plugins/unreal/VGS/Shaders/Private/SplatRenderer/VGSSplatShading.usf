@@ -132,7 +132,7 @@ uint VGSShadedNormal(uint SplatIndex, FVGSSplatData SplatData)
 	{
 		ViewNormal = -ViewNormal;
 	}
-	return VGSSplatPackHalf2(ViewNormal.xy);
+	return VGSSplatPackOctNormal(ViewNormal);
 }
 RWBuffer<uint> RWSplatCount;
 

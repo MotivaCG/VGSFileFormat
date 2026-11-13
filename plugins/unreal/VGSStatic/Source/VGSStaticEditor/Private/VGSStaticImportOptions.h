@@ -75,12 +75,14 @@ public:
 
 	/**
 	 * How far the proxy lies inside the splats. The lit splats would shadow themselves in
-	 * blotches if they were inside their own shadow caster; more than needed thins the shadows
-	 * of thin parts (fingers, hair).
+	 * specks (virtual shadow maps compare almost per pixel) if they were close to their own
+	 * shadow caster: 2 cm still left specks on a dress, 4 cm did not. Never more than 45 % of
+	 * how thick the character is behind each point, so a finger or a shoe's edge keeps a
+	 * thinner proxy instead of turning inside out.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, config, Category = "Shadow Proxy",
 		meta = (DisplayName = "Inset", ClampMin = "0", ClampMax = "20", Units = "cm", EditCondition = "bMakeShadowProxy"))
-	float ProxyInset = 2.0f;
+	float ProxyInset = 4.0f;
 
 	/** The triangles the proxy is reduced to (it is first made with several times more). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, config, Category = "Shadow Proxy",

@@ -128,7 +128,7 @@ public:
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, GBufferB)
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, GBufferC)
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float>, TransmittanceMap)
-		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float2>, DepthMap)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, DepthMap)
 		SHADER_PARAMETER_SAMPLER(SamplerState, BilinearSampler)
 		SHADER_PARAMETER(FVector3f, LightOrigin)
 		SHADER_PARAMETER(FVector3f, LightX)
@@ -259,9 +259,9 @@ void VGSSplat::RenderLightShadow(FRDGBuilder& GraphBuilder, const FSceneView& Vi
 		FRDGTextureDesc::Create2D(FIntPoint(Size), PF_R16F, FClearValueBinding(FLinearColor::White), TexCreate_RenderTargetable | TexCreate_ShaderResource),
 		TEXT("VGSSplat.LightShadow.Transmittance"));
 	// Depths from the casters' centre, in half floats: a few hundred units, to a fraction of one.
-	const FLinearColor Far(60000.0f, 60000.0f, 0.0f, 0.0f);
+	const FLinearColor Far(60000.0f, 60000.0f, 60000.0f, 60000.0f);
 	FRDGTextureRef DepthMap = GraphBuilder.CreateTexture(
-		FRDGTextureDesc::Create2D(FIntPoint(Size), PF_G16R16F, FClearValueBinding(Far), TexCreate_RenderTargetable | TexCreate_ShaderResource),
+		FRDGTextureDesc::Create2D(FIntPoint(Size), PF_FloatRGBA, FClearValueBinding(Far), TexCreate_RenderTargetable | TexCreate_ShaderResource),
 		TEXT("VGSSplat.LightShadow.Depths"));
 	AddClearRenderTargetPass(GraphBuilder, TransmittanceMap, FLinearColor::White);
 	AddClearRenderTargetPass(GraphBuilder, DepthMap, Far);
@@ -303,7 +303,7 @@ void VGSSplat::RenderLightShadow(FRDGBuilder& GraphBuilder, const FSceneView& Vi
 				// Transmittance multiplied; depths (d, -d) min blended: the nearest and farthest.
 				PSO.BlendState = TStaticBlendState<
 					CW_RED, BO_Add, BF_Zero, BF_SourceColor, BO_Add, BF_Zero, BF_One,
-					CW_RG, BO_Min, BF_One, BF_One, BO_Min, BF_One, BF_One>::GetRHI();
+					CW_RGBA, BO_Min, BF_One, BF_One, BO_Min, BF_One, BF_One>::GetRHI();
 				PSO.RasterizerState = TStaticRasterizerState<FM_Solid, CM_None>::GetRHI();
 				PSO.DepthStencilState = TStaticDepthStencilState<false, CF_Always>::GetRHI();
 				PSO.BoundShaderState.VertexDeclarationRHI = GEmptyVertexDeclaration.VertexDeclarationRHI;

@@ -36,6 +36,32 @@ float2 VGSSplatUnpackHalf2(uint Packed)
 	return float2(f16tof32(Packed & 0xFFFFu), f16tof32(Packed >> 16));
 }
 
+// VGS: a unit vector in one word, octahedral, 16 bits a coordinate, over the whole sphere: a
+// lit splat's view-space normal keeps its z, sign included (VGSSplatGBuffer.usf averages x, y
+// and z, not x and y with z made up).
+uint VGSSplatPackOctNormal(float3 N)
+{
+	N /= max(abs(N.x) + abs(N.y) + abs(N.z), 1e-6f);
+	float2 P = N.xy;
+	if (N.z < 0.0f)
+	{
+		P = (1.0f - abs(N.yx)) * select(N.xy >= 0.0f, 1.0f, -1.0f);
+	}
+	const uint2 Q = uint2(round(saturate(P * 0.5f + 0.5f) * 65535.0f));
+	return Q.x | (Q.y << 16);
+}
+
+float3 VGSSplatUnpackOctNormal(uint W)
+{
+	float2 P = float2(W & 65535u, W >> 16) / 65535.0f * 2.0f - 1.0f;
+	const float Z = 1.0f - abs(P.x) - abs(P.y);
+	if (Z < 0.0f)
+	{
+		P = (1.0f - abs(P.yx)) * select(P.xy >= 0.0f, 1.0f, -1.0f);
+	}
+	return normalize(float3(P, Z)); // z < 0 (towards the camera) is the folded half
+}
+
 struct FPackedShadedVGSSplatData
 {
 	float ViewZ;

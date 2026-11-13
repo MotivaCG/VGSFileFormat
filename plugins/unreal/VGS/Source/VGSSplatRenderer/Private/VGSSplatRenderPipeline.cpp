@@ -1208,6 +1208,27 @@ static TAutoConsoleVariable<float> CVarVGSSplatLitNormalSmoothing(
 	TEXT("Lit captures: overrides every capture's Normal Smoothing, in cm (0 off); below 0 (default) each capture's own."),
 	ECVF_RenderThreadSafe);
 
+// VGS: which neighbours the normal is averaged with (VGSSplatGBuffer.usf, VGSSmoothedViewNormal).
+// Measured on andreavictor (docs: vgs_lighting_shadows_review.md): 2 smooths flat parts as much
+// as 0 and changes folds and an arm over the torso half as much; the plane modes are noisier.
+static TAutoConsoleVariable<int32> CVarVGSSplatLitSmoothingMode(
+	TEXT("r.VGSSplat.Lit.NormalSmoothing.Mode"),
+	2,
+	TEXT("Lit splats, the neighbours the normal is averaged with: 0 those at about the pixel's depth; 1 those near the pixel's local plane (the depth's slope); 2 (default) as 0, and the more alike their normal the more they count (an arm and the torso behind it differ); 3 as 1 and 2."),
+	ECVF_RenderThreadSafe);
+
+static TAutoConsoleVariable<float> CVarVGSSplatLitSmoothingTolerance(
+	TEXT("r.VGSSplat.Lit.NormalSmoothing.Tolerance"),
+	0.015f,
+	TEXT("Lit splats: how far from the pixel's depth (or plane) a neighbour may lie and still count, as a share of the distance, plus the Bias."),
+	ECVF_RenderThreadSafe);
+
+static TAutoConsoleVariable<float> CVarVGSSplatLitSmoothingBias(
+	TEXT("r.VGSSplat.Lit.NormalSmoothing.Bias"),
+	0.5f,
+	TEXT("Lit splats: the part of the normal smoothing's tolerance that does not grow with distance, in cm."),
+	ECVF_RenderThreadSafe);
+
 class FVGSSplatGBufferPS : public FGlobalShader
 {
 	DECLARE_GLOBAL_SHADER(FVGSSplatGBufferPS);
@@ -1217,7 +1238,11 @@ class FVGSSplatGBufferPS : public FGlobalShader
 		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, SplatColorTexture)
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, DepthMomentsTexture)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, NormalZTexture)
 		SHADER_PARAMETER(float, ExpectedDepthScale)
+		SHADER_PARAMETER(uint32, SmoothingMode)
+		SHADER_PARAMETER(float, SmoothingTolerance)
+		SHADER_PARAMETER(float, SmoothingBias)
 		SHADER_PARAMETER(uint32, BlendInSRGB)
 		SHADER_PARAMETER(float, SelfIllumination)
 		SHADER_PARAMETER(float, Intensity)
@@ -1367,7 +1392,8 @@ void RasterizeHardware(
 	// VGS CHANGE: for a lit proxy, its normals by record; the depth moments come back in
 	// OutDepthMoments for VGSSplatGBuffer.usf instead of being resolved into scene depth.
 	FRDGBufferRef ShadedNormalBuffer = nullptr,
-	FRDGTextureRef* OutDepthMoments = nullptr
+	FRDGTextureRef* OutDepthMoments = nullptr,
+	FRDGTextureRef* OutNormalZ = nullptr // VGS CHANGE: and the normals' z, blended alike
 )
 {
 	const bool bGpuDrivenPipeline = (SplatCountBuffer != nullptr);
@@ -1552,6 +1578,16 @@ void RasterizeHardware(
 			TexCreate_ShaderResource | TexCreate_RenderTargetable);
 		DepthMomentsTexture = GraphBuilder.CreateTexture(MomentsDesc, TEXT("VGSSplat.DepthMoments"));
 	}
+	FRDGTextureRef NormalZTexture = nullptr; // VGS CHANGE
+	if (bLit)
+	{
+		const FRDGTextureDesc NormalZDesc = FRDGTextureDesc::Create2D(
+			Output.Texture->Desc.Extent,
+			PF_FloatRGBA,
+			FClearValueBinding::Black,
+			TexCreate_ShaderResource | TexCreate_RenderTargetable);
+		NormalZTexture = GraphBuilder.CreateTexture(NormalZDesc, TEXT("VGSSplat.NormalZ"));
+	}
 
 	// Rasterization
 	{
@@ -1600,6 +1636,10 @@ void RasterizeHardware(
 			{
 				PassParameters->RenderTargets[1] = FRenderTargetBinding(DepthMomentsTexture, ERenderTargetLoadAction::EClear);
 			}
+			if (NormalZTexture)
+			{
+				PassParameters->RenderTargets[2] = FRenderTargetBinding(NormalZTexture, ERenderTargetLoadAction::EClear); // VGS CHANGE
+			}
 			const FExclusiveDepthStencil::Type DepthStencilAccess = bHardwareDepth
 				? FExclusiveDepthStencil::DepthWrite_StencilNop
 				: FExclusiveDepthStencil::DepthRead_StencilNop;
@@ -1613,7 +1653,7 @@ void RasterizeHardware(
 			RDG_EVENT_NAME("VGSSplat.HardwareRasterize"),
 			PassParameters,
 			ERDGPassFlags::Raster,
-			[PassParameters, bGpuDrivenPipeline, bStochasticDepth, bHardwareDepth, bExpectedDepth, bVertexAttributeFetch, NumSplats, VertexShader, PixelShader, ViewRect = Output.ViewRect](FRDGAsyncTask, FRHICommandList& RHICmdList)
+			[PassParameters, bGpuDrivenPipeline, bStochasticDepth, bHardwareDepth, bExpectedDepth, bLit, bVertexAttributeFetch, NumSplats, VertexShader, PixelShader, ViewRect = Output.ViewRect](FRDGAsyncTask, FRHICommandList& RHICmdList)
 			{
 				FGraphicsPipelineStateInitializer GraphicsPSOInit;
 				RHICmdList.ApplyCachedRenderTargets(GraphicsPSOInit);
@@ -1625,6 +1665,15 @@ void RasterizeHardware(
 					GraphicsPSOInit.BlendState = TStaticBlendState<
 						CW_RGBA, BO_Add, BF_One, BF_InverseSourceAlpha, BO_Add, BF_Zero, BF_InverseSourceAlpha,
 						CW_RED,  BO_Max, BF_One, BF_One, BO_Max, BF_One, BF_One
+					>::GetRHI();
+				}
+				else if (bLit)
+				{
+					// VGS CHANGE: the UNDER operator below on three targets, the normals' z in the third.
+					GraphicsPSOInit.BlendState = TStaticBlendState<
+						CW_RGBA, BO_Add, BF_DestAlpha, BF_One, BO_Add, BF_Zero, BF_InverseSourceAlpha,
+						CW_RGBA, BO_Add, BF_DestAlpha, BF_One, BO_Add, BF_Zero, BF_InverseSourceAlpha,
+						CW_RGBA, BO_Add, BF_DestAlpha, BF_One, BO_Add, BF_Zero, BF_InverseSourceAlpha
 					>::GetRHI();
 				}
 				else if (bExpectedDepth)
@@ -1709,8 +1758,9 @@ void RasterizeHardware(
 	else if (bLit)
 	{
 		// VGS CHANGE: resolved by VGSSplatGBuffer.usf, which writes scene depth itself.
-		check(OutDepthMoments != nullptr);
+		check(OutDepthMoments != nullptr && OutNormalZ != nullptr);
 		*OutDepthMoments = DepthMomentsTexture;
+		*OutNormalZ = NormalZTexture;
 	}
 	else if (bExpectedDepth)
 	{
@@ -2283,13 +2333,14 @@ static void RenderProxyInternal(
 
 	// Rasterization
 	FRDGTextureRef DepthMoments = nullptr; // VGS CHANGE: a lit proxy's, for the GBuffer pass
+	FRDGTextureRef NormalZ = nullptr;
 	if (bHWRaster)
 	{
 		const ERenderTargetLoadAction ColorLoadAction = bUsesScratch ? ERenderTargetLoadAction::EClear : ERenderTargetLoadAction::ELoad;
 		const uint32 NumClusters = bClusterDispatch ? RenderProxy.NumClusters : 0u;
 		RasterizeHardware(GraphBuilder, View, ViewUniformBuffer, DownsampleFactor, SceneDepthTexture, SceneVelocityTexture, NumSplats, ShadedVGSSplatBuffer, RasterTarget, SplatCountBuffer,
 			SortKeyBuffer, SplatIndexBuffer, NumClusters, ClusterCountBuffer, RenderStats, ColorLoadAction,
-			ShadedNormalBuffer, bLit ? &DepthMoments : nullptr); // VGS CHANGE
+			ShadedNormalBuffer, bLit ? &DepthMoments : nullptr, bLit ? &NormalZ : nullptr); // VGS CHANGE
 	}
 	else
 	{
@@ -2308,7 +2359,11 @@ static void RenderProxyInternal(
 		Params->View = View.ViewUniformBuffer;
 		Params->SplatColorTexture = ProxyScratchRT.Texture;
 		Params->DepthMomentsTexture = DepthMoments;
+		Params->NormalZTexture = NormalZ;
 		Params->ExpectedDepthScale = GetExpectedDepthScale();
+		Params->SmoothingMode = uint32(FMath::Clamp(CVarVGSSplatLitSmoothingMode.GetValueOnRenderThread(), 0, 3));
+		Params->SmoothingTolerance = FMath::Max(CVarVGSSplatLitSmoothingTolerance.GetValueOnRenderThread(), 0.0f);
+		Params->SmoothingBias = FMath::Max(CVarVGSSplatLitSmoothingBias.GetValueOnRenderThread(), 0.0f);
 		Params->BlendInSRGB = RenderProxy.bBlendInSRGB ? 1u : 0u;
 		Params->SelfIllumination = RenderProxy.SelfIllumination;
 		Params->Intensity = RenderProxy.Intensity;

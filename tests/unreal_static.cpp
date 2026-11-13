@@ -446,6 +446,63 @@ void checkProxy() {
   }
 }
 
+// A thin splat lying diagonally across the voxels, off their corners: its voxels must be found
+// by the point of highest density in each, not the point nearest its centre in metres.
+// And a plate 1 cm thick with a 2 cm inset: the inset stops short of turning it inside out.
+void checkProxyThin() {
+  {
+    vgsstatic::Splats s;
+    const float c = 0.7071068f, sn = 0.7071068f; // 45 degrees about z: (cos 22.5, 0, 0, sin 22.5)
+    (void)c; (void)sn;
+    s.positions = {0.0031f, -0.0023f, 0.0047f};
+    s.rotations = {0.9238795f, 0.0f, 0.0f, 0.3826834f};
+    s.scales = {0.1f, 0.0015f, 0.0015f};
+    s.radiance = {0.0f, 0.0f, 0.0f, 1.0f};
+    s.count = 1;
+    vgsstatic::ProxySettings settings;
+    settings.inset = 0.0f;
+    vgsstatic::ProxyMesh m;
+    const bool built = vgsstatic::buildProxy(s, settings, m);
+    EXPECT(built, "a proxy for a thin diagonal splat");
+    double lo = 1e9, hi = -1e9;
+    for (size_t i = 0; i < m.positions.size(); i += 3) {
+      const double along = 0.7071068 * (m.positions[i] + m.positions[i + 1]);
+      lo = std::min(lo, along);
+      hi = std::max(hi, along);
+    }
+    // Solid where exp(-t^2 / 2 sigma^2) >= 0.357 (opacity 0.3): |t| <= 0.143 m along it.
+    std::printf("thin diagonal splat: %zu solid voxels, the proxy spans %.3f to %.3f along it (about -0.143 to 0.143), %zu pieces dropped\n", m.solid, lo, hi, m.floaterPieces);
+    EXPECT(built && lo < -0.12 && hi > 0.12 && m.floaterPieces == 0, "the thin splat is found along its length (%.3f to %.3f)", lo, hi);
+  }
+  {
+    std::mt19937 rng(3);
+    std::uniform_real_distribution<float> u(-0.2f, 0.2f), t(-0.003f, 0.003f);
+    vgsstatic::Splats s;
+    for (int i = 0; i < 20000; ++i) {
+      s.positions.insert(s.positions.end(), {u(rng), u(rng), t(rng)});
+      s.rotations.insert(s.rotations.end(), {1.0f, 0.0f, 0.0f, 0.0f});
+      s.scales.insert(s.scales.end(), {0.008f, 0.008f, 0.001f});
+      s.radiance.insert(s.radiance.end(), {0.0f, 0.0f, 0.0f, 0.9f});
+    }
+    s.count = s.positions.size() / 3;
+    vgsstatic::ProxySettings settings;
+    settings.inset = 0.02f;
+    vgsstatic::ProxyMesh m;
+    const bool built = vgsstatic::buildProxy(s, settings, m);
+    EXPECT(built, "a proxy for a thin plate");
+    if (!built) return;
+    const MeshCheck c = checkMesh(m);
+    double zlo = 1e9, zhi = -1e9;
+    for (size_t i = 2; i < m.positions.size(); i += 3) {
+      zlo = std::min(zlo, double(m.positions[i]));
+      zhi = std::max(zhi, double(m.positions[i]));
+    }
+    std::printf("thin plate, inset 0.02: %zu triangles, %s, volume %.5f, z from %.4f to %.4f\n", m.indices.size() / 3, c.closed ? "closed" : "NOT closed",
+                c.volume, zlo, zhi);
+    EXPECT(c.closed && c.volume > 0.0, "the plate is not turned inside out by the inset (volume %.5f)", c.volume);
+  }
+}
+
 // A real PLY's shadow proxy, with the import's settings (a PLY in metres): how long, how big.
 void checkFileProxy(const char *path, const char *obj) {
   std::ifstream in(path, std::ios::binary);
@@ -478,6 +535,7 @@ int main(int argc, char **argv) {
   checkNormalWords();
   checkAxisNormals();
   checkProxy();
+  checkProxyThin();
   for (int i = 1; i < argc; ++i)
     if (std::strstr(argv[i], ".obj") == nullptr) {
       checkFile(argv[i]);

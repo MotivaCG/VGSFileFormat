@@ -152,7 +152,11 @@ void MainPS(
 		discard;
 	}
 	OutTransmittance = 1.0f - Alpha;
-	OutDepths = Alpha >= DepthOpacity ? float4(OpacityDepth.y, -OpacityDepth.y, 0.0f, 0.0f) : float4(60000.0f, 60000.0f, 0.0f, 0.0f);
+	// x, y: nearest and farthest of the splats at least DepthOpacity opaque here; z, w: of every
+	// splat, for a texel only faint ones reach (hair, a fringe: many of them together still
+	// block much of the light, though none is opaque enough on its own).
+	const float2 Strong = Alpha >= DepthOpacity ? float2(OpacityDepth.y, -OpacityDepth.y) : float2(60000.0f, 60000.0f);
+	OutDepths = float4(Strong, OpacityDepth.y, -OpacityDepth.y);
 }
 
 #endif // VGS_LIGHT_SHADOW_MAP
@@ -169,7 +173,7 @@ Texture2D GBufferA;
 Texture2D GBufferB;
 Texture2D GBufferC;
 Texture2D<float> TransmittanceMap;
-Texture2D<float2> DepthMap;
+Texture2D<float4> DepthMap; // nearest, -farthest: of the opaque enough splats, then of every one
 SamplerState BilinearSampler;
 float3 LightOrigin; // translated world
 float3 LightX;
@@ -212,23 +216,37 @@ void MainPS(float4 SvPosition : SV_Position, out float4 OutColor : SV_Target0)
 	const int2 Texel = int2(UV * MapSize);
 	float Nearest = 1e30f;
 	float Farthest = -1e30f;
+	float FaintNearest = 1e30f;
+	float FaintFarthest = -1e30f;
 	UNROLL
 	for (int Y = -1; Y <= 1; ++Y)
 	{
 		UNROLL
 		for (int X = -1; X <= 1; ++X)
 		{
-			const float2 Depths = DepthMap.Load(int3(clamp(Texel + int2(X, Y), 0, int(MapSize) - 1), 0));
+			const float4 Depths = DepthMap.Load(int3(clamp(Texel + int2(X, Y), 0, int(MapSize) - 1), 0));
 			if (Depths.x < 59000.0f)
 			{
 				Nearest = min(Nearest, Depths.x);
 				Farthest = max(Farthest, -Depths.y);
 			}
+			if (Depths.z < 59000.0f)
+			{
+				FaintNearest = min(FaintNearest, Depths.z);
+				FaintFarthest = max(FaintFarthest, -Depths.w);
+			}
 		}
 	}
 	if (Nearest >= 59000.0f)
 	{
-		return;
+		// Only faint splats about this texel: theirs, when together they block enough light
+		// to matter (the transmittance below decides how much).
+		if (FaintNearest >= 59000.0f || TransmittanceMap.SampleLevel(BilinearSampler, UV, 0) > 0.9f)
+		{
+			return;
+		}
+		Nearest = FaintNearest;
+		Farthest = FaintFarthest;
 	}
 	const float Behind = L.z - (SelfShadow != 0u ? Nearest : Farthest) - Bias;
 	if (Behind <= 0.0f)
