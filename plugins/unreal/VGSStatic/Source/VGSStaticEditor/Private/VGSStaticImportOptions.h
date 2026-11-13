@@ -67,11 +67,13 @@ public:
 
 	/**
 	 * How opaque the splats must make a voxel for it to be inside the proxy: lower takes in
-	 * more of the hair's and the edges' haze (larger shadows), higher less.
+	 * more of the hair's and the edges' haze (larger shadows), higher less. Lower also lets
+	 * the proxy stand out in front of what is lit (haze before a face, a straw), which then
+	 * shadows the character itself in blotches, seen up close under local lights.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, config, Category = "Shadow Proxy",
 		meta = (DisplayName = "Opacity", ClampMin = "0.01", ClampMax = "0.99", EditCondition = "bMakeShadowProxy"))
-	float ProxyOpacity = 0.3f;
+	float ProxyOpacity = 0.6f;
 
 	/**
 	 * How far the proxy lies inside the splats. The lit splats would shadow themselves in

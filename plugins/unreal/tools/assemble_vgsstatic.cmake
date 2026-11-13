@@ -9,6 +9,7 @@
 #   Shaders/Private/SplatRenderer   -> Shaders/Private/SplatRenderer   (renamed)
 #   Shaders/Shared                  -> Shaders/Shared                  (renamed)
 #   Resources/InverseToneCurve      -> Resources/InverseToneCurve
+#   Content/Icons (the actor's icon) -> Content/Icons
 #   Source/VGSRuntime/Private/VGSSplatLayout.h -> Source/VGSStaticRuntime/Public (plain C++)
 # From the VGS editor, for estimating normals at import:
 #   editor/gaussiannormals.h, .cpp, normalrigs.cpp, dependencies/nanoflann
@@ -25,7 +26,7 @@ foreach(var VGS STATIC EDITOR STAGE)
   endif()
 endforeach()
 
-file(REMOVE_RECURSE ${STAGE}/Source ${STAGE}/Shaders ${STAGE}/Resources/InverseToneCurve)
+file(REMOVE_RECURSE ${STAGE}/Source ${STAGE}/Shaders ${STAGE}/Resources/InverseToneCurve ${STAGE}/Content/Icons)
 file(MAKE_DIRECTORY ${STAGE})
 file(COPY ${STATIC}/VGSStatic.uplugin DESTINATION ${STAGE})
 file(COPY ${STATIC}/Source DESTINATION ${STAGE})
@@ -61,6 +62,7 @@ copy_renamed(${VGS}/Source/VGSSplatRenderer ${STAGE}/Source/VGSStaticSplatRender
 copy_renamed(${VGS}/Shaders/Private/SplatRenderer ${STAGE}/Shaders/Private/SplatRenderer Shaders/Private/SplatRenderer)
 copy_renamed(${VGS}/Shaders/Shared ${STAGE}/Shaders/Shared Shaders/Shared)
 file(COPY ${VGS}/Resources/InverseToneCurve DESTINATION ${STAGE}/Resources)
+file(COPY ${VGS}/Content/Icons DESTINATION ${STAGE}/Content)
 file(COPY ${VGS}/Source/VGSRuntime/Private/VGSSplatLayout.h DESTINATION ${STAGE}/Source/VGSStaticRuntime/Public)
 
 set(normals ${STAGE}/Source/VGSStaticEditor/Private/Normals)

@@ -166,7 +166,7 @@ public:
 	float ProxyVoxelSize = 1.0f;
 
 	UPROPERTY(EditAnywhere, Category = "Import Settings", meta = (DisplayName = "Proxy Opacity", ClampMin = "0.01", ClampMax = "0.99", EditCondition = "bMakeShadowProxy"))
-	float ProxyOpacity = 0.3f;
+	float ProxyOpacity = 0.6f;
 
 	UPROPERTY(EditAnywhere, Category = "Import Settings", meta = (DisplayName = "Proxy Inset", ClampMin = "0", ClampMax = "20", Units = "cm", EditCondition = "bMakeShadowProxy"))
 	float ProxyInset = 4.0f;

@@ -356,10 +356,12 @@ void checkAxisNormals() {
 }
 
 // What a proxy mesh is: closed (every edge in an even number of triangles), its signed
-// volume (positive when the triangles face outwards), its vertices' distance from a point.
+// volume (positive when the triangles face outwards), its longest edge in voxels (a spike
+// standing out of the surface is a long edge).
 struct MeshCheck {
   bool closed = true;
   double volume = 0.0;
+  double longestEdge = 0.0;
 };
 
 MeshCheck checkMesh(const vgsstatic::ProxyMesh &m) {
@@ -368,7 +370,12 @@ MeshCheck checkMesh(const vgsstatic::ProxyMesh &m) {
   const auto &P = m.positions;
   for (size_t t = 0; t < m.indices.size(); t += 3) {
     const uint32_t i[3] = {m.indices[t], m.indices[t + 1], m.indices[t + 2]};
-    for (int k = 0; k < 3; ++k) ++edges[std::minmax(i[k], i[(k + 1) % 3])];
+    for (int k = 0; k < 3; ++k) {
+      ++edges[std::minmax(i[k], i[(k + 1) % 3])];
+      const float *p = &P[size_t(i[k]) * 3], *q = &P[size_t(i[(k + 1) % 3]) * 3];
+      const double d = std::sqrt(double(p[0] - q[0]) * (p[0] - q[0]) + double(p[1] - q[1]) * (p[1] - q[1]) + double(p[2] - q[2]) * (p[2] - q[2]));
+      r.longestEdge = std::max(r.longestEdge, d / double(m.voxel));
+    }
     const float *a = &P[size_t(i[0]) * 3], *b = &P[size_t(i[1]) * 3], *c = &P[size_t(i[2]) * 3];
     r.volume += (double(a[0]) * (double(b[1]) * c[2] - double(b[2]) * c[1]) - double(a[1]) * (double(b[0]) * c[2] - double(b[2]) * c[0]) +
                  double(a[2]) * (double(b[0]) * c[1] - double(b[1]) * c[0])) / 6.0;
@@ -461,6 +468,7 @@ void checkProxyThin() {
     s.count = 1;
     vgsstatic::ProxySettings settings;
     settings.inset = 0.0f;
+    settings.opacity = 0.3f; // the span below is worked out for it
     vgsstatic::ProxyMesh m;
     const bool built = vgsstatic::buildProxy(s, settings, m);
     EXPECT(built, "a proxy for a thin diagonal splat");
@@ -516,10 +524,13 @@ void checkFileProxy(const char *path, const char *obj) {
   if (!built) return;
   const MeshCheck c = checkMesh(m);
   std::printf("  shadow proxy: %zu vertices, %zu triangles, voxel %.4f, grid %dx%dx%d, %zu solid voxels, %zu filled inside, %zu floaters (%zu voxels), "
-              "%s, volume %.4f; %.2f s\n",
+              "%s, volume %.4f, longest edge %.1f voxels; %.2f s\n",
               m.positions.size() / 3, m.indices.size() / 3, m.voxel, m.dims[0], m.dims[1], m.dims[2], m.solid, m.insideFilled, m.floaterPieces,
-              m.floaterVoxels, c.closed ? "closed" : "NOT closed", c.volume, seconds(t));
+              m.floaterVoxels, c.closed ? "closed" : "NOT closed", c.volume, c.longestEdge, seconds(t));
   EXPECT(c.closed && c.volume > 0.0, "%s: the proxy is closed and faces outwards", path);
+  // The inset moves the surface 4 voxels in: each vertex along its own normal by its own
+  // amount, it left edges of 6 voxels and more (spikes through the lit splats).
+  EXPECT(c.longestEdge < 5.0, "%s: no spikes (longest edge %.1f voxels)", path, c.longestEdge);
   if (obj) writeObj(m, obj);
 }
 

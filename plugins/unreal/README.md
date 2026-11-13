@@ -251,7 +251,7 @@ many splats, the SH degree, and whether it has normals and where they come from.
   collision). The splats then cast nothing themselves.
   - Made as PlayCanvas splat-transform's collision mesh starts (MIT; its GPU voxelisation and
     block clean-up, ported to the CPU on a dense grid): every 1 cm voxel adds up its splats'
-    opacity·exp(-d²/2) at its point nearest each one, solid where 1 - exp(-sum) reaches 0.3;
+    opacity·exp(-d²/2) at its point nearest each one, solid where 1 - exp(-sum) reaches 0.6;
     lone voxels go and single holes close. Then this plugin's:
     - For an elongated splat, "nearest" is in its own metric (a few steps of coordinate
       descent within the voxel). The nearest point in metres can miss a thin splat lying
@@ -266,7 +266,13 @@ many splats, the SH degree, and whether it has normals and where they come from.
     - The surface goes 4 cm inwards along the normals, but never more than 45 % of the
       thickness behind each vertex, so that thin parts are not turned inside out. With 2 cm
       the dress still showed self-shadow specks under virtual shadow maps; with 4 cm they are
-      gone, and the feet still meet their shadow.
+      gone, and the feet still meet their shadow. The normals and the amounts are smoothed
+      over the neighbours first: each vertex along its own normal by its own amount broke the
+      surface into spikes up to 9 voxels long, which stood out through the face.
+    - Opacity 0.6, not splat-transform's 0.3: at 0.3 the haze before a face and the blur
+      around a straw made the proxy stand out in front of the lit splats, and close up under
+      point lights (virtual shadow maps) the face showed black blotches. At 0.6 the face is
+      clean and the shadows from afar look the same.
   - On andreavictor (221k splats): 125,000 triangles in 0.6 s, reduced by Unreal to 20,000
     when the mesh is built (its LOD 0 *Reduction Settings*, about 10 s on import). gs2mesh
     (`3dgs2mesh/gs2mesh_cpp`) with only the PLY takes about 60 s: it renders about a thousand

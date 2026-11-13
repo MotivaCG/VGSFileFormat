@@ -35,7 +35,7 @@ set(stage ${out}/${plugin})
 set(zip ${out}/vgs-unreal-${plugin_version}.zip)
 set(bridge_header ${CMAKE_SOURCE_DIR}/plugins/vgsbridge/include/vgsbridge.h)
 set(decoder_license ${CMAKE_SOURCE_DIR}/decoder/LICENSE.md)
-set(icon ${CMAKE_SOURCE_DIR}/logo.png)
+set(icon ${CMAKE_CURRENT_SOURCE_DIR}/Icon128.png) # logo.png at the 128 px Unreal asks for
 set(third_party_bin ${stage}/Binaries/ThirdParty/vgsbridge/Win64)
 
 add_custom_target(vgs_unreal_plugin ALL
@@ -89,7 +89,7 @@ add_custom_target(vgs_static_unreal_plugin ALL
     COMMAND ${CMAKE_COMMAND} -E copy ${icon} ${static_stage}/Resources/Icon128.png
     COMMAND ${CMAKE_COMMAND} -E chdir ${out}
             ${CMAKE_COMMAND} -E tar cf ${static_zip} --format=zip --
-            VGSStatic/VGSStatic.uplugin VGSStatic/Source VGSStatic/Shaders VGSStatic/Resources
+            VGSStatic/VGSStatic.uplugin VGSStatic/Source VGSStatic/Shaders VGSStatic/Content VGSStatic/Resources
     DEPENDS ${static_dir}/VGSStatic.uplugin ${static_sources} ${plugin_sources}
             ${editor_dir}/gaussiannormals.h ${editor_dir}/gaussiannormals.cpp ${editor_dir}/normalrigs.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/assemble_vgsstatic.cmake ${icon}

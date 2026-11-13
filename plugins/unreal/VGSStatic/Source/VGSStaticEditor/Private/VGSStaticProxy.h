@@ -25,6 +25,8 @@
  *   6. inset: moved inwards along the vertex normals, so that the lit splats are not inside
  *      their own shadow caster (they would shadow themselves in blotches); no more than 45 %
  *      of the solid's thickness behind each vertex, so that thin parts do not turn inside out.
+ *      Normals and amounts are smoothed over the neighbours first: unsmoothed, the vertices
+ *      of a surface stepped at one voxel go each their own way and stand out as spikes.
  *
  * Why not a TSDF from rendered depth (gs2mesh): that renders hundreds of views, twice, and
  * fuses each into the volume, for a millimetre surface to texture; a shadow caster needs one
@@ -47,7 +49,7 @@ namespace vgsstatic {
 
 struct ProxySettings {
   float voxel = 0.01f;          // in the file's units: 1 cm for a PLY in metres
-  float opacity = 0.3f;         // a voxel is solid from this opacity
+  float opacity = 0.6f;         // a voxel is solid from this opacity
   float inset = 0.04f;          // file units the surface is moved inwards (at most 45 % of the thickness)
   float floaterShare = 0.005f;  // pieces with fewer solid voxels than this share of the largest go
   int smoothing = 4;            // Taubin passes
@@ -471,9 +473,9 @@ inline bool buildProxy(const Splats &s, const ProxySettings &settings, ProxyMesh
     }
     for (size_t i = 0; i < nv; ++i) start[i + 1] += start[i];
   }
-  {
+  auto taubin = [&](int passes) {
     std::vector<float> next(P.size());
-    for (int pass = 0; pass < 2 * std::max(settings.smoothing, 0); ++pass) {
+    for (int pass = 0; pass < 2 * std::max(passes, 0); ++pass) {
       const float w = (pass % 2 == 0) ? 0.5f : -0.53f;
       for (size_t i = 0; i < nv; ++i) {
         float avg[3] = {0, 0, 0};
@@ -484,9 +486,15 @@ inline bool buildProxy(const Splats &s, const ProxySettings &settings, ProxyMesh
       }
       P.swap(next);
     }
-  }
+  };
+  taubin(settings.smoothing);
 
-  // ---- 6. inset along the area-weighted vertex normals
+  // ---- 6. inset along the vertex normals
+  // The inset is several voxels, and the surface is still stepped at one voxel: moved along
+  // its own normal by its own amount, each vertex would go its own way, and the surface would
+  // break into spikes standing out through the lit splats (which they then shadow in blotches,
+  // seen up close). So the normals and the amounts are smoothed over the neighbours first, and
+  // the result smoothed again.
   if (settings.inset > 0.0f) {
     std::vector<float> N(P.size(), 0.0f);
     for (size_t t = 0; t < T.size(); t += 3) {
@@ -496,13 +504,29 @@ inline bool buildProxy(const Splats &s, const ProxySettings &settings, ProxyMesh
       for (int k = 0; k < 3; ++k)
         for (int j = 0; j < 3; ++j) N[size_t(T[t + size_t(k)]) * 3 + size_t(j)] += n[j];
     }
-    for (size_t i = 0; i < nv; ++i) {
-      const float l = std::sqrt(N[i * 3] * N[i * 3] + N[i * 3 + 1] * N[i * 3 + 1] + N[i * 3 + 2] * N[i * 3 + 2]);
-      if (!(l > 0.0f)) continue;
-      const float n[3] = {N[i * 3] / l, N[i * 3 + 1] / l, N[i * 3 + 2] / l};
-      // No more than 45 % of how thick the solid is behind the vertex, measured along the
-      // inward normal through the occupancy: a full inset would turn a part thinner than
-      // twice the inset (a finger, a shoe's edge) inside out, its two sides crossing.
+    auto normalize = [nv](std::vector<float> &X) {
+      for (size_t i = 0; i < nv; ++i) {
+        const float l = std::sqrt(X[i * 3] * X[i * 3] + X[i * 3 + 1] * X[i * 3 + 1] + X[i * 3 + 2] * X[i * 3 + 2]);
+        for (int k = 0; k < 3; ++k) X[i * 3 + k] = l > 0.0f ? X[i * 3 + k] / l : 0.0f;
+      }
+    };
+    normalize(N);
+    for (int pass = 0; pass < 8; ++pass) {
+      std::vector<float> M(N);
+      for (size_t i = 0; i < nv; ++i)
+        for (uint32_t j = start[i]; j < start[i + 1]; ++j)
+          for (int k = 0; k < 3; ++k) M[i * 3 + k] += N[size_t(nbr[j]) * 3 + k];
+      normalize(M);
+      N.swap(M);
+    }
+    // No more than 45 % of how thick the solid is behind the vertex, measured along the
+    // inward normal through the occupancy: a full inset would turn a part thinner than twice
+    // the inset (a finger, a shoe's edge) inside out, its two sides crossing. A normal that
+    // never enters the solid gets none.
+    std::vector<float> amount(nv, 0.0f);
+    parallelFor(nv, settings.threads, [&](size_t i) {
+      const float *n = &N[i * 3];
+      if (n[0] == 0.0f && n[1] == 0.0f && n[2] == 0.0f) return;
       float thickness = 0.0f;
       bool entered = false;
       const float step = 0.25f * voxel, limit = 2.5f * settings.inset + 2.0f * voxel;
@@ -518,9 +542,24 @@ inline bool buildProxy(const Splats &s, const ProxySettings &settings, ProxyMesh
         else if (entered) break;
         thickness = t;
       }
-      const float inset = std::min(settings.inset, 0.45f * thickness);
-      for (int k = 0; k < 3; ++k) P[i * 3 + k] -= inset * n[k];
+      amount[i] = entered ? std::min(settings.inset, 0.45f * thickness) : 0.0f;
+    });
+    // The amounts smoothed: the smallest among the neighbours, then their mean, never more
+    // than the vertex's own (a thin part stays protected, and its edge eases into the rest).
+    for (int pass = 0; pass < 3; ++pass) {
+      std::vector<float> low(amount), eased(nv);
+      for (size_t i = 0; i < nv; ++i)
+        for (uint32_t j = start[i]; j < start[i + 1]; ++j) low[i] = std::min(low[i], amount[nbr[j]]);
+      for (size_t i = 0; i < nv; ++i) {
+        float sum = low[i];
+        for (uint32_t j = start[i]; j < start[i + 1]; ++j) sum += low[nbr[j]];
+        eased[i] = std::min(amount[i], sum / float(start[i + 1] - start[i] + 1));
+      }
+      amount.swap(eased);
     }
+    for (size_t i = 0; i < nv; ++i)
+      for (int k = 0; k < 3; ++k) P[i * 3 + k] -= amount[i] * N[i * 3 + k];
+    taubin(2);
   }
   return true;
 }
