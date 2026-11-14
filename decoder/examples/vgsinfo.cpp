@@ -129,6 +129,8 @@ int main(int argc, char **argv) {
                   imageFormatName(capture.thumbnailFormat()), capture.thumbnail().size());
     if (capture.hasMetadataJson())
       std::printf("%-18s %zu bytes\n", "metadata json", capture.metadataJson().size());
+    if (capture.hasProxyMesh())
+      std::printf("%-18s glb, %zu bytes\n", "proxy mesh", capture.proxyMesh().size());
     if (capture.hasMetadataJson2())
       std::printf("%-18s %zu bytes\n", "metadata json 2", capture.metadataJson2().size());
 

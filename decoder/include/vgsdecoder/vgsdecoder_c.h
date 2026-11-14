@@ -200,7 +200,8 @@ VGS_DECODER_API int vgs_motion_at(const vgs_capture *, double seconds, vgs_motio
 
 /* ---- payloads carried alongside ----
  *
- * A capture can carry a sound track, a thumbnail and two independent blocks of JSON.
+ * A capture can carry a sound track, a thumbnail and two independent blocks of JSON, and a
+ * still (.sgs) a mesh of its subject.
  * Each has its own pair of calls, and each checks the bytes against the signed table
  * before handing them over. The bytes belong to the capture and stay valid until the
  * next call of the same kind on it.
@@ -219,6 +220,10 @@ VGS_DECODER_API int vgs_has_thumbnail(const vgs_capture *);
 /** One of vgs_image_kind. */
 VGS_DECODER_API int vgs_thumbnail_format(const vgs_capture *);
 VGS_DECODER_API int vgs_thumbnail(vgs_capture *, const uint8_t **data, size_t *size);
+
+/** A still's mesh of its subject: one glTF 2.0 binary (.glb), in the capture's space. */
+VGS_DECODER_API int vgs_has_proxy_mesh(const vgs_capture *);
+VGS_DECODER_API int vgs_proxy_mesh(vgs_capture *, const uint8_t **data, size_t *size);
 
 VGS_DECODER_API int vgs_has_metadata_json(const vgs_capture *);
 /** The free-form JSON block as NUL terminated UTF-8, or "" when there is none. */

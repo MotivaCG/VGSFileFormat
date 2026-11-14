@@ -14,8 +14,8 @@ per-attribute FSE, Pcodec, rANS16 or Raw selection;
 which it has: the header declares the codec per attribute, so both are read by the same
 code. `.pgs` exists for cases where CPU time matters more than bytes.
 
-A third extension is reserved, not yet written by any tool: **`.sgs`, a static capture** (a
-scanned character or prop rather than a performance). See *Static captures* below.
+A third extension is **`.sgs`, a static capture** (a scanned character or prop rather than a
+performance), written by the SGS Editor (`sgseditor/`). See *Static captures* below.
 
 The container holds named, independently paged attributes, not the source's bytes.
 The format-6 `.mint` importer preserves every value needed to render its source,
@@ -401,9 +401,9 @@ else belongs under a vendor-prefixed key. Each extra's bytes are checked against
 digest in its table entry when they are read: none is needed to reconstruct a frame, so
 none is fetched to open the capture, but none comes back unverified either.
 
-### Static captures: `.sgs` (reserved)
+### Static captures: `.sgs`
 
-Not written yet; reserved so that nothing written now has to change when it is.
+Written by the SGS Editor (`sgseditor/`), from a 3D Gaussian Splatting PLY.
 
 An `.sgs` is this same container holding **one frame**: `frameCount` 1, one chunk of one
 interval, every splat alive for it. Nothing else differs, and a reader of `.vgs` reads it as
@@ -415,8 +415,12 @@ temporal harmonics layer and no motion samples, and `playbackMode` is ignored.
 It may carry a **proxy mesh** (extra type 5, format 1: one glTF 2.0 binary, `.glb`): a
 closed, simplified surface of the subject, in the capture's own space and units, for what
 splats do poorly in an engine: casting shadows into shadow maps, collision, occlusion and
-picking. It is never drawn in place of the splats, and nothing needed to show them is in
-it, so a reader that has no use for it skips it. Only one per file; the extra's digest is in
+picking. Nothing needed to show the splats is in it, so a reader that has no use for it
+skips it. It may carry its material too, a matte dielectric with a base colour texture and
+a tangent-space normal map embedded in the `.glb` (the SGS Editor bakes them from the
+splats, or from the photos they were trained from): a reader may then draw it where splats
+are not wanted, as a distant level of detail or a preview, but the splats remain the
+capture. Only one per file; the extra's digest is in
 the signed table like any other. A capture of more than one frame does not carry one: how a
 mesh would follow a moving performer is left to a later revision.
 

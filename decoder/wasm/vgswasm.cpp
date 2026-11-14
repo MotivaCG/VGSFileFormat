@@ -678,7 +678,7 @@ EMSCRIPTEN_KEEPALIVE const double *vgs_motion_at(double seconds) {
 // prime the range first, because a browser cannot answer a synchronous read. So each one
 // says where it is, and then hands the bytes over once they are within reach.
 
-enum PayloadKind { PayloadAudio = 0, PayloadThumbnail, PayloadMetadataJson, PayloadMetadataJson2 };
+enum PayloadKind { PayloadAudio = 0, PayloadThumbnail, PayloadMetadataJson, PayloadMetadataJson2, PayloadProxyMesh };
 
 namespace {
 vgsdec::Capture::Payload payloadOf(int kind) {
@@ -686,6 +686,7 @@ vgsdec::Capture::Payload payloadOf(int kind) {
   case PayloadThumbnail: return vgsdec::Capture::Payload::Thumbnail;
   case PayloadMetadataJson: return vgsdec::Capture::Payload::MetadataJson;
   case PayloadMetadataJson2: return vgsdec::Capture::Payload::MetadataJson2;
+  case PayloadProxyMesh: return vgsdec::Capture::Payload::ProxyMesh;
   default: return vgsdec::Capture::Payload::Audio;
   }
 }
@@ -700,6 +701,7 @@ EMSCRIPTEN_KEEPALIVE int vgs_has_payload(int kind) {
   case PayloadThumbnail: return capture->hasThumbnail() ? 1 : 0;
   case PayloadMetadataJson: return capture->hasMetadataJson() ? 1 : 0;
   case PayloadMetadataJson2: return capture->hasMetadataJson2() ? 1 : 0;
+  case PayloadProxyMesh: return capture->hasProxyMesh() ? 1 : 0;
   default: return 0;
   }
 }
@@ -736,6 +738,7 @@ EMSCRIPTEN_KEEPALIVE int vgs_payload(int kind) {
     switch (kind) {
     case PayloadAudio: staging = capture->audio(); break;
     case PayloadThumbnail: staging = capture->thumbnail(); break;
+    case PayloadProxyMesh: staging = capture->proxyMesh(); break;
     case PayloadMetadataJson: {
       const std::string json = capture->metadataJson();
       staging.assign(json.begin(), json.end());

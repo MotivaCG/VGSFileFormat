@@ -714,11 +714,20 @@ public:
   std::string metadataJson2() const;
 
   /**
+   * A still (.sgs) may carry a mesh of its subject: one glTF 2.0 binary (.glb), in the
+   * capture's own space and units, for what splats do poorly in an engine - casting shadows,
+   * collision, picking - and, with its textures, a stand-in where splats are not wanted.
+   * Empty when there is none.
+   */
+  bool hasProxyMesh() const;
+  std::vector<uint8_t> proxyMesh() const;
+
+  /**
    * Where a payload sits in the file. Only needed by a reader that fetches ranges itself
    * instead of letting the getters above read through its Source - a browser, mostly,
    * which cannot answer a synchronous read. Everything else can ignore this.
    */
-  enum class Payload { Audio, Thumbnail, MetadataJson, MetadataJson2 };
+  enum class Payload { Audio, Thumbnail, MetadataJson, MetadataJson2, ProxyMesh };
   struct Location {
     uint64_t offset = 0, size = 0;
   };

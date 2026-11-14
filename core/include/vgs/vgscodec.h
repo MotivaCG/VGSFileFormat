@@ -94,9 +94,10 @@ enum ExtraType : uint32_t {
   // to whoever produced the capture, the other to whoever uses it, and neither
   // has to parse or preserve the other's.
   MetadataExtra2 = 4,  // format 1: one UTF-8 JSON object
-  // Reserved for static captures (.sgs, one frame; FORMAT.md, "Static captures"): a
-  // simplified closed surface of the subject, in the capture's space, for shadows,
-  // collision and picking. Accepted and skipped by readers; nothing writes it yet.
+  // Static captures (.sgs, one frame; FORMAT.md, "Static captures"): a simplified closed
+  // surface of the subject, in the capture's space, for shadows, collision and picking,
+  // with its material when it has one. The SGS Editor writes it; vgsdec reads it
+  // (Capture::proxyMesh).
   ProxyMeshExtra = 5,  // format 1: glTF 2.0 binary (.glb)
   VendorExtraBase = 0x8000
 };

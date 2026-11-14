@@ -1100,6 +1100,7 @@ constexpr uint32_t MetadataJsonExtra = 1;
 constexpr uint32_t ThumbnailExtra = 2;
 constexpr uint32_t AudioExtra = 3;
 constexpr uint32_t MetadataJson2Extra = 4;
+constexpr uint32_t ProxyMeshExtra = 5;
 
 } // namespace
 
@@ -1107,6 +1108,7 @@ bool Capture::hasAudio() const { return hasEntry(AudioExtra); }
 bool Capture::hasThumbnail() const { return hasEntry(ThumbnailExtra); }
 bool Capture::hasMetadataJson() const { return hasEntry(MetadataJsonExtra); }
 bool Capture::hasMetadataJson2() const { return hasEntry(MetadataJson2Extra); }
+bool Capture::hasProxyMesh() const { return hasEntry(ProxyMeshExtra); }
 
 Capture::AudioFormat Capture::audioFormat() const {
   const uint32_t format = extraFormat(AudioExtra);
@@ -1120,6 +1122,7 @@ Capture::ImageFormat Capture::thumbnailFormat() const {
 
 std::vector<uint8_t> Capture::audio() const { return extra(AudioExtra); }
 std::vector<uint8_t> Capture::thumbnail() const { return extra(ThumbnailExtra); }
+std::vector<uint8_t> Capture::proxyMesh() const { return extra(ProxyMeshExtra); }
 
 std::string Capture::metadataJson() const {
   const std::vector<uint8_t> bytes = extra(MetadataJsonExtra);
@@ -1130,6 +1133,7 @@ Capture::Location Capture::locate(Payload payload) const {
   const uint32_t type = payload == Payload::Audio          ? AudioExtra
                         : payload == Payload::Thumbnail    ? ThumbnailExtra
                         : payload == Payload::MetadataJson ? MetadataJsonExtra
+                        : payload == Payload::ProxyMesh    ? ProxyMeshExtra
                                                            : MetadataJson2Extra;
   return {extraOffset(type), extraSize(type)};
 }

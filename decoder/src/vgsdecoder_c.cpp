@@ -342,6 +342,23 @@ VGS_DECODER_API int vgs_thumbnail(vgs_capture *h, const uint8_t **data, size_t *
   return VGS_DEC_ERROR;
 }
 
+VGS_DECODER_API int vgs_has_proxy_mesh(const vgs_capture *h) {
+  return self(h)->capture.hasProxyMesh() ? 1 : 0;
+}
+
+VGS_DECODER_API int vgs_proxy_mesh(vgs_capture *h, const uint8_t **data, size_t *size) {
+  lastError.clear();
+  Wrapper &w = *self(h);
+  try {
+    return handOver(w, w.capture.proxyMesh(), data, size);
+  } catch (const std::exception &e) {
+    lastError = e.what();
+  }
+  if (data) *data = nullptr;
+  if (size) *size = 0;
+  return VGS_DEC_ERROR;
+}
+
 VGS_DECODER_API int vgs_has_metadata_json(const vgs_capture *h) {
   return self(h)->capture.hasMetadataJson() ? 1 : 0;
 }
