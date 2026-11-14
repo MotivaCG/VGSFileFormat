@@ -371,18 +371,18 @@ Result computeNormals(const Splats &s, const std::vector<View> &views, float *no
     return result;
 }
 
-Result estimateNormals(const Splats &s, const std::vector<View> &rig, float *normalsOut) {
+Result estimateNormals(const Splats &s, const std::vector<View> &rig, float *normalsOut, int surrounding) {
     if (!rig.empty()) {
         Result r = computeNormals(s, rig, normalsOut);
         r.rigOpaqueSeen = r.opaqueSeen;
         if (!r.opaque || 2 * r.opaqueSeen >= r.opaque) return r;
         const size_t seen = r.opaqueSeen;
-        r = computeNormals(s, surroundingViews(s), normalsOut);
+        r = computeNormals(s, surroundingViews(s, surrounding), normalsOut);
         r.rigOpaqueSeen = seen;
         r.surrounding = true;
         return r;
     }
-    Result r = computeNormals(s, surroundingViews(s), normalsOut);
+    Result r = computeNormals(s, surroundingViews(s, surrounding), normalsOut);
     r.surrounding = true;
     return r;
 }

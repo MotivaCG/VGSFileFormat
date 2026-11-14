@@ -490,7 +490,7 @@ Gaussian normals* (`gaussiannormals.cpp`, kept the same in both): the shortest a
 splats, the neighbourhood plane on round ones, the side facing the cameras that see the
 splat through a coarse depth buffer, propagated, outliers given their neighbours' normal,
 and smoothed. Without a rig of ours, or when the rig's cameras see less than half of the
-opaque splats (the wrong rig, or a capture not in its own frame), 42 cameras spread all
+opaque splats (the wrong rig, or a capture not in its own frame), 100 cameras spread all
 around the splats decide the sides instead (`surroundingViews`, `estimateNormals`); on a
 ScanMeNow PLY 94 % of the normals came within 30 degrees of those its rig gave, side included.
 It runs on what is written, with the cameras moved by the capture transform, at one instant

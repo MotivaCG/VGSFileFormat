@@ -57,7 +57,7 @@ struct Result {
 // (Fibonacci), each seeing all of them. Which way is up does not matter. With them,
 // computeNormals decides each splat's side from the outside, as a rig would, so what lies
 // inside a fold or between the legs is decided by its neighbours instead.
-std::vector<View> surroundingViews(const Splats &splats, int count = 42);
+std::vector<View> surroundingViews(const Splats &splats, int count = 100);
 
 // Writes a unit normal for every used splat into normals (3 per splat); others are left
 // as they are. Direction: the shortest axis on flat splats, the neighbourhood plane on
@@ -65,9 +65,9 @@ std::vector<View> surroundingViews(const Splats &splats, int count = 42);
 // buffer, then propagated to the splats no camera decided, then smoothed.
 Result computeNormals(const Splats &splats, const std::vector<View> &views, float *normals);
 
-// computeNormals with a rig's cameras, or with cameras all around the splats when `rig` is
-// empty or its cameras see less than half of the opaque splats (not that rig's capture, or not
-// in its frame): there they would only guess the sides.
-Result estimateNormals(const Splats &splats, const std::vector<View> &rig, float *normals);
+// computeNormals with a rig's cameras, or with `surrounding` cameras all around the splats when
+// `rig` is empty or its cameras see less than half of the opaque splats (not that rig's capture,
+// or not in its frame): there they would only guess the sides.
+Result estimateNormals(const Splats &splats, const std::vector<View> &rig, float *normals, int surrounding = 100);
 
 } // namespace gaussiannormals
