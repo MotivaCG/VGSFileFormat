@@ -27,7 +27,8 @@ build them.
 Licensing is specific to each component; access to this repository does not
 grant a general right to use, modify or distribute its contents.
 
-- [VGS Encoder](encoder/LICENSE.md) and [VGS Editor](editor/LICENSE.md) are
+- [VGS Encoder](encoder/LICENSE.md) and [VGS Editor](editor/LICENSE.md) (with the SGS
+  Editor in `sgseditor/`) are
   proprietary commercial software owned by **Víctor M. Feliz**. **ScanMeNow**
   and **The4DScanner** have only the internal-use permission stated in those
   licences, with no ownership, sale, redistribution or sublicensing rights.
@@ -50,6 +51,8 @@ grant a general right to use, modify or distribute its contents.
     decoder/     libvgsdecoder  + vgsinfo, vgsplay, vgsdump, vgsexport, vgspagecost, WebAssembly
     editor/      Qt desktop editor, with its own build and installer
     viewer/      Qt desktop player, with its own build, deploy and installer (viewer/README.md)
+    sgseditor/   Qt editor for static captures (.ply to .sgs: normals, gs2mesh mesh, lights),
+                 with its own build, deploy and installer (sgseditor/README.md)
     tests/       the conformance and separation tests
     cmake/       package files for find_package
     logo.png     the mark, full size, on white; docs/logo.png is a copy for documents

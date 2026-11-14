@@ -1,0 +1,3 @@
+[submodule "editor/dependencies/gs2mesh_cpp"]
+	path = editor/dependencies/gs2mesh_cpp
+	url = https://github.com/MotivaCG/gs2mesh_cpp.git
