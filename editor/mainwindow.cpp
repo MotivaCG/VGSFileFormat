@@ -623,7 +623,7 @@ void MainWindow::buildUi() {
         if (!path.isEmpty()) openPath(path);
     });
     auto *openAction = file->addAction(tr("Import capture…"), QKeySequence("Ctrl+I"), this, [this] {
-        const QString path = QFileDialog::getOpenFileName(this, tr("Import capture"), history_.openPath("Capture"), tr("Captures (*.vgs *.pgs *.mint *.ply)"));
+        const QString path = QFileDialog::getOpenFileName(this, tr("Import capture"), history_.openPath("Capture"), tr("Captures (*.vgs *.pgs *.sgs *.mint *.ply)"));
         if (!path.isEmpty()) openPath(path);
     });
     recentMenu_ = file->addMenu(tr("Open recent")); recentMenu_->setToolTipsVisible(true);
@@ -1850,7 +1850,7 @@ bool MainWindow::openPath(const QString &path, Interaction interaction, bool dis
             relocated=true;
         }
         candidate=p;asset=p.asset;
-    } else if (suffix!="vgs" && suffix!="pgs" && suffix!="mint" && suffix!="ply") return failed(tr("Open a VGS, PGS, MINT, PLY or VGSPROJ file."));
+    } else if (suffix!="vgs" && suffix!="pgs" && suffix!="sgs" && suffix!="mint" && suffix!="ply") return failed(tr("Open a VGS, PGS, SGS, MINT, PLY or VGSPROJ file."));
     pendingProject_=candidate;pendingProjectPath_=candidate ? absolute : QString();pendingRelocated_=relocated;
     openingRemote_=interaction==Interaction::Automation;openingRequest_=++requestSerial_;
     automationError_.clear();
@@ -1867,7 +1867,7 @@ bool MainWindow::locateSource(Project *project) {
     while (!QFileInfo(folder).isDir()) {const QString parent=QFileInfo(folder).path();if (parent==folder) break;folder=parent;}
     const QString suffix=old.suffix().toLower();
     const QString path=QFileDialog::getOpenFileName(this,tr("Where is %1?").arg(old.fileName()),QDir(folder).filePath(old.fileName()),
-        tr("%1 capture (*.%2);;Captures (*.vgs *.pgs *.mint *.ply)").arg(suffix.toUpper(),suffix));
+        tr("%1 capture (*.%2);;Captures (*.vgs *.pgs *.sgs *.mint *.ply)").arg(suffix.toUpper(),suffix));
     if (path.isEmpty()) return false;
     const QFileInfo found(path);
     // A PLY sequence's frames and birth events keep their places relative to its first frame.

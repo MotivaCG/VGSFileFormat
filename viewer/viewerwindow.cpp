@@ -45,7 +45,7 @@ QIcon transportIcon(QStyle *style,QStyle::StandardPixmap symbol) {
     }
     return icon;
 }
-bool supported(const QString &path) {const auto s=QFileInfo(path).suffix().toLower();return s=="vgs" || s=="pgs";}
+bool supported(const QString &path) {const auto s=QFileInfo(path).suffix().toLower();return s=="vgs" || s=="pgs" || s=="sgs";}
 }
 
 ViewerWindow::ViewerWindow() : worker_(new CaptureWorker) {
@@ -89,7 +89,7 @@ ViewerWindow::ViewerWindow() : worker_(new CaptureWorker) {
         QSettings settings;
         const QString last=settings.value("Viewer/LastFile").toString();
         const QString initial=QFileInfo::exists(last) ? last : settings.value("Viewer/Directory").toString();
-        const QString path=QFileDialog::getOpenFileName(this,tr("Open capture"),initial,tr("VGS captures (*.vgs *.pgs)"));
+        const QString path=QFileDialog::getOpenFileName(this,tr("Open capture"),initial,tr("VGS captures (*.vgs *.pgs *.sgs)"));
         if (!path.isEmpty()) openFile(path);});
     recent_=file->addMenu(tr("Open recent"));updateRecent();
     file->addAction(tr("Capture information…"),QKeySequence("Ctrl+I"),this,&ViewerWindow::showInfo);

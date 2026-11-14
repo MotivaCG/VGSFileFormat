@@ -591,7 +591,7 @@ void CaptureWorker::open(const QString &path, quint64 generation, bool sh) {
             candidate.info_.antialiased = true;
             candidate.info_.audio = candidate.mint_->audio();
             if (!candidate.info_.audio.isEmpty()) candidate.info_.audioSuffix = QStringLiteral("mp3");
-        } else if (ext == "vgs" || ext == "pgs") {
+        } else if (ext == "vgs" || ext == "pgs" || ext == "sgs") { // .sgs: a still in the same container
             candidate.source_ = std::make_unique<FileSource>(path);
             candidate.vgs_ = std::make_unique<vgsdec::Capture>(vgsdec::Capture::openStream(*candidate.source_));
             candidate.vgs_->setCachePolicy(cachingEnabled_ ? vgsdec::CachePolicy{1,1,512ull*1024*1024} : vgsdec::CachePolicy{0,0,1});
