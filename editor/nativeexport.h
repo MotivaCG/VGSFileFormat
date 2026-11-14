@@ -20,6 +20,11 @@ bool supportsNativeTransform(const Project &);
 // before motion samples are added. Returns what the middle sample's cameras saw.
 gaussiannormals::Result addNormals(vgs::DecodedChunk &, const std::vector<gaussiannormals::View> &views,
                                    const ExportProgress &);
+// Writes the frame's own normals (Frame::normal, xyz per record) into the optional normals
+// attribute of the one-interval chunk packExportFrame made of it, whose records are the
+// frame's in the same order: a still that has its normals already (the SGS editor's) keeps
+// them, rather than have them estimated again.
+void setFrameNormals(vgs::DecodedChunk &, const vgs::Frame &);
 std::vector<NativeChunkPlan> nativeExportPlan(const vgs::Header &, int first, int frames);
 vgs::DecodedChunk assembleNativeChunk(vgs::DecodedChunk);
 void setNativeShDegree(vgs::DecodedChunk &, int sourceDegree, int targetDegree);

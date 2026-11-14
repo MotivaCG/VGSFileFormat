@@ -488,7 +488,7 @@ FramePtr CaptureWorker::reusableFrame() {
         if (slot.use_count()==1) {out=slot;break;}
     }
     if (!out) out=std::make_shared<RenderFrame>();
-    out->records.clear();out->active.clear();out->points.clear();out->morphMarkers.clear();out->prune.clear();out->greensApplied=false;out->visibilityFromCache=false;
+    out->records.clear();out->active.clear();out->points.clear();out->normals.clear();out->morphMarkers.clear();out->prune.clear();out->greensApplied=false;out->visibilityFromCache=false;
     out->sourceMs=out->assemblyMs=0;out->morphShapeFromCache=false;out->colourFromCache=false;out->shBlend={};
     out->packed.reset();out->despilled=false;out->shDespill={1,0,0, 0,1,0, 0,0,1};out->shOmitted=false;
     out->cache={};

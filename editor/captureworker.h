@@ -58,6 +58,9 @@ struct RenderFrame {
     std::vector<uint8_t> active;
     std::vector<PointVertex> points;
     std::vector<float> sh; // fully evaluated coefficients, except when shBlend supplies them
+    // Each record's outward normal, xyz in the capture's space, for a viewport that lights the
+    // splats (the SGS editor's); empty when there are none, zero for a record without one.
+    std::vector<float> normals;
     loopmorph::ShBlend shBlend;
     int coefficients = 0;
     double seconds = 0;

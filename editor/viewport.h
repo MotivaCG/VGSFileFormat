@@ -12,8 +12,10 @@
 #include "captureworker.h"
 #include "project.h"
 #include <QElapsedTimer>
+#include <QImage>
 #include <QTimer>
 #include <array>
+#include <optional>
 #include <QPainterPath>
 #include <QOpenGLFunctions_3_3_Core>
 #include <QOpenGLShaderProgram>
@@ -147,7 +149,60 @@ public:
     // Whether the last paint drew a packed frame (tests).
     bool lastPaintPacked() const { return lastPaintPacked_; }
     bool packedFramePending() const { return frame_ && frame_->packed && drawnPacked_ && drawnPackedSerial_!=frameSerial_; }
+
+    // Lights for the splats, the SGS editor's: each splat is lit by its own normal
+    // (RenderFrame::normals), Lambert in linear light, plus selfIllumination of its colour as
+    // it glows on its own, as Unreal's Shaded splats are. With no enabled light the colours are
+    // drawn as captured. Only after enableLighting(), which must come before the widget is
+    // first shown: the editor's and the viewer's shaders have none of it.
+    struct ViewLight {
+        bool directional = false, enabled = true, selected = false;
+        // Point: where it is. Directional: where its icon and gizmo are; it lights from infinity.
+        QVector3D position;
+        QVector3D direction{0, -1, 0}; // directional: the way the light travels
+        QVector3D colour{1, 1, 1}; // as picked, sRGB: the light itself is its linear value
+        // Directional: the colour reached by a splat facing it. Point: the same at one metre,
+        // falling with the square of the distance, and to nothing at `range` when it has one.
+        float intensity = 1, range = 0;
+    };
+    void enableLighting();
+    bool lightingEnabled() const { return lighting_; }
+    void setLights(const QVector<ViewLight> &lights, float selfIllumination);
+    const QVector<ViewLight> &lights() const { return lights_; }
+    float selfIllumination() const { return selfIllumination_; }
+    // Whether any enabled light lights the splats now: otherwise they are drawn as captured.
+    bool lit() const;
+    // The gizmo moves or rotates `target` instead of the capture (a light, for the SGS
+    // editor) and reports it by gizmoTargetEdited; none hands it back to the capture.
+    void setGizmoTarget(const std::optional<Transform> &target);
+    bool hasGizmoTarget() const { return gizmoTarget_.has_value(); }
+    // A textured triangle mesh drawn with the splats' lights (the SGS editor's generated mesh),
+    // in the capture's space: positions, normals and texture coordinates per vertex.
+    struct ViewMesh {
+        std::vector<float> vertices; // x y z, nx ny nz, u v
+        std::vector<uint32_t> indices;
+        QImage albedo;
+    };
+    void setMesh(std::shared_ptr<const ViewMesh> mesh);
+    bool hasMesh() const { return bool(mesh_); }
+    void setDrawMesh(bool draw);
+    void setDrawSplats(bool draw);
+    // The mesh with its albedo (shaded), or light grey, to see its shape alone.
+    void setMeshTextured(bool textured);
+    bool meshTextured() const { return meshShowsTexture_; }
+    // The lights' icons in the view (and clicking them); those the splats hide are left out.
+    void setLightIcons(bool shown);
+    bool lightIcons() const { return lightIcons_; }
+    bool drawsMesh() const { return drawMesh_; }
+    bool drawsSplats() const { return drawSplats_; }
+    // What the empty viewport says; empty for the viewer's or the editor's own text.
+    void setEmptyHint(const QString &text) { emptyHint_ = text; update(); }
 signals:
+    // The gizmo moved or turned the target of setGizmoTarget.
+    void gizmoTargetEdited(Transform transform);
+    // A click on a light's icon: its index in setLights; -1 for a click on nothing that
+    // did not drag, while there are lights.
+    void lightClicked(int index);
     void cameraChanged();
     void renderFailed(QString error);
     // A packed frame arrived that this context cannot draw: the owner asks for floats instead.
@@ -211,6 +266,7 @@ private:
     quint64 markerHiddenFrame_ = 0;
     bool markerHiddenSplats_ = false, markerHiddenValid_ = false;
     void updateMarkerOcclusion(const QMatrix4x4 &model, const QMatrix4x4 &view, const QMatrix4x4 &viewProjection);
+    std::vector<bool> hiddenBySplats(const std::vector<QVector3D> &worlds, const QMatrix4x4 &model, const QMatrix4x4 &view, const QMatrix4x4 &viewProjection) const;
     QString busyText_;
     bool pointPicking_ = false;
     QString pickHint_;
@@ -325,6 +381,31 @@ private:
     Transform dragStart_;
     CropVolume dragStartCrop_;
     QVector3D dragPivot_, dragAxis_, dragPlaneNormal_, dragPlaneStart_, dragRotationVector_;
+    // Lighting (enableLighting): the lit variants of the record shaders, the lights and the
+    // normals buffer, and the mesh drawn with them.
+    bool lighting_ = false;
+    QVector<ViewLight> lights_;
+    float selfIllumination_ = 0.1f;
+    GLuint normalBuffer_ = 0, normalTexture_ = 0;
+    void setLightUniforms(QOpenGLShaderProgram *shader, const QMatrix4x4 &model);
+    int lightAt(const QPointF &screen) const;
+    void drawLightIcons(QPainter &painter);
+    bool lightIcons_ = true;
+    const std::vector<bool> &lightIconsHidden() const;
+    mutable std::vector<bool> lightHidden_;
+    mutable quint64 lightHiddenFrame_ = 0;
+    mutable QMatrix4x4 lightHiddenView_;
+    mutable QVector<QVector3D> lightHiddenPositions_;
+    mutable bool lightHiddenSplats_ = false;
+    std::optional<Transform> gizmoTarget_;
+    std::shared_ptr<const ViewMesh> mesh_;
+    bool meshDirty_ = false, drawMesh_ = false, drawSplats_ = true;
+    std::unique_ptr<QOpenGLShaderProgram> meshShader_;
+    GLuint meshVao_ = 0, meshVertexBuffer_ = 0, meshIndexBuffer_ = 0, meshTexture_ = 0;
+    GLsizei meshIndices_ = 0;
+    bool meshTextured_ = false, meshShowsTexture_ = true;
+    void drawMesh(const QMatrix4x4 &projection, const QMatrix4x4 &view, const QMatrix4x4 &model);
+    QString emptyHint_;
     QPointF dragScreenStart_, dragScreenAxis_;
     float dragLength_ = 1, dragParameter_ = 0, dragRotationAngle_ = 0;
 };

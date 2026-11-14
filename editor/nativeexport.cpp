@@ -584,6 +584,22 @@ void transformPositions(vgs::DecodedChunk &c,const Project &p) {
 }
 }
 
+void setFrameNormals(vgs::DecodedChunk &c,const vgs::Frame &frame) {
+    normalizeSchemas(c);
+    if (c.groups.size()!=2 || c.groups[0].intervals!=1 || c.groups[1].splats!=frame.count) throw std::runtime_error("Normals: the chunk is not the frame's.");
+    if (frame.normal.size()!=size_t(frame.count)*3) throw std::runtime_error("Normals: the frame has none.");
+    const auto &indices=get(c,vgs::ScaleIndices,1).bytes;const size_t n=size_t(frame.count);
+    std::vector<uint8_t> codes(n*2);
+    for (size_t i=0;i<n;++i) {
+        // Into the splat's own frame: the inverse of its rotation, q in xyzw.
+        const float *q=frame.rotation.data()+i*4;const QQuaternion inverse=QQuaternion(q[3],q[0],q[1],q[2]).normalized().conjugated();
+        const QVector3D local=inverse.rotatedVector({frame.normal[i*3],frame.normal[i*3+1],frame.normal[i*3+2]});
+        const float l[3]={local.x(),local.y(),local.z()};
+        vgs::encodeNormal(l,indices.data()+i*3,codes.data()+i*2);
+    }
+    vgs::DecodedPage page;page.descriptor.attribute=vgs::Normals;page.descriptor.group=1;page.bytes=std::move(codes);c.pages.push_back(std::move(page));
+    normalizeSchemas(c);
+}
 gaussiannormals::Result addNormals(vgs::DecodedChunk &c,const std::vector<gaussiannormals::View> &views,const ExportProgress &progress) {
     normalizeSchemas(c);const size_t T=c.groups[0].intervals;
     std::vector<size_t> offsets(c.groups.size()+1,0);

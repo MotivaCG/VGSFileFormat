@@ -61,9 +61,43 @@ uniform mat3 colourMatrix;  // the Colour modifiers', on the colour as seen
 out vec4 rgba;
 // Splats an Erase modifier has picked, while its picks are edited: drawn hot pink.
 vec3 marked(vec3 c) { return usePurgeMask && abs(modifierVisibility-0.75)<0.1 ? mix(c,vec3(1.0,0.2,0.75),0.7) : c; }
+#ifdef VGS_LIGHTING
+// The SGS editor's lights (Viewport::setLights): the colour as captured, in linear light, is
+// lit by each enabled light along the record's normal, plus selfIllumination of it glowing
+// on its own. With no light the colour stays as it is.
+uniform int lightCount;
+uniform vec4 lightPosition[8]; // xyz: a point light's position, or the way a directional one travels; w: 1 directional
+uniform vec4 lightColour[8];   // rgb: colour times intensity; a: a point light's range, 0 for none
+uniform float selfIllumination;
+uniform samplerBuffer normalData; // xyz per record
+uniform bool hasNormals;
+vec3 toLinear(vec3 c) { return mix(c/12.92,pow((c+0.055)/1.055,vec3(2.4)),greaterThan(c,vec3(0.04045))); }
+vec3 toSrgb(vec3 c) { return mix(c*12.92,1.055*pow(c,vec3(1.0/2.4))-0.055,greaterThan(c,vec3(0.0031308))); }
+vec3 lit(vec3 c) {
+    if(lightCount==0) return c;
+    vec3 world=(model*vec4(position,1)).xyz;
+    vec3 n=hasNormals ? texelFetch(normalData,int(sourceId)).xyz : vec3(0);
+    n=dot(n,n)>1e-12 ? normalize(mat3(model)*n) : vec3(0); // none: no direct light
+    vec3 light=vec3(selfIllumination);
+    for(int i=0;i<8;++i) {
+        if(i>=lightCount) break;
+        vec3 l;float attenuation=1.0;
+        if(lightPosition[i].w>0.5) l=-normalize(lightPosition[i].xyz);
+        else {
+            vec3 d=lightPosition[i].xyz-world;float d2=max(dot(d,d),1e-4);l=d*inversesqrt(d2);attenuation=1.0/d2;
+            // Unreal's window: to nothing at the light's range.
+            if(lightColour[i].a>0.0) {float r=d2/(lightColour[i].a*lightColour[i].a);float w=clamp(1.0-r*r,0.0,1.0);attenuation*=w*w;}
+        }
+        light+=lightColour[i].rgb*(attenuation*max(dot(n,l),0.0));
+    }
+    return clamp(toSrgb(toLinear(c)*light),0.0,1.0);
+}
+#else
+vec3 lit(vec3 c) { return c; }
+#endif
 vec3 shadedColor() {
     vec3 result=color;
-    if(shCoefficients==0) return marked(clamp(colourMatrix*result,0.0,1.0));
+    if(shCoefficients==0) return marked(lit(clamp(colourMatrix*result,0.0,1.0)));
     vec3 d=normalize(position-eyeLocal);
     float x=d.x,y=d.y,z=d.z;
     float basis[15];
@@ -88,7 +122,7 @@ vec3 shadedColor() {
             result+=basis[k]*((1.0-weight)*own+weight*other);
         }
     } else for(int k=0;k<min(shCoefficients,shEvaluated);k++) result+=basis[k]*texelFetch(shData,int(sourceId)*shCoefficients+k).rgb;
-    return marked(clamp(colourMatrix*result,0.0,1.0));
+    return marked(lit(clamp(colourMatrix*result,0.0,1.0)));
 }
 uniform float pointSize;
 uniform samplerBuffer modifierData;
@@ -220,6 +254,57 @@ void main() {
     gl_Position=clip+vec4(offset*toClip,0,0);
     uv=corner;
     rgba=vec4(displayedColor(removed),opacity*aaFactor);
+}
+)GLSL";
+// The SGS editor's generated mesh: its albedo lit as the splats are (recordShading's lit()),
+// opaque, with the normals of its vertices.
+static const char *meshVertex = R"GLSL(
+#version 330 core
+layout(location=0) in vec3 position;
+layout(location=1) in vec3 normal;
+layout(location=2) in vec2 texcoord;
+uniform mat4 model, view, projection;
+out vec3 worldPosition, worldNormal;
+out vec2 uv;
+void main() {
+    worldPosition=(model*vec4(position,1)).xyz;worldNormal=mat3(model)*normal;uv=texcoord;
+    gl_Position=projection*view*vec4(worldPosition,1);
+}
+)GLSL";
+static const char *meshFragment = R"GLSL(
+#version 330 core
+in vec3 worldPosition, worldNormal;
+in vec2 uv;
+uniform sampler2D albedo;
+uniform bool textured;
+uniform int lightCount;
+uniform vec4 lightPosition[8], lightColour[8];
+uniform float selfIllumination;
+uniform vec3 eye;
+out vec4 fragColor;
+vec3 toLinear(vec3 c) { return mix(c/12.92,pow((c+0.055)/1.055,vec3(2.4)),greaterThan(c,vec3(0.04045))); }
+vec3 toSrgb(vec3 c) { return mix(c*12.92,1.055*pow(c,vec3(1.0/2.4))-0.055,greaterThan(c,vec3(0.0031308))); }
+void main() {
+    vec3 c=textured ? texture(albedo,uv).rgb : vec3(0.78); // grey: light, to read the shape // the image is uploaded bottom row first, as OBJ coordinates count
+    vec3 n=normalize(worldNormal);
+    if(!gl_FrontFacing) n=-n;
+    if(lightCount==0) {
+        // Unlit, the albedo alone would hide the shape: a head light shades it a little.
+        fragColor=vec4(c*(0.6+0.4*abs(dot(n,normalize(eye-worldPosition)))),1);
+        return;
+    }
+    vec3 light=vec3(selfIllumination);
+    for(int i=0;i<8;++i) {
+        if(i>=lightCount) break;
+        vec3 l;float attenuation=1.0;
+        if(lightPosition[i].w>0.5) l=-normalize(lightPosition[i].xyz);
+        else {
+            vec3 d=lightPosition[i].xyz-worldPosition;float d2=max(dot(d,d),1e-4);l=d*inversesqrt(d2);attenuation=1.0/d2;
+            if(lightColour[i].a>0.0) {float r=d2/(lightColour[i].a*lightColour[i].a);float w=clamp(1.0-r*r,0.0,1.0);attenuation*=w*w;}
+        }
+        light+=lightColour[i].rgb*(attenuation*max(dot(n,l),0.0));
+    }
+    fragColor=vec4(clamp(toSrgb(toLinear(c)*light),0.0,1.0),1);
 }
 )GLSL";
 // Projection and SH evaluation are independent of the quad's corner. Transform
@@ -594,6 +679,11 @@ void Viewport::cleanup() {
     glDeleteBuffers(1, &markerBuffer_); glDeleteVertexArrays(1, &markerVao_);
     glDeleteBuffers(1, &fineBuffer_); glDeleteVertexArrays(1, &fineVao_);
     glDeleteBuffers(1, &gizmoBuffer_); glDeleteVertexArrays(1, &gizmoVao_);
+    if (lighting_) {
+        meshShader_.reset();glDeleteBuffers(1,&normalBuffer_);glDeleteTextures(1,&normalTexture_);
+        glDeleteVertexArrays(1,&meshVao_);glDeleteBuffers(1,&meshVertexBuffer_);glDeleteBuffers(1,&meshIndexBuffer_);glDeleteTextures(1,&meshTexture_);
+        normalBuffer_=normalTexture_=meshVao_=meshVertexBuffer_=meshIndexBuffer_=meshTexture_=0;meshDirty_=true;
+    }
     initialized_ = false; doneCurrent();
 }
 void Viewport::initializeGL() {
@@ -615,11 +705,24 @@ void Viewport::initializeGL() {
         }
         return true;
     };
-    const QByteArray pointVertex = QByteArray(pointInputs)+recordShading+pointMain;
+    // Lit, the floats' shaders light each record (lit()); the packed one never is.
+    const QByteArray shading=(lighting_ ? QByteArray("#define VGS_LIGHTING\n") : QByteArray())+recordShading;
+    const QByteArray pointVertex = QByteArray(pointInputs)+shading+pointMain;
     QByteArray prepareInputs(splatInputs);
     prepareInputs.replace("layout(location=0) in vec2 corner;","const vec2 corner=vec2(0);");
     prepareInputs.replace("layout(location=1) in uint record;","#define record uint(gl_VertexID)");
-    const QByteArray splatVertex = prepareInputs+recordShading+splatMain;
+    const QByteArray splatVertex = prepareInputs+shading+splatMain;
+    if (lighting_) {
+        if (!build(meshShader_,meshVertex,meshFragment)) return;
+        glGenBuffers(1,&normalBuffer_);glGenTextures(1,&normalTexture_);
+        glGenVertexArrays(1,&meshVao_);glGenBuffers(1,&meshVertexBuffer_);glGenBuffers(1,&meshIndexBuffer_);glGenTextures(1,&meshTexture_);
+        glBindVertexArray(meshVao_);glBindBuffer(GL_ARRAY_BUFFER,meshVertexBuffer_);glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,meshIndexBuffer_);
+        for (GLuint i=0;i<3;++i) glEnableVertexAttribArray(i);
+        glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,8*sizeof(float),nullptr);
+        glVertexAttribPointer(1,3,GL_FLOAT,GL_FALSE,8*sizeof(float),reinterpret_cast<void *>(3*sizeof(float)));
+        glVertexAttribPointer(2,2,GL_FLOAT,GL_FALSE,8*sizeof(float),reinterpret_cast<void *>(6*sizeof(float)));
+        glBindVertexArray(0);meshDirty_=true;
+    }
     if (!build(pointShader_, pointVertex.constData(), pointFragment) || !build(gridShader_, gridVertex, gridFragment)) return;
     if (!build(splatPrepareShader_, splatVertex.constData(), nullptr,true) || !build(splatShader_,projectedSplatVertex,splatFragment)) return;
     glGenVertexArrays(1,&splatPrepareVao_);glGenBuffers(1,&projectedBuffer_);glGenTextures(1,&projectedTexture_);
@@ -829,7 +932,10 @@ void Viewport::paintGL() {
     const bool packedFrame = frame_ && frame_->packed && (!hybridFrame ||
         ((playbackPlaying_ || frame_->shOmitted) && splats_ && !sheetCapture_ && !frame_->shBlend.sources && splatPackedShader_ && packedFits(*frame_->packed->chunk)));
     lastPaintPacked_ = packedFrame;
-    if (packedFrame && !hybridFrame && (!splatPackedShader_ || !splats_ || !packedFits(*frame_->packed->chunk))) {
+    if (lighting_ && mesh_ && drawMesh_ && frame_) drawMesh(projection,view,model);
+    if (!drawSplats_ && lighting_) {
+        // The mesh alone.
+    } else if (packedFrame && !hybridFrame && (!splatPackedShader_ || !splats_ || !packedFits(*frame_->packed->chunk))) {
         // Cannot be drawn here: the owner switches to floats and asks again.
         if (!packedFailureReported_) {packedFailureReported_=true;QMetaObject::invokeMethod(this,[this] {emit packedRenderingFailed();},Qt::QueuedConnection);}
     } else if (frame_ && (packedFrame || !frame_->points.empty())) {
@@ -876,6 +982,13 @@ void Viewport::paintGL() {
                 for (size_t i=0;i<size_t(frame_->total);++i) {blendIndexUpload_[i*2]=(*blend.source)[i];blendIndexUpload_[i*2+1]=(*blend.partner)[i];}
                 glBindBuffer(GL_TEXTURE_BUFFER,blendIndexBuffer_);glBufferData(GL_TEXTURE_BUFFER,GLsizeiptr(blendIndexUpload_.size()*sizeof(uint32_t)),blendIndexUpload_.data(),GL_STREAM_DRAW);
                 glActiveTexture(GL_TEXTURE3);glBindTexture(GL_TEXTURE_BUFFER,blendIndexTexture_);glTexBuffer(GL_TEXTURE_BUFFER,GL_RG32UI,blendIndexBuffer_);glActiveTexture(GL_TEXTURE0);
+            }
+            if (lighting_) {
+                // One normal per record, read by its source id; a dummy when there are none.
+                const float none[3]={};const bool has=!frame_->normals.empty();
+                glBindBuffer(GL_TEXTURE_BUFFER,normalBuffer_);
+                glBufferData(GL_TEXTURE_BUFFER,has ? GLsizeiptr(frame_->normals.size()*sizeof(float)) : GLsizeiptr(sizeof(none)),has ? frame_->normals.data() : none,GL_STREAM_DRAW);
+                glBindTexture(GL_TEXTURE_BUFFER,normalTexture_);glTexBuffer(GL_TEXTURE_BUFFER,GL_RGB32F,normalBuffer_);
             }
             frameDirty_ = false;
             uploadMs_ = timer.nsecsElapsed()/1e6;
@@ -960,6 +1073,11 @@ void Viewport::paintGL() {
         shader->setUniformValue("blendSh",blendSh);shader->setUniformValue("blendIndices",3);
         shader->setUniformValue("blendEndCount",blendSh ? int(blend.sources->endCount) : 0);shader->setUniformValue("blendFraction",blend.fraction);
         glActiveTexture(GL_TEXTURE3);glBindTexture(GL_TEXTURE_BUFFER,blendIndexTexture_);
+        if (lighting_ && !packedFrame) {
+            setLightUniforms(shader,recordModel);
+            shader->setUniformValue("normalData",4);shader->setUniformValue("hasNormals",!frame_->normals.empty());
+            glActiveTexture(GL_TEXTURE4);glBindTexture(GL_TEXTURE_BUFFER,normalTexture_);
+        }
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_BUFFER,blendSh ? blendSourceTexture_ : shTexture_);
         if (splats) {
             timer.restart();
@@ -1043,6 +1161,7 @@ void Viewport::paintGL() {
     glDisable(GL_DEPTH_TEST); glDisable(GL_PROGRAM_POINT_SIZE);
     painter.endNativePainting();
     if (cleanCapture_ || sheetCapture_) return;
+    if (lighting_ && frame_) drawLightIcons(painter);
     if (!viewMarkers_.isEmpty()) {
         updateMarkerOcclusion(model,view,projection*view);
         painter.setRenderHint(QPainter::Antialiasing);QFont font("Segoe UI",8);font.setBold(true);painter.setFont(font);
@@ -1400,7 +1519,10 @@ void Viewport::mouseReleaseEvent(QMouseEvent *event) {
     // while placing, places one. One that moved was an orbit.
     if (event->button()==Qt::LeftButton && !dragging_ && QLineF(pickPress_,event->position()).length()<=4) {
         pickPress_ = QPointF(-1e9,-1e9);
-        if (event->modifiers() & Qt::AltModifier) {
+        if (lighting_ && !lights_.isEmpty() && !pointPicking_) {
+            // Over a light's icon: that light; elsewhere, none.
+            emit lightClicked(lightAt(event->position()));
+        } else if (event->modifiers() & Qt::AltModifier) {
             int nearest=0;double best=11*11;
             for (int i=0;i<viewMarkers_.size();++i) {
                 const auto &marker=viewMarkers_[i];
@@ -1458,9 +1580,15 @@ bool Viewport::nearestVisiblePoint(const QVector3D &near, QVector3D *found) cons
 void Viewport::updateMarkerOcclusion(const QMatrix4x4 &model, const QMatrix4x4 &view, const QMatrix4x4 &viewProjection) {
     if (markerHiddenValid_ && markerHiddenFrame_==frameSerial_ && markerHiddenView_==viewProjection && markerHiddenSplats_==splats_ && markerHidden_.size()==size_t(viewMarkers_.size())) return;
     markerHiddenValid_=true;markerHiddenFrame_=frameSerial_;markerHiddenView_=viewProjection;markerHiddenSplats_=splats_;
-    const size_t count=size_t(viewMarkers_.size());markerHidden_.assign(count,false);if (!frame_ || !count) return;
+    std::vector<QVector3D> worlds;for (const auto &m:viewMarkers_) worlds.push_back(m.world);
+    markerHidden_=hiddenBySplats(worlds,model,view,viewProjection);
+}
+// Which of these world points the splats in front hide: where what lies in front along the
+// pixel lets less than a third of the light through (points: any point drawn over it).
+std::vector<bool> Viewport::hiddenBySplats(const std::vector<QVector3D> &worlds, const QMatrix4x4 &model, const QMatrix4x4 &view, const QMatrix4x4 &viewProjection) const {
+    const size_t count=worlds.size();std::vector<bool> hidden(count,false);if (!frame_ || !count) return hidden;
     struct Target {QPointF at;float depth;double light=1;};std::vector<Target> targets(count);
-    for (size_t i=0;i<count;++i) {projectPoint(viewMarkers_[int(i)].world,&targets[i].at);targets[i].depth=-view.map(viewMarkers_[int(i)].world).z();}
+    for (size_t i=0;i<count;++i) {projectPoint(worlds[i],&targets[i].at);targets[i].depth=-view.map(worlds[i]).z();}
     auto stack=modifiers_;if (!modifierStack_) {Modifier m;m.crop=crop_;stack={m};}const CompiledModifiers modifiers(stack);
     const float modelScale=std::cbrt(std::abs(model.determinant()));const bool orthographic=camera_.orthographic && camera_.preset!=ViewPreset::Free;
     const float tangent=std::tan(qDegreesToRadians(22.5f)),pixelsAtUnitDepth=height()*0.5f/tangent,orthographicPixels=height()*0.5f/std::max(1e-6f,camera_.distance*tangent);
@@ -1479,7 +1607,8 @@ void Viewport::updateMarkerOcclusion(const QMatrix4x4 &model, const QMatrix4x4 &
             if (d2>9*sigma*sigma) continue;t.light*=1-std::min(0.99f,opacity*std::exp(-0.5f*d2/(sigma*sigma)));
         }
     }
-    for (size_t i=0;i<count;++i) markerHidden_[i]=targets[i].light<1.0/3;
+    for (size_t i=0;i<count;++i) hidden[i]=targets[i].light<1.0/3;
+    return hidden;
 }
 void Viewport::setPointPicking(bool picking, const QString &hint) {
     if (pointPicking_==picking && pickHint_==hint) return;
@@ -1596,7 +1725,7 @@ void Viewport::activateTransformShortcut(TransformMode mode) {
     else if (!(cropEditing_ && mode==TransformMode::Scale))
         setCoordinateSpace(mode,chosenCoordinateSpace(mode)==CoordinateSpace::Global ? CoordinateSpace::Local : CoordinateSpace::Global);
 }
-Transform Viewport::editableTransform() const { return cropEditing_ ? crop_.transform : transform_; }
+Transform Viewport::editableTransform() const { return gizmoTarget_ ? *gizmoTarget_ : cropEditing_ ? crop_.transform : transform_; }
 CoordinateSpace Viewport::coordinateSpace(TransformMode mode) const {
     // A crop is always scaled in its own axes: that is what its dimensions are measured in.
     // Move and Rotate keep the scene's choice.
@@ -1646,6 +1775,7 @@ void Viewport::setDisplayedComponent(int group,int axis,float value) {
 QMatrix4x4 Viewport::editableParent() const { return QMatrix4x4(); }
 QVector3D Viewport::editablePivot() const { return editableParent().map(editableTransform().position); }
 void Viewport::applyEditableTransform(const Transform &transform) {
+    if (gizmoTarget_) {gizmoTarget_=transform;emit gizmoTargetEdited(transform);update();return;}
     if (cropEditing_ && mode_==TransformMode::Scale && dragging_) {
         // Scaling a crop changes its size, not its scale: the factor the drag produced goes
         // into radius X / Z, width / depth and height, measured from where the drag began.
@@ -2040,4 +2170,153 @@ bool Viewport::visibleExtent(QVector3D *minimum, QVector3D *maximum, float trim)
         std::nth_element(v.begin(),v.end()-1-cut,v.end());(*maximum)[a]=v[v.size()-1-cut];
     }
     return true;
+}
+
+// ---- Lighting: the SGS editor's lights, mesh and gizmo target (enableLighting).
+void Viewport::enableLighting() {
+    if (lighting_) return;
+    lighting_=true;
+    // Shaders already built have none of it: they are built again with it on the next paint.
+    if (initialized_) {cleanup();if (context()) {makeCurrent();initializeGL();doneCurrent();}}
+    update();
+}
+void Viewport::setLights(const QVector<ViewLight> &lights,float selfIllumination) {
+    lights_=lights;selfIllumination_=std::clamp(selfIllumination,0.f,1.f);update();
+}
+bool Viewport::lit() const {
+    return lighting_ && std::any_of(lights_.cbegin(),lights_.cend(),[](const ViewLight &l) {return l.enabled;});
+}
+void Viewport::setLightUniforms(QOpenGLShaderProgram *shader,const QMatrix4x4 &) {
+    QVector4D position[8],colour[8];int count=0;
+    for (const auto &l:lights_) {
+        if (!l.enabled || count==8) continue;
+        const QVector3D way=l.direction.lengthSquared()>1e-12f ? l.direction.normalized() : QVector3D(0,-1,0);
+        position[count]=l.directional ? QVector4D(way,1) : QVector4D(l.position,0);
+        // The colour as picked is sRGB, as a colour dialog shows it; the light is linear, as
+        // Unreal takes a light's colour. Used as they are, a picked deep blue lights a pale one.
+        auto linear=[](float c) {c=std::clamp(c,0.f,1.f);return c<=0.04045f ? c/12.92f : std::pow((c+0.055f)/1.055f,2.4f);};
+        const QVector3D tint(linear(l.colour.x()),linear(l.colour.y()),linear(l.colour.z()));
+        colour[count]=QVector4D(tint*std::max(0.f,l.intensity),l.directional ? 0.f : std::max(0.f,l.range));++count;
+    }
+    shader->setUniformValue("lightCount",count);
+    shader->setUniformValueArray("lightPosition",position,8);shader->setUniformValueArray("lightColour",colour,8);
+    shader->setUniformValue("selfIllumination",selfIllumination_);
+}
+void Viewport::setGizmoTarget(const std::optional<Transform> &target) {
+    gizmoTarget_=target;
+    if (!target && !dragging_) hoverHandle_=-1;
+    update();
+}
+void Viewport::setMesh(std::shared_ptr<const ViewMesh> mesh) {mesh_=std::move(mesh);meshDirty_=true;update();}
+void Viewport::setDrawMesh(bool draw) {drawMesh_=draw;update();}
+void Viewport::setDrawSplats(bool draw) {drawSplats_=draw;update();}
+void Viewport::setMeshTextured(bool textured) {meshShowsTexture_=textured;update();}
+void Viewport::drawMesh(const QMatrix4x4 &projection,const QMatrix4x4 &view,const QMatrix4x4 &model) {
+    if (!meshShader_) return;
+    if (meshDirty_) {
+        glBindVertexArray(meshVao_);
+        glBindBuffer(GL_ARRAY_BUFFER,meshVertexBuffer_);glBufferData(GL_ARRAY_BUFFER,GLsizeiptr(mesh_->vertices.size()*sizeof(float)),mesh_->vertices.data(),GL_STATIC_DRAW);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,meshIndexBuffer_);glBufferData(GL_ELEMENT_ARRAY_BUFFER,GLsizeiptr(mesh_->indices.size()*sizeof(uint32_t)),mesh_->indices.data(),GL_STATIC_DRAW);
+        glBindVertexArray(0);meshIndices_=GLsizei(mesh_->indices.size());
+        meshTextured_=!mesh_->albedo.isNull();
+        if (meshTextured_) {
+            const QImage image=mesh_->albedo.convertToFormat(QImage::Format_RGBA8888).mirrored();
+            glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,meshTexture_);
+            glPixelStorei(GL_UNPACK_ALIGNMENT,4);
+            glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,image.width(),image.height(),0,GL_RGBA,GL_UNSIGNED_BYTE,image.constBits());
+            glGenerateMipmap(GL_TEXTURE_2D);
+            glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR_MIPMAP_LINEAR);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+        }
+        meshDirty_=false;
+    }
+    glEnable(GL_DEPTH_TEST);glDepthMask(GL_TRUE);glDisable(GL_BLEND);
+    meshShader_->bind();
+    meshShader_->setUniformValue("model",model);meshShader_->setUniformValue("view",view);meshShader_->setUniformValue("projection",projection);
+    meshShader_->setUniformValue("eye",view.inverted().map(QVector3D(0,0,0)));
+    meshShader_->setUniformValue("textured",meshTextured_ && meshShowsTexture_);meshShader_->setUniformValue("albedo",0);
+    setLightUniforms(meshShader_.get(),model);
+    glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,meshTexture_);
+    glBindVertexArray(meshVao_);glDrawElements(GL_TRIANGLES,meshIndices_,GL_UNSIGNED_INT,nullptr);glBindVertexArray(0);
+    glBindTexture(GL_TEXTURE_2D,0);meshShader_->release();
+}
+void Viewport::setLightIcons(bool shown) {lightIcons_=shown;update();}
+// Which lights' icons the splats hide, for this view and these lights; worked out again only
+// when either changes (every frame while the lights turn).
+const std::vector<bool> &Viewport::lightIconsHidden() const {
+    QVector<QVector3D> positions;for (const auto &l:lights_) positions.append(l.position);
+    const QMatrix4x4 view=viewMatrix(),viewProjection=projectionMatrix()*view;
+    if (!(lightHiddenFrame_==frameSerial_ && lightHiddenView_==viewProjection && lightHiddenPositions_==positions && lightHiddenSplats_==splats_)) {
+        std::vector<QVector3D> worlds(positions.begin(),positions.end());
+        lightHidden_=drawSplats_ ? hiddenBySplats(worlds,transform_.matrix(),view,viewProjection) : std::vector<bool>(worlds.size(),false);
+        lightHiddenFrame_=frameSerial_;lightHiddenView_=viewProjection;lightHiddenPositions_=positions;lightHiddenSplats_=splats_;
+    }
+    return lightHidden_;
+}
+int Viewport::lightAt(const QPointF &screen) const {
+    int best=-1;double nearest=14*14;
+    if (!lightIcons_) return -1;
+    const auto &hidden=lightIconsHidden();
+    for (int i=0;i<lights_.size();++i) {
+        // A hidden icon cannot be clicked, unless it is the selected one, which stays drawn.
+        if (i<int(hidden.size()) && hidden[size_t(i)] && !lights_[i].selected) continue;
+        QPointF at;if (!projectPoint(lights_[i].position,&at)) continue;
+        const QPointF d=at-screen;const double d2=d.x()*d.x()+d.y()*d.y();
+        if (d2<nearest) {nearest=d2;best=i;}
+    }
+    return best;
+}
+// A light's icon where it is: a sun for a directional light, with a ray along the way its
+// light travels, a bulb for a point light; in its colour, ringed while selected and hollow
+// while it is off.
+void Viewport::drawLightIcons(QPainter &painter) {
+    if (!lightIcons_) return;
+    painter.setRenderHint(QPainter::Antialiasing);
+    const auto &hidden=lightIconsHidden();
+    for (int i=0;i<lights_.size();++i) {
+        const auto &l=lights_[i];
+        // Behind the capture: not drawn, but the selected one, faint, so it is not lost.
+        const bool behind=i<int(hidden.size()) && hidden[size_t(i)];
+        if (behind && !l.selected) continue;
+        painter.setOpacity(behind ? 0.35 : 1.0);
+        QPointF at;if (!projectPoint(l.position,&at)) continue;
+        const QColor ink=QColor::fromRgbF(std::clamp(l.colour.x(),0.f,1.f),std::clamp(l.colour.y(),0.f,1.f),std::clamp(l.colour.z(),0.f,1.f));
+        const QColor shade=l.enabled ? ink : QColor(150,150,150);
+        if (l.directional) {
+            // The ray: a quarter of the view's distance along the light's way, at least.
+            const QVector3D way=l.direction.lengthSquared()>1e-12f ? l.direction.normalized() : QVector3D(0,-1,0);
+            QPointF end;
+            if (projectPoint(l.position+way*std::max(0.25f*camera_.distance,0.2f),&end)) {
+                const QLineF ray(at,end);
+                for (const auto &pen:{QPen(QColor(0,0,0,150),4,l.enabled ? Qt::SolidLine : Qt::DashLine),QPen(shade,2,l.enabled ? Qt::SolidLine : Qt::DashLine)}) {
+                    painter.setPen(pen);painter.drawLine(ray);
+                    if (ray.length()>12) {
+                        QLineF head(end,at);head.setLength(10);
+                        QLineF left=head;left.setAngle(head.angle()+25);QLineF right=head;right.setAngle(head.angle()-25);
+                        painter.drawLine(left);painter.drawLine(right);
+                    }
+                }
+            }
+            for (const auto &pen:{QPen(QColor(0,0,0,150),4),QPen(shade,2)}) {
+                painter.setPen(pen);
+                for (int k=0;k<8;++k) {
+                    const double angle=k*M_PI/4;
+                    painter.drawLine(QPointF(at.x()+10*std::cos(angle),at.y()+10*std::sin(angle)),QPointF(at.x()+14*std::cos(angle),at.y()+14*std::sin(angle)));
+                }
+            }
+        } else {
+            // Rays all around: a bulb.
+            for (const auto &pen:{QPen(QColor(0,0,0,150),4),QPen(shade,2)}) {
+                painter.setPen(pen);
+                for (int k=0;k<4;++k) {
+                    const double angle=M_PI/8+k*M_PI/2;
+                    painter.drawLine(QPointF(at.x()+10*std::cos(angle),at.y()+10*std::sin(angle)),QPointF(at.x()+14*std::cos(angle),at.y()+14*std::sin(angle)));
+                }
+            }
+        }
+        painter.setPen(QPen(QColor(0,0,0,170),1.5));painter.setBrush(l.enabled ? QBrush(ink) : Qt::NoBrush);
+        painter.drawEllipse(at,7,7);
+        if (l.selected) {painter.setBrush(Qt::NoBrush);painter.setPen(QPen(QColor(255,255,255),2));painter.drawEllipse(at,18,18);painter.setPen(QPen(QColor(0,0,0,120),1));painter.drawEllipse(at,20,20);}
+    }
+    painter.setOpacity(1);painter.setBrush(Qt::NoBrush);
 }
