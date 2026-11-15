@@ -993,7 +993,8 @@ void SgsEditorTests::meshAgainstSplats() {
         QList<QImage> shots;
         window.setShowMesh(false);viewport->setCamera(camera);viewport->update();QTest::qWait(300);shots << viewport->grabFramebuffer();
         for (const QString &obj:meshes.split(';',Qt::SkipEmptyParts)) {
-            window.project().meshFiles={obj};window.loadMesh(0);window.setShowMesh(true);viewport->setMeshTextured(true);
+            window.project().meshFiles={obj};window.loadMesh(0);window.setShowMesh(true);
+            viewport->setMeshTextured(qEnvironmentVariable("SGS_TEST_GRAY")!="1"); // SGS_TEST_GRAY=1: the shape alone
             viewport->setCamera(camera);viewport->update();QTest::qWait(300);shots << viewport->grabFramebuffer();
         }
         // side by side: the splats, then each mesh in the order given
