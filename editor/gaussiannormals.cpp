@@ -22,10 +22,7 @@ namespace {
 // SMNForge's values (plygaussiansplatting.cpp), kept equal so both tools agree.
 constexpr int kNormalNeighbors = 24;
 constexpr float kRoundSplatRatio = 0.5f;
-constexpr int kNormalDepthResolution = 320;
-constexpr int kNormalDepthClosePixels = 1;
 constexpr float kNormalOccluderOpacity = 0.05f;
-constexpr float kNormalDepthTolerance = 0.01f;
 constexpr int kNormalSignPropagationPasses = 4;
 constexpr int kNormalSmoothingPasses = 4;
 constexpr float kAxisTrustCos = 0.8660254f;        // cos 30
@@ -90,7 +87,7 @@ std::vector<View> transformedViews(const std::vector<View> &views, const Eigen::
     return out;
 }
 
-std::vector<View> surroundingViews(const Splats &s, int count) {
+std::vector<View> surroundingViews(const Splats &s, int count, int resolution) {
     // The opaque splats' extent, per axis between the 1st and 99th percentiles, so that a
     // few floaters far out do not shrink the subject in every camera.
     std::vector<float> axes[3];
@@ -113,7 +110,7 @@ std::vector<View> surroundingViews(const Splats &s, int count) {
     const Eigen::Vector3f centre = 0.5f * (lo + hi);
     const float radius = std::max(0.5f * (hi - lo).norm(), 1e-4f);
     constexpr float kDistance = 3.0f; // in radii: a sphere of the subject's size fills ~40 degrees
-    const int side = kNormalDepthResolution;
+    const int side = std::max(resolution, 16);
     const float focal = 0.5f * float(side) / std::tan(std::asin(1.0f / kDistance)) * 0.95f;
 
     std::vector<View> views;
@@ -142,7 +139,7 @@ std::vector<View> surroundingViews(const Splats &s, int count) {
     return views;
 }
 
-Result computeNormals(const Splats &s, const std::vector<View> &views, float *normalsOut) {
+Result computeNormals(const Splats &s, const std::vector<View> &views, float *normalsOut, const Visibility &visibility) {
     Result result;
     std::vector<size_t> ids;
     ids.reserve(s.count);
@@ -256,9 +253,36 @@ Result computeNormals(const Splats &s, const std::vector<View> &views, float *no
     std::vector<Eigen::Vector3f> votes(ids.size(), Eigen::Vector3f::Zero());
     std::vector<int> viewCount(ids.size(), 0), pixel(ids.size());
     std::vector<float> depth(ids.size());
+    // limitToDensity: how far apart the opaque splats are (the median distance to the nearest
+    // other), and where they are, so that no view draws them finer than the closing can join.
+    float spacing = 0.0f;
+    Eigen::Vector3f middle = Eigen::Vector3f::Zero();
+    if (visibility.limitToDensity) {
+        std::vector<float> gaps;
+        gaps.reserve(ids.size());
+        for (int i = 0; i < count; ++i) {
+            if (!(alpha[size_t(i)] > kNormalOccluderOpacity)) continue;
+            const size_t *hood = neighborhood(i);
+            for (int j = 0; j < kNormalNeighbors; ++j) {
+                const float d = (cloud.pts[hood[j]] - cloud.pts[size_t(i)]).norm();
+                if (d > 0.0f) { gaps.push_back(d); break; }
+            }
+            middle += cloud.pts[size_t(i)];
+        }
+        if (!gaps.empty()) {
+            middle /= float(gaps.size());
+            std::nth_element(gaps.begin(), gaps.begin() + ptrdiff_t(gaps.size() / 2), gaps.end());
+            spacing = gaps[gaps.size() / 2];
+        }
+    }
     for (const View &view : views) {
         if (view.width <= 0 || view.height <= 0 || view.fx <= 0.0f || view.fy <= 0.0f) continue;
-        const float scale = std::min(1.0f, float(kNormalDepthResolution) / float(std::max(view.width, view.height)));
+        float scale = std::min(1.0f, float(visibility.resolution) / float(std::max(view.width, view.height)));
+        if (spacing > 0.0f) {
+            // Neighbours at most 2 * closePixels apart where the splats are: the closing joins them.
+            const float z = (view.worldToCamera * middle + view.translation).z();
+            if (z > 0.0f) scale = std::min(scale, 2.0f * float(std::max(1, visibility.closePixels)) * z / (view.fx * spacing));
+        }
         const int width = std::max(1, int(view.width * scale)), height = std::max(1, int(view.height * scale));
         const Eigen::Vector3f centre = -view.worldToCamera.transpose() * view.translation;
         parallelFor(count, [&](int i) {
@@ -276,21 +300,23 @@ Result computeNormals(const Splats &s, const std::vector<View> &views, float *no
                 nearest[size_t(pixel[size_t(i)])] = std::min(nearest[size_t(pixel[size_t(i)])], depth[size_t(i)]);
         // Close the pinholes left between point samples.
         std::vector<float> closed(nearest.size(), std::numeric_limits<float>::infinity());
-        for (int y = 0; y < height; ++y)
+        const int close = visibility.closePixels;
+        parallelFor(height, [&](int y) {
             for (int x = 0; x < width; ++x) {
                 float value = std::numeric_limits<float>::infinity();
-                for (int dy = -kNormalDepthClosePixels; dy <= kNormalDepthClosePixels; ++dy)
-                    for (int dx = -kNormalDepthClosePixels; dx <= kNormalDepthClosePixels; ++dx) {
+                for (int dy = -close; dy <= close; ++dy)
+                    for (int dx = -close; dx <= close; ++dx) {
                         const int sx = x + dx, sy = y + dy;
                         if (sx >= 0 && sx < width && sy >= 0 && sy < height)
                             value = std::min(value, nearest[size_t(sy) * width + sx]);
                     }
                 closed[size_t(y) * width + x] = value;
             }
+        });
         parallelFor(count, [&](int i) {
             if (pixel[size_t(i)] < 0) return;
             const float z = depth[size_t(i)];
-            const float tolerance = kNormalDepthTolerance * z + std::min(2.0f * radius[size_t(i)], 0.01f * z);
+            const float tolerance = visibility.tolerance * z + std::min(2.0f * radius[size_t(i)], 0.01f * z);
             if (z > closed[size_t(pixel[size_t(i)])] + tolerance) return;
             votes[size_t(i)] += (centre - cloud.pts[size_t(i)]).normalized();
             ++viewCount[size_t(i)];
@@ -371,18 +397,19 @@ Result computeNormals(const Splats &s, const std::vector<View> &views, float *no
     return result;
 }
 
-Result estimateNormals(const Splats &s, const std::vector<View> &rig, float *normalsOut, int surrounding) {
+Result estimateNormals(const Splats &s, const std::vector<View> &rig, float *normalsOut, int surrounding,
+                       const Visibility &around) {
     if (!rig.empty()) {
         Result r = computeNormals(s, rig, normalsOut);
         r.rigOpaqueSeen = r.opaqueSeen;
         if (!r.opaque || 2 * r.opaqueSeen >= r.opaque) return r;
         const size_t seen = r.opaqueSeen;
-        r = computeNormals(s, surroundingViews(s, surrounding), normalsOut);
+        r = computeNormals(s, surroundingViews(s, surrounding, around.resolution), normalsOut, around);
         r.rigOpaqueSeen = seen;
         r.surrounding = true;
         return r;
     }
-    Result r = computeNormals(s, surroundingViews(s, surrounding), normalsOut);
+    Result r = computeNormals(s, surroundingViews(s, surrounding, around.resolution), normalsOut, around);
     r.surrounding = true;
     return r;
 }

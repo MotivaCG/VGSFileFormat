@@ -490,9 +490,13 @@ Gaussian normals* (`gaussiannormals.cpp`, kept the same in both): the shortest a
 splats, the neighbourhood plane on round ones, the side facing the cameras that see the
 splat through a coarse depth buffer, propagated, outliers given their neighbours' normal,
 and smoothed. Without a rig of ours, or when the rig's cameras see less than half of the
-opaque splats (the wrong rig, or a capture not in its own frame), 100 cameras spread all
-around the splats decide the sides instead (`surroundingViews`, `estimateNormals`); on a
-ScanMeNow PLY 94 % of the normals came within 30 degrees of those its rig gave, side included.
+opaque splats (the wrong rig, or a capture not in its own frame), 256 cameras spread all
+around the splats decide the sides instead (`surroundingViews`, `estimateNormals`), a splat
+counting as seen up to 0.1 % of its distance behind the nearest (`kSurroundingVisibility`; a
+rig's cameras keep SMNForge's 1 %). Against gs2mesh's dense mesh of two captures that put the
+side wrong on 0.40 % of the splats, where 100 cameras at 1 % did on 1.3 %: at 1 % the back of
+fingers, ears and cloth edges passed as seen from the front. Twice as long as 100 cameras:
+1 s for 300 000 splats.
 It runs on what is written, with the cameras moved by the capture transform, at one instant
 per splat and chunk; the normal is stored in the splat's own frame, so it turns with it.
 The export notes say which cameras decided, and how much of the capture the rig's saw. On the boxing capture (SMNV1): +2.8% size,

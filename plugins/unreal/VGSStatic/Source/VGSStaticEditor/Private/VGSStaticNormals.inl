@@ -63,7 +63,10 @@ RigNormalsResult estimate(const Splats &s, const std::vector<gaussiannormals::Vi
   in.scale = s.scales.data();
   in.opacity = opacity.data();
   normals.assign(s.count * 3, 0.0f);
-  const gaussiannormals::Result r = gaussiannormals::computeNormals(in, views ? *views : gaussiannormals::surroundingViews(in), normals.data());
+  // A rig's cameras see as SMNForge's; those all around as the editors' (kSurroundingVisibility).
+  const gaussiannormals::Result r = views
+      ? gaussiannormals::computeNormals(in, *views, normals.data())
+      : gaussiannormals::computeNormals(in, gaussiannormals::surroundingViews(in), normals.data(), gaussiannormals::kSurroundingVisibility);
   RigNormalsResult result;
   result.opaque = r.opaque;
   result.seen = r.opaqueSeen;

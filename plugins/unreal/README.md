@@ -231,12 +231,14 @@ many splats, the SH degree, and whether it has normals and where they come from.
     normals SMNForge` beside the normals it writes) or the import is told one; if that rig's
     cameras see less than half of the splats the PLY is not in its frame, and
   - otherwise (a PLY from anywhere else): the same estimate with **cameras all around**
-    instead of a rig's (`gaussiannormals::surroundingViews`: 100 on a Fibonacci sphere about
-    the opaque splats, whichever way is up), which decide each splat's outward side as a
-    rig's would. On andreavictor (221k splats) against the file's normals (the SMNV1 rig's):
-    mean |cos| 0.981 (96.6 % within 30 degrees), with the side 0.917 (94.2 %), measured with
-    42 cameras in 0.35 s; 100 (since 2026-11-14) take about 0.5 s and set the side of 1-2 % of
-    the splats otherwise.
+    instead of a rig's (`gaussiannormals::surroundingViews`: 256 on a Fibonacci sphere about
+    the opaque splats, whichever way is up, seeing as `kSurroundingVisibility`), which decide
+    each splat's outward side as a rig's would. On andreavictor (221k splats) against the
+    file's normals (the SMNV1 rig's): mean |cos| 0.981 (96.6 % within 30 degrees), with the
+    side 0.917 (94.2 %), measured with 42 cameras in 0.35 s. Since 2026-11-14, 256 cameras
+    and a depth tolerance of 0.1 % (was 1 %): against gs2mesh's dense mesh of andreavictor
+    and of another capture, the side is wrong on 0.40 % of the splats (1.3 % before), in
+    about 1 s.
   - *Method* Shortest axes keeps the earlier way: as PGSR takes a splat's normal (Chen et
     al. 2024), replaced where the splat is round or disagrees with its neighbours by their
     consensus, then smoothed; its side is decided on screen, facing the camera
