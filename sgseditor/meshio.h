@@ -17,7 +17,12 @@
 struct MeshData {
     std::vector<float> positions, normals, uvs; // 3, 3 and 2 per vertex; uv as in OBJ, v up
     std::vector<uint32_t> indices;              // 3 per triangle
+    // Per vertex, the OBJ position (v) it uses: the vertices of a UV seam share one. And how many
+    // positions the OBJ has, so that a mesh written back keeps their order (writeObj).
+    std::vector<uint32_t> positionIds;
+    size_t positionCount = 0;
     QString albedo, normalMap;                  // the material's textures, absolute; empty for none
+    QString material;                           // the .mtl it names, absolute; empty for none
     size_t vertices() const { return positions.size()/3; }
     size_t triangles() const { return indices.size()/3; }
     QVector3D minimum() const;
@@ -25,6 +30,17 @@ struct MeshData {
 };
 // Throws std::runtime_error. Normals missing from the file are worked out from the faces.
 MeshData readObj(const QString &path);
+// The mesh as gs2mesh writes one, which it reads back (for LODs): its positions in the order of
+// positionIds (one per OBJ position, with its normal), a texture coordinate per vertex, faces
+// v/vt/vn, and `mtl` (a file name beside it) as its material, `materialName` in it. Throws
+// std::runtime_error.
+void writeObj(const QString &path, const MeshData &mesh, const QString &mtl, const QString &materialName);
+// The name of the first material an .mtl defines (newmtl), or "material_0".
+QString materialName(const QString &mtl);
+// The albedo an .mtl names (map_Kd), absolute; empty for none.
+QString materialAlbedo(const QString &mtl);
+// The .mtl with its albedo (map_Kd) named `file`, beside it. Throws std::runtime_error.
+void setMaterialAlbedo(const QString &mtl, const QString &file);
 
 // The mesh as one glTF 2.0 binary (.glb), in the same space and units (Y up, metres, as
 // the captures are): positions, normals and texture coordinates, its albedo as the base

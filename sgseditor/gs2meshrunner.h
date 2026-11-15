@@ -24,7 +24,8 @@ struct MeshSettings {
     QJsonObject json() const;
     static MeshSettings fromJson(const QJsonObject &);
     bool operator==(const MeshSettings &o) const { return json()==o.json(); }
-    QString summary() const; // "200k triangles, LODs 40k and 3k, 4096 texture"
+    QString summary() const;     // the main mesh: "200k triangles, 4096 texture"
+    QString lodsSummary() const; // "LODs of 40k and 3k triangles"
 };
 
 // gs2mesh, loaded when first used (gs2mesh.dll and its CUDA and ONNX libraries): the editor
@@ -38,11 +39,20 @@ public:
         QString stereoModel, mogeModel;  // optional ONNX models, used with photos only
         QString engineCache;
         MeshSettings settings;
+        // Only the lower LODs of a main mesh made before: its .obj and the _dense.ply beside it.
+        QString lodsFrom, lodsDense;
+        // lodsFrom was edited since gs2mesh made it: its normal map is baked again too, written
+        // with it under `name` (gs2m_run_lods_ex, GS2M_LODS_REBAKE_MAIN).
+        bool rebakeMain = false;
     };
     explicit Gs2Mesh(QObject *parent = nullptr);
     ~Gs2Mesh() override;
     // Whether gs2mesh can be loaded, and if not why; its version when it can.
     static bool available(QString *why = nullptr, QString *version = nullptr);
+    // Whether this gs2mesh makes LODs of a mesh made before (gs2m_run_lods).
+    static bool makesLods();
+    // Whether it also bakes the normal map of an edited main mesh again (gs2m_run_lods_ex).
+    static bool rebakesMain();
     // Where it was found or would be looked for.
     static QStringList searchPaths();
     // The ONNX models gs2mesh uses with photos: a models folder beside gs2mesh.dll (the deployed

@@ -165,8 +165,8 @@ QJsonObject SgsProject::json(const QString &projectPath) const {
     QJsonArray files;for (const auto &f:meshFiles) files.append(stored(f,projectPath));
     QJsonObject root{{"format","sgsproject"},{"version",1},{"ply",stored(ply,projectPath)},
         {"colmap",QJsonObject{{"folder",stored(colmap,projectPath)},{"declined",colmapDeclined}}},
-        {"lights",lightArray},{"lightsTurn",QJsonObject{{"seconds",double(rigTurnSeconds)},{"clockwise",rigClockwise}}},{"selfIllumination",double(selfIllumination)},{"estimatedNormals",estimatedNormals},
-        {"mesh",QJsonObject{{"settings",mesh.json()},{"files",files},{"inputs",meshInputs}}},
+        {"lights",lightArray},{"lightsTurn",QJsonObject{{"seconds",double(rigTurnSeconds)},{"clockwise",rigClockwise}}},{"selfIllumination",double(selfIllumination)},{"estimatedNormals",estimatedNormals},{"fineNormals",fineNormals},
+        {"mesh",QJsonObject{{"settings",mesh.json()},{"files",files},{"inputs",meshInputs},{"edited",meshEdited.isEmpty() ? QString() : stored(meshEdited,projectPath)},{"lodsSource",lodsSource}}},
         {"sgs",QJsonObject{{"includeMesh",sgsIncludesMesh},{"mesh",sgsMesh},{"textureSize",sgsTextureSize}}}};
     if (cameraSet) root["camera"]=QJsonObject{{"target",vec(camera.target)},{"yaw",camera.yaw},{"pitch",camera.pitch},{"roll",camera.roll},{"distance",camera.distance},{"orthographic",camera.orthographic}};
     return root;
@@ -181,9 +181,12 @@ SgsProject SgsProject::fromJson(const QJsonObject &root,const QString &projectPa
     const auto turn=root.value("lightsTurn").toObject();
     p.rigTurnSeconds=float(std::clamp(turn.value("seconds").toDouble(0),0.0,86400.0));p.rigClockwise=turn.value("clockwise").toBool();
     p.estimatedNormals=root.value("estimatedNormals").toBool();
+    p.fineNormals=p.estimatedNormals && root.value("fineNormals").toBool();
     const auto mesh=root.value("mesh").toObject();p.mesh=MeshSettings::fromJson(mesh.value("settings").toObject());
     for (const auto &f:mesh.value("files").toArray()) p.meshFiles << restored(f.toString(),projectPath);
     p.meshInputs=mesh.value("inputs").toString();
+    if (const QString edited=mesh.value("edited").toString();!edited.isEmpty()) p.meshEdited=restored(edited,projectPath);
+    p.lodsSource=mesh.value("lodsSource").toString();
     const auto sgs=root.value("sgs").toObject();
     p.sgsIncludesMesh=sgs.value("includeMesh").toBool(true);p.sgsMesh=sgs.value("mesh").toInt(-1);p.sgsTextureSize=std::clamp(sgs.value("textureSize").toInt(2048),0,16384);
     if (root.contains("camera")) {
@@ -197,11 +200,30 @@ SgsProject SgsProject::fromJson(const QJsonObject &root,const QString &projectPa
 QString SgsProject::currentMeshInputs() const {
     const QFileInfo file(ply);
     const QByteArray key=QJsonDocument(QJsonObject{{"ply",file.absoluteFilePath()},{"size",double(file.size())},{"modified",file.lastModified().toMSecsSinceEpoch()},
-        {"colmap",colmapDeclined ? QString() : QFileInfo(colmap).absoluteFilePath()},{"settings",mesh.json()}}).toJson(QJsonDocument::Compact);
+        {"colmap",colmapDeclined ? QString() : QFileInfo(colmap).absoluteFilePath()},{"settings",[this] {auto s=mesh;s.lods.clear();return s.json();}()}}).toJson(QJsonDocument::Compact);
     return QString::fromLatin1(QCryptographicHash::hash(key,QCryptographicHash::Sha256).toHex().left(32));
 }
+QStringList SgsProject::meshObjs() const {
+    QStringList objs;
+    for (const auto &f:meshFiles) if (f.endsWith(".obj",Qt::CaseInsensitive) && !f.endsWith("_dense.obj",Qt::CaseInsensitive) && f!=meshEdited) objs << f;
+    if (!objs.isEmpty() && !meshEdited.isEmpty()) objs[0]=meshEdited;
+    return objs;
+}
+QString SgsProject::generatedObj() const {
+    for (const auto &f:meshFiles) if (f.endsWith(".obj",Qt::CaseInsensitive) && !f.endsWith("_dense.obj",Qt::CaseInsensitive) && f!=meshEdited) return f;
+    return {};
+}
+QString SgsProject::fileSignature(const QString &path) {
+    const QFileInfo file(path);
+    if (!file.exists()) return {};
+    return QStringLiteral("%1|%2|%3").arg(file.fileName()).arg(file.size()).arg(file.lastModified().toMSecsSinceEpoch());
+}
+bool SgsProject::lodsOutOfDate() const {
+    const QStringList objs=meshObjs();
+    return objs.size()>1 && !lodsSource.isEmpty() && lodsSource!=fileSignature(objs.first());
+}
 QString SgsProject::sgsMeshFile() const {
-    QStringList objs;for (const auto &f:meshFiles) if (f.endsWith(".obj",Qt::CaseInsensitive) && !f.endsWith("_dense.obj",Qt::CaseInsensitive)) objs << f;
+    const QStringList objs=meshObjs();
     if (objs.isEmpty()) return {};
     if (sgsMesh<0) return objs.last();
     return objs.value(std::min(sgsMesh,int(objs.size())-1));

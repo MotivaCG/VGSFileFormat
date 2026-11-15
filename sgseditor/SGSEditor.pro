@@ -35,9 +35,9 @@ INCLUDEPATH += $$PWD $$EDITOR $$EDITOR/dependencies/mint $$EDITOR/dependencies/e
     $$VGS_ROOT/decoder/include $$VGS_ROOT/core/include/vgs $$VGS_ROOT/core/crypto $$VGS_ROOT/core/src
 
 SOURCES += $$PWD/sgsmain.cpp $$PWD/sgswindow.cpp $$PWD/sgsply.cpp $$PWD/sgscapture.cpp $$PWD/colmapfinder.cpp \
-    $$PWD/gs2meshrunner.cpp $$PWD/meshio.cpp $$PWD/sgsexport.cpp $$PWD/sgsproject.cpp
+    $$PWD/gs2meshrunner.cpp $$PWD/meshio.cpp $$PWD/meshsculpt.cpp $$PWD/sgsexport.cpp $$PWD/sgsproject.cpp
 HEADERS += $$PWD/sgswindow.h $$PWD/sgsply.h $$PWD/sgscapture.h $$PWD/colmapfinder.h $$PWD/gs2meshrunner.h \
-    $$PWD/meshio.h $$PWD/sgsexport.h $$PWD/sgsproject.h $$PWD/sgsversion.h
+    $$PWD/meshio.h $$PWD/meshsculpt.h $$PWD/sgsexport.h $$PWD/sgsproject.h $$PWD/sgsversion.h
 
 # The editor's sources the SGS editor shares: its viewport, export, normals and display support.
 SOURCES += $$EDITOR/viewport.cpp $$EDITOR/viewcube.cpp $$EDITOR/editortheme.cpp $$EDITOR/displayscaling.cpp \

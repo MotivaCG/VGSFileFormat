@@ -70,7 +70,7 @@ set(SGS_SHARED_SOURCES editortheme.cpp displayscaling.cpp previewmemory.cpp plys
     playbackahead.cpp dependencies/mint/mintfile.cpp plyexport.cpp dependencies/plyseq/plyfit.cpp)
 list(TRANSFORM SGS_SHARED_SOURCES PREPEND "${VGS_EDITOR_DIR}/")
 add_library(sgs_support STATIC ${SGS_SHARED_SOURCES}
-    sgsply.cpp sgscapture.cpp colmapfinder.cpp gs2meshrunner.cpp meshio.cpp sgsexport.cpp sgsproject.cpp
+    sgsply.cpp sgscapture.cpp colmapfinder.cpp gs2meshrunner.cpp meshio.cpp meshsculpt.cpp sgsexport.cpp sgsproject.cpp
     ${VGS_EDITOR_DIR}/viewport.cpp ${VGS_EDITOR_DIR}/viewcube.cpp)
 target_include_directories(sgs_support PUBLIC . ${VGS_EDITOR_DIR} ${VGS_EDITOR_DIR}/dependencies/mint ${VGS_EDITOR_DIR}/dependencies/eigen
     ${GS2MESH_SOURCE}/include)

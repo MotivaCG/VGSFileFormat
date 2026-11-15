@@ -10,6 +10,8 @@
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QSaveFile>
+#include <cstdio>
 #include <QTextStream>
 #include <QtEndian>
 #include <algorithm>
@@ -62,7 +64,9 @@ MeshData readObj(const QString &path) {
         if (key=="v" && words.size()>=4) for (int i=1;i<4;++i) v.push_back(words[i].toFloat());
         else if (key=="vt" && words.size()>=3) {vt.push_back(words[1].toFloat());vt.push_back(words[2].toFloat());}
         else if (key=="vn" && words.size()>=4) for (int i=1;i<4;++i) vn.push_back(words[i].toFloat());
-        else if (key=="mtllib" && words.size()>=2) readMaterial(QFileInfo(path).dir().absoluteFilePath(QString::fromUtf8(words.mid(1).join(' '))),mesh);
+        else if (key=="mtllib" && words.size()>=2) {
+            mesh.material=QFileInfo(path).dir().absoluteFilePath(QString::fromUtf8(words.mid(1).join(' ')));readMaterial(mesh.material,mesh);
+        }
         else if (key=="f" && words.size()>=4) {
             std::vector<uint32_t> corners;
             for (int i=1;i<words.size();++i) {
@@ -79,6 +83,7 @@ MeshData readObj(const QString &path) {
                 if (found==unique.end()) {
                     const uint32_t id=uint32_t(mesh.vertices());
                     for (int a=0;a<3;++a) mesh.positions.push_back(v[size_t(std::get<0>(key3))*3+a]);
+                    mesh.positionIds.push_back(uint32_t(std::get<0>(key3)));
                     if (std::get<1>(key3)>=0) {mesh.uvs.push_back(vt[size_t(std::get<1>(key3))*2]);mesh.uvs.push_back(vt[size_t(std::get<1>(key3))*2+1]);}
                     else {mesh.uvs.push_back(0);mesh.uvs.push_back(0);}
                     if (std::get<2>(key3)>=0) for (int a=0;a<3;++a) mesh.normals.push_back(vn[size_t(std::get<2>(key3))*3+a]);
@@ -91,6 +96,7 @@ MeshData readObj(const QString &path) {
         }
     }
     if (mesh.indices.empty()) fail(QStringLiteral("%1 has no triangles.").arg(path));
+    mesh.positionCount=v.size()/3;
     if (missingNormals) {
         // Area-weighted face normals, summed at each vertex.
         std::fill(mesh.normals.begin(),mesh.normals.end(),0.f);
@@ -140,6 +146,58 @@ QByteArray encoded(const QImage &image,const char *format,int quality) {
     return out;
 }
 } // namespace
+
+QString materialName(const QString &mtl) {
+    QFile file(mtl);
+    if (file.open(QIODevice::ReadOnly|QIODevice::Text))
+        while (!file.atEnd()) {
+            const QString line=QString::fromUtf8(file.readLine()).trimmed();
+            if (line.startsWith(QLatin1String("newmtl "))) return line.mid(7).trimmed();
+        }
+    return QStringLiteral("material_0");
+}
+
+QString materialAlbedo(const QString &mtl) {MeshData m;readMaterial(mtl,m);return m.albedo;}
+
+void setMaterialAlbedo(const QString &mtl,const QString &file) {
+    QFile in(mtl);if (!in.open(QIODevice::ReadOnly|QIODevice::Text)) fail(QStringLiteral("Cannot read %1.").arg(mtl));
+    QStringList lines=QString::fromUtf8(in.readAll()).split('\n');in.close();
+    bool named=false;
+    for (QString &line:lines) if (line.trimmed().startsWith(QLatin1String("map_Kd "))) {line=QStringLiteral("map_Kd ")+file;named=true;}
+    if (!named) lines.insert(std::min<qsizetype>(1,lines.size()),QStringLiteral("map_Kd ")+file);
+    QSaveFile out(mtl);const QByteArray bytes=lines.join('\n').toUtf8();
+    if (!out.open(QIODevice::WriteOnly) || out.write(bytes)!=bytes.size() || !out.commit()) fail(QStringLiteral("Cannot write %1: %2").arg(mtl,out.errorString()));
+}
+
+void writeObj(const QString &path,const MeshData &mesh,const QString &mtl,const QString &materialName) {
+    const size_t vertices=mesh.vertices();
+    if (mesh.positionIds.size()!=vertices) fail(QStringLiteral("%1: the mesh does not say which positions its vertices use.").arg(path));
+    size_t count=mesh.positionCount;
+    for (uint32_t id:mesh.positionIds) count=std::max(count,size_t(id)+1);
+    // One position (and normal) per OBJ position: those of the first vertex using it.
+    std::vector<int64_t> first(count,-1);
+    for (size_t i=0;i<vertices;++i) if (first[mesh.positionIds[i]]<0) first[mesh.positionIds[i]]=int64_t(i);
+    QByteArray out;out.reserve(int(count*80+vertices*24+mesh.triangles()*40));
+    out+="# SGS Editor\n";
+    if (!mtl.isEmpty()) out+="mtllib "+mtl.toUtf8()+"\nusemtl "+materialName.toUtf8()+"\n";
+    char line[160];
+    for (size_t p=0;p<count;++p) {
+        const float *x=first[p]>=0 ? &mesh.positions[size_t(first[p])*3] : nullptr;
+        std::snprintf(line,sizeof line,"v %.6f %.6f %.6f\n",x ? x[0] : 0.f,x ? x[1] : 0.f,x ? x[2] : 0.f);out+=line;
+    }
+    for (size_t i=0;i<vertices;++i) {std::snprintf(line,sizeof line,"vt %.6f %.6f\n",mesh.uvs[i*2],mesh.uvs[i*2+1]);out+=line;}
+    for (size_t p=0;p<count;++p) {
+        const float *n=first[p]>=0 ? &mesh.normals[size_t(first[p])*3] : nullptr;
+        std::snprintf(line,sizeof line,"vn %.5f %.5f %.5f\n",n ? n[0] : 0.f,n ? n[1] : 1.f,n ? n[2] : 0.f);out+=line;
+    }
+    for (size_t t=0;t<mesh.triangles();++t) {
+        const uint32_t *f=&mesh.indices[t*3];
+        const unsigned a=mesh.positionIds[f[0]]+1,b=mesh.positionIds[f[1]]+1,c=mesh.positionIds[f[2]]+1;
+        std::snprintf(line,sizeof line,"f %u/%u/%u %u/%u/%u %u/%u/%u\n",a,f[0]+1,a,b,f[1]+1,b,c,f[2]+1,c);out+=line;
+    }
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly) || file.write(out)!=out.size() || !file.commit()) fail(QStringLiteral("Cannot write %1: %2").arg(path,file.errorString()));
+}
 
 QByteArray writeGlb(const MeshData &mesh,const QImage &albedo,const QImage &normalMap,const GlbOptions &options) {
     if (mesh.indices.empty()) fail("The mesh has no triangles.");

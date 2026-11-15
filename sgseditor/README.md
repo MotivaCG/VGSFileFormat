@@ -16,19 +16,65 @@ shares (viewport, export, normals) from `../editor`; it is supplied under the
 - **Normals, our method**: the PLY's own when it has some; otherwise, or on *Estimate
   normals*, the VGS editor's estimate (`editor/gaussiannormals.cpp`): each splat's side
   decided by the cameras of the rig the PLY names (`comment capture_rig SMNV1` or
-  `THE4DSCANNER`), or by cameras all around it.
-- **Mesh with gs2mesh** (`editor/dependencies/gs2mesh_cpp`, a submodule): a textured,
-  low-poly mesh with lower LODs sharing its textures. *Generate mesh* asks for the capture's
-  photos (an undistorted COLMAP model and its images) the first time, unless one is beside
-  the PLY (the folder itself, `undistorted\sparse` before a distorted `sparse`, then anything below:
-  the first model gs2mesh can use), and then for the resolutions, gs2mesh's own by default (200 000 triangles, LODs of
-  40 000 and 3 000, 4096 textures). Both are kept in the project and can be changed later
-  (*Photos (COLMAP)* in the panel, or *Change photos…* in the mesh dialog). With photos,
-  gs2mesh takes the geometry from stereo between them (with a FoundationStereo model), the
-  faces' relief (with a MoGe-2 model) and the albedo from them; without, everything comes
-  from the splats, the albedo baked from renders of them all around. The mesh goes to
+  `THE4DSCANNER`), or by 256 cameras all around it. *Estimate normals* has those cameras see
+  finer than an import does (1024 pixels, `kFineVisibility`): some ten seconds for 300 000
+  splats, the window waiting, and a sixth fewer splats on the wrong side; the project
+  remembers it and makes them so again when opened.
+- **Mesh with gs2mesh** (`editor/dependencies/gs2mesh_cpp`, a submodule): a textured mesh,
+  without LODs. *Generate mesh* asks for the capture's photos (an undistorted COLMAP model and
+  its images) the first time, unless one is beside the PLY (the folder itself,
+  `undistorted\sparse` before a distorted `sparse`, then anything below: the first model
+  gs2mesh can use), and then for the resolutions, gs2mesh's own by default (200 000
+  triangles, 4096 textures). Both are kept in the project and can be changed later (*Photos
+  (COLMAP)* in the panel, or *Change photos…* in the mesh dialog). With photos, gs2mesh takes
+  the geometry from stereo between them (FoundationStereo), the faces' relief (MoGe-2) and the
+  albedo from them; without, everything comes from the splats, the albedo baked from renders of
+  them all around. The first run with photos on a machine builds TensorRT's engine for its GPU
+  (some twenty minutes, said under the progress bar); later runs reuse it. The mesh goes to
   `<ply name>_mesh` beside the project, or beside the PLY before the project is saved. The
   panel says when it is out of date (the PLY, the photos or the settings changed since).
+  While gs2mesh works the rest of the editor waits; only its progress and Cancel stay on.
+- **Sculpt**: the main mesh cleaned up by hand before its LODs are made, in mesh view (Tab
+  in the view switches splats and mesh) on the main mesh only, with T4DEditor's brushes and
+  controls, so both editors sculpt alike. Its tools go down the left of the window as there:
+  *Mesh brushes* drops the list down (Ctrl+F1 to Ctrl+F8: *Move*, *Draw*, *Inflate*, *Pinch*,
+  *Smooth*, *Relax*, *Flatten*, *Erase*), Esc goes back to navigating. On the mesh the left
+  button paints and the right one the opposite (Draw in, Inflate deflates, Pinch spreads), Ctrl
+  inverts and Alt smooths with any brush; off it the left button orbits and the right one pans.
+  The brush is T4DEditor's: a radius in cm along the surface (or a sphere: *Reach*), a strength
+  and a hardness (the share of the radius at full strength), changed with Ctrl, Shift and Alt +
+  wheel, drawn as there with their values under it while those keys are held. *Erase* takes the
+  surface back to how gs2mesh made it. *Relax* is this editor's: the points slid along the
+  surface to even the triangles out, the shape kept; where faces are folded over (against the
+  surface four rings around) they are taken to their neighbours' middle until they unfold. While
+  a brush is chosen the mesh shows grey under a light that turns with the view, to read its
+  shape. *Fix spikes* finds the spikes and folded faces over the whole mesh and smooths them into
+  what is around; *Remove loose pieces* removes those with fewer than 2 % of the triangles. Each
+  stroke or fix is undone with Ctrl+Z (Ctrl+Y redoes). Only vertices move and faces go, so the
+  UVs and the albedo stay valid, and the vertices of a UV seam move together
+  (`meshsculpt.cpp`). The edit is written beside the generated mesh as
+  `<name>_edited.obj` (with its own `.mtl`) when the project is saved, LODs are made or the
+  mesh is exported; the generated one stays, and *Revert to generated* goes back to it. A new
+  *Generate mesh* replaces the edit, after asking.
+- **Paint the texture**: T4DEditor's texture brushes on the main mesh's albedo, behind
+  *Texture brushes* (Alt+F1 to Alt+F6): *Paint* (the colour in the panel), *Erase paint* (back
+  to the albedo gs2mesh made), *Clone* (Alt+click its source, then paint), *Blur*, *Lighten*,
+  *Darken*; the right button paints the opposite (Paint and Erase paint, Lighten and Darken).
+  Only the faces turned to the view are painted, as far as the brush reaches in space, with the
+  same radius, strength (its opacity) and hardness. Each stroke is undone as a brush's is; after
+  it the gutters around the UV islands are filled from their edges (8 texels), so the seams do
+  not bleed old colours. The painted albedo is written as `<name>_edited_albedo.png`, named by
+  the edit's material, so the LODs made after (which share it) and the `.sgs` carry it; the
+  generated one stays.
+- **LODs**, once the mesh looks right: *Generate LODs* (40 000 and 3 000 triangles by
+  default) reduces it keeping its texture layout, so every LOD shares its albedo and gets a
+  normal map of its own baked from the dense surface (`gs2m_run_lods`; `gs2mesh_cli
+  --lods-from main.obj main_dense.ply`). New LODs replace those made before. Of an edited mesh,
+  the LODs are made from the edit: the dense surface is first moved as the mesh was
+  (`<name>_edited_dense.ply`, each vertex by the edit around it), and gs2mesh bakes the edited
+  mesh's own normal map again from it too (`gs2m_run_lods_ex`, `GS2M_LODS_REBAKE_MAIN`). The
+  panel says when the LODs are of the mesh before its last edits. In mesh view a button beside
+  the view cube goes through the main mesh and its LODs.
 - **Lights**: point and directional, added, deleted, edited, turned off and on (H); the
   gizmo moves a point light (G) and turns a directional one (R). Each splat is lit by its
   normal, Lambert in linear light, plus *Self-illumination* of its colour glowing on its own
@@ -86,11 +132,14 @@ cmake --build build/cmake-msvc --config Release
 ```
 
 `sgseditor_tests` checks the PLY reader, the normals, the project, the COLMAP finder, the
-OBJ to glTF conversion, the `.sgs` export read back, and the lights, gizmo and mesh as the
-viewport draws them. Run it with Qt's `bin` on `PATH`. `SGS_TEST_PLY=<capture.ply>` adds a
-real capture; with `SGS_TEST_GS2MESH=1` too, gs2mesh runs on it from the window (a few
-minutes) and the `.sgs` with its mesh is checked. `SGS_TEST_SHOTS=<folder>` saves pictures
-of the window, the lights and the mesh (`SGS_TEST_MESH=<mesh.obj>`).
+OBJ to glTF conversion, the `.sgs` export read back, the lights, gizmo and mesh as the
+viewport draws them, and sculpting (seams, undo, spikes, loose pieces, the edit written back,
+the dense surface moved alike, the tools in the window). Run it with Qt's `bin` on `PATH`.
+`SGS_TEST_PLY=<capture.ply>` adds a real capture; with `SGS_TEST_GS2MESH=1` too, gs2mesh runs
+on it from the window (a few minutes) and the `.sgs` with its mesh is checked; with
+`SGS_TEST_LODS=<main.obj gs2mesh made of it>`, a copy of that mesh is edited and gs2mesh makes
+its LODs from the edit. `SGS_TEST_MESH=<mesh.obj>` times sculpting a real mesh.
+`SGS_TEST_SHOTS=<folder>` saves pictures of the window, the lights, the mesh and sculpting.
 
 `SGSEditor.exe --self-test <file.json>` writes whether gs2mesh loads and exits, without a
 window: for a deployment or an installation.

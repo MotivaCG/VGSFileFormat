@@ -37,10 +37,21 @@ struct SgsCapture {
     // Our estimate (gaussiannormals::estimateNormals, as the VGS editor's export and SMNForge
     // make them): the sides decided by the cameras of the rig the PLY names, or by cameras all
     // around when it names none or its cameras see less than half of it. Replaces the
-    // normals; `note`, when given, says what decided the sides.
-    void estimateNormals(QString *note = nullptr, int surrounding = SurroundingViews);
+    // normals; `note`, when given, says what decided the sides. `fine`: the cameras all around
+    // see finer (gaussiannormals::kFineVisibility), some ten times slower.
+    void estimateNormals(QString *note = nullptr, int surrounding = SurroundingViews, bool fine = false);
+    // The same in two steps: the estimate, which only reads the capture (another thread may make
+    // it while nothing changes the capture), and taking it.
+    struct NormalsEstimate {
+        std::vector<float> normals;
+        gaussiannormals::Result result;
+        int surrounding = 0;
+        bool fine = false;
+    };
+    NormalsEstimate computeNormals(int surrounding = SurroundingViews, bool fine = false) const;
+    void applyNormals(NormalsEstimate estimate, QString *note = nullptr);
     // Cameras all around when the PLY names no rig, as the VGS editor's export.
-    static constexpr int SurroundingViews = 100;
+    static constexpr int SurroundingViews = gaussiannormals::kSurroundingViews;
     // What the viewport draws: the splats and their normals.
     FramePtr renderFrame() const;
 };

@@ -33,11 +33,13 @@ MeshSettings MeshSettings::fromJson(const QJsonObject &o) {
     s.denoise=o.value("denoise").toBool(s.denoise);
     return s;
 }
+namespace {QString kilo(int n) {return n>=1000 ? QStringLiteral("%1k").arg(n/1000.0,0,'g',4) : QString::number(n);}}
 QString MeshSettings::summary() const {
-    auto k=[](int n) {return n>=1000 ? QStringLiteral("%1k").arg(n/1000.0,0,'g',4) : QString::number(n);};
-    QStringList levels;for (int l:lods) levels << k(l);
-    return QStringLiteral("%1 triangles, %2, %3 texture").arg(k(triangles),levels.isEmpty() ? QStringLiteral("no LODs") : QStringLiteral("LODs %1").arg(levels.join(", ")))
-        .arg(textureSize);
+    return QStringLiteral("%1 triangles, %2 texture").arg(kilo(triangles)).arg(textureSize);
+}
+QString MeshSettings::lodsSummary() const {
+    QStringList levels;for (int l:lods) levels << kilo(l);
+    return levels.isEmpty() ? QStringLiteral("no LODs") : QStringLiteral("LODs of %1 triangles").arg(levels.join(QStringLiteral(" and ")));
 }
 
 // The DLL's entry points, resolved by name: nothing links against gs2mesh.
@@ -51,6 +53,8 @@ struct Gs2Mesh::Library {
     decltype(&gs2m_cancel) cancel=nullptr;
     decltype(&gs2m_last_error) lastError=nullptr;
     decltype(&gs2m_output_file) outputFile=nullptr;
+    decltype(&gs2m_run_lods) runLods=nullptr; // optional: an older gs2mesh has none
+    decltype(&gs2m_run_lods_ex) runLodsEx=nullptr; // optional too
 };
 
 QStringList Gs2Mesh::searchPaths() {
@@ -102,6 +106,8 @@ std::shared_ptr<Gs2Mesh::Library> Gs2Mesh::library(QString *why) {
               && resolve(lib->run,"gs2m_run") && resolve(lib->cancel,"gs2m_cancel") && resolve(lib->lastError,"gs2m_last_error") && resolve(lib->outputFile,"gs2m_output_file"))) {
             reasons=QStringLiteral("%1 is not a gs2mesh this editor knows.").arg(QDir::toNativeSeparators(path));continue;
         }
+        lib->runLods=reinterpret_cast<decltype(lib->runLods)>(lib->dll.resolve("gs2m_run_lods"));
+        lib->runLodsEx=reinterpret_cast<decltype(lib->runLodsEx)>(lib->dll.resolve("gs2m_run_lods_ex"));
         // The header this editor was built with must be the DLL's.
         gs2m_config config{};lib->defaults(&config);
         if (config.struct_size!=sizeof(gs2m_config)) {reasons=QStringLiteral("%1 is another version of gs2mesh than this editor's.").arg(QDir::toNativeSeparators(path));continue;}
@@ -111,6 +117,8 @@ std::shared_ptr<Gs2Mesh::Library> Gs2Mesh::library(QString *why) {
     return {};
 }
 
+bool Gs2Mesh::makesLods() {const auto lib=library(nullptr);return lib && lib->runLods;}
+bool Gs2Mesh::rebakesMain() {const auto lib=library(nullptr);return lib && lib->runLodsEx;}
 bool Gs2Mesh::available(QString *why,QString *version) {
     const auto lib=library(why);
     if (lib && version) *version=QString::fromUtf8(lib->version());
@@ -132,11 +140,13 @@ bool Gs2Mesh::start(const Job &job) {
     if (running_) return false;
     QString why;lib_=library(&why);
     if (!lib_) {emit finished(false,why,{});return false;}
+    if (!job.lodsFrom.isEmpty() && !lib_->runLods) {emit finished(false,QStringLiteral("This gs2mesh cannot make LODs of a mesh made before."),{});return false;}
     running_=true;
     std::thread([this,job,lib=lib_] {
         // Strings the configuration points to live here until the run is over.
         const QByteArray ply=job.ply.toUtf8(),out=job.outputDir.toUtf8(),name=job.name.toUtf8(),sparse=job.sparse.toUtf8(),images=job.images.toUtf8();
         const QByteArray stereo=job.stereoModel.toUtf8(),moge=job.mogeModel.toUtf8(),cache=job.engineCache.toUtf8();
+        const QByteArray lodsFrom=job.lodsFrom.toUtf8(),lodsDense=job.lodsDense.toUtf8();
         const bool photos=!job.sparse.isEmpty() && !job.images.isEmpty();
         gs2m_config c{};lib->defaults(&c);
         c.ply_path=ply.constData();c.output_dir=out.constData();c.output_name=name.constData();
@@ -164,7 +174,9 @@ bool Gs2Mesh::start(const Job &job) {
         // running_ falls only after the last signal: the destructor waits for it.
         if (!ctx) {emit finished(false,QStringLiteral("gs2mesh refused the job (out of memory, or another version)."),{});running_=false;return;}
         context_=ctx;
-        const gs2m_status status=lib->run(ctx);
+        const gs2m_status status=lodsFrom.isEmpty() ? lib->run(ctx)
+            : job.rebakeMain && lib->runLodsEx ? lib->runLodsEx(ctx,lodsFrom.constData(),lodsDense.constData(),GS2M_LODS_REBAKE_MAIN)
+            : lib->runLods(ctx,lodsFrom.constData(),lodsDense.constData());
         context_=nullptr;
         QStringList files;QString error;
         if (status==GS2M_OK) for (int i=0;;++i) {const char *file=lib->outputFile(ctx,i);if (!file) break;files << QString::fromUtf8(file);}

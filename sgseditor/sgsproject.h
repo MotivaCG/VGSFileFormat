@@ -71,20 +71,28 @@ struct SgsProject {
     // How much of the splats' colour glows on its own when lit (Unreal's Self-illumination
     // Amount, 0.1 by default there too).
     float selfIllumination = 0.1f;
-    // Every light turning together, on top of each one's own turn (SgsLight::turnSeconds).
-    float rigTurnSeconds = 0;
+    // Every light turning together, on top of each one's own turn (SgsLight::turnSeconds): once
+    // every 5 s for a new capture, ready for Play (the clock does not start by itself).
+    float rigTurnSeconds = 5;
     bool rigClockwise = false;
     float rigTurnRate() const;
     // How far light i has turned at `seconds`, in degrees.
     float lightAngle(int i, double seconds) const;
     bool anyTurning() const;
-    // Our estimate replaced the PLY's normals (or it had none): made again when opened.
+    // Our estimate replaced the PLY's normals (or it had none): made again when opened; the
+    // fine one (Estimate normals) when that is what was made.
     bool estimatedNormals = false;
+    bool fineNormals = false;
     MeshSettings mesh;
     // The mesh gs2mesh made: its files (main .obj first, then the LODs), and the inputs it was
     // made from, to tell when it is out of date.
     QStringList meshFiles;
     QString meshInputs;
+    // The main mesh as edited by hand (SculptMesh), <main>_edited.obj beside it; empty when it
+    // is as gs2mesh made it. And what the LODs were made from (fileSignature of the main mesh
+    // then), to tell when they no longer follow it.
+    QString meshEdited;
+    QString lodsSource;
     // Which mesh an .sgs carries: -1 the lowest LOD, 0 the main one, n the nth LOD; and the
     // longest side of its textures there (0: as made).
     int sgsMesh = -1, sgsTextureSize = 2048;
@@ -94,9 +102,18 @@ struct SgsProject {
 
     QJsonObject json(const QString &projectPath) const;
     static SgsProject fromJson(const QJsonObject &, const QString &projectPath); // throws std::runtime_error
-    // What the mesh depends on: the PLY (path, size, time), the COLMAP folder and the settings.
+    // What the mesh depends on: the PLY (path, size, time), the COLMAP folder and the settings
+    // (but the LODs, made from it afterwards).
     QString currentMeshInputs() const;
     bool meshOutOfDate() const { return !meshFiles.isEmpty() && meshInputs != currentMeshInputs(); }
     // The .obj of the mesh an .sgs carries, or empty.
     QString sgsMeshFile() const;
+    // The main mesh's .obj (as edited, when it is), then its LODs'.
+    QStringList meshObjs() const;
+    // The main mesh as gs2mesh made it.
+    QString generatedObj() const;
+    // A file's name, size and time, to tell when it changed.
+    static QString fileSignature(const QString &path);
+    // LODs made from another main mesh than the one there is now (it was edited since).
+    bool lodsOutOfDate() const;
 };

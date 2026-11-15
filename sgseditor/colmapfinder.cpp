@@ -159,7 +159,7 @@ QString suggestColmap(const QString &plyPath) {
         bool any=false;for (const auto &d:likelyModels(candidate)) any=any || hasModel(d);
         if (!any) continue;
         const auto m=findColmap(candidate);
-        if (m.usable()) return m.folder;
+        if (m.usable()) return m.sparse; // the model itself, not where it was looked for
     }
     return {};
 }

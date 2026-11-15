@@ -33,5 +33,6 @@ ColmapModel findColmap(const QString &folder);
 // splats' box, else what is wrong (the photos of another capture, or another scale).
 QString colmapMatches(const ColmapModel &, const QVector3D &minimum, const QVector3D &maximum);
 
-// A folder beside the PLY, or the PLY's own, that holds a usable model; empty when none.
+// The usable model beside the PLY (its folder of cameras.bin and images.bin, such as
+// undistorted/sparse), found in the PLY's folder or those beside it; empty when none.
 QString suggestColmap(const QString &plyPath);

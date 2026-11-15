@@ -10,6 +10,7 @@
 #include "colmapfinder.h"
 #include "exportcapture.h"
 #include "meshio.h"
+#include "meshsculpt.h"
 #include "sgscapture.h"
 #include "sgsexport.h"
 #include "sgsproject.h"
@@ -20,6 +21,9 @@
 #include <QDir>
 #include <QFile>
 #include <QJsonDocument>
+#include <QLabel>
+#include <QPainter>
+#include <QToolBar>
 #include <QDoubleSpinBox>
 #include <QListWidget>
 #include <QProgressBar>
@@ -32,6 +36,7 @@
 #include <QTest>
 #include <QtEndian>
 #include <cmath>
+#include <array>
 #include <map>
 #include <random>
 #include <tuple>
@@ -104,6 +109,48 @@ QColor average(const QImage &image,const QRect &area) {
     return QColor::fromRgbF(float(r/n),float(g/n),float(b/n));
 }
 double luminance(const QColor &c) {return 0.2126*c.redF()+0.7152*c.greenF()+0.0722*c.blueF();}
+// A UV sphere as gs2mesh writes meshes (v, vt, vn; faces v/vt/vn), its seam's vertices sharing
+// their positions, with its material and albedo beside it; and, asked for, a loose tetrahedron.
+QString writeSphereObj(const QString &dir,const QString &name,float radius,const QVector3D &centre,bool loosePiece=false,int rings=24,int segments=32) {
+    QImage albedo(64,32,QImage::Format_RGB888);albedo.fill(QColor(200,100,50));albedo.save(dir+"/"+name+"_albedo.png");
+    QFile mtl(dir+"/"+name+".mtl");mtl.open(QIODevice::WriteOnly);mtl.write(("newmtl material_0\nmap_Kd "+name+"_albedo.png\n").toUtf8());mtl.close();
+    QByteArray v,vt,vn,f;
+    auto pos=[&](const QVector3D &p) {
+        v+=QStringLiteral("v %1 %2 %3\n").arg(p.x()).arg(p.y()).arg(p.z()).toUtf8();
+        const QVector3D n=(p-centre).normalized();vn+=QStringLiteral("vn %1 %2 %3\n").arg(n.x()).arg(n.y()).arg(n.z()).toUtf8();};
+    // Positions: the poles, then rings x segments (no seam column); texture coordinates: every
+    // ring has segments + 1, the last at u = 1 on the seam.
+    pos(centre+QVector3D(0,radius,0));pos(centre-QVector3D(0,radius,0));
+    for (int r=1;r<rings;++r) for (int s=0;s<segments;++s) {
+        const double th=M_PI*r/rings,ph=2*M_PI*s/segments;
+        pos(centre+QVector3D(float(std::sin(th)*std::cos(ph)),float(std::cos(th)),float(std::sin(th)*std::sin(ph)))*radius);
+    }
+    for (int r=0;r<=rings;++r) for (int s=0;s<=segments;++s) vt+=QStringLiteral("vt %1 %2\n").arg(double(s)/segments).arg(1.0-double(r)/rings).toUtf8();
+    auto P=[&](int r,int s) {return r==0 ? 1 : r==rings ? 2 : 3+(r-1)*segments+(s%segments);};
+    auto T=[&](int r,int s) {return 1+r*(segments+1)+s;};
+    auto face=[&](int r0,int s0,int r1,int s1,int r2,int s2) {
+        f+=QStringLiteral("f %1/%2/%1 %3/%4/%3 %5/%6/%5\n").arg(P(r0,s0)).arg(T(r0,s0)).arg(P(r1,s1)).arg(T(r1,s1)).arg(P(r2,s2)).arg(T(r2,s2)).toUtf8();};
+    for (int r=0;r<rings;++r) for (int s=0;s<segments;++s) {
+        if (r>0) face(r,s,r,s+1,r+1,s);
+        if (r<rings-1) face(r,s+1,r+1,s+1,r+1,s);
+    }
+    if (loosePiece) {
+        // Far off the sphere, its own four positions.
+        const int at=2+(rings-1)*segments;const QVector3D o=centre+QVector3D(radius*3,0,0);const float e=radius*0.05f;
+        for (const QVector3D &d:{QVector3D(0,0,0),QVector3D(e,0,0),QVector3D(0,e,0),QVector3D(0,0,e)}) pos(o+d);
+        const int a=at+1,b=at+2,c=at+3,d=at+4;
+        for (const auto &t:{std::array<int,3>{a,c,b},{a,b,d},{a,d,c},{b,c,d}}) f+=QStringLiteral("f %1/1/%1 %2/1/%2 %3/1/%3\n").arg(t[0]).arg(t[1]).arg(t[2]).toUtf8();
+    }
+    QFile obj(dir+"/"+name+".obj");obj.open(QIODevice::WriteOnly);
+    obj.write(("mtllib "+name+".mtl\nusemtl material_0\n").toUtf8()+v+vt+vn+f);obj.close();
+    return dir+"/"+name+".obj";
+}
+QVector3D at3(const std::vector<float> &p,size_t i) {return {p[i*3],p[i*3+1],p[i*3+2]};}
+// Where a ray meets the mesh, as a brush lands there; false when it misses.
+bool landAt(const SculptMesh &s,const QVector3D &origin,const QVector3D &direction,float radius,SculptMesh::Dab *d,float strength=1.f,bool invert=false) {
+    int triangle=-1;if (!s.raycast(origin,direction,&d->centre,nullptr,&triangle)) return false;
+    d->triangle=triangle;d->radius=radius;d->strength=strength;d->invert=invert;d->hardness=0.3f;return true;
+}
 } // namespace
 
 class SgsEditorTests : public QObject {
@@ -128,6 +175,17 @@ private slots:
     void lightIconsHideBehindSplats();
     void modelsHaveDefaults();
     void meshIsDrawnLit();
+    void sculptKeepsSeamsAndUndoes();
+    void sculptFixesSpikesAndPieces();
+    void relaxUnfoldsATangle();
+    void texturePaintsTheFrontOnly();
+    void noBlackWhereNormalsCancel();
+    void doubleClickPaintsWithABrush();
+    void editsReachTheDenseSurface();
+    void sculptingInTheWindow();
+    void sculptRealMesh();
+    void lodsFromEditedMesh();
+    void meshAgainstSplats();
     void realCapture();
     void visualSheet();
 };
@@ -164,9 +222,18 @@ void SgsEditorTests::normalsPointOutwards() {
     QCOMPARE(c.normals,NormalsSource::Surrounding);QVERIFY(note.contains("all around"));
     int within=0;for (size_t i=0;i<size_t(c.frame.count);++i) within+=degreesBetween(&c.frame.normal[i*3],&truth[i*3])<15;
     QVERIFY2(within>int(c.frame.count)*95/100,qPrintable(QStringLiteral("%1 of %2 within 15 degrees").arg(within).arg(c.frame.count)));
+    // Estimate normals: the fine estimate, on another thread while the window waits; the project
+    // remembers it was the fine one.
+    SgsWindow window;window.show();QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QVERIFY(window.openPly(path));QVERIFY(!window.project().fineNormals);
+    window.findChild<QPushButton *>("estimateNormals")->click();
+    QVERIFY(window.project().estimatedNormals && window.project().fineNormals);
+    const SgsCapture *fine=window.capture();QCOMPARE(fine->normals,NormalsSource::Surrounding);
+    within=0;for (size_t i=0;i<size_t(fine->frame.count);++i) within+=degreesBetween(&fine->frame.normal[i*3],&truth[i*3])<15;
+    QVERIFY2(within>int(fine->frame.count)*95/100,qPrintable(QStringLiteral("fine: %1 of %2 within 15 degrees").arg(within).arg(fine->frame.count)));
 }
 void SgsEditorTests::projectRoundTripsWithRelativePaths() {
-    SgsProject p;p.ply=dir_.filePath("sub/capture.ply");p.colmap=dir_.filePath("photos");p.selfIllumination=0.25f;p.estimatedNormals=true;
+    SgsProject p;p.ply=dir_.filePath("sub/capture.ply");p.colmap=dir_.filePath("photos");p.selfIllumination=0.25f;p.estimatedNormals=true;p.fineNormals=true;
     p.mesh.triangles=100000;p.mesh.lods={20000};p.mesh.textureSize=2048;
     p.meshFiles={dir_.filePath("sub/capture_mesh/capture.obj"),dir_.filePath("sub/capture_mesh/capture_lod1.obj")};p.meshInputs="abc";
     SgsLight sun=SgsLight::sun({0,1,0},1.8f);sun.colour=QColor(255,200,150);p.lights={sun,SgsLight::bulb({0,1,0},1.8f)};p.lights[1].enabled=false;
@@ -178,7 +245,7 @@ void SgsEditorTests::projectRoundTripsWithRelativePaths() {
     const QString moved=QDir::cleanPath(dir_.filePath("elsewhere/project/one.sgsproj"));
     const SgsProject q=SgsProject::fromJson(QJsonDocument::fromJson(QJsonDocument(json).toJson()).object(),moved);
     QCOMPARE(q.ply,QDir::cleanPath(dir_.filePath("elsewhere/sub/capture.ply")));
-    QCOMPARE(q.selfIllumination,0.25f);QVERIFY(q.estimatedNormals);QCOMPARE(q.mesh.triangles,100000);QCOMPARE(q.mesh.lods,QVector<int>{20000});
+    QCOMPARE(q.selfIllumination,0.25f);QVERIFY(q.estimatedNormals);QVERIFY(q.fineNormals);QCOMPARE(q.mesh.triangles,100000);QCOMPARE(q.mesh.lods,QVector<int>{20000});
     QCOMPARE(q.lights.size(),2);QVERIFY(q.lights[0].directional);QCOMPARE(q.lights[0].colour,QColor(255,200,150));QVERIFY(!q.lights[1].enabled);
     QVERIFY((q.lights[0].direction()-p.lights[0].direction()).length()<1e-4f);
     QCOMPARE(q.meshFiles.size(),2);QCOMPARE(q.sgsMesh,0);QCOMPARE(q.sgsTextureSize,1024);
@@ -214,7 +281,7 @@ void SgsEditorTests::findsAndChecksColmap() {
     QVERIFY(!findColmap(dir_.filePath("nothing_here")).usable());
     // Beside a PLY: suggested.
     const QString beside=dir_.filePath("beside");QDir().mkpath(beside);writeSphere(beside,"cap.ply",100);writeColmap(beside+"/colmap",8,3.f,{0,1,0});
-    QCOMPARE(QDir::cleanPath(suggestColmap(beside+"/cap.ply")),QDir::cleanPath(beside+"/colmap"));
+    QCOMPARE(QDir::cleanPath(suggestColmap(beside+"/cap.ply")),QDir::cleanPath(beside+"/colmap/sparse/0"));
     // COLMAP's own layout: the original sparse/ keeps its distortion, undistorted/sparse is
     // what gs2mesh takes, beside the PLY.
     const QString colmapLayout=dir_.filePath("layout");QDir().mkpath(colmapLayout);writeSphere(colmapLayout,"scan.ply",100);
@@ -223,7 +290,7 @@ void SgsEditorTests::findsAndChecksColmap() {
     m=findColmap(colmapLayout);QVERIFY2(m.usable(),qPrintable(m.problem));
     QCOMPARE(QDir::cleanPath(m.sparse),QDir::cleanPath(colmapLayout+"/undistorted/sparse"));
     QCOMPARE(QDir::cleanPath(m.images),QDir::cleanPath(colmapLayout+"/undistorted/images"));
-    QVERIFY(!suggestColmap(colmapLayout+"/scan.ply").isEmpty());
+    QCOMPARE(QDir::cleanPath(suggestColmap(colmapLayout+"/scan.ply")),QDir::cleanPath(colmapLayout+"/undistorted/sparse"));
     QVERIFY(findColmap(suggestColmap(colmapLayout+"/scan.ply")).usable());
     // Only the distorted one: found, but not usable, and said why.
     const QString distorted=dir_.filePath("distorted");writeColmap(distorted,8,3.f,{0,1,0},true,4,"/sparse/0");
@@ -512,6 +579,432 @@ void SgsEditorTests::meshIsDrawnLit() {
     const double back=luminance(average(shot(),centre));
     QVERIFY2(front>back*2,qPrintable(QStringLiteral("front %1, back %2").arg(front).arg(back)));
 }
+void SgsEditorTests::sculptKeepsSeamsAndUndoes() {
+    const QString path=writeSphereObj(dir_.path(),"ball",0.5f,{0,1,0});
+    const MeshData data=readObj(path);
+    // The seam's vertices share positions: more vertices than positions.
+    QCOMPARE(data.positionCount,size_t(2+23*32));QVERIFY(data.vertices()>data.positionCount);
+    SculptMesh s(data,QImage());
+    // The ray from the front meets the sphere's front.
+    QVector3D hit,normal;QVERIFY(s.raycast({0,1,5},{0,0,-1},&hit,&normal));
+    QVERIFY2(std::abs(hit.z()-0.5f)<0.01f && normal.z()>0.9f,qPrintable(QStringLiteral("%1 %2").arg(hit.z()).arg(normal.z())));
+    // Inflate pushes out, Ctrl (inverted) in; each stroke one step.
+    SculptMesh::Dab d;QVERIFY(landAt(s,{0,1,5},{0,0,-1},0.2f,&d));
+    s.beginStroke(SculptMesh::Brush::Inflate,d);s.dab(d);QVERIFY(s.endStroke());
+    QVERIFY(s.raycast({0,1,5},{0,0,-1},&hit));QVERIFY2(hit.z()>0.5f+0.002f,qPrintable(QString::number(hit.z())));
+    const float inflated=hit.z();
+    QVERIFY(landAt(s,{0,1,5},{0,0,-1},0.2f,&d,1.f,true));
+    s.beginStroke(SculptMesh::Brush::Inflate,d);s.dab(d);QVERIFY(s.endStroke());
+    QVERIFY(s.raycast({0,1,5},{0,0,-1},&hit));QVERIFY(hit.z()<inflated);
+    // The seam stays shut: every vertex of a position where the position is, in the view too.
+    {
+        // A grab across the seam (x > 0, z = 0).
+        QVERIFY(s.raycast({5,1,0},{-1,0,0},&hit));
+        QVERIFY(landAt(s,{5,1,0},{-1,0,0},0.15f,&d));
+        s.beginStroke(SculptMesh::Brush::Move,d);s.moveBy({0.1f,0,0});QVERIFY(s.endStroke());
+        const auto view=s.view();const MeshData now=s.mesh();
+        for (size_t v=0;v<now.vertices();++v) {
+            const QVector3D p=at3(s.points(),now.positionIds[v]);
+            QVERIFY((QVector3D(view->vertices[v*8],view->vertices[v*8+1],view->vertices[v*8+2])-p).length()<1e-6f);
+        }
+        QVERIFY(s.points()[size_t(now.positionIds[0])*3]==now.positions[0]);
+    }
+    // Undone to the start: exactly as built, and back.
+    const std::vector<float> after=s.points();
+    QCOMPARE(s.state()!=0,true);
+    while (s.canUndo()) s.undo();
+    QCOMPARE(s.points(),s.originalPoints());QCOMPARE(s.state(),quint64(0));
+    while (s.canRedo()) s.redo();
+    QCOMPARE(s.points(),after);
+    // Written as gs2mesh writes meshes and read back: the same positions, in the same order.
+    const QString edited=dir_.filePath("ball_edited.obj");
+    writeObj(edited,s.mesh(),"ball.mtl","material_0");
+    const MeshData back=readObj(edited);
+    QCOMPARE(back.positionCount,data.positionCount);QCOMPARE(back.vertices(),data.vertices());QCOMPARE(back.triangles(),data.triangles());
+    QVERIFY(!back.albedo.isEmpty());
+    for (size_t v=0;v<back.vertices();++v) {
+        QCOMPARE(back.positionIds[v],data.positionIds[v]);
+        QVERIFY((at3(back.positions,v)-at3(s.points(),back.positionIds[v])).length()<1e-5f);
+        QVERIFY(std::abs(back.uvs[v*2]-data.uvs[v*2])<1e-5f);
+    }
+}
+void SgsEditorTests::sculptFixesSpikesAndPieces() {
+    const MeshData data=readObj(writeSphereObj(dir_.path(),"spiky",0.5f,{0,1,0},true));
+    SculptMesh s(data,QImage());
+    const size_t triangles=s.triangles();
+    // A spike: one point pulled out to twice the radius.
+    QVector3D hit;QVERIFY(s.raycast({0,1,5},{0,0,-1},&hit));
+    SculptMesh::Dab d;QVERIFY(landAt(s,{0,1,5},{0,0,-1},0.02f,&d));d.hardness=0.9f;
+    s.beginStroke(SculptMesh::Brush::Move,d);s.moveBy({0,0,0.5f});QVERIFY(s.endStroke());
+    float far=0;for (size_t p=0;p<s.points().size()/3;++p) far=std::max(far,(at3(s.points(),p)-QVector3D(0,1,0)).length());
+    QVERIFY2(far>0.8f,qPrintable(QString::number(far)));
+    const int found=s.fixSpikes();QVERIFY(found>0);
+    // Gone: nothing far off the sphere any more, and the rest where it was.
+    far=0;size_t moved=0;
+    for (size_t p=0;p<2+23*32;++p) {
+        far=std::max(far,(at3(s.points(),p)-QVector3D(0,1,0)).length());
+        moved+=(at3(s.points(),p)-at3(s.originalPoints(),p)).length()>1e-3f;
+    }
+    QVERIFY2(far<0.58f,qPrintable(QStringLiteral("%1 still out, %2 points found").arg(far).arg(found)));
+    QVERIFY2(moved<60,qPrintable(QStringLiteral("%1 points moved").arg(moved)));
+    s.undo();
+    far=0;for (size_t p=0;p<s.points().size()/3;++p) far=std::max(far,(at3(s.points(),p)-QVector3D(0,1,0)).length());
+    QVERIFY(far>0.8f);
+    s.redo();
+    // The loose tetrahedron: its 4 triangles go, the sphere stays; undone, it is back.
+    QCOMPARE(s.removeLoosePieces(),4);QCOMPARE(s.triangles(),triangles-4);
+    QVERIFY(!s.raycast({1.5f+0.01f,1.01f,5},{0,0,-1},&hit));
+    s.undo();QCOMPARE(s.triangles(),triangles);
+    QCOMPARE(s.removeLoosePieces(),4);QCOMPARE(s.removeLoosePieces(),0);
+}
+// A tangle as fusion leaves in poorly seen slits: the points of a patch shaken until faces turn
+// over. Relax under the brush, and Fix spikes over the whole mesh, each leave none turned over.
+void SgsEditorTests::relaxUnfoldsATangle() {
+    const MeshData data=readObj(writeSphereObj(dir_.path(),"tangled",0.5f,{0,1,0},false,48,64));
+    const QVector3D centre(0,1,0);
+    auto turned=[&](const SculptMesh &s) {
+        // Faces facing in (the sphere's outside is away from its centre), near the front.
+        int count=0;const MeshData m=s.mesh();
+        for (size_t t=0;t<m.triangles();++t) {
+            const QVector3D a=at3(m.positions,m.indices[t*3]),b=at3(m.positions,m.indices[t*3+1]),c=at3(m.positions,m.indices[t*3+2]);
+            const QVector3D mid=(a+b+c)/3.f;
+            if (mid.z()>0.3f && QVector3D::dotProduct(QVector3D::crossProduct(b-a,c-a),mid-centre)<0) ++count;
+        }
+        return count;};
+    // Every position of the front patch moved at random by about its edges (3 to 5 cm); a seam's
+    // vertices alike.
+    MeshData shaken=data;
+    {
+        std::mt19937 random(3);std::uniform_real_distribution<float> shake(-0.045f,0.045f);
+        std::vector<QVector3D> offset(data.positionCount);for (auto &o:offset) o=QVector3D(shake(random),shake(random),shake(random));
+        for (size_t v=0;v<shaken.vertices();++v)
+            if (shaken.positions[v*3+2]>0.38f) for (int a=0;a<3;++a) shaken.positions[v*3+a]+=offset[shaken.positionIds[v]][a];
+    }
+    {
+        SculptMesh s(shaken,QImage());
+        const int before=turned(s);QVERIFY2(before>10,qPrintable(QString::number(before)));
+        QVector3D hit;QVERIFY(s.raycast({0,1,5},{0,0,-1},&hit));
+        // The whole patch under the brush.
+        SculptMesh::Dab d;QVERIFY(landAt(s,{0,1,5},{0,0,-1},0.5f,&d));d.hardness=0.6f;
+        s.beginStroke(SculptMesh::Brush::Relax,d);
+        for (int i=0;i<12;++i) s.dab(d);
+        QVERIFY(s.endStroke());
+        QVERIFY2(turned(s)==0,qPrintable(QStringLiteral("relax: %1 of %2 still turned over").arg(turned(s)).arg(before)));
+        // Its shape kept: the front still where the sphere is.
+        QVERIFY(s.raycast({0,1,5},{0,0,-1},&hit));QVERIFY2(std::abs(hit.z()-0.5f)<0.02f,qPrintable(QString::number(hit.z())));
+    }
+    {
+        SculptMesh s(shaken,QImage());
+        const int before=turned(s);QVERIFY(s.fixSpikes()>0);
+        QVERIFY2(turned(s)==0,qPrintable(QStringLiteral("fix spikes: %1 of %2 still turned over").arg(turned(s)).arg(before)));
+    }
+}
+// The texture brushes paint the albedo where the brush lands, on the faces turned to the eye;
+// undone exactly; Erase paint brings back what gs2mesh made; in the window, written beside the
+// edited mesh and named by its material.
+void SgsEditorTests::texturePaintsTheFrontOnly() {
+    const QString obj=writeSphereObj(dir_.path(),"painted",0.5f,{0,1,0});
+    const MeshData data=readObj(obj);
+    SculptMesh s(data,QImage(data.albedo));QVERIFY(s.hasAlbedo());
+    const QImage before=s.albedo().copy();
+    // The front (+z) is u = 0.25, v = 0.5: texel (16, 16) of 64 x 32; the back u = 0.75.
+    auto texel=[&](int x,int y) {return s.albedo().pixelColor(x,y);};
+    QCOMPARE(texel(16,16),QColor(200,100,50));
+    SculptMesh::TextureDab dab;QVERIFY(s.raycast({0,1,5},{0,0,-1},&dab.centre));
+    dab.eye={0,1,5};dab.radius=0.2f;dab.hardness=0.5f;dab.opacity=1.f;dab.colour=QColor(0,0,255);
+    s.beginTextureStroke(SculptMesh::TextureBrush::Paint);QVERIFY(!s.textureDab(dab).isNull());QVERIFY(s.endStroke());
+    QVERIFY2(texel(16,16).blue()>200 && texel(16,16).red()<40,qPrintable(texel(16,16).name()));
+    QCOMPARE(texel(48,16),QColor(200,100,50));QVERIFY(s.albedoPainted());
+    // Seen from behind, the same brush on the front paints nothing: those faces are turned away.
+    s.beginTextureStroke(SculptMesh::TextureBrush::Paint);dab.eye={0,1,-5};dab.colour=QColor(0,255,0);
+    QVERIFY(s.textureDab(dab).isNull());QVERIFY(!s.endStroke());dab.eye={0,1,5};
+    // Undone: exactly as before; redone: blue again.
+    QVERIFY(!s.undo().isNull());QVERIFY(s.albedo()==before);
+    QVERIFY(!s.redo().isNull());QVERIFY(texel(16,16).blue()>200);
+    // Erase paint: back to the albedo it was built with.
+    s.beginTextureStroke(SculptMesh::TextureBrush::Unpaint);s.textureDab(dab);s.textureDab(dab);s.textureDab(dab);QVERIFY(s.endStroke());
+    QVERIFY2(std::abs(texel(16,16).red()-200)<12,qPrintable(texel(16,16).name()));
+    // Lighten and Darken move the texels' brightness.
+    s.beginTextureStroke(SculptMesh::TextureBrush::Darken);s.textureDab(dab);QVERIFY(s.endStroke());
+    QVERIFY(texel(16,16).red()<190);
+
+    // In the window: painted, written as <name>_edited_albedo.png, its material naming it.
+    SgsWindow window;window.resize(900,700);window.show();QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QVERIFY(window.openPly(writeSphere(dir_.path(),"topaint.ply",3000,true)));
+    QDir().mkpath(dir_.filePath("topaint_mesh"));
+    const QString main=writeSphereObj(dir_.filePath("topaint_mesh"),"topaint",0.5f,{0,1,0});
+    window.project().meshFiles={main};window.setShowMesh(true);
+    window.setSculptTool(SgsWindow::Paint);QCOMPARE(window.sculptTool(),int(SgsWindow::Paint));
+    // Painting shows the texture, lit as usual.
+    QVERIFY(window.viewport()->meshTextured());QVERIFY(!window.viewport()->meshShapeLight());
+    Camera camera;camera.target={0,1,0};camera.yaw=0;camera.pitch=0;camera.distance=2.5f;window.viewport()->setCamera(camera);
+    const QPointF centre(window.viewport()->width()/2.0,window.viewport()->height()/2.0);
+    window.sculptStroke(centre,0,Qt::LeftButton,{});window.sculptStroke(centre+QPointF(6,0),1,Qt::LeftButton,{});window.sculptStroke(centre+QPointF(6,0),2,Qt::LeftButton,{});
+    QVERIFY(window.sculptDirty());QVERIFY(window.saveSculpt());
+    const QString albedo=dir_.filePath("topaint_mesh/topaint_edited_albedo.png");
+    QVERIFY(QFileInfo::exists(albedo));
+    const MeshData back=readObj(dir_.filePath("topaint_mesh/topaint_edited.obj"));
+    QCOMPARE(QFileInfo(back.albedo).fileName(),QStringLiteral("topaint_edited_albedo.png"));
+    QVERIFY(QImage(albedo)!=QImage(dir_.filePath("topaint_mesh/topaint_albedo.png")));
+    // The generated albedo stays as it was.
+    QCOMPARE(QImage(dir_.filePath("topaint_mesh/topaint_albedo.png")).pixelColor(16,16),QColor(200,100,50));
+    window.revertSculpt(false);QVERIFY(!QFileInfo::exists(albedo));
+}
+// Across a fold the vertex normals can cancel out, and a surface can face the view exactly:
+// neither may draw black (normalize(0), pow of a negative: NaN). A quad whose two sides' normals
+// point opposite ways, seen head-on in the sculpting light.
+void SgsEditorTests::noBlackWhereNormalsCancel() {
+    QImage albedo(16,16,QImage::Format_RGB888);albedo.fill(QColor(200,200,200));albedo.save(dir_.filePath("cancel_albedo.png"));
+    {QFile mtl(dir_.filePath("cancel.mtl"));mtl.open(QIODevice::WriteOnly);mtl.write("newmtl m\nmap_Kd cancel_albedo.png\n");}
+    {QFile obj(dir_.filePath("cancel.obj"));obj.open(QIODevice::WriteOnly);
+     obj.write("mtllib cancel.mtl\nv -1 0 0\nv 1 0 0\nv 1 2 0\nv -1 2 0\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\nvn 0 0 1\nvn 0 0 -1\n"
+               "f 1/1/1 2/2/1 3/3/2\nf 1/1/1 3/3/2 4/4/2\n");}
+    SgsWindow window;window.resize(700,600);window.show();QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QVERIFY(window.openPly(writeSphere(dir_.path(),"cancel.ply",500,true)));
+    window.project().meshFiles={dir_.filePath("cancel.obj")};window.setShowMesh(true);QVERIFY(window.showsMesh());
+    auto *viewport=window.viewport();viewport->setMeshTextured(false);viewport->setMeshShapeLight(true);
+    Camera camera;camera.target={0,1,0};camera.yaw=0;camera.pitch=0;camera.distance=3.f;viewport->setCamera(camera);
+    viewport->update();QTest::qWait(80);const QImage shot=viewport->grabFramebuffer();
+    // The middle of the quad, where its normals cancel and where it faces the view: never black.
+    int black=0,seen=0;
+    for (int y=shot.height()/2-60;y<=shot.height()/2+60;y+=2)
+        for (int x=shot.width()/2-60;x<=shot.width()/2+60;x+=2) {++seen;black+=luminance(shot.pixelColor(x,y))<0.05;}
+    QVERIFY2(black==0,qPrintable(QStringLiteral("%1 of %2 pixels black").arg(black).arg(seen)));
+}
+// With a brush a double-click paints twice and leaves the view where it is (no focus jump).
+void SgsEditorTests::doubleClickPaintsWithABrush() {
+    SgsWindow window;window.resize(800,600);window.show();QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QVERIFY(window.openPly(writeSphere(dir_.path(),"dbl.ply",2000,true)));
+    QDir().mkpath(dir_.filePath("dbl_mesh"));
+    window.project().meshFiles={writeSphereObj(dir_.filePath("dbl_mesh"),"dbl",0.5f,{0,1,0})};window.setShowMesh(true);
+    window.setSculptTool(SgsWindow::Draw);QCOMPARE(window.sculptTool(),int(SgsWindow::Draw));
+    // A brush larger than this sphere's triangles (5 to 9 cm).
+    const double radiusBefore=window.findChild<QDoubleSpinBox *>("brushRadius")->value();
+    window.findChild<QDoubleSpinBox *>("brushRadius")->setValue(15);
+    auto *viewport=window.viewport();
+    Camera camera;camera.target={0.2f,1.1f,0};camera.yaw=0;camera.pitch=0;camera.distance=2.5f;viewport->setCamera(camera);
+    QSignalSpy strokes(viewport,&Viewport::paintStroke);
+    const QPoint at(viewport->width()/2,viewport->height()/2);
+    // As the system sends a double-click: press, release, double-click (in place of the second
+    // press), release.
+    auto send=[&](QEvent::Type type) {
+        QMouseEvent e(type,QPointF(at),viewport->mapToGlobal(QPointF(at)),Qt::LeftButton,type==QEvent::MouseButtonRelease ? Qt::NoButton : Qt::LeftButton,Qt::NoModifier);
+        QApplication::sendEvent(viewport,&e);};
+    send(QEvent::MouseButtonPress);send(QEvent::MouseButtonRelease);send(QEvent::MouseButtonDblClick);send(QEvent::MouseButtonRelease);
+    QVERIFY((viewport->camera().target-camera.target).length()<1e-6f);
+    // Two strokes, each pressed and released.
+    QVERIFY2(strokes.size()==4,qPrintable(QString::number(strokes.size())));
+    QVERIFY(window.sculpt()->canUndo());
+    window.findChild<QDoubleSpinBox *>("brushRadius")->setValue(radiusBefore); // the brush is remembered on this machine
+}
+void SgsEditorTests::editsReachTheDenseSurface() {
+    // The dense surface: a finer cloud on the same sphere (here its positions, a little inside).
+    const MeshData data=readObj(writeSphereObj(dir_.path(),"densed",0.5f,{0,1,0}));
+    SculptMesh s(data,QImage());
+    QVector3D hit;QVERIFY(s.raycast({0,1,5},{0,0,-1},&hit));
+    SculptMesh::Dab d;QVERIFY(landAt(s,{0,1,5},{0,0,-1},0.15f,&d));
+    s.beginStroke(SculptMesh::Brush::Move,d);s.moveBy({0,0,0.1f});QVERIFY(s.endStroke());
+    std::vector<QVector3D> dense;
+    for (size_t p=0;p<s.originalPoints().size()/3;++p) dense.push_back(QVector3D(0,1,0)+(at3(s.originalPoints(),p)-QVector3D(0,1,0))*0.995f);
+    QByteArray ply=QStringLiteral("ply\nformat binary_little_endian 1.0\nelement vertex %1\nproperty float x\nproperty float y\nproperty float z\nelement face 0\nproperty list uchar int vertex_indices\nend_header\n").arg(dense.size()).toUtf8();
+    for (const auto &d:dense) for (float c:{d.x(),d.y(),d.z()}) ply.append(reinterpret_cast<const char *>(&c),4);
+    const QString in=dir_.filePath("ball_dense.ply"),out=dir_.filePath("ball_edited_dense.ply");
+    {QFile f(in);f.open(QIODevice::WriteOnly);f.write(ply);}
+    transferEdits(s.originalPoints(),s.points(),in,out);
+    QFile f(out);QVERIFY(f.open(QIODevice::ReadOnly));const QByteArray moved=f.readAll();
+    QCOMPARE(moved.size(),ply.size());
+    const char *body=moved.constData()+moved.indexOf("end_header\n")+11;
+    float front=0,back=0;
+    for (size_t i=0;i<dense.size();++i) {
+        const float *q=reinterpret_cast<const float *>(body)+i*3;const QVector3D d=QVector3D(q[0],q[1],q[2])-dense[i];
+        if (dense[i].z()>0.49f) front=std::max(front,d.z());
+        if (dense[i].z()<0) back=std::max(back,d.length());
+    }
+    // Where the mesh was pulled the dense surface follows; behind it nothing moved.
+    QVERIFY2(front>0.08f,qPrintable(QString::number(front)));QVERIFY2(back<1e-6f,qPrintable(QString::number(back)));
+}
+void SgsEditorTests::sculptingInTheWindow() {
+    SgsWindow window;window.resize(900,700);window.show();QVERIFY(QTest::qWaitForWindowExposed(&window));
+    window.activateWindow();QVERIFY(QTest::qWaitForWindowActive(&window));
+    QVERIFY(window.openPly(writeSphere(dir_.path(),"tosculpt.ply",3000,true)));
+    QDir().mkpath(dir_.filePath("tosculpt_mesh"));
+    const QString obj=writeSphereObj(dir_.filePath("tosculpt_mesh"),"tosculpt",0.5f,{0,1,0});
+    const QString lod=writeSphereObj(dir_.filePath("tosculpt_mesh"),"tosculpt_lod1",0.5f,{0,1,0},false,8,10);
+    window.project().meshFiles={obj,lod};window.project().lodsSource=SgsProject::fileSignature(obj);
+    window.loadMesh(0);
+    auto *viewport=window.viewport();viewport->setFocus();
+    // Tab: the mesh, and the tools for it; Tab again: the splats, the tools gone.
+    QTest::keyClick(viewport,Qt::Key_Tab);QVERIFY(window.showsMesh());
+    auto *section=window.findChild<QWidget *>("sculptSection");QVERIFY(section->isVisible());
+    QTest::keyClick(viewport,Qt::Key_Tab);QVERIFY(!window.showsMesh());QVERIFY(!section->isVisible());
+    window.setShowMesh(true);QVERIFY(section->isVisible());
+    // A brush: the view paints, the mesh grey and lit to read it; Navigate gives the look back.
+    QTest::keyClick(&window,Qt::Key_F3,Qt::ControlModifier);QCOMPARE(window.sculptTool(),int(SgsWindow::Inflate));
+    QVERIFY(window.findChild<QToolBar *>("sculptToolbar")->isVisible());
+    QCOMPARE(viewport->selectTool(),Viewport::SelectTool::Paint);QVERIFY(!viewport->meshTextured());QVERIFY(viewport->meshShapeLight());
+    Camera camera;camera.target={0,1,0};camera.yaw=0;camera.pitch=0;camera.distance=2.5f;viewport->setCamera(camera);
+    const QPointF centre(viewport->width()/2.0,viewport->height()/2.0);
+    QVector3D o,d,before;viewport->captureRay(centre,&o,&d);QVERIFY(window.sculpt()->raycast(o,d,&before));
+    window.sculptStroke(centre,0,Qt::LeftButton,{});window.sculptStroke(centre+QPointF(12,0),1,Qt::LeftButton,{});window.sculptStroke(centre+QPointF(12,0),2,Qt::LeftButton,{});
+    QVector3D after;QVERIFY(window.sculpt()->raycast(o,d,&after));
+    QVERIFY2((after-QVector3D(0,1,0)).length()>(before-QVector3D(0,1,0)).length()+1e-3f,qPrintable(QStringLiteral("%1 -> %2").arg(before.z()).arg(after.z())));
+    QVERIFY(window.sculptDirty());
+    // The LODs are now of another mesh: said so.
+    QVERIFY(window.findChildren<QLabel *>().size()>0);
+    bool told=false;for (auto *l:window.findChildren<QLabel *>()) told=told || l->text().contains("LODs are of the mesh before");
+    QVERIFY(told);
+    // Undone back to as it was: nothing to write; redone and written: <main>_edited.obj, the main mesh now.
+    window.undoSculpt();QVERIFY(!window.sculptDirty());
+    window.redoSculpt();QVERIFY(window.sculptDirty());
+    QVERIFY(window.saveSculpt());QVERIFY(!window.sculptDirty());
+    const QString edited=dir_.filePath("tosculpt_mesh/tosculpt_edited.obj");
+    QCOMPARE(window.project().meshEdited,edited);QVERIFY(QFileInfo::exists(edited));QVERIFY(QFileInfo::exists(dir_.filePath("tosculpt_mesh/tosculpt_edited.mtl")));
+    QCOMPARE(window.project().meshObjs().value(0),edited);QCOMPARE(window.project().meshObjs().value(1),lod);QCOMPARE(window.project().generatedObj(),obj);
+    QVERIFY(window.project().lodsOutOfDate());
+    // Kept in the project, relative.
+    const SgsProject reread=SgsProject::fromJson(window.project().json(dir_.filePath("p.sgsproj")),dir_.filePath("p.sgsproj"));
+    QCOMPARE(reread.meshEdited,edited);
+    // Only on the main mesh: the LOD shown, the tools go (and the brush with them).
+    window.findChild<QPushButton *>("displayMeshLevel")->click();QVERIFY(!section->isVisible());QCOMPARE(window.sculptTool(),int(SgsWindow::Navigate));
+    QVERIFY(!window.findChild<QToolBar *>("sculptToolbar")->isVisible());
+    QVERIFY(viewport->meshTextured());QVERIFY(!viewport->meshShapeLight());
+    window.findChild<QPushButton *>("displayMeshLevel")->click();QVERIFY(section->isVisible());
+    // Reverted: the generated mesh again, the edit's files gone.
+    window.revertSculpt(false);
+    QVERIFY(window.project().meshEdited.isEmpty());QVERIFY(!QFileInfo::exists(edited));QCOMPARE(window.project().meshObjs().value(0),obj);
+}
+// SGS_TEST_MESH=<main.obj> (with SGS_TEST_SHOTS=<folder> for pictures): sculpting a real mesh,
+// how long its parts take and what the fixes find.
+void SgsEditorTests::sculptRealMesh() {
+    const QString obj=qEnvironmentVariable("SGS_TEST_MESH");
+    if (obj.isEmpty()) QSKIP("SGS_TEST_MESH names no mesh.");
+    QElapsedTimer timer;timer.start();
+    const MeshData data=readObj(obj);const double readMs=timer.restart();
+    SculptMesh s(data,data.albedo.isEmpty() ? QImage() : QImage(data.albedo));const double buildMs=timer.restart();
+    const int spikes=s.fixSpikes();const double spikesMs=timer.restart();
+    const int pieces=s.removeLoosePieces();const double piecesMs=timer.restart();
+    const QVector3D lo=data.minimum(),hi=data.maximum(),mid=(lo+hi)*0.5f;
+    QVector3D hit;const bool front=s.raycast(QVector3D(mid.x(),mid.y()+0.25f*(hi.y()-lo.y()),hi.z()+1),{0,0,-1},&hit);QVERIFY(front);
+    SculptMesh::Dab d;QVERIFY(landAt(s,QVector3D(mid.x(),mid.y()+0.25f*(hi.y()-lo.y()),hi.z()+1),{0,0,-1},0.03f,&d,0.5f));
+    s.beginStroke(SculptMesh::Brush::Smooth,d);
+    for (int i=0;i<60;++i) {d.centre=hit+QVector3D(0.001f*i,0,0);d.triangle=-1;s.dab(d);}
+    s.endStroke();const double strokeMs=timer.restart();
+    // Painting its albedo: a stroke of 30 dabs (the stroke's start copies the albedo, for its undo).
+    double paintMs=0;
+    if (s.hasAlbedo()) {
+        timer.restart();
+        s.beginTextureStroke(SculptMesh::TextureBrush::Paint);
+        SculptMesh::TextureDab t;t.radius=0.03f;t.opacity=0.6f;t.colour=QColor(30,90,220);t.eye=QVector3D(mid.x(),mid.y(),hi.z()+2);
+        for (int i=0;i<30;++i) {t.centre=hit+QVector3D(0.002f*i,0,0);s.textureDab(t);}
+        s.endStroke();s.padAlbedo();paintMs=timer.restart();
+    }
+    qInfo("%s: %zu triangles, %zu positions; read %.0f ms, made editable %.0f ms; fix spikes %d points %.0f ms; loose pieces %d triangles %.0f ms; 60 dabs %.0f ms; a painted stroke of 30 dabs on its %dx%d albedo, padded, %.0f ms",
+          qPrintable(QFileInfo(obj).fileName()),data.triangles(),data.positionCount,readMs,buildMs,spikes,spikesMs,pieces,piecesMs,strokeMs,
+          s.albedo().width(),s.albedo().height(),paintMs);
+    if (const QString shots=qEnvironmentVariable("SGS_TEST_SHOTS");!shots.isEmpty()) {
+        QDir().mkpath(shots);
+        SgsWindow window;window.resize(1400,1000);window.show();QVERIFY(QTest::qWaitForWindowExposed(&window));
+        QVERIFY(window.openPly(writeSphere(dir_.path(),"forshots.ply",500,true)));
+        window.project().meshFiles={obj};window.setShowMesh(true);QVERIFY(window.showsMesh());
+        auto *viewport=window.viewport();
+        Camera camera;camera.target=QVector3D(mid.x(),mid.y()+0.3f*(hi.y()-lo.y()),mid.z());camera.yaw=0;camera.pitch=0;camera.distance=0.9f;viewport->setCamera(camera);
+        window.setSculptTool(SgsWindow::Smooth);
+        auto save=[&](const QString &name) {viewport->update();QTest::qWait(200);viewport->grabFramebuffer().save(shots+"/"+name);};
+        save("sculpt_before.png");
+        window.fixSpikes();save("sculpt_fixspikes.png");
+        window.removeLoosePieces();
+        QTest::mouseMove(viewport,QPoint(viewport->width()/2,viewport->height()/2));save("sculpt_brush.png");
+        // A painted stroke across the chest, blue, and the texture brushes' look.
+        window.setSculptTool(SgsWindow::Paint);
+        const QPointF from(viewport->width()*0.42,viewport->height()*0.62),to(viewport->width()*0.58,viewport->height()*0.62);
+        window.sculptStroke(from,0,Qt::LeftButton,{});
+        for (int i=1;i<=20;++i) window.sculptStroke(from+(to-from)*(i/20.0),1,Qt::LeftButton,{});
+        window.sculptStroke(to,2,Qt::LeftButton,{});
+        QTest::mouseMove(viewport,to.toPoint());save("sculpt_paint.png");
+        window.setSculptTool(SgsWindow::Navigate);save("sculpt_textured.png");
+        window.grab().save(shots+"/sculpt_window.png");
+    }
+}
+// SGS_TEST_LODS=<main.obj gs2mesh made> with SGS_TEST_PLY=<its capture>: a copy of that mesh
+// edited, then its LODs made by gs2mesh from the edit (minutes, an NVIDIA GPU).
+void SgsEditorTests::lodsFromEditedMesh() {
+    const QString source=qEnvironmentVariable("SGS_TEST_LODS"),ply=qEnvironmentVariable("SGS_TEST_PLY");
+    if (source.isEmpty() || ply.isEmpty()) QSKIP("SGS_TEST_LODS and SGS_TEST_PLY name no mesh and capture.");
+    if (!Gs2Mesh::rebakesMain()) QSKIP("This gs2mesh cannot bake an edited main mesh again.");
+    // The mesh's files, copied: the original stays as it is.
+    const QFileInfo main(source);const QString stem=main.completeBaseName(),folder=dir_.filePath("lods_mesh");QDir().mkpath(folder);
+    QStringList files;
+    for (const QString &suffix:{".obj",".mtl","_albedo.png","_normal.png","_dense.ply"}) {
+        const QString from=main.absolutePath()+"/"+stem+suffix,to=folder+"/"+stem+suffix;
+        if (QFileInfo::exists(from)) {QVERIFY(QFile::copy(from,to));files << to;}
+    }
+    SgsWindow window;window.resize(1200,900);window.show();QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QVERIFY(window.openPly(ply));
+    window.project().meshFiles=files;window.project().mesh.lods={20000};
+    window.setShowMesh(true);QVERIFY(window.ensureSculpt());
+    // An edit worth seeing: the top of the mesh pulled up 2 cm, and the spikes fixed.
+    const MeshData data=readObj(files.first());const QVector3D lo=data.minimum(),hi=data.maximum();
+    QVector3D hit;QVERIFY(window.sculpt()->raycast(QVector3D((lo.x()+hi.x())/2,hi.y()+1,(lo.z()+hi.z())/2),{0,-1,0},&hit));
+    SculptMesh::Dab d;QVERIFY(landAt(*window.sculpt(),QVector3D((lo.x()+hi.x())/2,hi.y()+1,(lo.z()+hi.z())/2),{0,-1,0},0.08f,&d));
+    window.sculpt()->beginStroke(SculptMesh::Brush::Move,d);window.sculpt()->moveBy({0,0.02f,0});QVERIFY(window.sculpt()->endStroke());
+    window.fixSpikes();QVERIFY(window.sculptDirty());
+    const std::vector<float> edited=window.sculpt()->points();
+    QSignalSpy finished(&window,&SgsWindow::meshFinished);
+    QVERIFY(window.startLods());
+    QVERIFY(finished.wait(30*60*1000));
+    QVERIFY2(finished.first().at(0).toBool(),qPrintable(finished.first().at(1).toString()));
+    const QString editedObj=folder+"/"+stem+"_edited.obj";
+    QCOMPARE(window.project().meshEdited,editedObj);QVERIFY(!window.sculptDirty());
+    // Its own normal map, baked again, named by its material; the dense surface moved alike.
+    QVERIFY(QFileInfo::exists(folder+"/"+stem+"_edited_normal.png"));QVERIFY(QFileInfo::exists(folder+"/"+stem+"_edited_dense.ply"));
+    const MeshData back=readObj(editedObj);
+    QCOMPARE(QFileInfo(back.normalMap).fileName(),stem+"_edited_normal.png");QCOMPARE(QFileInfo(back.albedo).fileName(),stem+"_albedo.png");
+    // gs2mesh wrote the edit as it was: the same positions in the same order.
+    QCOMPARE(back.positionCount,data.positionCount);
+    double worst=0;for (size_t v=0;v<back.vertices();++v) worst=std::max(worst,double((at3(back.positions,v)-at3(edited,back.positionIds[v])).length()));
+    QVERIFY2(worst<1e-4,qPrintable(QString::number(worst)));
+    // The LOD: of the edit, up to date, the edit itself not taken for one.
+    const QStringList objs=window.project().meshObjs();
+    QCOMPARE(objs.size(),2);QCOMPARE(objs.first(),editedObj);QCOMPARE(QFileInfo(objs.last()).completeBaseName(),stem+"_edited_lod1");
+    QVERIFY(!window.project().lodsOutOfDate());
+    const MeshData lod=readObj(objs.last());
+    QVERIFY2(lod.triangles()<=20000 && lod.triangles()>15000,qPrintable(QString::number(lod.triangles())));
+    // It follows the edit: as high as the pulled top.
+    QVERIFY2(lod.maximum().y()>hi.y()+0.01f,qPrintable(QStringLiteral("%1 vs %2").arg(lod.maximum().y()).arg(hi.y())));
+    qInfo("LODs of the edited mesh: %s, %zu triangles, top %.3f (was %.3f)",qPrintable(QFileInfo(objs.last()).fileName()),lod.triangles(),lod.maximum().y(),hi.y());
+}
+// SGS_TEST_PLY, SGS_TEST_MESH (one or more .obj, ';'-separated), SGS_TEST_SHOTS and SGS_TEST_VIEW
+// ("target x,y,z,yaw,pitch,distance", several separated by ';'): the splats and each mesh, textured,
+// from the same cameras, side by side, to compare what the mesh's texture and shape keep.
+void SgsEditorTests::meshAgainstSplats() {
+    const QString ply=qEnvironmentVariable("SGS_TEST_PLY"),meshes=qEnvironmentVariable("SGS_TEST_MESH"),out=qEnvironmentVariable("SGS_TEST_SHOTS"),views=qEnvironmentVariable("SGS_TEST_VIEW");
+    if (ply.isEmpty() || meshes.isEmpty() || out.isEmpty() || views.isEmpty()) QSKIP("SGS_TEST_PLY, SGS_TEST_MESH, SGS_TEST_SHOTS and SGS_TEST_VIEW name no capture, mesh, folder and view.");
+    QDir().mkpath(out);
+    SgsWindow window;window.resize(1400,1000);window.show();QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QVERIFY(window.openPly(ply));
+    window.project().lights.clear();window.selectLight(-1);
+    auto *viewport=window.viewport();
+    // A light background, as one judges a texture, and the same size for every shot.
+    viewport->setLightBackground(true);viewport->setFixedSize(1000,900);
+    int v=0;
+    for (const QString &view:views.split(';',Qt::SkipEmptyParts)) {
+        const QStringList n=view.split(',');QCOMPARE(n.size(),6);
+        Camera camera;camera.target={n[0].toFloat(),n[1].toFloat(),n[2].toFloat()};camera.yaw=n[3].toFloat();camera.pitch=n[4].toFloat();camera.distance=n[5].toFloat();
+        QList<QImage> shots;
+        window.setShowMesh(false);viewport->setCamera(camera);viewport->update();QTest::qWait(300);shots << viewport->grabFramebuffer();
+        for (const QString &obj:meshes.split(';',Qt::SkipEmptyParts)) {
+            window.project().meshFiles={obj};window.loadMesh(0);window.setShowMesh(true);viewport->setMeshTextured(true);
+            viewport->setCamera(camera);viewport->update();QTest::qWait(300);shots << viewport->grabFramebuffer();
+        }
+        // side by side: the splats, then each mesh in the order given
+        const int w=shots.first().width(),h=shots.first().height();
+        QImage sheet(w*int(shots.size()),h,QImage::Format_RGB32);sheet.fill(Qt::black);
+        QPainter painter(&sheet);
+        for (int i=0;i<shots.size();++i) painter.drawImage(i*w,0,shots[i]);
+        painter.end();
+        sheet.save(QStringLiteral("%1/compare_%2.png").arg(out).arg(v++));
+    }
+}
 void SgsEditorTests::realCapture() {
     const QString ply=qEnvironmentVariable("SGS_TEST_PLY");
     if (ply.isEmpty()) QSKIP("SGS_TEST_PLY names no capture.");
@@ -528,8 +1021,8 @@ void SgsEditorTests::realCapture() {
             const double d=degreesBetween(&capture.frame.normal[i*3],&fewer.frame.normal[i*3]);
             flipped+=d>120;turned+=d>15;
         }
-        qInfo("42 cameras: %.0f ms; %.2f%% of the splats face the other way with 100, %.2f%% differ by more than 15 degrees",
-              fewerMs,100.0*double(flipped)/double(compared),100.0*double(turned)/double(compared));
+        qInfo("42 cameras: %.0f ms; %.2f%% of the splats face the other way with %d, %.2f%% differ by more than 15 degrees",
+              fewerMs,100.0*double(flipped)/double(compared),SgsCapture::SurroundingViews,100.0*double(turned)/double(compared));
     }
     timer.restart();
     const QString out=dir_.filePath("real.sgs");
@@ -539,7 +1032,10 @@ void SgsEditorTests::realCapture() {
     if (qEnvironmentVariable("SGS_TEST_GS2MESH")!="1") return;
     // The whole way: gs2mesh from the splats alone, then the .sgs with its lowest LOD.
     SgsWindow window;window.show();QVERIFY(QTest::qWaitForWindowExposed(&window));
-    QVERIFY(window.openPly(ply));window.project().colmapDeclined=true;window.project().colmap.clear();
+    QVERIFY(window.openPly(ply));
+    // SGS_TEST_PHOTOS=1: with the COLMAP found beside the PLY; else from the splats alone.
+    if (qEnvironmentVariable("SGS_TEST_PHOTOS")!="1") {window.project().colmapDeclined=true;window.project().colmap.clear();}
+    else QVERIFY2(!window.project().colmap.isEmpty(),"no COLMAP beside the PLY");
     QSignalSpy finished(&window,&SgsWindow::meshFinished);
     QVERIFY(window.startMesh());
     // While it works, the rest waits: the lights, the panel, the menus; the mesh's Cancel does not.
@@ -558,7 +1054,22 @@ void SgsEditorTests::realCapture() {
     QVERIFY2(!back,"the mesh's progress went back");
     QVERIFY(window.findChild<QListWidget *>("lights")->isEnabled());
     QVERIFY2(finished.first().at(0).toBool(),qPrintable(finished.first().at(1).toString()));
-    QVERIFY(window.project().meshFiles.size()>=3);QVERIFY(!window.project().meshOutOfDate());
+    QVERIFY(!window.project().meshOutOfDate());
+    // The mesh comes alone; its LODs afterwards, from it.
+    QCOMPARE(window.project().meshObjs().size(),qsizetype(1));
+    QVERIFY(window.findChild<QPushButton *>("generateLods")->isEnabled());
+    QSignalSpy lodsDone(&window,&SgsWindow::meshFinished);
+    QVERIFY(window.startLods());
+    QVERIFY(lodsDone.wait(10*60*1000));
+    QVERIFY2(lodsDone.first().at(0).toBool(),qPrintable(lodsDone.first().at(1).toString()));
+    QCOMPARE(window.project().meshObjs().size(),qsizetype(1+window.project().mesh.lods.size()));
+    // They share the main mesh's albedo, each with its own normal map.
+    for (const auto &obj:window.project().meshObjs().mid(1)) {
+        const MeshData lod=readObj(obj);QVERIFY(lod.albedo.endsWith("_albedo.png"));QVERIFY(lod.normalMap.contains("_lod"));
+    }
+    // Beside the view cube, the LOD button goes through them.
+    auto *level=window.findChild<QPushButton *>("displayMeshLevel");QVERIFY(level->isVisible());
+    const QString shownFirst=level->text();level->click();QCOMPARE(level->text(),QStringLiteral("LOD: Main"));level->click();QVERIFY(level->text()!=shownFirst);
     const QString sgs=dir_.filePath("real_mesh.sgs");const auto withMesh=window.exportSgsTo(sgs);
     auto read=vgsdec::Capture::openFile(sgs.toStdString());QVERIFY(read.hasProxyMesh());
     const auto glb=read.proxyMesh();const GlbInfo info=inspectGlb(QByteArray(reinterpret_cast<const char *>(glb.data()),qsizetype(glb.size())));
@@ -601,6 +1112,10 @@ void SgsEditorTests::visualSheet() {
         window.selectLight(-1);save("6_mesh_lit.png");
         for (auto &l:window.project().lights) l.enabled=false;window.selectLight(-1);save("7_mesh_unlit.png");
         window.findChild<QPushButton *>("displayMeshLook")->click();QVERIFY(!viewport->meshTextured());save("7b_mesh_gray.png");
+        // S switches it back, and again.
+        window.activateWindow();QVERIFY(QTest::qWaitForWindowActive(&window));
+        viewport->setFocus();QTest::keyClick(viewport,Qt::Key_S);QVERIFY(viewport->meshTextured());
+        QTest::keyClick(viewport,Qt::Key_S);QVERIFY(!viewport->meshTextured());
         QVERIFY(window.grab().save(out+"/0b_window_mesh.png"));
     }
 }
