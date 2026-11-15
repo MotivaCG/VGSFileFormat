@@ -15,6 +15,7 @@
 #include <QImage>
 #include <QTimer>
 #include <array>
+#include <functional>
 #include <optional>
 #include <QPainterPath>
 #include <QOpenGLFunctions_3_3_Core>
@@ -101,10 +102,24 @@ public:
     // brush of `radius` pixels or draws a lasso; on release the records of the visible splats
     // inside are sent with what the stroke does: replace the chunk's picks, add (Ctrl) or
     // subtract (Alt). The right button orbits and the middle one pans meanwhile.
-    enum class SelectTool { None, Brush, Lasso };
+    // Paint (the SGS editor's mesh brushes, as T4DEditor's): on the mesh the left button paints
+    // and, for brushes with an opposite, so does the right one (paintStroke says which); anywhere
+    // else the left button orbits and the right or middle one pans. The brush shows where the
+    // mouse is over the mesh: its radius at the depth there, its hardness share dashed inside,
+    // filled as dense as its strength; while Ctrl, Alt or Shift is held, the values the wheel
+    // then changes (radius, hardness, strength) under it.
+    enum class SelectTool { None, Brush, Lasso, Paint };
     enum class SelectMode { Replace, Add, Subtract };
     void setSelectTool(SelectTool tool, float radius);
     SelectTool selectTool() const { return selectTool_; }
+    // What the hint at the bottom says while painting, its parts on lines of their own (split at
+    // " · "); empty for none.
+    void setPaintHint(const QString &hint) { paintHint_ = hint; update(); }
+    // Whether a point of the view is over what is painted, and where (capture space).
+    void setPaintHitTest(std::function<bool(const QPointF &, QVector3D *)> test) { paintHitTest_ = std::move(test); }
+    // The brush as drawn: its radius (capture units), strength and hardness (0..1), and whether
+    // the right button paints its opposite.
+    void setPaintBrush(float radius, float strength, float hardness, bool opposite);
     // The records of the visible splats a region of the view covers.
     std::vector<uint32_t> recordsInside(const QPainterPath &region) const;
     // The region a brush stroke along `path` covers.
@@ -184,12 +199,26 @@ public:
         QImage albedo;
     };
     void setMesh(std::shared_ptr<const ViewMesh> mesh);
+    // The mesh set changed in place, its vertices or triangles but not its albedo: drawn anew
+    // without loading the texture again.
+    void meshGeometryChanged();
+    // Texels of the mesh's albedo painted in place (image rows from the top); a null rectangle,
+    // all of it. Only they are uploaded again.
+    void meshTextureChanged(const QRect &texels = QRect());
+    // The ray under a point of the view, in the capture's space (where the mesh is), and how big
+    // one pixel of the view is at a point of that space.
+    void captureRay(const QPointF &screen, QVector3D *origin, QVector3D *direction) const;
+    float pixelSizeAt(const QVector3D &capturePoint) const;
     bool hasMesh() const { return bool(mesh_); }
     void setDrawMesh(bool draw);
     void setDrawSplats(bool draw);
     // The mesh with its albedo (shaded), or light grey, to see its shape alone.
     void setMeshTextured(bool textured);
     bool meshTextured() const { return meshShowsTexture_; }
+    // The mesh lit to read its shape (a key light that turns with the view), whatever the lights:
+    // for sculpting it.
+    void setMeshShapeLight(bool on);
+    bool meshShapeLight() const { return meshShapeLight_; }
     // The lights' icons in the view (and clicking them); those the splats hide are left out.
     void setLightIcons(bool shown);
     bool lightIcons() const { return lightIcons_; }
@@ -213,6 +242,12 @@ signals:
     void frameRequested();
     void ghostChanged(bool enabled);
     void selectionStroke(std::vector<uint32_t> records, Viewport::SelectMode mode);
+    // SelectTool::Paint: a drag on the mesh, as it goes. phase 0 pressed, 1 moved, 2 released;
+    // the button that paints (the right one: the opposite).
+    void paintStroke(QPointF position, int phase, Qt::MouseButton button, Qt::KeyboardModifiers modifiers);
+    // SelectTool::Paint, the wheel with Ctrl (setting 0, the radius), Shift (1, the strength) or
+    // Alt (2, the hardness): by so many steps.
+    void paintWheel(int setting, int steps);
     // Ctrl + wheel over the brush asks for a new radius; the owner sets it back.
     void brushRadiusRequested(float radius);
     // Esc in the viewport: the owner leaves its editing modes too.
@@ -274,6 +309,14 @@ private:
     bool cleanCapture_ = false, sheetCapture_ = false, sheetShowRemoved_ = false, sheetCrop_ = false;
     SelectTool selectTool_ = SelectTool::None;
     float brushRadius_ = 20;
+    QString paintHint_;
+    std::function<bool(const QPointF &, QVector3D *)> paintHitTest_;
+    float paintRadius_ = 0.03f, paintStrength_ = 0.5f, paintHardness_ = 0.3f;
+    bool paintOpposite_ = false, paintOver_ = false;
+    int paintDrag_ = 0; // 1 painting, 2 orbiting, 3 panning
+    Qt::MouseButton paintButton_ = Qt::NoButton;
+    QVector3D paintHoverPoint_;
+    void drawPaintBrush(QPainter &painter);
     bool selecting_ = false;
     SelectMode strokeMode_ = SelectMode::Replace;
     QPainterPath stroke_;
@@ -403,7 +446,9 @@ private:
     std::unique_ptr<QOpenGLShaderProgram> meshShader_;
     GLuint meshVao_ = 0, meshVertexBuffer_ = 0, meshIndexBuffer_ = 0, meshTexture_ = 0;
     GLsizei meshIndices_ = 0;
-    bool meshTextured_ = false, meshShowsTexture_ = true;
+    bool meshTextured_ = false, meshShowsTexture_ = true, meshGeometryDirty_ = false, meshShapeLight_ = false;
+    std::vector<QRect> meshTexelsDirty_;
+    bool meshTextureAllDirty_ = false;
     void drawMesh(const QMatrix4x4 &projection, const QMatrix4x4 &view, const QMatrix4x4 &model);
     QString emptyHint_;
     QPointF dragScreenStart_, dragScreenAxis_;

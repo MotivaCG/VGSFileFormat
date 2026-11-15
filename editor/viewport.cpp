@@ -277,6 +277,8 @@ in vec3 worldPosition, worldNormal;
 in vec2 uv;
 uniform sampler2D albedo;
 uniform bool textured;
+uniform bool shapeLight;
+uniform vec3 keyLight;
 uniform int lightCount;
 uniform vec4 lightPosition[8], lightColour[8];
 uniform float selfIllumination;
@@ -286,8 +288,17 @@ vec3 toLinear(vec3 c) { return mix(c/12.92,pow((c+0.055)/1.055,vec3(2.4)),greate
 vec3 toSrgb(vec3 c) { return mix(c*12.92,1.055*pow(c,vec3(1.0/2.4))-0.055,greaterThan(c,vec3(0.0031308))); }
 void main() {
     vec3 c=textured ? texture(albedo,uv).rgb : vec3(0.78); // grey: light, to read the shape // the image is uploaded bottom row first, as OBJ coordinates count
-    vec3 n=normalize(worldNormal);
+    // Across a fold the vertex normals may cancel out: there the face's own, else normalize(0)
+    // is NaN and the pixel black.
+    vec3 n=dot(worldNormal,worldNormal)>1e-12 ? normalize(worldNormal) : normalize(cross(dFdx(worldPosition),dFdy(worldPosition)));
     if(!gl_FrontFacing) n=-n;
+    if(shapeLight) {
+        // To read the shape while sculpting: a key light from above and to the left of the view,
+        // which turns with it, and a rim where the surface turns away.
+        float facing=abs(dot(n,normalize(eye-worldPosition)));
+        fragColor=vec4(c*(0.18+0.82*max(dot(n,keyLight),0.0))+vec3(0.12)*pow(max(1.0-facing,0.0),3.0),1);
+        return;
+    }
     if(lightCount==0) {
         // Unlit, the albedo alone would hide the shape: a head light shades it a little.
         fragColor=vec4(c*(0.6+0.4*abs(dot(n,normalize(eye-worldPosition)))),1);
@@ -1207,8 +1218,11 @@ void Viewport::paintGL() {
         if (selecting_ && selectTool_==SelectTool::Brush) { QColor fill=ink; fill.setAlpha(60); painter.fillPath(brushRegion(stroke_,brushRadius_),fill); }
         if (selecting_ && selectTool_==SelectTool::Lasso) { QColor fill=ink; fill.setAlpha(40); QPainterPath closed=stroke_; closed.closeSubpath(); painter.fillPath(closed,fill); painter.setPen(QPen(ink,1.5)); painter.drawPath(stroke_); }
         if (selectTool_==SelectTool::Brush) { painter.setPen(QPen(ink,1.5)); painter.setBrush(Qt::NoBrush); painter.drawEllipse(hover_,brushRadius_,brushRadius_); }
-        painter.setPen(overlayText()); painter.setFont(QFont("Segoe UI", 9));
-        painter.drawText(18, height()-18, tr("Drag: pick (add)   ·   Ctrl: replace   ·   Alt: subtract   ·   Right drag: orbit   ·   Middle drag: pan"));
+        if (selectTool_==SelectTool::Paint) drawPaintBrush(painter);
+        else {
+            painter.setPen(overlayText()); painter.setFont(QFont("Segoe UI", 9));
+            painter.drawText(18, height()-18, tr("Drag: pick (add)   ·   Ctrl: replace   ·   Alt: subtract   ·   Right drag: orbit   ·   Middle drag: pan"));
+        }
     } else if (viewerMode_) {
     painter.setPen(overlayText()); painter.setFont(QFont("Segoe UI", 9));
     painter.drawText(18, height()-18, tr("Drag: orbit   ·   Right drag: pan   ·   Wheel: zoom   ·   Double-click: focus"));
@@ -1455,6 +1469,18 @@ void Viewport::mousePressEvent(QMouseEvent *event) {
     orbitDragging_=viewerMode_ && event->button()==Qt::LeftButton && !(event->modifiers() & Qt::ShiftModifier);
     if (orbitDragging_) orbitSampleClock_.start();
     lastMouse_ = event->position().toPoint(); setFocus();
+    if (selectTool_==SelectTool::Paint) {
+        // On the mesh the left button paints, and the right one its opposite; anywhere else the
+        // left one orbits and the right or middle one pans.
+        hover_ = event->position();
+        QVector3D at; const bool on = paintHitTest_ && paintHitTest_(event->position(),&at);
+        if (on) { paintOver_ = true; paintHoverPoint_ = at; }
+        if (on && (event->button()==Qt::LeftButton || (event->button()==Qt::RightButton && paintOpposite_))) {
+            paintDrag_ = 1; paintButton_ = event->button();
+            emit paintStroke(event->position(),0,event->button(),event->modifiers()); update(); event->accept(); return;
+        }
+        paintDrag_ = event->button()==Qt::LeftButton ? 2 : 3; event->accept(); return;
+    }
     if (selectTool_ != SelectTool::None && event->button()==Qt::LeftButton) {
         selecting_ = true; stroke_ = QPainterPath(event->position()); hover_ = event->position();
         strokeMode_ = (event->modifiers() & Qt::AltModifier) ? SelectMode::Subtract : (event->modifiers() & Qt::ControlModifier) ? SelectMode::Replace : SelectMode::Add;
@@ -1471,6 +1497,17 @@ void Viewport::mouseMoveEvent(QMouseEvent *event) {
     const QPoint delta = event->position().toPoint() - lastMouse_; lastMouse_ = event->position().toPoint();
     if (selectTool_ != SelectTool::None) {
         hover_ = event->position();
+        if (selectTool_==SelectTool::Paint) {
+            if (paintDrag_==1) emit paintStroke(event->position(),1,paintButton_,event->modifiers());
+            else if (paintDrag_==2 || paintDrag_==3) {
+                if (paintDrag_==2) orbit(-delta.x()*0.3f,delta.y()*0.3f);
+                else { const auto inv = viewMatrix().inverted(); camera_.target += inv.mapVector({-float(delta.x()),float(delta.y()),0}) * (camera_.distance*0.0015f); }
+                viewCube_->setCamera(camera_); update(); emit cameraChanged(); return;
+            }
+            QVector3D at; paintOver_ = paintHitTest_ && paintHitTest_(event->position(),&at);
+            if (paintOver_) paintHoverPoint_ = at;
+            update(); return;
+        }
         if (selecting_) { stroke_.lineTo(event->position()); update(); return; }
         // Picking: the right button orbits, the middle one pans.
         if (event->buttons() & Qt::RightButton) orbit(-delta.x()*0.3f,delta.y()*0.3f);
@@ -1509,6 +1546,12 @@ void Viewport::mouseReleaseEvent(QMouseEvent *event) {
             orbitInertiaClock_.start();orbitInertiaTimer_.start();
         }
     }
+    if (selectTool_==SelectTool::Paint && paintDrag_) {
+        const bool painting = paintDrag_==1 && event->button()==paintButton_;
+        if (painting) emit paintStroke(event->position(),2,paintButton_,event->modifiers());
+        if (painting || (paintDrag_==2 && event->button()==Qt::LeftButton) || (paintDrag_==3 && event->button()!=Qt::LeftButton)) paintDrag_ = 0;
+        update(); event->accept(); return;
+    }
     if (selecting_ && event->button()==Qt::LeftButton) {
         selecting_ = false; stroke_.lineTo(event->position());
         QPainterPath region = selectTool_==SelectTool::Lasso ? stroke_ : brushRegion(stroke_,brushRadius_);
@@ -1541,6 +1584,8 @@ void Viewport::mouseReleaseEvent(QMouseEvent *event) {
 }
 void Viewport::mouseDoubleClickEvent(QMouseEvent *event) {
     orbitInertiaTimer_.stop();orbitDragging_=false;
+    // With a brush the second click is a press like the first: it paints, the view stays.
+    if (selectTool_==SelectTool::Paint) { mousePressEvent(event); return; }
     // On a gizmo handle a double-click is a press like any other; elsewhere it focuses.
     if (event->button()==Qt::LeftButton && !(event->modifiers() & Qt::ShiftModifier) && pickHandle(event->position())<0) {
         lastMouse_ = event->position().toPoint(); ignoreLeftUntilRelease_ = true; // the second press does not orbit
@@ -1685,11 +1730,11 @@ bool Viewport::pickPoint(const QPointF &screen, QVector3D *world) const {
     *world = origin + direction*((picked-z0)/(z1-z0)); return true;
 }
 void Viewport::keyReleaseEvent(QKeyEvent *event) {
-    if (selectTool_!=SelectTool::None && event->key()==Qt::Key_Alt) update();
+    if (selectTool_!=SelectTool::None && (event->key()==Qt::Key_Alt || (selectTool_==SelectTool::Paint && (event->key()==Qt::Key_Control || event->key()==Qt::Key_Shift)))) update();
     QOpenGLWidget::keyReleaseEvent(event);
 }
 void Viewport::keyPressEvent(QKeyEvent *event) {
-    if (selectTool_!=SelectTool::None && event->key()==Qt::Key_Alt) update();
+    if (selectTool_!=SelectTool::None && (event->key()==Qt::Key_Alt || (selectTool_==SelectTool::Paint && (event->key()==Qt::Key_Control || event->key()==Qt::Key_Shift)))) update();
     if (handleViewKey(event->key(),event->modifiers())) { event->accept(); return; }
     if (event->key()==Qt::Key_Escape) { setTransformMode(TransformMode::None); emit escapePressed(); event->accept(); return; }
     if (event->key()==Qt::Key_Return || event->key()==Qt::Key_Enter) { emit enterPressed(); event->accept(); return; }
@@ -1705,6 +1750,12 @@ void Viewport::keyPressEvent(QKeyEvent *event) {
 void Viewport::wheelEvent(QWheelEvent *event) {
     focusTimer_.stop();orbitInertiaTimer_.stop();orbitDragging_=false;
     if (dragging_) { dragging_ = false; ignoreLeftUntilRelease_ = true; }
+    if (selectTool_==SelectTool::Paint && (event->modifiers() & (Qt::ControlModifier|Qt::ShiftModifier|Qt::AltModifier))) {
+        // Windows turns Alt + wheel into a horizontal wheel.
+        const int delta = event->angleDelta().y() ? event->angleDelta().y() : event->angleDelta().x();
+        if (!(paintDrag_==1) && delta) emit paintWheel(event->modifiers() & Qt::ControlModifier ? 0 : event->modifiers() & Qt::ShiftModifier ? 1 : 2, delta/120 ? delta/120 : (delta>0 ? 1 : -1));
+        event->accept(); return;
+    }
     if (selectTool_==SelectTool::Brush && (event->modifiers() & Qt::ControlModifier)) {
         if (!selecting_ && event->angleDelta().y()) emit brushRadiusRequested(brushRadius_ * std::pow(1.15f, event->angleDelta().y()/120.0f));
         event->accept(); return;
@@ -2209,9 +2260,90 @@ void Viewport::setGizmoTarget(const std::optional<Transform> &target) {
     update();
 }
 void Viewport::setMesh(std::shared_ptr<const ViewMesh> mesh) {mesh_=std::move(mesh);meshDirty_=true;update();}
+void Viewport::meshGeometryChanged() {meshGeometryDirty_=true;update();}
+void Viewport::meshTextureChanged(const QRect &texels) {
+    if (texels.isNull()) meshTextureAllDirty_=true; else meshTexelsDirty_.push_back(texels);
+    update();
+}
+void Viewport::setPaintBrush(float radius,float strength,float hardness,bool opposite) {
+    paintRadius_=radius;paintStrength_=strength;paintHardness_=hardness;paintOpposite_=opposite;update();
+}
+// The brush and its hint, as T4DEditor draws them.
+void Viewport::drawPaintBrush(QPainter &painter) {
+    painter.setRenderHint(QPainter::Antialiasing);
+    const Qt::KeyboardModifiers held = QGuiApplication::queryKeyboardModifiers();
+    const QColor colour(255,255,255);
+    if (paintOver_ && paintDrag_!=2 && paintDrag_!=3) {
+        const float px = paintRadius_/std::max(1e-9f,pixelSizeAt(paintHoverPoint_));
+        // The falloff: full strength inside the hardness circle, fading out to the edge; the fill
+        // as dense as the strength.
+        if (px>2) {
+            const double hard = std::clamp(double(paintHardness_),0.0,1.0);
+            QColor fill = colour; fill.setAlpha(int(18+52*std::clamp(paintStrength_,0.f,1.f)));
+            QColor clear = fill; clear.setAlpha(0);
+            QRadialGradient falloff(hover_,px); falloff.setColorAt(0,fill); falloff.setColorAt(hard,fill); falloff.setColorAt(1,clear);
+            painter.setPen(Qt::NoPen); painter.setBrush(falloff); painter.drawEllipse(hover_,px,px);
+            painter.setBrush(Qt::NoBrush);
+            QColor ring = colour; ring.setAlpha(held & Qt::AltModifier ? 255 : 150);
+            painter.setPen(QPen(ring,held & Qt::AltModifier ? 1.4 : 1,Qt::DashLine)); painter.drawEllipse(hover_,px*hard,px*hard);
+        }
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(QPen(QColor(0,0,0,120),3)); painter.drawEllipse(hover_,px,px);
+        painter.setPen(QPen(colour,held & Qt::ControlModifier ? 2.2 : 1.5)); painter.drawEllipse(hover_,px,px); painter.drawEllipse(hover_,1.5,1.5);
+        // While Ctrl, Alt or Shift is held the wheel changes radius, hardness or strength: their
+        // values under the brush, the one changing lit.
+        if (held & (Qt::ControlModifier|Qt::AltModifier|Qt::ShiftModifier)) {
+            struct Value { QString text; bool changing; };
+            const std::vector<Value> values{{tr("Radius %1 cm").arg(double(paintRadius_)*100,0,'f',1),bool(held & Qt::ControlModifier)},
+                                            {tr("Hardness %1 %").arg(std::lround(paintHardness_*100)),bool(held & Qt::AltModifier)},
+                                            {tr("Strength %1 %").arg(std::lround(paintStrength_*100)),bool(held & Qt::ShiftModifier)}};
+            QFont font("Segoe UI",8); QFont bold=font; bold.setBold(true);
+            const QFontMetricsF metrics(font),boldMetrics(bold);
+            const double gap=10; double width=12-gap;
+            for (const Value &v:values) width+=(v.changing ? boldMetrics : metrics).horizontalAdvance(v.text)+gap;
+            const QRectF box(hover_.x()-width/2,hover_.y()+px+8,width,metrics.height()+6);
+            QColor back=EditorTheme::panel(); back.setAlpha(215);
+            painter.setPen(QPen(EditorTheme::panelBorder(),1)); painter.setBrush(back); painter.drawRoundedRect(box,4,4);
+            double x=box.left()+6;
+            for (const Value &v:values) {
+                painter.setFont(v.changing ? bold : font); painter.setPen(v.changing ? EditorTheme::accent() : EditorTheme::mutedText());
+                const double w=(v.changing ? boldMetrics : metrics).horizontalAdvance(v.text);
+                painter.drawText(QRectF(x,box.top(),w+1,box.height()),Qt::AlignVCenter|Qt::AlignLeft,v.text); x+=w+gap;
+            }
+        }
+    }
+    if (paintHint_.isEmpty()) return;
+    // The tool's controls in a card at the bottom left, one per line.
+    const QStringList lines = paintHint_.split(QStringLiteral(" · "));
+    const QFont font("Segoe UI",9); painter.setFont(font);
+    const QFontMetricsF metrics(font);
+    double textWidth=0; for (const QString &line:lines) textWidth=std::max(textWidth,metrics.horizontalAdvance(line));
+    const double lineHeight=metrics.height()+2;
+    const QRectF card(10,height()-12-lines.size()*lineHeight-12,std::min(textWidth+24,width()-20.0),lines.size()*lineHeight+12);
+    QColor fill=EditorTheme::panel(); fill.setAlpha(205);
+    painter.setPen(QPen(EditorTheme::panelBorder(),1)); painter.setBrush(fill);
+    painter.drawRoundedRect(card,EditorTheme::controlRadius,EditorTheme::controlRadius);
+    painter.setPen(EditorTheme::mutedText());
+    for (int i=0;i<lines.size();++i)
+        painter.drawText(QRectF(card.left()+12,card.top()+6+i*lineHeight,card.width()-24,lineHeight),Qt::AlignLeft|Qt::AlignVCenter,metrics.elidedText(lines[i],Qt::ElideRight,card.width()-24));
+}
+void Viewport::captureRay(const QPointF &screen,QVector3D *origin,QVector3D *direction) const {
+    QVector3D o,d;mouseRay(screen,&o,&d);
+    const QMatrix4x4 toCapture=transform_.matrix().inverted();
+    *origin=toCapture.map(o);*direction=toCapture.mapVector(d).normalized();
+}
+float Viewport::pixelSizeAt(const QVector3D &capturePoint) const {
+    const QVector3D world=transform_.matrix().map(capturePoint);
+    const QMatrix4x4 view=viewMatrix();
+    const float halfHeight=camera_.orthographic && camera_.preset!=ViewPreset::Free ? camera_.distance*std::tan(qDegreesToRadians(22.5f))
+                                                                                    : std::max(1e-6f,-view.map(world).z())*std::tan(qDegreesToRadians(22.5f));
+    const float scale=std::cbrt(std::abs(transform_.matrix().determinant()));
+    return 2*halfHeight/std::max(1,height())/std::max(1e-12f,scale);
+}
 void Viewport::setDrawMesh(bool draw) {drawMesh_=draw;update();}
 void Viewport::setDrawSplats(bool draw) {drawSplats_=draw;update();}
 void Viewport::setMeshTextured(bool textured) {meshShowsTexture_=textured;update();}
+void Viewport::setMeshShapeLight(bool on) {meshShapeLight_=on;update();}
 void Viewport::drawMesh(const QMatrix4x4 &projection,const QMatrix4x4 &view,const QMatrix4x4 &model) {
     if (!meshShader_) return;
     if (meshDirty_) {
@@ -2229,13 +2361,35 @@ void Viewport::drawMesh(const QMatrix4x4 &projection,const QMatrix4x4 &view,cons
             glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR_MIPMAP_LINEAR);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
             glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
         }
-        meshDirty_=false;
+        meshDirty_=false;meshGeometryDirty_=false;meshTexelsDirty_.clear();meshTextureAllDirty_=false;
+    }
+    if (meshTextured_ && (meshTextureAllDirty_ || !meshTexelsDirty_.empty()) && !mesh_->albedo.isNull()) {
+        // Painted texels: those rectangles again (rows flipped, as the whole image is uploaded), then the mipmaps.
+        const QImage &albedo=mesh_->albedo;
+        glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,meshTexture_);glPixelStorei(GL_UNPACK_ALIGNMENT,4);
+        if (meshTextureAllDirty_) meshTexelsDirty_={albedo.rect()};
+        for (const QRect &r:meshTexelsDirty_) {
+            const QRect at=r.intersected(albedo.rect());if (at.isEmpty()) continue;
+            const QImage piece=albedo.copy(at).convertToFormat(QImage::Format_RGBA8888).mirrored();
+            glTexSubImage2D(GL_TEXTURE_2D,0,at.left(),albedo.height()-at.bottom()-1,at.width(),at.height(),GL_RGBA,GL_UNSIGNED_BYTE,piece.constBits());
+        }
+        glGenerateMipmap(GL_TEXTURE_2D);
+        meshTexelsDirty_.clear();meshTextureAllDirty_=false;
+    }
+    if (meshGeometryDirty_) {
+        // Moved vertices, or triangles gone: the buffers again, the texture as it is.
+        glBindVertexArray(meshVao_);
+        glBindBuffer(GL_ARRAY_BUFFER,meshVertexBuffer_);glBufferData(GL_ARRAY_BUFFER,GLsizeiptr(mesh_->vertices.size()*sizeof(float)),mesh_->vertices.data(),GL_DYNAMIC_DRAW);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,meshIndexBuffer_);glBufferData(GL_ELEMENT_ARRAY_BUFFER,GLsizeiptr(mesh_->indices.size()*sizeof(uint32_t)),mesh_->indices.data(),GL_DYNAMIC_DRAW);
+        glBindVertexArray(0);meshIndices_=GLsizei(mesh_->indices.size());meshGeometryDirty_=false;
     }
     glEnable(GL_DEPTH_TEST);glDepthMask(GL_TRUE);glDisable(GL_BLEND);
     meshShader_->bind();
     meshShader_->setUniformValue("model",model);meshShader_->setUniformValue("view",view);meshShader_->setUniformValue("projection",projection);
     meshShader_->setUniformValue("eye",view.inverted().map(QVector3D(0,0,0)));
     meshShader_->setUniformValue("textured",meshTextured_ && meshShowsTexture_);meshShader_->setUniformValue("albedo",0);
+    meshShader_->setUniformValue("shapeLight",meshShapeLight_);
+    meshShader_->setUniformValue("keyLight",view.inverted().mapVector(QVector3D(-0.35f,0.55f,0.75f).normalized()).normalized());
     setLightUniforms(meshShader_.get(),model);
     glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,meshTexture_);
     glBindVertexArray(meshVao_);glDrawElements(GL_TRIANGLES,meshIndices_,GL_UNSIGNED_INT,nullptr);glBindVertexArray(0);
