@@ -461,11 +461,16 @@ void SgsEditorTests::lightsTurn() {
     const SgsProject q=SgsProject::fromJson(p.json(dir_.filePath("t.sgsproj")),dir_.filePath("t.sgsproj"));
     QCOMPARE(q.lights[0].turnSeconds,8.f);QVERIFY(q.lights[0].clockwise);QCOMPARE(q.rigTurnSeconds,20.f);QVERIFY(q.rigClockwise);
     QVERIFY(std::abs(q.lightAngle(0,2)-(-45*2-18*2))<1e-3f); // its own -45 and the set's -18 degrees a second
+    // A project saved without the set's turn turns as a new capture: once every 5 s.
+    QJsonObject old=p.json(dir_.filePath("t.sgsproj"));old.remove("lightsTurn");
+    QCOMPARE(SgsProject::fromJson(old,dir_.filePath("t.sgsproj")).rigTurnSeconds,5.f);
 
     SgsWindow window;window.resize(900,700);window.show();QVERIFY(QTest::qWaitForWindowExposed(&window));
     QVERIFY(window.openPly(writeSphere(dir_.path(),"turn.ply",2000,true)));
     window.project().lights.clear();window.addLight(false);window.project().lights[0].position={1,1,0};window.selectLight(-1);
-    // Nothing turns yet: Play does nothing.
+    // A new capture's set turns once every 5 s; with it still and no light turning, Play does nothing.
+    QCOMPARE(window.project().rigTurnSeconds,5.f);
+    window.setRigTurn(0,false);
     window.setTurning(true);QVERIFY(!window.turning());
     window.setLightTurn(0,4,false); // a turn every 4 s
     window.setLightTime(1);

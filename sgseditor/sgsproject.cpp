@@ -127,7 +127,7 @@ struct Rig {
 } // namespace
 
 QStringList SgsLight::presetNames() {
-    return {QStringLiteral("Neon: magenta and blue"),QStringLiteral("Red and cyan"),QStringLiteral("Three-point"),QStringLiteral("Daylight sun"),
+    return {QStringLiteral("Neon: magenta and blue"),QStringLiteral("Red and cyan"),QStringLiteral("Night: sodium and teal"),QStringLiteral("Three-point"),QStringLiteral("Daylight sun"),
             QStringLiteral("Sunset"),QStringLiteral("Soft studio"),QStringLiteral("Horror: green from below"),QStringLiteral("Campfire and moon"),
             QStringLiteral("Disco: turning colours")};
 }
@@ -137,15 +137,18 @@ QVector<SgsLight> SgsLight::preset(int index,const QVector3D &centre,float size)
     case 0: return {r.point("Magenta rim",QColor(255,30,200),-105,15,6),r.point("Blue rim",QColor(30,90,255),105,15,8),
                     r.point("Violet fill",QColor(120,70,255),0,10,0.35f,1.4f)};
     case 1: return {r.point("Red",QColor(255,25,25),-90,5,5),r.point("Cyan",QColor(0,220,255),90,5,4)};
-    case 2: return {r.point("Key",QColor(255,236,214),-40,35,2.2f,1.2f),r.point("Fill",QColor(190,210,255),45,10,0.6f,1.2f),
+    case 2: // a warm street lamp in front at one side, a bluish, barely green night all around the rest
+        return {r.point("Sodium key",QColor(255,150,60),-60,20,2.0f,1.1f),r.point("Teal fill",QColor(30,150,200),55,10,2.2f,1.2f),
+                r.point("Teal rim",QColor(50,175,215),155,30,4.0f)};
+    case 3: return {r.point("Key",QColor(255,236,214),-40,35,2.2f,1.2f),r.point("Fill",QColor(190,210,255),45,10,0.6f,1.2f),
                     r.point("Rim",QColor(255,255,255),170,45,2.5f)};
-    case 3: return {r.sun("Sun",QColor(255,244,229),-35,55,2.5f),r.sun("Sky",QColor(150,190,255),145,35,0.6f)};
-    case 4: return {r.sun("Low sun",QColor(255,125,45),70,8,3),r.sun("Dusk sky",QColor(110,120,220),-110,40,0.8f)};
-    case 5: return {r.point("Soft left",QColor(255,250,245),-45,20,1,1.3f),r.point("Soft right",QColor(255,250,245),45,20,1,1.3f),
+    case 4: return {r.sun("Sun",QColor(255,244,229),-35,55,2.5f),r.sun("Sky",QColor(150,190,255),145,35,0.6f)};
+    case 5: return {r.sun("Low sun",QColor(255,125,45),70,8,3),r.sun("Dusk sky",QColor(110,120,220),-110,40,0.8f)};
+    case 6: return {r.point("Soft left",QColor(255,250,245),-45,20,1,1.3f),r.point("Soft right",QColor(255,250,245),45,20,1,1.3f),
                     r.sun("Top",QColor(255,255,255),0,85,0.5f)};
-    case 6: return {r.point("Green from below",QColor(80,255,100),0,-55,3.5f,0.8f),r.point("Blue back",QColor(50,80,255),180,30,2)};
-    case 7: return {r.point("Fire",QColor(255,110,35),20,-20,3.5f,0.8f),r.sun("Moon",QColor(130,160,255),-150,50,0.5f)};
-    case 8: {
+    case 7: return {r.point("Green from below",QColor(80,255,100),0,-55,3.5f,0.8f),r.point("Blue back",QColor(50,80,255),180,30,2)};
+    case 8: return {r.point("Fire",QColor(255,110,35),20,-20,3.5f,0.8f),r.sun("Moon",QColor(130,160,255),-150,50,0.5f)};
+    case 9: {
         // Three colours a third of a turn apart, going round at their own pace.
         QVector<SgsLight> lights{r.point("Magenta",QColor(255,30,200),0,25,3),r.point("Cyan",QColor(0,220,255),120,25,3),r.point("Yellow",QColor(255,210,0),240,25,3)};
         lights[0].turnSeconds=6;lights[1].turnSeconds=6;lights[2].turnSeconds=9;lights[2].clockwise=true;
@@ -179,7 +182,8 @@ SgsProject SgsProject::fromJson(const QJsonObject &root,const QString &projectPa
     for (const auto &l:root.value("lights").toArray()) p.lights.append(SgsLight::fromJson(l.toObject()));
     p.selfIllumination=float(std::clamp(root.value("selfIllumination").toDouble(0.1),0.0,1.0));
     const auto turn=root.value("lightsTurn").toObject();
-    p.rigTurnSeconds=float(std::clamp(turn.value("seconds").toDouble(0),0.0,86400.0));p.rigClockwise=turn.value("clockwise").toBool();
+    // a project saved without it turns as a new capture does: once every 5 s
+    p.rigTurnSeconds=float(std::clamp(turn.value("seconds").toDouble(SgsProject{}.rigTurnSeconds),0.0,86400.0));p.rigClockwise=turn.value("clockwise").toBool();
     p.estimatedNormals=root.value("estimatedNormals").toBool();
     p.fineNormals=p.estimatedNormals && root.value("fineNormals").toBool();
     const auto mesh=root.value("mesh").toObject();p.mesh=MeshSettings::fromJson(mesh.value("settings").toObject());

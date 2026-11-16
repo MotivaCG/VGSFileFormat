@@ -80,7 +80,7 @@ shares (viewport, export, normals) from `../editor`; it is supplied under the
   normal, Lambert in linear light, plus *Self-illumination* of its colour glowing on its own
   (10 %, as Unreal's default). With no light on, the splats show as captured. A new capture
   comes with a magenta and a blue rim light, both off. *Lights > Presets* replaces the lights
-  with a ready-made lighting (neon rims, red and cyan, three-point, daylight sun, sunset, soft
+  with a ready-made lighting (neon rims, red and cyan, sodium and teal night, three-point, daylight sun, sunset, soft
   studio, horror, campfire); *Lights > All lights* turns them all on or off. A light's colour
   is taken as picked (sRGB) and lights with its linear value, as in Unreal. *Show: Mesh*
   draws the mesh under the same lights.
