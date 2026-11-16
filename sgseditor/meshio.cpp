@@ -4,9 +4,11 @@
 // Part of SGS Editor, under the VGS Editor licence (editor/LICENSE.md).
 
 #include "meshio.h"
+#include "meshtangents.h"
 #include <QBuffer>
 #include <QDir>
 #include <QFile>
+#include <cstring>
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -34,6 +36,7 @@ void readMaterial(const QString &mtl,MeshData &mesh) {
         const QString key=words[0].toLower(),name=words.last();
         if (key=="map_kd" && mesh.albedo.isEmpty()) mesh.albedo=dir.absoluteFilePath(name);
         else if ((key=="norm" || key=="map_bump" || key=="bump") && mesh.normalMap.isEmpty()) mesh.normalMap=dir.absoluteFilePath(name);
+        else if (key=="map_ka" && mesh.occlusion.isEmpty()) mesh.occlusion=dir.absoluteFilePath(name);
     }
 }
 } // namespace
@@ -106,6 +109,69 @@ MeshData readObj(const QString &path) {
             const QVector3D n=QVector3D::crossProduct(p[1]-p[0],p[2]-p[0]);
             for (int k=0;k<3;++k) for (int a=0;a<3;++a) mesh.normals[f[k]*3+a]+=n[a];
         }
+    }
+    for (size_t i=0;i<mesh.vertices();++i) {
+        QVector3D n(mesh.normals[i*3],mesh.normals[i*3+1],mesh.normals[i*3+2]);
+        n=n.lengthSquared()>1e-20f ? n.normalized() : QVector3D(0,1,0);
+        for (int a=0;a<3;++a) mesh.normals[i*3+a]=n[a];
+    }
+    return mesh;
+}
+
+MeshData readPlyMesh(const QString &path) {
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) fail(QStringLiteral("Cannot read %1: %2").arg(path,file.errorString()));
+    qint64 vertices=-1,faces=-1;
+    int stride=0,xyz[3]={-1,-1,-1};
+    bool inVertex=false,binary=false,faceListOk=false;
+    while (true) {
+        const QByteArray line=file.readLine().trimmed();
+        if (line.isEmpty() && file.atEnd()) fail(QStringLiteral("%1: no PLY header end.").arg(path));
+        const auto w=line.split(' ');
+        if (w[0]=="format") binary=w.value(1)=="binary_little_endian";
+        else if (w[0]=="element") {inVertex=w.value(1)=="vertex";(inVertex ? vertices : faces)=w.value(2).toLongLong();}
+        else if (w[0]=="property" && inVertex) {
+            const int size=w.value(1)=="float" ? 4 : (w.value(1)=="uchar" ? 1 : (w.value(1)=="double" ? 8 : 0));
+            if (!size) fail(QStringLiteral("%1: unsupported vertex property type %2.").arg(path,QString::fromLatin1(w.value(1))));
+            const QByteArray name=w.value(2);
+            if (size==4) for (int a=0;a<3;++a) if (name==QByteArray(1,char('x'+a))) xyz[a]=stride;
+            stride+=size;
+        }
+        else if (w[0]=="property" && !inVertex) faceListOk=w.value(1)=="list" && w.value(2)=="uchar" && (w.value(3)=="int" || w.value(3)=="uint");
+        else if (w[0]=="end_header") break;
+    }
+    if (!binary || vertices<=0 || faces<=0 || xyz[0]<0 || xyz[1]<0 || xyz[2]<0 || !faceListOk)
+        fail(QStringLiteral("%1: not a binary triangle mesh PLY with float x, y, z and int face lists.").arg(path));
+    const QByteArray vbytes=file.read(vertices*stride);
+    if (vbytes.size()!=vertices*stride) fail(QStringLiteral("%1: truncated vertices.").arg(path));
+    MeshData mesh;
+    mesh.positions.resize(size_t(vertices)*3);
+    for (qint64 i=0;i<vertices;++i)
+        for (int a=0;a<3;++a) std::memcpy(&mesh.positions[size_t(i)*3+a],vbytes.constData()+i*stride+xyz[a],4);
+    const QByteArray fbytes=file.readAll();
+    qsizetype at=0;
+    for (qint64 f=0;f<faces;++f) {
+        if (at>=fbytes.size()) fail(QStringLiteral("%1: truncated faces.").arg(path));
+        const int n=quint8(fbytes[at++]);
+        if (at+qsizetype(n)*4>fbytes.size()) fail(QStringLiteral("%1: truncated faces.").arg(path));
+        std::vector<uint32_t> c(static_cast<size_t>(n));
+        for (int k=0;k<n;++k) std::memcpy(&c[size_t(k)],fbytes.constData()+at+k*4,4);
+        at+=qsizetype(n)*4;
+        for (uint32_t v:c) if (v>=uint64_t(vertices)) fail(QStringLiteral("%1: a face points past the vertices.").arg(path));
+        for (int k=1;k+1<n;++k) {mesh.indices.push_back(c[0]);mesh.indices.push_back(c[size_t(k)]);mesh.indices.push_back(c[size_t(k)+1]);}
+    }
+    if (mesh.indices.empty()) fail(QStringLiteral("%1 has no triangles.").arg(path));
+    mesh.uvs.assign(size_t(vertices)*2,0.f);
+    mesh.positionIds.resize(size_t(vertices));
+    for (size_t i=0;i<size_t(vertices);++i) mesh.positionIds[i]=uint32_t(i);
+    mesh.positionCount=size_t(vertices);
+    // area-weighted face normals, summed at each vertex
+    mesh.normals.assign(size_t(vertices)*3,0.f);
+    for (size_t t=0;t<mesh.triangles();++t) {
+        const uint32_t *f=&mesh.indices[t*3];QVector3D p[3];
+        for (int k=0;k<3;++k) p[k]=QVector3D(mesh.positions[f[k]*3],mesh.positions[f[k]*3+1],mesh.positions[f[k]*3+2]);
+        const QVector3D n=QVector3D::crossProduct(p[1]-p[0],p[2]-p[0]);
+        for (int k=0;k<3;++k) for (int a=0;a<3;++a) mesh.normals[f[k]*3+a]+=n[a];
     }
     for (size_t i=0;i<mesh.vertices();++i) {
         QVector3D n(mesh.normals[i*3],mesh.normals[i*3+1],mesh.normals[i*3+2]);
@@ -199,7 +265,7 @@ void writeObj(const QString &path,const MeshData &mesh,const QString &mtl,const 
     if (!file.open(QIODevice::WriteOnly) || file.write(out)!=out.size() || !file.commit()) fail(QStringLiteral("Cannot write %1: %2").arg(path,file.errorString()));
 }
 
-QByteArray writeGlb(const MeshData &mesh,const QImage &albedo,const QImage &normalMap,const GlbOptions &options) {
+QByteArray writeGlb(const MeshData &mesh,const QImage &albedo,const QImage &normalMap,const GlbOptions &options,const QImage &occlusion) {
     if (mesh.indices.empty()) fail("The mesh has no triangles.");
     Binary b;const qsizetype n=qsizetype(mesh.vertices());
     const QVector3D lo=mesh.minimum(),hi=mesh.maximum();
@@ -226,7 +292,11 @@ QByteArray writeGlb(const MeshData &mesh,const QImage &albedo,const QImage &norm
     };
     if (!albedo.isNull()) {pbr["baseColorTexture"]=QJsonObject{{"index",image(albedo,"JPG","image/jpeg",options.jpegQuality)}};material["pbrMetallicRoughness"]=pbr;}
     if (options.normalMap && !normalMap.isNull()) material["normalTexture"]=QJsonObject{{"index",image(normalMap,"PNG","image/png",-1)}};
+    // grey: glTF reads its red channel
+    if (options.occlusion && !occlusion.isNull()) material["occlusionTexture"]=QJsonObject{{"index",image(occlusion,"PNG","image/png",-1)}};
     QJsonObject attributes{{"POSITION",positions},{"NORMAL",normals},{"TEXCOORD_0",texcoords}};
+    // The tangent space the normal map was baked in, so that no viewer has to rebuild it.
+    if (material.contains("normalTexture")) attributes["TANGENT"]=b.accessor(b.view(floats(meshTangents(mesh)),34962),5126,n,"VEC4");
     QJsonObject root{
         {"asset",QJsonObject{{"version","2.0"},{"generator","SGS Editor"}}},
         {"scene",0},{"scenes",QJsonArray{QJsonObject{{"nodes",QJsonArray{0}}}}},

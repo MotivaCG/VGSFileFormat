@@ -226,6 +226,8 @@ public:
     bool drawsSplats() const { return drawSplats_; }
     // What the empty viewport says; empty for the viewer's or the editor's own text.
     void setEmptyHint(const QString &text) { emptyHint_ = text; update(); }
+    // A line about what is drawn (e.g. the mesh level and its triangles), above the controls hint; empty: none.
+    void setInfoText(const QString &text) { if (infoText_ != text) { infoText_ = text; update(); } }
 signals:
     // The gizmo moved or turned the target of setGizmoTarget.
     void gizmoTargetEdited(Transform transform);
@@ -451,6 +453,7 @@ private:
     bool meshTextureAllDirty_ = false;
     void drawMesh(const QMatrix4x4 &projection, const QMatrix4x4 &view, const QMatrix4x4 &model);
     QString emptyHint_;
+    QString infoText_;
     QPointF dragScreenStart_, dragScreenAxis_;
     float dragLength_ = 1, dragParameter_ = 0, dragRotationAngle_ = 0;
 };

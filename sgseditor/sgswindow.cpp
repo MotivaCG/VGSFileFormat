@@ -5,6 +5,7 @@
 
 #include "sgswindow.h"
 #include "colmapfinder.h"
+#include "sgsautomation.h"
 #include "sgsversion.h"
 #include "viewport.h"
 #include "viewcube.h"
@@ -25,6 +26,7 @@
 #include <QDragEnterEvent>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QLocale>
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QJsonArray>
@@ -231,6 +233,7 @@ void SgsWindow::setClockwise(QPushButton *b,bool clockwise) {
 SgsWindow::SgsWindow() : gs2mesh_(new Gs2Mesh(this)), turnTimer_(new QTimer(this)) {
     qRegisterMetaType<FramePtr>();qRegisterMetaType<Transform>();
     setAcceptDrops(true);resize(1440,900);
+    automation_=new SgsAutomation(this,[this](const QString &method,const QJsonObject &arguments) {return automation(method,arguments);});
     viewport_=new Viewport;viewport_->enableLighting();viewport_->setViewerMode(true);viewport_->setSplatRendering(true);viewport_->setSplatShDegree(-1);
     viewport_->setEmptyHint(tr("Open or drop a 3D Gaussian Splatting .ply\n\nCtrl+O"));
     auto *splitter=new QSplitter;splitter->addWidget(viewport_);
@@ -393,8 +396,9 @@ SgsWindow::SgsWindow() : gs2mesh_(new Gs2Mesh(this)), turnTimer_(new QTimer(this
             project_.meshEdited.clear();project_.lodsSource.clear();sculpt_.reset();
             if (loadMesh(0)) {showMesh_=true;viewport_->setDrawMesh(true);viewport_->setDrawSplats(false);}
             statusBar()->showMessage(tr("Mesh made: %1").arg(QDir::toNativeSeparators(QFileInfo(files.value(0)).absolutePath())),10000);
-        } else if (error!=tr("Cancelled.") && error!="Cancelled.")
+        } else if (error!=tr("Cancelled.") && error!="Cancelled." && !quietMesh_)
             QMessageBox::warning(this,lods ? tr("Generate LODs") : tr("Generate mesh"),tr("gs2mesh could not make the %1:\n\n%2").arg(lods ? tr("LODs") : tr("mesh"),error));
+        meshError_=ok ? QString() : error;quietMesh_=false;
         setMeshBusy(false);emit meshFinished(ok,error);
     });
     auto key=[&](const QKeySequence &sequence,auto action) {auto *s=new QShortcut(sequence,this);connect(s,&QShortcut::activated,this,action);};
@@ -405,8 +409,19 @@ SgsWindow::SgsWindow() : gs2mesh_(new Gs2Mesh(this)), turnTimer_(new QTimer(this
     // Space and Home are the Lights menu's (Play / pause turning, Back to the start): a second
     // shortcut on the same key would leave both ambiguous, and neither would fire.
     syncTitle();syncCapture();syncPhotos();syncMesh();syncLights();syncTurning();
+    if (QSettings().value("Mcp/Enabled",false).toBool()) setMcpEnabled(true);
 }
 SgsWindow::~SgsWindow() {gs2mesh_->cancel();}
+
+void SgsWindow::setMcpEnabled(bool enabled) {
+    QString error;
+    if (enabled && !automation_->start(&error)) {
+        statusBar()->showMessage(tr("Cannot enable MCP: %1").arg(error),8000);enabled=false;
+    } else if (!enabled) automation_->stop();
+    else statusBar()->showMessage(tr("MCP enabled."),3000);
+    if (mcpAction_) {const QSignalBlocker block(mcpAction_);mcpAction_->setChecked(enabled);}
+    QSettings().setValue("Mcp/Enabled",enabled);
+}
 
 void SgsWindow::buildPanel() {
     auto *panel=new QWidget;panel->setObjectName("sgsPanel");auto *layout=new QVBoxLayout(panel);layout->setContentsMargins(14,12,14,12);layout->setSpacing(8);
@@ -592,6 +607,10 @@ void SgsWindow::buildMenus() {
     editMenu->addAction(tr("Fix spikes"),this,&SgsWindow::fixSpikes);
     editMenu->addAction(tr("Remove loose pieces"),this,&SgsWindow::removeLoosePieces);
     editMenu->addAction(tr("Revert mesh to generated"),this,[this] {revertSculpt(true);});
+    editMenu->addSeparator();
+    mcpAction_=editMenu->addAction(tr("Enable MCP"));mcpAction_->setCheckable(true);mcpAction_->setChecked(automation_->enabled());
+    mcpAction_->setToolTip(tr("Lets an AI assistant on this computer drive the editor through its MCP adapter (mcp/README.md)."));
+    connect(mcpAction_,&QAction::toggled,this,[this](bool on) {setMcpEnabled(on);});
     auto *captureMenu=menuBar()->addMenu(tr("Capture"));
     captureMenu->addAction(tr("Estimate normals"),this,[this] {estimateNormals();});
     captureMenu->addAction(tr("Photos (COLMAP)…"),this,[this] {askColmap(true);});
@@ -652,6 +671,7 @@ bool SgsWindow::openFile(const QString &path) {
 }
 
 bool SgsWindow::openPly(const QString &path) {
+    inspectingFile_=false;
     if (gs2mesh_->running()) {QMessageBox::warning(this,tr("SGS Editor"),tr("Wait for the mesh to be made, or cancel it."));return false;}
     QApplication::setOverrideCursor(Qt::WaitCursor);
     try {
@@ -681,6 +701,7 @@ bool SgsWindow::openPly(const QString &path) {
 }
 
 bool SgsWindow::openProject(const QString &path) {
+    inspectingFile_=false;
     SgsProject loaded;
     try {
         QFile file(path);if (!file.open(QIODevice::ReadOnly)) throw std::runtime_error(file.errorString().toStdString());
@@ -765,14 +786,23 @@ void SgsWindow::syncPhotos() {
 }
 void SgsWindow::syncDisplay() {
     if (!display_) return;
-    const bool hasMesh=!project_.meshFiles.isEmpty() && QFileInfo::exists(project_.meshFiles.first());
+    // a mesh file shown over MCP (view_mesh_file) counts as a mesh until the project's mesh or the splats are shown
+    const bool hasMesh=inspectingFile_ || (!project_.meshFiles.isEmpty() && QFileInfo::exists(project_.meshFiles.first()));
     if (!hasMesh && showMesh_) {showMesh_=false;viewport_->setDrawMesh(false);viewport_->setDrawSplats(true);} // back to the splats
     display_->setText(showMesh_ ? tr("Show: Mesh") : tr("Show: Splats"));meshLook_->setText(meshGray_ ? tr("Mesh: Gray") : tr("Mesh: Shaded"));
     const int levels=int(project_.meshObjs().size());
     meshLevelButton_->setText(meshLevel_==0 ? tr("LOD: Main") : tr("LOD: %1").arg(meshLevel_));
     display_->setVisible(hasMesh);meshLook_->setVisible(hasMesh && showMesh_);meshLevelButton_->setVisible(hasMesh && showMesh_ && levels>1);
+    syncMeshInfo();
     // The view cube's panel takes the controls' new height.
     viewport_->setDisplayControls(displayControls_);
+}
+void SgsWindow::syncMeshInfo() {
+    // in the mesh view, which mesh and how many triangles, over the controls hint
+    if (!showMesh_ || !mesh_) {viewport_->setInfoText({});return;}
+    const QString triangles=tr("%1 triangles").arg(QLocale().toString(qlonglong(mesh_->indices.size()/3)));
+    const QString which=inspectingFile_ ? tr("File: %1").arg(inspectedName_) : meshLevel_==0 ? tr("LOD: Main") : tr("LOD: %1").arg(meshLevel_);
+    viewport_->setInfoText(which+QStringLiteral("   ·   ")+triangles);
 }
 void SgsWindow::syncMesh() {
     syncDisplay();
@@ -1137,6 +1167,7 @@ bool SgsWindow::startLods() {
 }
 
 bool SgsWindow::loadMesh(int level) {
+    inspectingFile_=false;
     const QStringList objs=project_.meshObjs();
     if (level<0) level=meshLevel_;
     level=std::clamp(level,0,std::max(0,int(objs.size())-1));
@@ -1172,6 +1203,7 @@ bool SgsWindow::loadMesh(int level) {
 
 // ---- Sculpting
 void SgsWindow::setShowMesh(bool mesh) {
+    if (!mesh) inspectingFile_=false;
     if (mesh && !mesh_ && !loadMesh(meshLevel_)) return;
     showMesh_=mesh;viewport_->setDrawMesh(mesh);viewport_->setDrawSplats(!mesh);syncDisplay();syncSculpt();
 }
@@ -1258,6 +1290,7 @@ bool SgsWindow::ensureSculpt() {
     viewport_->setBusyText({});QApplication::restoreOverrideCursor();
     meshCache_[objs.first()]=sculpt_->view();
     if (meshLevel_==0) {mesh_=sculpt_->view();viewport_->setMesh(mesh_);}
+    syncMeshInfo();
     return true;
 }
 void SgsWindow::setSculptTool(int tool) {
@@ -1438,7 +1471,7 @@ void SgsWindow::revertSculpt(bool ask) {
     if (!project_.meshEdited.isEmpty()) {
         const QFileInfo info(project_.meshEdited);const QString base=info.absolutePath()+"/"+info.completeBaseName();
         meshCache_.erase(project_.meshEdited);
-        for (const QString &f:{project_.meshEdited,base+".mtl",base+"_normal.png",base+"_dense.ply",base+"_albedo.png"}) QFile::remove(f);
+        for (const QString &f:{project_.meshEdited,base+".mtl",base+"_normal.png",base+"_ao.png",base+"_dense.ply",base+"_albedo.png"}) QFile::remove(f);
     }
     project_.meshEdited.clear();sculpt_.reset();
     if (showMesh_ && meshLevel_==0) loadMesh(0);
@@ -1476,7 +1509,8 @@ SgsExportResult SgsWindow::exportSgsTo(const QString &path) {
         if (!obj.isEmpty() && QFileInfo::exists(obj)) {
             const MeshData mesh=readObj(obj);
             GlbOptions glb;glb.textureSize=project_.sgsTextureSize;
-            options.glb=writeGlb(mesh,mesh.albedo.isEmpty() ? QImage() : QImage(mesh.albedo),mesh.normalMap.isEmpty() ? QImage() : QImage(mesh.normalMap),glb);
+            options.glb=writeGlb(mesh,mesh.albedo.isEmpty() ? QImage() : QImage(mesh.albedo),mesh.normalMap.isEmpty() ? QImage() : QImage(mesh.normalMap),glb,
+                                 mesh.occlusion.isEmpty() ? QImage() : QImage(mesh.occlusion));
             options.provenance["mesh"]=QJsonObject{{"source",QFileInfo(obj).fileName()},{"triangles",double(mesh.triangles())},{"settings",project_.mesh.json()},
                                                     {"photos",!project_.colmap.isEmpty()}};
         }

@@ -33,6 +33,7 @@ class QTimer;
 class QToolBar;
 class QToolButton;
 class QToolBar;
+class SgsAutomation;
 class Viewport;
 
 // The SGS editor: one static capture (a 3DGS PLY), its normals, a mesh made from it with
@@ -119,6 +120,11 @@ public:
     // Back to the mesh as gs2mesh made it: the edits and their files go.
     void revertSculpt(bool ask = true);
     QString editedObjPath() const;
+    // One request of the MCP adapter (sgsautomation.h, mcp/server.py), on the UI thread: the
+    // editor's state, opening and saving, normals, photos, mesh settings, gs2mesh's mesh and LODs
+    // (started, followed, cancelled), the view and a picture of it, and the export. Throws
+    // std::runtime_error with what stops it. sgswindowautomation.cpp.
+    QJsonObject automation(const QString &method, const QJsonObject &arguments);
 signals:
     void meshFinished(bool ok, QString error);
 protected:
@@ -159,6 +165,7 @@ private:
     void setLightIconsShown(bool shown);
     // Beside the view cube: Show (splats or mesh) only when there is a mesh, its look only when it is shown.
     void syncDisplay();
+    void syncMeshInfo();
     void syncSculpt();
     void sculptChanged();
     void syncBrush();
@@ -230,4 +237,13 @@ private:
     QLabel *sculptInfo_ = nullptr;
     QPushButton *sculptUndo_ = nullptr, *sculptRedo_ = nullptr, *sculptRevert_ = nullptr;
     QAction *undoAction_ = nullptr, *redoAction_ = nullptr;
+    // MCP (Edit > Enable MCP, remembered): the loopback bridge its adapter talks to.
+    SgsAutomation *automation_ = nullptr;
+    QAction *mcpAction_ = nullptr;
+    void setMcpEnabled(bool enabled);
+    QJsonObject automationState() const;
+    QString meshError_;      // why the last mesh or LODs failed; empty when they did not
+    bool quietMesh_ = false; // started over MCP: a failure is reported there, not in a dialog
+    bool inspectingFile_ = false; // a mesh file from disk is drawn (view_mesh_file), not the project's
+    QString inspectedName_;       // its file name
 };

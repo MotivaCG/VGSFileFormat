@@ -96,14 +96,19 @@ shares (viewport, export, normals) from `../editor`; it is supplied under the
 - **Export** (File > Export, by the extension chosen): **.ply**, the splats with their normals
   in `nx, ny, nz`; or **.sgs**: the splats with their normals, a thumbnail of the view and, when asked,
   the mesh (its lowest LOD by default, textures at 2048) as one `.glb` in the proxy mesh
-  extra. The file is signed as the editor's exports are, read back and checked before it
+  extra, with its albedo, normal map and ambient occlusion (`occlusionTexture`). The file is signed as the editor's exports are, read back and checked before it
   replaces the destination. The viewer and the VGS editor open `.sgs` files; `vgsdec`
   hands the mesh over with `Capture::proxyMesh()`.
 
 ## gs2mesh
 
 The editor loads `gs2mesh.dll` when it first needs it, so it runs without it, and only
-mesh generation needs an NVIDIA GPU (CUDA). It looks in a `gs2mesh` folder beside the exe,
+mesh generation needs an NVIDIA GPU (CUDA). Its normal maps are tangent space in MikkTSpace,
+OpenGL convention (Y+), the basis Blender, Unreal, 3ds Max and glTF viewers use; the `.glb` of an
+`.sgs` export carries those tangents (`TANGENT`), computed with gs2mesh's own MikkTSpace
+(`meshtangents.cpp`). Every mesh and LOD also gets an ambient occlusion map, `<name>_ao.png`
+(named by its `.mtl` as `map_Ka`): the albedo keeps the occlusion the photos saw, the map is
+for renderers that light the mesh themselves. It looks in a `gs2mesh` folder beside the exe,
 then beside the exe, then in the submodule's install for builds run where they were made.
 Build that install once:
 
@@ -123,6 +128,15 @@ MoGe-2 for the faces' relief) are not in the repository. The editor takes them f
 takes them from where CMake's `SGS_STEREO_MODEL` and `SGS_MOGE_MODEL` (qmake: the same
 variables) point, by default the FoundationStereo export in `3dgs2mesh` and SMNForge's
 `onnx/depth`. The mesh dialog shows them and can point elsewhere; the machine remembers that.
+
+## MCP
+
+**Edit > Enable MCP** (off by default, remembered) lets an AI assistant on the same computer drive
+the open editor through an MCP server: open a capture, estimate normals, set the photos and the
+mesh settings, run gs2mesh for the mesh and its LODs and follow it, choose the view and take a
+picture of it, save the project and export. The editor only opens a private bridge on 127.0.0.1
+with a token per session (`sgsautomation.cpp`, the requests in `sgswindowautomation.cpp`); the MCP
+server is `mcp/server.py`, set up as `mcp/README.md` says. It is built like the VGS editor's.
 
 ## Build with CMake
 

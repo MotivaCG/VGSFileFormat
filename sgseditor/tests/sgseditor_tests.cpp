@@ -76,7 +76,8 @@ double degreesBetween(const float *a,const float *b) {
 QString writeQuadObj(const QString &dir) {
     QImage albedo(64,32,QImage::Format_RGB888);albedo.fill(QColor(200,100,50));albedo.save(dir+"/quad_albedo.png");
     QImage normal(64,32,QImage::Format_RGB888);normal.fill(QColor(128,128,255));normal.save(dir+"/quad_normal.png");
-    QFile mtl(dir+"/quad.mtl");mtl.open(QIODevice::WriteOnly);mtl.write("newmtl m\nmap_Kd quad_albedo.png\nnorm quad_normal.png\n");mtl.close();
+    QImage ao(64,32,QImage::Format_Grayscale8);ao.fill(QColor(180,180,180));ao.save(dir+"/quad_ao.png");
+    QFile mtl(dir+"/quad.mtl");mtl.open(QIODevice::WriteOnly);mtl.write("newmtl m\nmap_Kd quad_albedo.png\nnorm quad_normal.png\nmap_Ka quad_ao.png\n");mtl.close();
     QFile obj(dir+"/quad.obj");obj.open(QIODevice::WriteOnly);
     obj.write("mtllib quad.mtl\nv 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\nvn 0 0 1\nf 1/1/1 2/2/1 3/3/1\nf 1/1/1 3/3/1 4/4/1\n");obj.close();
     return dir+"/quad.obj";
@@ -311,11 +312,13 @@ void SgsEditorTests::findsAndChecksColmap() {
 void SgsEditorTests::objToGlb() {
     const MeshData mesh=readObj(writeQuadObj(dir_.path()));
     QCOMPARE(mesh.triangles(),size_t(2));QCOMPARE(mesh.vertices(),size_t(4));QVERIFY(mesh.albedo.endsWith("quad_albedo.png"));QVERIFY(mesh.normalMap.endsWith("quad_normal.png"));
-    const QByteArray glb=writeGlb(mesh,QImage(mesh.albedo),QImage(mesh.normalMap));
+    QVERIFY(mesh.occlusion.endsWith("quad_ao.png"));
+    const QByteArray glb=writeGlb(mesh,QImage(mesh.albedo),QImage(mesh.normalMap),{},QImage(mesh.occlusion));
     const GlbInfo info=inspectGlb(glb);
     QVERIFY2(info.error.isEmpty(),qPrintable(info.error));
-    QCOMPARE(info.triangles,size_t(2));QCOMPARE(info.vertices,size_t(4));QCOMPARE(info.images,2);QCOMPARE(info.materials,1);
+    QCOMPARE(info.triangles,size_t(2));QCOMPARE(info.vertices,size_t(4));QCOMPARE(info.images,3);QCOMPARE(info.materials,1);
     const auto material=info.json.value("materials").toArray()[0].toObject();
+    QVERIFY(material.contains("occlusionTexture"));
     QVERIFY(material.contains("normalTexture"));QVERIFY(material.value("pbrMetallicRoughness").toObject().contains("baseColorTexture"));
     // OBJ's v counts up from the bottom, glTF's down from the top.
     const auto accessors=info.json.value("accessors").toArray();const auto views=info.json.value("bufferViews").toArray();

@@ -21,7 +21,8 @@ struct MeshData {
     // positions the OBJ has, so that a mesh written back keeps their order (writeObj).
     std::vector<uint32_t> positionIds;
     size_t positionCount = 0;
-    QString albedo, normalMap;                  // the material's textures, absolute; empty for none
+    QString albedo, normalMap, occlusion;       // the material's textures, absolute; empty for none
+                                                // (occlusion: ambient occlusion, map_Ka)
     QString material;                           // the .mtl it names, absolute; empty for none
     size_t vertices() const { return positions.size()/3; }
     size_t triangles() const { return indices.size()/3; }
@@ -30,6 +31,10 @@ struct MeshData {
 };
 // Throws std::runtime_error. Normals missing from the file are worked out from the faces.
 MeshData readObj(const QString &path);
+// A triangle mesh as a binary little-endian PLY (gs2mesh's <name>_dense.ply: float x, y, z and any other
+// float or uchar vertex properties, faces as uchar-counted int lists): positions and normals worked out
+// from the faces, no texture coordinates. Throws std::runtime_error.
+MeshData readPlyMesh(const QString &path);
 // The mesh as gs2mesh writes one, which it reads back (for LODs): its positions in the order of
 // positionIds (one per OBJ position, with its normal), a texture coordinate per vertex, faces
 // v/vt/vn, and `mtl` (a file name beside it) as its material, `materialName` in it. Throws
@@ -44,14 +49,17 @@ void setMaterialAlbedo(const QString &mtl, const QString &file);
 
 // The mesh as one glTF 2.0 binary (.glb), in the same space and units (Y up, metres, as
 // the captures are): positions, normals and texture coordinates, its albedo as the base
-// colour (JPEG) and its normal map (PNG, tangent space), both scaled to `textureSize` on
-// their longer side when larger (0 keeps them). A matte dielectric, as the splats are lit.
+// colour (JPEG), its normal map (PNG, tangent space) and its ambient occlusion (PNG), all
+// scaled to `textureSize` on their longer side when larger (0 keeps them). A matte
+// dielectric, as the splats are lit.
 struct GlbOptions {
     int textureSize = 2048;
     int jpegQuality = 90;
     bool normalMap = true;
+    bool occlusion = true;
 };
-QByteArray writeGlb(const MeshData &, const QImage &albedo, const QImage &normalMap, const GlbOptions & = {});
+QByteArray writeGlb(const MeshData &, const QImage &albedo, const QImage &normalMap, const GlbOptions & = {},
+                    const QImage &occlusion = QImage());
 
 // What a .glb holds, read back: for tests and for the export's report.
 struct GlbInfo {

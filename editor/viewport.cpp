@@ -1232,6 +1232,10 @@ void Viewport::paintGL() {
         ? tr("Drag: orbit   ·   Right drag: pan   ·   Wheel: zoom   ·   G/R/S: transform")
         : tr("Drag a gizmo handle to transform   ·   Repeat G/R/S: Global/Local   ·   Esc: exit mode"));
     }
+    if (!infoText_.isEmpty() && frame_) {
+        painter.setPen(overlayText()); painter.setFont(QFont("Segoe UI", 9));
+        painter.drawText(18, height()-38, infoText_);
+    }
     updateStatistics();
     if (!frame_) {
         painter.setPen(lightBackground_ ? QColor("#333") : QColor("#ddd")); painter.setFont(QFont("Segoe UI", 18));

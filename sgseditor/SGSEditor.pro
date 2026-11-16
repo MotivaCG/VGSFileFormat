@@ -9,7 +9,7 @@
 !versionAtLeast(QT_VERSION, 6.8.0) {
     error("SGS Editor requires Qt 6.8 or newer. Select the Desktop Qt 6.8.0 MSVC2022 64-bit kit.")
 }
-QT += core gui widgets opengl openglwidgets multimedia
+QT += core gui widgets opengl openglwidgets multimedia network
 CONFIG += c++17
 TARGET = SGSEditor
 DEFINES += VGS_AUTHORING
@@ -32,12 +32,13 @@ isEmpty(SGS_MOGE_MODEL): SGS_MOGE_MODEL = D:/Trabajos/ScanMeNow/RaspberrySoft/SM
 DEFINES += SGS_STEREO_MODEL=\\\"$$SGS_STEREO_MODEL\\\" SGS_MOGE_MODEL=\\\"$$SGS_MOGE_MODEL\\\"
 
 INCLUDEPATH += $$PWD $$EDITOR $$EDITOR/dependencies/mint $$EDITOR/dependencies/eigen $$GS2MESH_SOURCE/include \
+    $$GS2MESH_SOURCE/dependencies/win64/mikktspace \
     $$VGS_ROOT/decoder/include $$VGS_ROOT/core/include/vgs $$VGS_ROOT/core/crypto $$VGS_ROOT/core/src
 
-SOURCES += $$PWD/sgsmain.cpp $$PWD/sgswindow.cpp $$PWD/sgsply.cpp $$PWD/sgscapture.cpp $$PWD/colmapfinder.cpp \
-    $$PWD/gs2meshrunner.cpp $$PWD/meshio.cpp $$PWD/meshsculpt.cpp $$PWD/sgsexport.cpp $$PWD/sgsproject.cpp
+SOURCES += $$PWD/sgsmain.cpp $$PWD/sgswindow.cpp $$PWD/sgswindowautomation.cpp $$PWD/sgsautomation.cpp $$PWD/sgsply.cpp $$PWD/sgscapture.cpp $$PWD/colmapfinder.cpp \
+    $$PWD/gs2meshrunner.cpp $$PWD/meshio.cpp $$PWD/meshtangents.cpp $$PWD/meshsculpt.cpp $$PWD/sgsexport.cpp $$PWD/sgsproject.cpp
 HEADERS += $$PWD/sgswindow.h $$PWD/sgsply.h $$PWD/sgscapture.h $$PWD/colmapfinder.h $$PWD/gs2meshrunner.h \
-    $$PWD/meshio.h $$PWD/meshsculpt.h $$PWD/sgsexport.h $$PWD/sgsproject.h $$PWD/sgsversion.h
+    $$PWD/meshio.h $$PWD/meshtangents.h $$PWD/sgsautomation.h $$PWD/meshsculpt.h $$PWD/sgsexport.h $$PWD/sgsproject.h $$PWD/sgsversion.h
 
 # The editor's sources the SGS editor shares: its viewport, export, normals and display support.
 SOURCES += $$EDITOR/viewport.cpp $$EDITOR/viewcube.cpp $$EDITOR/editortheme.cpp $$EDITOR/displayscaling.cpp \
