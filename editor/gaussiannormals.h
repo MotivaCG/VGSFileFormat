@@ -44,11 +44,19 @@ std::vector<View> transformedViews(const std::vector<View> &views, const Eigen::
 // splats are dense, neighbours at most 2 * closePixels apart, for the closing to join them: a
 // finer buffer of sparse splats is mostly holes, every splat seen from everywhere (on a
 // 6000-splat sphere at 1024 pixels: 8 % of the normals right).
+// footprints: each opaque splat drawn as its own projected ellipse (2 sigma), at the depth of its
+// plane along each ray, instead of its centre's pixel and the closing: no holes for a surface
+// behind to be seen through, and a tilted splat no nearer than it is. probes: the side also from
+// points at these distances on either side of each splat; from a camera on its outer side the
+// outer point floats in front of the surface the camera sees, the inner one never does. Where the
+// cameras that count tell the two apart, that decides the side; elsewhere the votes do.
 struct Visibility {
     int resolution = 320;
     int closePixels = 1;
     float tolerance = 0.01f;
     bool limitToDensity = false;
+    bool footprints = false;
+    float probes[3] = {0, 0, 0}; // metres; 0: none
 };
 
 // A rig's cameras: SMNForge's values, kept equal so both tools agree.
@@ -58,11 +66,17 @@ inline constexpr Visibility kRigVisibility{};
 // and 1 % (3 cm at their distance: the back of fingers, ears and cloth edges passed as seen
 // from the front and voted the wrong way); 0.44 % / 0.44 % with 0.1 %, and 0.40 % / 0.41 %
 // with 256 cameras, in twice the time (1 s for 300 000 splats). 256 cameras at 1 % alone: no
-// better than 100.
-inline constexpr Visibility kSurroundingVisibility{320, 1, 0.001f};
+// better than 100. With footprints and probes at 16, 8 and 4 mm (2026-11-16, against the same
+// meshes, splats over 5 % opaque): 0.42 % -> 0.14 % and 0.53 % -> 0.25 %; on thin parts (an
+// opposite surface within 25 mm) 3.6 % -> 1.5 % and 4.7 % -> 2.6 %; 2.4 s for 300 000 splats.
+// A single 16 mm probe crossed plates thinner than it (6 mm: 3.0 % -> 3.6 % wrong); the three
+// together 2.5 %. A fit of the plane with the neighbours' own shape and a robust pass gained
+// 0.3 degrees on synthetic solids but smoothed faces in pictures: not used.
+inline constexpr Visibility kSurroundingVisibility{320, 1, 0.001f, false, true, {0.016f, 0.008f, 0.004f}};
 // Finer, for when the time is spent on purpose (the SGS editor's Estimate normals): 0.34 % /
-// 0.36 % in nine times as long. 1536 pixels: 0.34 % / 0.33 % in 30 times as long.
-inline constexpr Visibility kFineVisibility{1024, 3, 0.0005f, true};
+// 0.36 % in nine times as long. 1536 pixels: 0.34 % / 0.33 % in 30 times as long. With footprints
+// and probes (2026-11-16): 0.35 % -> 0.10 %, 0.49 % -> 0.20 % in about 12 s for 300 000 splats.
+inline constexpr Visibility kFineVisibility{1024, 3, 0.0005f, true, true, {0.016f, 0.008f, 0.004f}};
 inline constexpr int kSurroundingViews = 256;
 
 struct Splats {

@@ -47,6 +47,9 @@ constexpr int kOutlierNeighbors = 12;   // the nearest of the kNormalNeighbors, 
 constexpr int kSmoothingNeighbors = 48;
 constexpr float kOutlierMaxAngleCos = 0.6427876f;   // cos 50
 constexpr float kOutlierConsensus = 0.7f;           // neighbours' mean resultant length
+// Visibility::footprints: how far out a splat covers (its sigmas) and at most how many pixels.
+constexpr float kFootprintSigmas = 2.0f;
+constexpr int kFootprintMaxPixels = 24;
 
 struct Cloud {
     std::vector<Eigen::Vector3f> pts;
@@ -169,6 +172,8 @@ Result computeNormals(const Splats &s, const std::vector<View> &views, float *no
     cloud.pts.resize(ids.size());
     std::vector<Eigen::Vector3f> axis(ids.size());
     std::vector<float> roundness(ids.size()), radius(ids.size()), alpha(ids.size());
+    // Each splat's covariance, for drawing its footprint (Visibility::footprints).
+    std::vector<Eigen::Matrix3f> shape(visibility.footprints ? ids.size() : 0);
     parallelFor(count, [&](int i) {
         const size_t id = ids[size_t(i)];
         const float *p = s.position + id * 3, *q = s.rotation + id * 4, *sc = s.scale + id * 3;
@@ -181,6 +186,7 @@ Result computeNormals(const Splats &s, const std::vector<View> &views, float *no
         roundness[size_t(i)] = sigma[order[1]] > 0.0f ? sigma[order[0]] / sigma[order[1]] : 1.0f;
         radius[size_t(i)] = sigma[order[2]];
         alpha[size_t(i)] = std::clamp(s.opacity[id], 0.0f, 1.0f);
+        if (!shape.empty()) shape[size_t(i)] = basis * sigma.cwiseProduct(sigma).asDiagonal() * basis.transpose();
     });
 
     using KDTree = nanoflann::KDTreeSingleIndexAdaptor<nanoflann::L2_Simple_Adaptor<float, Cloud>, Cloud, 3>;
@@ -252,6 +258,8 @@ Result computeNormals(const Splats &s, const std::vector<View> &views, float *no
     // Side: towards the cameras that see the splat through a coarse depth buffer.
     std::vector<Eigen::Vector3f> votes(ids.size(), Eigen::Vector3f::Zero());
     std::vector<int> viewCount(ids.size(), 0), pixel(ids.size());
+    const bool probing = visibility.probes[0] > 0 || visibility.probes[1] > 0 || visibility.probes[2] > 0;
+    std::vector<int> probeScore(probing ? ids.size() : 0, 0); // cameras that saw the outer point free, less the inner
     std::vector<float> depth(ids.size());
     // limitToDensity: how far apart the opaque splats are (the median distance to the nearest
     // other), and where they are, so that no view draws them finer than the closing can join.
@@ -298,10 +306,57 @@ Result computeNormals(const Splats &s, const std::vector<View> &views, float *no
         for (int i = 0; i < count; ++i)
             if (pixel[size_t(i)] >= 0 && alpha[size_t(i)] > kNormalOccluderOpacity)
                 nearest[size_t(pixel[size_t(i)])] = std::min(nearest[size_t(pixel[size_t(i)])], depth[size_t(i)]);
-        // Close the pinholes left between point samples.
         std::vector<float> closed(nearest.size(), std::numeric_limits<float>::infinity());
-        const int close = visibility.closePixels;
+        if (visibility.footprints) {
+            // Each opaque splat over its 2-sigma ellipse, at the depth of its own plane along each ray (held within
+            // twice its size of its centre), into one buffer per thread, then the nearest of them.
+            const float fx = view.fx * scale, fy = view.fy * scale, cx = view.cx * scale, cy = view.cy * scale;
+            const int threads = std::clamp(int(std::thread::hardware_concurrency()), 1, 16);
+            std::vector<std::vector<float>> part(static_cast<size_t>(threads));
+            std::vector<std::thread> pool;
+            for (int t = 0; t < threads; ++t)
+                pool.emplace_back([&, t] {
+                    std::vector<float> &buffer = part[size_t(t)];
+                    buffer.assign(closed.size(), std::numeric_limits<float>::infinity());
+                    for (int i = t; i < count; i += threads) {
+                        if (!(alpha[size_t(i)] > kNormalOccluderOpacity)) continue;
+                        const Eigen::Vector3f p = view.worldToCamera * cloud.pts[size_t(i)] + view.translation;
+                        if (p.z() <= 1e-3f) continue;
+                        Eigen::Matrix<float, 2, 3> J;
+                        J << fx / p.z(), 0, -fx * p.x() / (p.z() * p.z()), 0, fy / p.z(), -fy * p.y() / (p.z() * p.z());
+                        const Eigen::Matrix2f S = J * (view.worldToCamera * shape[size_t(i)] * view.worldToCamera.transpose()) * J.transpose()
+                                                + 0.3f * Eigen::Matrix2f::Identity();
+                        const float det = S.determinant();
+                        if (!(det > 0.0f)) continue;
+                        const float mid = 0.5f * (S(0, 0) + S(1, 1)), largest = mid + std::sqrt(std::max(0.0f, mid * mid - det));
+                        const int reachPx = std::min(kFootprintMaxPixels, int(std::ceil(kFootprintSigmas * std::sqrt(largest))));
+                        const float u = fx * p.x() / p.z() + cx, v = fy * p.y() / p.z() + cy;
+                        const float ia = S(1, 1) / det, ib = -S(0, 1) / det, ic = S(0, 0) / det;
+                        const Eigen::Vector3f n = view.worldToCamera * axis[size_t(i)];
+                        const float np = n.dot(p), reach = 2.0f * radius[size_t(i)];
+                        for (int y = std::max(0, int(v) - reachPx); y <= std::min(height - 1, int(v) + reachPx); ++y)
+                            for (int x = std::max(0, int(u) - reachPx); x <= std::min(width - 1, int(u) + reachPx); ++x) {
+                                const float dx = x + 0.5f - u, dy = y + 0.5f - v;
+                                if (ia * dx * dx + 2.0f * ib * dx * dy + ic * dy * dy > kFootprintSigmas * kFootprintSigmas) continue;
+                                const float nr = n.dot(Eigen::Vector3f((x + 0.5f - cx) / fx, (y + 0.5f - cy) / fy, 1.0f));
+                                const float z = std::clamp(std::abs(nr) > 0.2f ? np / nr : p.z(), p.z() - reach, p.z() + reach);
+                                float &b = buffer[size_t(y) * width + x];
+                                b = std::min(b, z);
+                            }
+                    }
+                });
+            for (auto &thread : pool) thread.join();
+            parallelFor(height, [&](int y) {
+                for (int x = 0; x < width; ++x) {
+                    float m = std::numeric_limits<float>::infinity();
+                    for (const auto &b : part) m = std::min(m, b[size_t(y) * width + x]);
+                    closed[size_t(y) * width + x] = m;
+                }
+            });
+        } else
+        // Close the pinholes left between point samples.
         parallelFor(height, [&](int y) {
+            const int close = visibility.closePixels;
             for (int x = 0; x < width; ++x) {
                 float value = std::numeric_limits<float>::infinity();
                 for (int dy = -close; dy <= close; ++dy)
@@ -321,10 +376,28 @@ Result computeNormals(const Splats &s, const std::vector<View> &views, float *no
             votes[size_t(i)] += (centre - cloud.pts[size_t(i)]).normalized();
             ++viewCount[size_t(i)];
         });
+        if (probing) parallelFor(count, [&](int i) {
+            auto freeAt = [&](const Eigen::Vector3f &q) {
+                const Eigen::Vector3f p = view.worldToCamera * q + view.translation;
+                if (p.z() <= 1e-6f) return 0;
+                const int u = int(std::floor((view.fx * p.x() / p.z() + view.cx) * scale));
+                const int v = int(std::floor((view.fy * p.y() / p.z() + view.cy) * scale));
+                if (u < 0 || u >= width || v < 0 || v >= height) return 0;
+                return p.z() < closed[size_t(v) * width + u] ? 1 : 0;
+            };
+            const Eigen::Vector3f &n = normal[size_t(i)], &c = cloud.pts[size_t(i)];
+            for (const float d : visibility.probes)
+                if (d > 0) probeScore[size_t(i)] += freeAt(c + d * n) - freeAt(c - d * n);
+        });
     }
 
     std::vector<uint8_t> resolved(ids.size(), 0);
     for (int i = 0; i < count; ++i) {
+        if (probing && probeScore[size_t(i)] != 0) {
+            if (probeScore[size_t(i)] < 0) normal[size_t(i)] = -normal[size_t(i)];
+            resolved[size_t(i)] = 1;
+            continue;
+        }
         const float facing = normal[size_t(i)].dot(votes[size_t(i)]);
         if (viewCount[size_t(i)] > 0 && std::abs(facing) > 1e-6f) {
             if (facing < 0.0f) normal[size_t(i)] = -normal[size_t(i)];
