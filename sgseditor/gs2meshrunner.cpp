@@ -12,6 +12,8 @@
 #include <QJsonArray>
 #include <QLibrary>
 #include <QMutex>
+#include <QSettings>
+#include <QStandardPaths>
 #include <thread>
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -66,6 +68,13 @@ QStringList Gs2Mesh::searchPaths() {
     paths << QStringLiteral(SGS_GS2MESH_DIR); // the submodule's install, for builds run where they were made
 #endif
     return paths;
+}
+
+void Gs2Mesh::usePhotoModels(Job &job) {
+    QSettings settings;
+    job.stereoModel=settings.value("Models/Stereo",defaultModel(Model::Stereo)).toString();
+    job.mogeModel=settings.value("Models/MoGe",defaultModel(Model::MoGe)).toString();
+    job.engineCache=QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)+"/tensorrt";QDir().mkpath(job.engineCache);
 }
 
 QString Gs2Mesh::defaultModel(Model model) {

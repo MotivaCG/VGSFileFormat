@@ -60,6 +60,9 @@ public:
     // empty when there is none.
     enum class Model { Stereo, MoGe };
     static QString defaultModel(Model);
+    // The photos' models as chosen on this machine (settings Models/Stereo, Models/MoGe; else
+    // defaultModel) and the TensorRT engine cache, into a job that uses photos.
+    static void usePhotoModels(Job &job);
     // Runs it on a thread of its own. One job at a time.
     bool start(const Job &job);
     void cancel();

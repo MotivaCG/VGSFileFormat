@@ -15,6 +15,8 @@
 #include "sgsexport.h"
 #include "sgsproject.h"
 #include "sgswindow.h"
+#include "sgsqueue.h"
+#include <QSettings>
 #include "viewport.h"
 #include "vgsdecoder/vgsdecoder.h"
 #include <QApplication>
@@ -186,6 +188,7 @@ private slots:
     void sculptingInTheWindow();
     void sculptRealMesh();
     void lodsFromEditedMesh();
+    void meshQueue();
     void meshAgainstSplats();
     void realCapture();
     void visualSheet();
@@ -1014,6 +1017,57 @@ void SgsEditorTests::meshAgainstSplats() {
         sheet.save(QStringLiteral("%1/compare_%2.png").arg(out).arg(v++));
     }
 }
+void SgsEditorTests::meshQueue() {
+    // Captures from folders of their own, one with its photos beside it.
+    const QString a=dir_.filePath("queue_a"),b=dir_.filePath("queue_b");QDir().mkpath(a);QDir().mkpath(b);
+    const QString plyA=writeSphere(a,"alpha.ply",2000,true),plyB=writeSphere(b,"beta.ply",2000,true);
+    writeColmap(a+"/colmap",8,3.f,{0,1,0});
+    QSettings().remove("MeshQueue/Items");
+    {
+        SgsMeshQueue queue(nullptr,{});
+        QVERIFY(queue.addPly(plyA));QVERIFY(queue.addPly(plyB));
+        QVERIFY(!queue.addPly(plyA));QVERIFY(!queue.addPly(dir_.filePath("none.ply")));QVERIFY(!queue.addPly(a+"/colmap"));
+        QCOMPARE(queue.count(),2);QCOMPARE(queue.item(0).triangles,200000);QCOMPARE(queue.item(1).triangles,200000);
+        QVERIFY(QDir::cleanPath(queue.item(0).colmap).startsWith(QDir::cleanPath(a+"/colmap")));QVERIFY(queue.item(1).colmap.isEmpty());
+        queue.setTriangles(1,100000);queue.setColmap(1,a+"/colmap");QVERIFY(!queue.item(1).colmap.isEmpty());queue.setColmap(1,"");
+        QCOMPARE(SgsMeshQueue::projectPath(plyA),a+"/alpha.sgsproj");QCOMPARE(SgsMeshQueue::meshFolder(plyB),b+"/beta_mesh");
+        if (const QString shots=qEnvironmentVariable("SGS_TEST_SHOTS");!shots.isEmpty()) {
+            queue.show();QVERIFY(QTest::qWaitForWindowExposed(&queue));QDir().mkpath(shots);queue.grab().save(shots+"/mesh_queue.png");
+        }
+    }
+    // Kept between sessions.
+    {
+        SgsMeshQueue again(nullptr,{});QCOMPARE(again.count(),2);QCOMPARE(again.item(1).triangles,100000);QVERIFY(again.item(1).colmap.isEmpty());
+        QCOMPARE(again.item(0).state,SgsMeshQueue::State::Waiting);
+        again.removeRow(0);again.removeRow(0);QCOMPARE(again.count(),0);
+    }
+    // The whole way on a real capture (SGS_TEST_GS2MESH=1, SGS_TEST_PLY), copied so that its own project is not touched; the
+    // one open in the editor waits: it is not made behind the editor's back.
+    const QString real=qEnvironmentVariable("SGS_TEST_PLY");
+    if (qEnvironmentVariable("SGS_TEST_GS2MESH")!="1" || real.isEmpty()) return;
+    const QString c=dir_.filePath("queue_real");QDir().mkpath(c);const QString copy=c+"/"+QFileInfo(real).fileName();
+    QVERIFY(QFile::copy(real,copy));
+    SgsWindow window;window.show();QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QVERIFY(window.openPly(plyB));
+    SgsMeshQueue *queue=window.meshQueue();
+    QVERIFY(queue->addPly(copy));QVERIFY(queue->addPly(plyB));
+    QSignalSpy done(queue,&SgsMeshQueue::finishedAll);
+    queue->start();QVERIFY(queue->running());
+    // While it runs the editor's own gs2mesh waits for it (after saying so).
+    QTimer::singleShot(500,[] {if (QWidget *w=QApplication::activeModalWidget()) w->close();});
+    QVERIFY(!window.startMesh());
+    QVERIFY(done.wait(15*60*1000));
+    QCOMPARE(queue->item(0).state,SgsMeshQueue::State::Done);
+    QCOMPARE(queue->item(1).state,SgsMeshQueue::State::Failed);QVERIFY(queue->item(1).status.contains("Open in the editor"));
+    qInfo("queue: %s",qPrintable(queue->item(0).status));
+    // The project opens with its mesh, fine normals and two rim lights, and makes its LODs.
+    QVERIFY(window.openProject(SgsMeshQueue::projectPath(copy)));
+    QVERIFY(window.project().fineNormals);QVERIFY(!window.project().meshObjs().isEmpty());QCOMPARE(window.project().lights.size(),2);
+    QVERIFY(window.project().colmapDeclined || !window.project().colmap.isEmpty());
+    QVERIFY(QFileInfo(window.project().meshObjs().first()).absolutePath().endsWith("_mesh"));
+    QSettings().remove("MeshQueue/Items");
+}
+
 void SgsEditorTests::realCapture() {
     const QString ply=qEnvironmentVariable("SGS_TEST_PLY");
     if (ply.isEmpty()) QSKIP("SGS_TEST_PLY names no capture.");

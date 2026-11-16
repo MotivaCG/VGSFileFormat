@@ -127,19 +127,26 @@ struct Rig {
 } // namespace
 
 QStringList SgsLight::presetNames() {
-    return {QStringLiteral("Neon: magenta and blue"),QStringLiteral("Red and cyan"),QStringLiteral("Night: sodium and teal"),QStringLiteral("Three-point"),QStringLiteral("Daylight sun"),
-            QStringLiteral("Sunset"),QStringLiteral("Soft studio"),QStringLiteral("Horror: green from below"),QStringLiteral("Campfire and moon"),
+    return {
+            QStringLiteral("Drive 1: sodium and teal"),
+            QStringLiteral("Drive 2: magenta and blue"),
+            QStringLiteral("Red and cyan"),
+            QStringLiteral("Three-point"),
+            QStringLiteral("Daylight sun"),
+            QStringLiteral("Sunset"),QStringLiteral("Soft studio"),
+            QStringLiteral("Horror: green from below"),
+            QStringLiteral("Campfire and moon"),
             QStringLiteral("Disco: turning colours")};
 }
 QVector<SgsLight> SgsLight::preset(int index,const QVector3D &centre,float size) {
     const Rig r{centre,std::max(size,0.5f)*0.6f};
     switch (index) {
-    case 0: return {r.point("Magenta rim",QColor(255,30,200),-105,15,6),r.point("Blue rim",QColor(30,90,255),105,15,8),
-                    r.point("Violet fill",QColor(120,70,255),0,10,0.35f,1.4f)};
-    case 1: return {r.point("Red",QColor(255,25,25),-90,5,5),r.point("Cyan",QColor(0,220,255),90,5,4)};
-    case 2: // a warm street lamp in front at one side, a bluish, barely green night all around the rest
+    case 0: // a warm street lamp in front at one side, a bluish, barely green night all around the rest
         return {r.point("Sodium key",QColor(255,150,60),-60,20,2.0f,1.1f),r.point("Teal fill",QColor(30,150,200),55,10,2.2f,1.2f),
                 r.point("Teal rim",QColor(50,175,215),155,30,4.0f)};
+    case 1: return {r.point("Magenta rim",QColor(255,30,200),-105,15,6),r.point("Blue rim",QColor(30,90,255),105,15,8),
+                    r.point("Violet fill",QColor(120,70,255),0,10,0.35f,1.4f)};
+    case 2: return {r.point("Red",QColor(255,25,25),-90,5,5),r.point("Cyan",QColor(0,220,255),90,5,4)};
     case 3: return {r.point("Key",QColor(255,236,214),-40,35,2.2f,1.2f),r.point("Fill",QColor(190,210,255),45,10,0.6f,1.2f),
                     r.point("Rim",QColor(255,255,255),170,45,2.5f)};
     case 4: return {r.sun("Sun",QColor(255,244,229),-35,55,2.5f),r.sun("Sky",QColor(150,190,255),145,35,0.6f)};
@@ -158,7 +165,7 @@ QVector<SgsLight> SgsLight::preset(int index,const QVector3D &centre,float size)
     }
 }
 QVector<SgsLight> SgsLight::defaults(const QVector3D &centre,float size) {
-    auto lights=preset(0,centre,size).mid(0,2); // the two rims, without the fill
+    auto lights=preset(1,centre,size).mid(0,2); // the magenta and blue rims, without the fill
     for (auto &l:lights) l.enabled=false;
     return lights;
 }

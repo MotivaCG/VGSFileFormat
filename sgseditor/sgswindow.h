@@ -34,6 +34,7 @@ class QToolBar;
 class QToolButton;
 class QToolBar;
 class SgsAutomation;
+class SgsMeshQueue;
 class Viewport;
 
 // The SGS editor: one static capture (a 3DGS PLY), its normals, a mesh made from it with
@@ -83,8 +84,12 @@ public:
     const SgsCapture *capture() const { return capture_ ? &*capture_ : nullptr; }
     Gs2Mesh *meshMaker() const { return gs2mesh_; }
     int selectedLight() const { return selected_; }
-    // Starts gs2mesh with the project's settings and COLMAP, asking nothing (tests and scripts).
+    // Starts gs2mesh with the project's settings and COLMAP, asking nothing (tests and scripts);
+    // the capture's fine normals first, when the project does not have them.
     bool startMesh();
+    // Capture > Mesh queue: made when first shown, kept while the editor runs.
+    SgsMeshQueue *meshQueue();
+    void showMeshQueue();
     // The splats or the mesh (Tab).
     void setShowMesh(bool mesh);
     bool showsMesh() const { return showMesh_; }
@@ -239,6 +244,9 @@ private:
     QAction *undoAction_ = nullptr, *redoAction_ = nullptr;
     // MCP (Edit > Enable MCP, remembered): the loopback bridge its adapter talks to.
     SgsAutomation *automation_ = nullptr;
+    SgsMeshQueue *queue_ = nullptr;
+    // gs2mesh is the queue's while it runs: one job at a time on the GPU. True after saying so.
+    bool queueBusy(const QString &title);
     QAction *mcpAction_ = nullptr;
     void setMcpEnabled(bool enabled);
     QJsonObject automationState() const;

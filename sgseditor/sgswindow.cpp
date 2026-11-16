@@ -4,6 +4,7 @@
 // Part of SGS Editor, under the VGS Editor licence (editor/LICENSE.md).
 
 #include "sgswindow.h"
+#include "sgsqueue.h"
 #include "colmapfinder.h"
 #include "sgsautomation.h"
 #include "sgsversion.h"
@@ -616,6 +617,9 @@ void SgsWindow::buildMenus() {
     captureMenu->addAction(tr("Photos (COLMAP)…"),this,[this] {askColmap(true);});
     captureMenu->addAction(tr("Generate mesh…"),QKeySequence("Ctrl+M"),this,&SgsWindow::generateMesh);
     captureMenu->addAction(tr("Generate LODs…"),this,&SgsWindow::generateLods);
+    captureMenu->addSeparator();
+    captureMenu->addAction(tr("Mesh queue…"),this,&SgsWindow::showMeshQueue);
+    captureMenu->addSeparator();
     captureMenu->addAction(tr("gs2mesh log"),this,&SgsWindow::showLog);
     auto *lights=menuBar()->addMenu(tr("Lights"));
     lights->addAction(tr("Add point light"),this,[this] {addLight(false);});
@@ -746,9 +750,25 @@ bool SgsWindow::maybeSave() {
     return !path.isEmpty() && saveProject(path);
 }
 void SgsWindow::closeEvent(QCloseEvent *event) {
+    if (queue_ && queue_->running() && QMessageBox::question(this,tr("SGS Editor"),tr("The mesh queue is still making meshes. Stop it and quit?"))!=QMessageBox::Yes) {event->ignore();return;}
     if (gs2mesh_->running() && QMessageBox::question(this,tr("SGS Editor"),tr("The mesh is still being made. Stop it and quit?"))!=QMessageBox::Yes) {event->ignore();return;}
     if (!maybeSave()) {event->ignore();return;}
-    gs2mesh_->cancel();event->accept();
+    gs2mesh_->cancel();if (queue_) queue_->stop();event->accept();
+}
+
+SgsMeshQueue *SgsWindow::meshQueue() {
+    if (!queue_) {
+        queue_=new SgsMeshQueue(gs2mesh_,[this] {return capture_ ? capture_->path : QString();},this);
+        connect(queue_,&SgsMeshQueue::openRequested,this,[this](QString path) {if (!gs2mesh_->running() && maybeSave()) openProject(path);});
+        connect(queue_,&SgsMeshQueue::runningChanged,this,[this] {syncMesh();});
+    }
+    return queue_;
+}
+void SgsWindow::showMeshQueue() {meshQueue()->show();queue_->raise();queue_->activateWindow();}
+bool SgsWindow::queueBusy(const QString &title) {
+    if (!queue_ || !queue_->running()) return false;
+    QMessageBox::information(this,title,tr("The mesh queue is making meshes, one at a time on the GPU. Wait for it, or stop it (Capture > Mesh queue)."));
+    return true;
 }
 void SgsWindow::dragEnterEvent(QDragEnterEvent *event) {
     const auto urls=event->mimeData()->urls();
@@ -1070,7 +1090,7 @@ bool SgsWindow::meshDialog() {
 }
 
 void SgsWindow::generateMesh() {
-    if (!capture_ || gs2mesh_->running()) return;
+    if (!capture_ || gs2mesh_->running() || queueBusy(tr("Generate mesh"))) return;
     QString why;if (!Gs2Mesh::available(&why)) {QMessageBox::warning(this,tr("Generate mesh"),tr("gs2mesh is not available:\n\n%1").arg(why));return;}
     if ((!project_.meshEdited.isEmpty() || sculptDirty()) &&
         QMessageBox::question(this,tr("Generate mesh"),tr("The mesh was edited by hand. A new one replaces it, and the edits are lost. Generate it?"))!=QMessageBox::Yes) return;
@@ -1080,17 +1100,16 @@ void SgsWindow::generateMesh() {
 }
 
 bool SgsWindow::startMesh() {
-    if (!capture_ || gs2mesh_->running()) return false;
+    if (!capture_ || gs2mesh_->running() || queueBusy(tr("Generate mesh"))) return false;
+    // The mesh is made on the capture as it will be kept: with our fine normals.
+    if (!project_.fineNormals) estimateNormals();
     Gs2Mesh::Job job;job.ply=capture_->path;job.outputDir=meshFolder();job.name=QFileInfo(capture_->path).completeBaseName();job.settings=project_.mesh;
     job.settings.lods.clear(); // made afterwards, from the mesh once it looks right (Generate LODs)
     if (!project_.colmap.isEmpty()) {
         const auto m=findColmap(project_.colmap);
         if (!m.usable()) {QMessageBox::warning(this,tr("Generate mesh"),tr("The photos cannot be used:\n\n%1").arg(m.problem));return false;}
         job.sparse=m.sparse;job.images=m.images;
-        QSettings settings;
-        job.stereoModel=settings.value("Models/Stereo",Gs2Mesh::defaultModel(Gs2Mesh::Model::Stereo)).toString();
-        job.mogeModel=settings.value("Models/MoGe",Gs2Mesh::defaultModel(Gs2Mesh::Model::MoGe)).toString();
-        job.engineCache=QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)+"/tensorrt";QDir().mkpath(job.engineCache);
+        Gs2Mesh::usePhotoModels(job);
     }
     if (!QDir().mkpath(job.outputDir)) {QMessageBox::warning(this,tr("Generate mesh"),tr("Cannot create %1.").arg(QDir::toNativeSeparators(job.outputDir)));return false;}
     meshLog_.clear();meshProgress_->setValue(0);meshStage_->setText(tr("Starting gs2mesh…"));
@@ -1101,7 +1120,7 @@ bool SgsWindow::startMesh() {
 }
 
 void SgsWindow::generateLods() {
-    if (!capture_ || gs2mesh_->running() || project_.meshObjs().isEmpty()) return;
+    if (!capture_ || gs2mesh_->running() || project_.meshObjs().isEmpty() || queueBusy(tr("Generate LODs"))) return;
     QDialog dialog(this);dialog.setWindowTitle(tr("Generate LODs"));auto *layout=new QVBoxLayout(&dialog);auto *form=new QFormLayout;
     QStringList current;for (int l:project_.mesh.lods) current << QString::number(l);
     auto *lods=new QComboBox;lods->setObjectName("lodsChoice");
@@ -1122,7 +1141,7 @@ void SgsWindow::generateLods() {
 
 bool SgsWindow::startLods() {
     const QStringList objs=project_.meshObjs();
-    if (!capture_ || gs2mesh_->running() || objs.isEmpty() || project_.mesh.lods.isEmpty()) return false;
+    if (!capture_ || gs2mesh_->running() || objs.isEmpty() || project_.mesh.lods.isEmpty() || queueBusy(tr("Generate LODs"))) return false;
     const QFileInfo generated(project_.generatedObj());
     QString dense=generated.absolutePath()+"/"+generated.completeBaseName()+"_dense.ply";
     for (const auto &f:project_.meshFiles) if (f.endsWith("_dense.ply",Qt::CaseInsensitive)) dense=f;

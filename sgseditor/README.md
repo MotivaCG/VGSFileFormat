@@ -33,7 +33,19 @@ shares (viewport, export, normals) from `../editor`; it is supplied under the
   (some twenty minutes, said under the progress bar); later runs reuse it. The mesh goes to
   `<ply name>_mesh` beside the project, or beside the PLY before the project is saved. The
   panel says when it is out of date (the PLY, the photos or the settings changed since).
-  While gs2mesh works the rest of the editor waits; only its progress and Cancel stay on.
+  When the capture does not have our fine normals yet, they are made first (*Estimate
+  normals*). While gs2mesh works the rest of the editor waits; only its progress and Cancel
+  stay on.
+- **Mesh queue** (*Capture > Mesh queue…*): PLYs from any folders (added, or dropped on it)
+  made one after another into a project and its mesh, to open, touch up and give LODs by
+  hand afterwards. A table: the PLY, its main mesh's triangles (200 000 by default) and its
+  photos (the COLMAP found beside it, as on import; empty: from the splats alone), with each
+  one's status. Beside each PLY go `<name>.sgsproj` (fine normals, its photos, the two rim
+  lights off) and `<name>_mesh`; a project already there keeps its lights and view and gets the
+  new mesh. The queue runs while the editor is used and is kept between sessions; the editor's
+  own *Generate mesh* and *Generate LODs* wait while it runs (one gs2mesh job at a time on the
+  GPU), and the capture open in the editor is not made behind its back. *Open project* (or a
+  double-click on a finished row) opens one.
 - **Sculpt**: the main mesh cleaned up by hand before its LODs are made, in mesh view (Tab
   in the view switches splats and mesh) on the main mesh only, with T4DEditor's brushes and
   controls, so both editors sculpt alike. Its tools go down the left of the window as there:
@@ -80,7 +92,7 @@ shares (viewport, export, normals) from `../editor`; it is supplied under the
   normal, Lambert in linear light, plus *Self-illumination* of its colour glowing on its own
   (10 %, as Unreal's default). With no light on, the splats show as captured. A new capture
   comes with a magenta and a blue rim light, both off. *Lights > Presets* replaces the lights
-  with a ready-made lighting (neon rims, red and cyan, sodium and teal night, three-point, daylight sun, sunset, soft
+  with a ready-made lighting (neon rims, sodium and teal night, red and cyan, three-point, daylight sun, sunset, soft
   studio, horror, campfire); *Lights > All lights* turns them all on or off. A light's colour
   is taken as picked (sRGB) and lights with its linear value, as in Unreal. *Show: Mesh*
   draws the mesh under the same lights.
