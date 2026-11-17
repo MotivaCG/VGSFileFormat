@@ -70,16 +70,13 @@ CaptureSettingsDialog::CaptureSettingsDialog(const Project &project,PresetStore 
     options->addRow(tr("SH reduction"),shPrune_);
     connect(shDegree_,&QComboBox::currentIndexChanged,this,[this] {shPrune_->setEnabled(shDegree_->currentData().toInt()!=0);});
     playback_ = new QComboBox; playback_->addItem(tr("Keep source"),-1); playback_->addItem(tr("Once"),0); playback_->addItem(tr("Loop"),1); playback_->addItem(tr("Ping-pong"),2); options->addRow(tr("Playback"),playback_);
-    normals_ = new QCheckBox(tr("Write normals"));
-    normals_->setToolTip(tr("Store every splat's outward surface normal in the .vgs, or as nx ny nz in a .ply, for renderers that light splats. Computed at export from the cameras of the rig that captured it. About two bytes per splat before compression; MINT cannot hold them."));
-    options->addRow(normals_);
-    normalRig_ = new QComboBox; normalRig_->addItem(QStringLiteral("SMNV1"),0); normalRig_->addItem(QStringLiteral("THE4DSCANNER"),1);
-    normalRig_->addItem(tr("None of ours (cameras all around)"),2);
-    normalRig_->setToolTip(tr("The studio rig that recorded the capture: its cameras decide which side of each splat faces outwards. "
-                              "For a capture from anywhere else, cameras spread all around it decide instead; they also take over "
-                              "when the rig's cameras see less than half of the splats."));
-    options->addRow(tr("Rig"),normalRig_);
-    connect(normals_,&QCheckBox::toggled,normalRig_,&QWidget::setEnabled);
+    normals_ = new QComboBox; normals_->setObjectName("normals");
+    normals_->addItem(tr("No"),int(CaptureSettings::NormalsNone)); normals_->addItem(tr("Yes"),int(CaptureSettings::NormalsFine));
+    normals_->setToolTip(tr("Store every splat's outward surface normal in the .vgs, or as nx ny nz in a .ply, for renderers that light splats. "
+                            "Computed at export, 256 cameras all around the splats deciding which side faces out: about 3 s per 300 000-splat frame, "
+                            "kept instead from a .vgs that has them where nothing that decides them changed. "
+                            "About two bytes per splat before compression; MINT cannot hold them."));
+    options->addRow(tr("Normals"),normals_);
     despill_ = new QCheckBox(tr("Apply despill")); options->addRow(despill_);
     strength_ = new QDoubleSpinBox; strength_->setRange(0,1); strength_->setDecimals(4); strength_->setSingleStep(0.05); options->addRow(tr("Strength"),strength_);
     gain_ = new QDoubleSpinBox; gain_->setRange(0,2); gain_->setDecimals(3); gain_->setSingleStep(0.01); options->addRow(tr("Green gain"),gain_);
@@ -116,7 +113,7 @@ CaptureSettings CaptureSettingsDialog::settings() const {
     s.extraJson = extraJson_->toPlainText(); s.shDegree = shDegree_->currentData().toInt(); s.shPrune = shPrune_->currentData().toDouble(); s.playbackMode = playback_->currentData().toInt();
     s.despill = despill_->isChecked(); s.despillStrength = strength_->value(); s.greenGain = gain_->value(); s.viewChromaScale = chroma_->value(); s.recoverSkin = recoverSkin_->isChecked();
     s.despill = false; // a Colour modifier's setting now
-    s.normals = normals_->isChecked(); s.normalRig = normalRig_->currentData().toInt();
+    s.normals = normals_->currentData().toInt();
     s.plyFps=plyFps_->value();s.plyRowOffset=plyRowOffset_->value();
     return s;
 }
@@ -129,7 +126,7 @@ void CaptureSettingsDialog::setSettings(const CaptureSettings &s) {
     plyFps_->setValue(s.plyFps);plyRowOffset_->setValue(s.plyRowOffset);
     despill_->setChecked(s.despill); strength_->setValue(s.despillStrength); gain_->setValue(s.greenGain); chroma_->setValue(s.viewChromaScale); recoverSkin_->setChecked(s.recoverSkin);
     for (auto *spin : {strength_,gain_,chroma_}) spin->setEnabled(s.despill); recoverSkin_->setEnabled(s.despill);
-    normals_->setChecked(s.normals); normalRig_->setCurrentIndex(normalRig_->findData(s.normalRig)); normalRig_->setEnabled(s.normals);
+    normals_->setCurrentIndex(s.normals == CaptureSettings::NormalsNone ? 0 : 1);
 }
 void CaptureSettingsDialog::accept() { QString error; if (!settings().validate(&error)) { QMessageBox::warning(this,tr("Capture settings"),error); return; } QDialog::accept(); }
 void CaptureSettingsDialog::refreshPresets(const QString &path) {

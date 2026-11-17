@@ -12,6 +12,7 @@
 #include <Eigen/Dense>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 // Outward surface normals for Gaussian splats, from the studio rig that captured them.
@@ -68,16 +69,23 @@ inline constexpr Visibility kRigVisibility{};
 // with 256 cameras, in twice the time (1 s for 300 000 splats). 256 cameras at 1 % alone: no
 // better than 100. With footprints and probes at 16, 8 and 4 mm (2026-11-16, against the same
 // meshes, splats over 5 % opaque): 0.42 % -> 0.14 % and 0.53 % -> 0.25 %; on thin parts (an
-// opposite surface within 25 mm) 3.6 % -> 1.5 % and 4.7 % -> 2.6 %; 2.4 s for 300 000 splats.
+// opposite surface within 25 mm) 3.6 % -> 1.5 % and 4.7 % -> 2.6 %; 2.4 s for 300 000 splats, 1.3 s
+// since the same normals were made faster (2026-11-17: one pool of threads, the footprints drawn into
+// one buffer, eight pixels at a time with AVX).
 // A single 16 mm probe crossed plates thinner than it (6 mm: 3.0 % -> 3.6 % wrong); the three
 // together 2.5 %. A fit of the plane with the neighbours' own shape and a robust pass gained
 // 0.3 degrees on synthetic solids but smoothed faces in pictures: not used.
 inline constexpr Visibility kSurroundingVisibility{320, 1, 0.001f, false, true, {0.016f, 0.008f, 0.004f}};
 // Finer, for when the time is spent on purpose (the SGS editor's Estimate normals): 0.34 % /
 // 0.36 % in nine times as long. 1536 pixels: 0.34 % / 0.33 % in 30 times as long. With footprints
-// and probes (2026-11-16): 0.35 % -> 0.10 %, 0.49 % -> 0.20 % in about 12 s for 300 000 splats.
+// and probes (2026-11-16): 0.35 % -> 0.10 %, 0.49 % -> 0.20 % in about 12 s for 300 000 splats, 3 s
+// since 2026-11-17.
 inline constexpr Visibility kFineVisibility{1024, 3, 0.0005f, true, true, {0.016f, 0.008f, 0.004f}};
 inline constexpr int kSurroundingViews = 256;
+// The method's version, written with the normals it made (the VGS editor's export provenance)
+// so that a re-export can keep them rather than compute them again. Raise it whenever the
+// normals it gives change: 2 is cameras all around with footprints and probes (2026-11-16).
+inline constexpr int kNormalsVersion = 2;
 
 struct Splats {
     size_t count = 0;
@@ -105,9 +113,11 @@ std::vector<View> surroundingViews(const Splats &splats, int count = kSurroundin
 // Writes a unit normal for every used splat into normals (3 per splat); others are left
 // as they are. Direction: the shortest axis on flat splats, the neighbourhood plane on
 // round ones. Side: towards the cameras that see the splat through a coarse depth
-// buffer, then propagated to the splats no camera decided, then smoothed.
+// buffer, then propagated to the splats no camera decided, then smoothed. `poll`, when given,
+// is called before each camera, from the calling thread: it may throw to stop the estimate
+// (an export being canceled), which then leaves `normals` as they were part way.
 Result computeNormals(const Splats &splats, const std::vector<View> &views, float *normals,
-                      const Visibility &visibility = kRigVisibility);
+                      const Visibility &visibility = kRigVisibility, const std::function<void()> &poll = {});
 
 // computeNormals with a rig's cameras, or with `surrounding` cameras all around the splats when
 // `rig` is empty or its cameras see less than half of the opaque splats (not that rig's capture,

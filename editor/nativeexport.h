@@ -16,10 +16,11 @@
 struct NativeChunkPlan { size_t sourceIndex=0; int first=0,intervals=0; };
 bool supportsNativeTransform(const Project &);
 // Writes every splat's outward normal into the chunk's optional normals attribute
-// (FORMAT.md, Normals), seen from `views`, which must be in the chunk's own frame. Call it
-// before motion samples are added. Returns what the middle sample's cameras saw.
-gaussiannormals::Result addNormals(vgs::DecodedChunk &, const std::vector<gaussiannormals::View> &views,
-                                   const ExportProgress &);
+// (FORMAT.md, Normals), its side decided by cameras all around the splats that see as
+// `visibility`. Call it before motion samples are added.
+void addNormals(vgs::DecodedChunk &, const gaussiannormals::Visibility &visibility, const ExportProgress &);
+// The visibility of the chosen normals (CaptureSettings::normals): Normal or Fine.
+const gaussiannormals::Visibility &normalsVisibility(const CaptureSettings &);
 // Writes the frame's own normals (Frame::normal, xyz per record) into the optional normals
 // attribute of the one-interval chunk packExportFrame made of it, whose records are the
 // frame's in the same order: a still that has its normals already (the SGS editor's) keeps
@@ -46,4 +47,7 @@ inline float bakedOpacityFactor(const float ratios[3]) {
 vgs::DecodedChunk editNativeChunk(vgs::DecodedChunk, const NativeChunkPlan &, const Project &,
                                  ExportResult *, const ExportProgress &, const vgs::DecodedChunk *classificationSource=nullptr,
                                  const std::vector<QMatrix4x4> *sampleModels=nullptr,int sourceStartFrame=0,
-                                 const std::vector<uint8_t> *pruned=nullptr,const ExportVisibilityLookup &cachedVisibility = {});
+                                 const std::vector<uint8_t> *pruned=nullptr,const ExportVisibilityLookup &cachedVisibility = {},
+                                 bool *geometryKept=nullptr);
+// geometryKept, when given, is set when the chunk keeps every splat with its opacity and size:
+// normals the source computed for it still hold.

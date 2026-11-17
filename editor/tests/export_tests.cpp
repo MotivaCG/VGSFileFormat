@@ -988,21 +988,21 @@ private slots:
         QCOMPARE(int(code[0]),128);QCOMPARE(int(code[1]),129);
     }
     void normalsFaceOutwardsInEveryFrame_data() {
-        // The rig's cameras; cameras all around, asked for; and the rig's, for a capture so far
-        // out of its frame that they see none of it and cameras all around take over.
-        QTest::addColumn<bool>("transformed");QTest::addColumn<int>("rig");QTest::addColumn<bool>("far");QTest::addColumn<QString>("note");
-        QTest::newRow("as captured")<<false<<0<<false<<QStringLiteral("Normals written: the SMNV1 cameras");
-        QTest::newRow("moved and turned")<<true<<0<<false<<QStringLiteral("Normals written: the SMNV1 cameras");
-        QTest::newRow("cameras all around")<<true<<2<<false<<QStringLiteral("decided by cameras all around the splats");
-        QTest::newRow("out of the rig's frame")<<true<<0<<true<<QStringLiteral("cameras all around decided the sides instead");
+        // Cameras all around the splats wherever they are: as captured, moved and turned, and
+        // far from where any studio rig would look; Normal and Fine.
+        QTest::addColumn<bool>("transformed");QTest::addColumn<int>("mode");QTest::addColumn<bool>("far");QTest::addColumn<QString>("note");
+        QTest::newRow("as captured")<<false<<int(CaptureSettings::NormalsNormal)<<false<<QStringLiteral("Normals written (Normal).");
+        QTest::newRow("moved and turned")<<true<<int(CaptureSettings::NormalsNormal)<<false<<QStringLiteral("Normals written (Normal).");
+        QTest::newRow("far away")<<true<<int(CaptureSettings::NormalsNormal)<<true<<QStringLiteral("Normals written (Normal).");
+        QTest::newRow("fine")<<true<<int(CaptureSettings::NormalsFine)<<false<<QStringLiteral("Normals written (Fine).");
     }
     void normalsFaceOutwardsInEveryFrame() {
-        QFETCH(bool,transformed);QFETCH(int,rig);QFETCH(bool,far);QFETCH(QString,note);
-        // Far: the ball itself 60 m above the rig, where none of its cameras looks.
+        QFETCH(bool,transformed);QFETCH(int,mode);QFETCH(bool,far);QFETCH(QString,note);
+        // Far: the ball itself 60 m up.
         const Eigen::Vector3f ball=far ? Eigen::Vector3f(0,60,0) : kBallCentre;
         QTemporaryDir dir;const auto source=dir.filePath("ball.vgs");ballFile(source,60000,ball);
         Project project;project.asset=source;project.in=0;project.out=1.0/25;project.modifiers.clear();
-        project.captureSettings.normals=true;project.captureSettings.normalRig=rig;
+        project.captureSettings.normals=mode;
         if (transformed) {project.transform.position={2.f,0,-1};project.transform.rotation={0,90,0};project.transform.scale={1.5f,1.5f,1.5f};}
         const auto path=dir.filePath("normals.vgs");const auto result=exportCaptureFile(project,path);
         QVERIFY2(result.notes.join(' ').contains(note),qPrintable(result.notes.join(' ')));
@@ -1022,31 +1022,90 @@ private slots:
             }
             QVERIFY2(outwards>=live*98/100,qPrintable(QString("%1 of %2 face outwards").arg(outwards).arg(live)));
         }
-        // Off by default, and then the capture carries none.
-        Project plain=project;plain.captureSettings.normals=false;const auto without=dir.filePath("without.vgs");exportCaptureFile(plain,without);
+        // None: the capture carries none.
+        Project plain=project;plain.captureSettings.normals=CaptureSettings::NormalsNone;const auto without=dir.filePath("without.vgs");exportCaptureFile(plain,without);
         auto other=vgsdec::Capture::openFile(without.toStdString());QVERIFY(!other.setTime(0,false).normals);
-        if (!transformed && !rig) {
+        if (!transformed) {
             // MINT cannot hold them: said, and the export goes on.
             const auto mint=exportCaptureFile(project,dir.filePath("normals.mint"));QVERIFY(mint.notes.join(' ').contains("MINT cannot hold normals"));
             qInfo("normals add %lld bytes to %lld",qlonglong(QFileInfo(path).size()-QFileInfo(without).size()),qlonglong(QFileInfo(without).size()));
         }
     }
+    void reexportKeepsNormalsThatStillHold() {
+        // A .vgs exported Fine says so; exported again Normal, moved and turned, it keeps them
+        // (still outward); asked Fine from Normal ones, or with splats cut away, they are made again.
+        QTemporaryDir dir;const auto source=dir.filePath("ball.vgs");ballFile(source,20000);
+        auto exported=[&](const QString &asset,int mode,const QString &name,const QVector<Modifier> &modifiers={},bool moved=false) {
+            Project project;project.asset=asset;project.in=0;project.out=1.0/25;project.modifiers=modifiers;project.captureSettings.normals=mode;
+            if (moved) {project.transform.position={2.f,0,-1};project.transform.rotation={0,90,0};project.transform.scale={1.5f,1.5f,1.5f};}
+            const auto result=exportCaptureFile(project,dir.filePath(name));return std::make_pair(result.notes.join(' '),project.transform.matrix());
+        };
+        auto outwards=[&](const QString &name,const QMatrix4x4 &model) {
+            const QVector3D centre=model.map(QVector3D(kBallCentre.x(),kBallCentre.y(),kBallCentre.z()));
+            auto capture=vgsdec::Capture::openFile(dir.filePath(name).toStdString());const auto &frame=capture.setTime(0,false);
+            if (!frame.normals) return 0.0;size_t facing=0,live=0;
+            for (size_t i=0;i<frame.splatCount;++i) if (frame.active[i]) {
+                ++live;facing+=QVector3D::dotProduct(QVector3D(frame.normals[i*3],frame.normals[i*3+1],frame.normals[i*3+2]),
+                                                     (QVector3D(frame.positions[i*3],frame.positions[i*3+1],frame.positions[i*3+2])-centre).normalized())>.9f;
+            }
+            return live ? double(facing)/double(live) : 0.0;
+        };
+        QVERIFY(!exported(source,CaptureSettings::NormalsFine,"fine.vgs").first.contains("kept"));
+        const auto kept=exported(dir.filePath("fine.vgs"),CaptureSettings::NormalsNormal,"kept.vgs",{},true);
+        QVERIFY2(kept.first.contains("Normals written (Normal): the source's kept"),qPrintable(kept.first));
+        QVERIFY(outwards("kept.vgs",kept.second)>=.98);
+        // What it kept says how they were made, so a third export keeps them as well.
+        QVERIFY(exported(dir.filePath("kept.vgs"),CaptureSettings::NormalsNormal,"again.vgs").first.contains("the source's kept"));
+        const auto finer=exported(dir.filePath("kept.vgs"),CaptureSettings::NormalsFine,"finer.vgs");
+        QVERIFY2(finer.first.contains("Normals written (Fine).") && !finer.first.contains("kept"),qPrintable(finer.first));
+        Modifier cut;cut.id=Project::newId();cut.name="Cut";cut.crop.enabled=true;cut.crop.remove=true;cut.crop.radius=cut.crop.radiusZ=.25f;cut.crop.height=.5f;cut.crop.transform.position={.4f,.75f,0};
+        const auto cropped=exported(dir.filePath("fine.vgs"),CaptureSettings::NormalsFine,"cut.vgs",{cut});
+        QVERIFY2(cropped.first.contains("Normals written (Fine).") && !cropped.first.contains("kept"),qPrintable(cropped.first));
+        QVERIFY(outwards("cut.vgs",QMatrix4x4())>=.98);
+    }
     void normalsReachSplatsBornWhereFloatTimeFallsShort() {
         // Over 41 intervals, sample 1 as float time is 0.99999...: taken there, the splats
         // born at 1 were never alive and normals went round for ever.
         auto chunk=temporalFixture(false,41,1);
-        const auto views=gaussiannormals::rigViews(gaussiannormals::Rig::SmnV1);
-        addNormals(chunk,views,{});
+        addNormals(chunk,gaussiannormals::kSurroundingVisibility,{});
         size_t pages=0;for (const auto &p:chunk.pages) pages+=p.descriptor.attribute==vgs::Normals;
         QVERIFY(pages>0);
     }
+    void cancelingStopsSoonWhileNormalsAreComputed() {
+        // EDITOR_CANCEL_CAPTURE=<capture>[;<NORMAL|FINE>[;<seconds before canceling>[;<seconds of it>]]]: how long an
+        // export takes to stop once canceled while it works out normals.
+        const auto spec=qEnvironmentVariable("EDITOR_CANCEL_CAPTURE").split(';');
+        if (spec.first().isEmpty()) QSKIP("Set EDITOR_CANCEL_CAPTURE to time canceling on a real capture.");
+        QTemporaryDir dir;Project project;project.asset=spec[0];project.in=0;project.out=spec.size()>3 ? spec[3].toDouble() : 1;project.modifiers.clear(); // seconds of it
+        project.captureSettings.normals=spec.size()>1 && spec[1]=="FINE" ? CaptureSettings::NormalsFine : CaptureSettings::NormalsNormal;
+        const double wait=spec.size()>2 ? spec[2].toDouble() : 2.0;
+        QElapsedTimer timer;timer.start();qint64 seenAt=-1,previous=0,longest=0;QString last,quiet;QSet<QString> rounds;
+        bool threw=false;
+        try {
+            const auto result=exportCaptureFile(project,dir.filePath("canceled.vgs"),[&](int,const QString &message) {
+                if (message.startsWith("Computing normals")) rounds.insert(message);
+                const qint64 now=timer.elapsed();if (now-previous>longest) {longest=now-previous;quiet=last;}previous=now;last=message;
+                if (now<wait*1000) return true;
+                if (seenAt<0) seenAt=now;
+                return false;
+            });
+            qInfo("%d frames written, notes: %s",result.frames,qPrintable(result.notes.join(' ')));
+        } catch (const std::exception &) {threw=true;}
+        qInfo("export %s after %.1f s; the callback said cancel from %.1f s; last \"%s\"; normals estimates seen: %s",threw ? "threw" : "returned",timer.elapsed()/1000.0,
+              seenAt/1000.0,qPrintable(last),qPrintable(QStringList(rounds.begin(),rounds.end()).join(", ")));
+        QVERIFY(threw);QVERIFY(seenAt>=0);
+        const double stopped=(timer.elapsed()-wait*1000)/1000.0;
+        qInfo("canceled at %.1f s: seen %.1f s later (\"%s\"), stopped %.1f s after it; longest silence %.1f s after \"%s\"",
+              wait,(seenAt-wait*1000)/1000.0,qPrintable(last),stopped,longest/1000.0,qPrintable(quiet));
+        QVERIFY2(stopped<1,"canceling took more than 1 s");
+    }
     void normalsOnARealCapture() {
-        // EDITOR_NORMALS_CAPTURE=<capture>;<SMNV1|THE4DSCANNER>[;<out.vgs>]: what normals cost.
+        // EDITOR_NORMALS_CAPTURE=<capture>;<NORMAL|FINE>[;<out.vgs>]: what normals cost.
         const auto spec=qEnvironmentVariable("EDITOR_NORMALS_CAPTURE").split(';');
         if (spec.size()<2) QSKIP("Set EDITOR_NORMALS_CAPTURE to measure normals on a real capture.");
         QTemporaryDir dir;Project project;project.asset=spec[0];project.in=0;project.out=1e9;project.modifiers.clear();
         auto timed=[&](bool normals,const QString &path) {
-            project.captureSettings.normals=normals;project.captureSettings.normalRig=spec[1]=="THE4DSCANNER" ? 1 : 0;
+            project.captureSettings.normals=!normals ? CaptureSettings::NormalsNone : spec[1]=="FINE" ? CaptureSettings::NormalsFine : CaptureSettings::NormalsNormal;
             QElapsedTimer timer;timer.start();const auto result=exportCaptureFile(project,path);
             qInfo("%s: %lld bytes in %.1f s. %s",normals ? "with normals" : "without",qlonglong(QFileInfo(path).size()),timer.elapsed()/1000.0,qPrintable(result.notes.join(' ')));
             return QFileInfo(path).size();
@@ -1146,7 +1205,7 @@ private slots:
     }
     void plyCarriesNormalsWhenAsked() {
         // nx ny nz face outwards in a frame and in every file of a sequence, moved and turned;
-        // without Write normals they stay zero, as 3DGS training writes them.
+        // with Normals None they stay zero, as 3DGS training writes them.
         QTemporaryDir dir;const auto source=dir.filePath("ball.vgs");ballFile(source);
         Project project;project.asset=source;project.in=0;project.out=1.0/25;project.modifiers.clear();
         project.transform.position={2,0,-1};project.transform.rotation={0,90,0};
@@ -1162,14 +1221,32 @@ private slots:
             }
             return n ? double(facing)/double(n) : -1.0;
         };
+        project.captureSettings.normals=CaptureSettings::NormalsNone;
         QCOMPARE(outwards((exportFramePly(project,0,dir.filePath("plain.ply")),dir.filePath("plain.ply"))),0.0);
-        project.captureSettings.normals=true;
+        project.captureSettings.normals=CaptureSettings::NormalsNormal;
         const auto frame=exportFramePly(project,0,dir.filePath("frame.ply"));
-        QVERIFY2(frame.notes.join(' ').contains("Normals written: the SMNV1 cameras"),qPrintable(frame.notes.join(' ')));
+        QVERIFY2(frame.notes.join(' ').contains("Normals written (Normal)."),qPrintable(frame.notes.join(' ')));
         QVERIFY(outwards(dir.filePath("frame.ply"))>=.98);
         const auto sequence=exportCaptureFile(project,dir.filePath("seq.ply"));QCOMPARE(sequence.frames,2);
         QVERIFY2(sequence.notes.join(' ').contains("Normals written"),qPrintable(sequence.notes.join(' ')));
         for (const char *file:{"seq0000.ply","seq0001.ply"}) QVERIFY2(outwards(dir.filePath(file))>=.98,file);
+        // From a .vgs with Fine normals, a .ply keeps them, turned with the capture; where a crop
+        // removes splats they are computed again.
+        Project fine;fine.asset=source;fine.in=0;fine.out=1.0/25;fine.modifiers.clear();fine.captureSettings.normals=CaptureSettings::NormalsFine;
+        exportCaptureFile(fine,dir.filePath("fine.vgs"));
+        Project reused=project;reused.asset=dir.filePath("fine.vgs");reused.captureSettings.normals=CaptureSettings::NormalsFine;
+        const auto keptFrame=exportFramePly(reused,0,dir.filePath("kept.ply"));
+        QVERIFY2(keptFrame.notes.join(' ').contains("the source's kept"),qPrintable(keptFrame.notes.join(' ')));
+        QVERIFY(outwards(dir.filePath("kept.ply"))>=.98);
+        const auto keptSequence=exportCaptureFile(reused,dir.filePath("kept.ply"));
+        QVERIFY2(keptSequence.notes.join(' ').contains("the source's kept"),qPrintable(keptSequence.notes.join(' ')));
+        for (const char *file:{"kept0000.ply","kept0001.ply"}) QVERIFY2(outwards(dir.filePath(file))>=.98,file);
+        Modifier cut;cut.id=Project::newId();cut.name="Cut";cut.crop.enabled=true;cut.crop.remove=true;cut.crop.radius=cut.crop.radiusZ=.25f;cut.crop.height=.5f;
+        cut.crop.transform.position=model.map(QVector3D(.4f,.75f,0));
+        Project cropped=reused;cropped.modifiers={cut};
+        const auto computed=exportFramePly(cropped,0,dir.filePath("cut.ply"));
+        QVERIFY2(computed.notes.join(' ').contains("Normals written (Fine).") && !computed.notes.join(' ').contains("kept"),qPrintable(computed.notes.join(' ')));
+        QVERIFY(outwards(dir.filePath("cut.ply"))>=.98);
     }
     void walkMarksTheHeaderAndLeavesTheDataInPlace() {
         QTemporaryDir dir;const auto source=dir.filePath("source.pgs");sourceFile(source,5);
@@ -1871,7 +1948,9 @@ private:
         vgs::Frame out;out.count=f.splatCount;out.seconds=f.seconds;out.shCoefficients=f.shCoefficients;size_t n=f.splatCount;
         out.position.assign(f.positions,f.positions+n*3);out.rotation.assign(f.rotations,f.rotations+n*4);out.scale.assign(f.scales,f.scales+n*3);
         out.opacity.assign(f.opacities,f.opacities+n);out.colorDc.assign(f.colors,f.colors+n*3);out.active.assign(f.active,f.active+n);
-        out.shRest.assign(f.sphericalHarmonics,f.sphericalHarmonics+n*f.shCoefficients*3);return out;
+        out.shRest.assign(f.sphericalHarmonics,f.sphericalHarmonics+n*f.shCoefficients*3);
+        if (f.normals) out.normal.assign(f.normals,f.normals+n*3);
+        return out;
     }
 };
 QTEST_MAIN(ExportTests)

@@ -51,7 +51,7 @@ HEADERS += $$PWD/mainwindow.h $$PWD/viewport.h $$PWD/viewcube.h $$PWD/capturewor
 msvc: QMAKE_CXXFLAGS += /utf-8 /bigobj /openmp
 win32: LIBS += -lopengl32 -luser32
 RESOURCES += $$PWD/resources.qrc
-win32: RC_ICONS = $$PWD/assets/gracia/logo.ico
+win32: RC_ICONS = $$PWD/assets/gracia/logo_vgs.ico
 # The version is set once, in licensemanagement.h ("v1.0.0"): the exe's version
 # information takes it from there, as the window title, About and the installer do.
 VGS_HEADER_LINES = $$cat($$PWD/licensemanagement.h, lines)

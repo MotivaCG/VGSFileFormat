@@ -13,6 +13,7 @@
 #ifndef VGS_VIEWER
 #include "packedsource.h"
 #include "vgscodec.h"
+#include "gaussiannormals.h"
 #endif
 #include <QFloat16>
 #include <QThread>
@@ -552,6 +553,31 @@ FramePtr CaptureWorker::frame(double time, bool includeSh) {
     trimFramePool();
     return out;
 }
+// The normals a .vgs/.pgs carries, as the capture panel names them: how the editor's export made
+// them (its provenance's "normals"), else whether the header declares any at all. Not in the
+// viewer, which shows no such panel.
+#ifdef VGS_VIEWER
+static QString captureNormals(const QString &,const vgsdec::Capture &) {return {};}
+#else
+static QString captureNormals(const QString &path,const vgsdec::Capture &capture) {
+    if (capture.hasMetadataJson2()) {
+        const auto json=capture.metadataJson2();
+        const auto record=QJsonDocument::fromJson(QByteArray(json.data(),qsizetype(json.size()))).object()["normals"].toObject();
+        const QString mode=record["mode"].toString();
+        // Yes; made some other way (Normal, or an earlier method), an export computes them again.
+        if (mode==QLatin1String("FINE") && record["version"].toInt()==gaussiannormals::kNormalsVersion) return QStringLiteral("Yes");
+        if (mode==QLatin1String("NORMAL") || mode==QLatin1String("FINE")) return QStringLiteral("Yes, made by an earlier method");
+    }
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) return {};
+    const QByteArray bytes=file.read(1<<20);
+    try {
+        const auto header=vgs::readHeader(reinterpret_cast<const uint8_t *>(bytes.constData()),size_t(bytes.size()));
+        for (const auto &policy:header.policies) if (policy.attribute==vgs::Normals) return QStringLiteral("Yes, from an earlier export");
+    } catch (const std::exception &) {return {};}
+    return QStringLiteral("No");
+}
+#endif
 void CaptureWorker::openRequest(const QString &path, quint64 generation, bool sh, quint64 request) {
     const QScopedValueRollback<quint64> scope(request_,request);open(path,generation,sh);
 }
@@ -604,6 +630,7 @@ void CaptureWorker::open(const QString &path, quint64 generation, bool sh) {
             bounds = candidate.vgs_->bounds();
             candidate.info_.antialiased = candidate.vgs_->antialiased();
             candidate.info_.startSeconds = candidate.vgs_->startSeconds();
+            candidate.info_.normals = captureNormals(path,*candidate.vgs_);
             if (candidate.vgs_->hasAudio()) {
                 const auto track = candidate.vgs_->audio();
                 candidate.info_.audio = QByteArray(reinterpret_cast<const char *>(track.data()), qsizetype(track.size()));
@@ -612,9 +639,9 @@ void CaptureWorker::open(const QString &path, quint64 generation, bool sh) {
                 candidate.info_.audioSuffix = format == Format::Mp3 ? "mp3" : format == Format::Aac ? "m4a" : format == Format::Opus ? "opus" : format == Format::Wav ? "wav" : "";
             }
 #ifdef VGS_VIEWER
-        } else throw std::runtime_error("Unsupported format. Open a .vgs, .pgs or .mint file.");
+        } else throw std::runtime_error("Unsupported format. Open a .vgs, .pgs, .sgs or .mint file.");
 #else
-        } else throw std::runtime_error("Unsupported format. Open a .vgs, .pgs, .mint or .ply file.");
+        } else throw std::runtime_error("Unsupported format. Open a .vgs, .pgs, .sgs, .mint or .ply file.");
 #endif
         if (!std::isfinite(candidate.info_.duration) || candidate.info_.duration <= 0 ||
             !std::isfinite(candidate.info_.fps) || candidate.info_.fps <= 0 ||

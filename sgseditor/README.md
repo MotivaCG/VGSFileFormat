@@ -15,10 +15,10 @@ shares (viewport, export, normals) from `../editor`; it is supplied under the
   (`.sgsproj`).
 - **Normals, our method**: the PLY's own when it has some; otherwise, or on *Estimate
   normals*, the VGS editor's estimate (`editor/gaussiannormals.cpp`): each splat's side
-  decided by the cameras of the rig the PLY names (`comment capture_rig SMNV1` or
-  `THE4DSCANNER`), or by 256 cameras all around it. *Estimate normals* has those cameras see
-  finer than an import does (1024 pixels, `kFineVisibility`): some ten seconds for 300 000
-  splats, the window waiting, and a sixth fewer splats on the wrong side; the project
+  decided by 256 cameras all around it, whichever rig the PLY names (a rig's own cameras put
+  the side wrong several times as often). An import sees as the VGS editor's Fine too;
+  *Estimate normals* as its Fine (1024 pixels, `kFineVisibility`): some three seconds for 300 000
+  splats, the window waiting, and about a quarter fewer splats on the wrong side; the project
   remembers it and makes them so again when opened.
 - **Mesh with gs2mesh** (`editor/dependencies/gs2mesh_cpp`, a submodule): a textured mesh,
   without LODs. *Generate mesh* asks for the capture's photos (an undistorted COLMAP model and

@@ -25,11 +25,12 @@ struct ViewerFixture {
     std::unique_ptr<ViewerWindow> window;
     Viewport *viewport = nullptr;
     RangeSlider *slider = nullptr;
-    // A capture of `frames` frames, played the packed way unless `floats`.
-    bool open(int frames, bool floats) {
+    // A capture of `frames` frames, played the packed way unless `floats`, in a file named with
+    // `suffix` (an .sgs is a still in the same container).
+    bool open(int frames, bool floats, const QString &suffix = QStringLiteral("vgs")) {
         if (!dir.isValid()) return false;
         QSettings::setDefaultFormat(QSettings::IniFormat); QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, dir.path());
-        const QString path = dir.filePath("play.vgs");
+        const QString path = dir.filePath("play." + suffix);
         if (!playbackcheck::writeCapture(path, frames).isEmpty()) return false;
         if (floats) qputenv("VGS_VIEWER_FLOATS", "1");
         window = std::make_unique<ViewerWindow>();
@@ -57,6 +58,11 @@ class ViewerTests : public QObject {
     Q_OBJECT
     static void modes() { QTest::addColumn<bool>("floats"); QTest::newRow("packed") << false; QTest::newRow("floats") << true; }
 private slots:
+    void opensAnSgs() {
+        // A still from the SGS editor opens like any capture: one frame, shown.
+        ViewerFixture f; QVERIFY(f.open(1, false, QStringLiteral("sgs")));
+        QCOMPARE(f.shown(), 0);
+    }
     void playsEachFrameOnTime_data() { modes(); }
     void playsEachFrameOnTime() {
         QFETCH(bool, floats);

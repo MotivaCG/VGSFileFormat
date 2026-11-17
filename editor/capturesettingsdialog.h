@@ -33,8 +33,8 @@ private:
     PresetStore &store_;
     QLineEdit *fields_[9], *tags_;
     QPlainTextEdit *extraJson_;
-    QComboBox *presets_, *shDegree_, *shPrune_, *playback_, *normalRig_;
-    QCheckBox *despill_, *recoverSkin_, *normals_;
+    QComboBox *presets_, *shDegree_, *shPrune_, *playback_, *normals_;
+    QCheckBox *despill_, *recoverSkin_;
     QDoubleSpinBox *strength_, *gain_, *chroma_, *plyFps_;
     QSpinBox *plyRowOffset_;
 };

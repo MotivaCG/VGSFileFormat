@@ -8,7 +8,7 @@
 // See LICENSE.md for the limited use grant and applicable terms.
 // Other uses require prior written authorisation, subject to mandatory law.
 
-IDI_APP_ICON ICON DISCARDABLE "@CMAKE_CURRENT_SOURCE_DIR@/assets/gracia/logo.ico"
+IDI_APP_ICON ICON DISCARDABLE "@CMAKE_CURRENT_SOURCE_DIR@/assets/gracia/logo_vgs.ico"
 
 // The version comes from licensemanagement.h (CMakeLists.txt reads it).
 1 VERSIONINFO

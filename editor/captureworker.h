@@ -114,6 +114,9 @@ struct CaptureInfo {
     double startSeconds = 0;
     // Internal chunk changes, in seconds on the capture timeline; editor display only.
     QVector<double> chunkBoundaries;
+    // A .vgs/.pgs: whether it carries normals, as the capture panel says it ("Yes", "No", "Yes,
+    // made by an earlier method"...); empty for other formats.
+    QString normals;
     QVector3D minimum, maximum;
 };
 Q_DECLARE_METATYPE(CaptureInfo)

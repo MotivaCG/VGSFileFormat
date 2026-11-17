@@ -87,7 +87,7 @@ DefaultDirName={autopf}\VGS Editor
 DefaultGroupName={#MyAppName}
 UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName} {#MyAppVersion}
-SetupIconFile=..\assets\gracia\logo.ico
+SetupIconFile=..\assets\gracia\logo_vgs.ico
 LicenseFile=..\LICENSE.md
 ; 64-bit only, installed in the 64-bit Program Files.
 ArchitecturesAllowed=x64compatible

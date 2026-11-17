@@ -165,7 +165,7 @@ async def save_project(path: str | None = None) -> dict[str, Any]:
 
 @mcp.tool(title="Estimate normals", annotations=EDIT)
 async def estimate_normals() -> dict[str, Any]:
-    """Capture > Estimate normals: each splat's normal, seen finely (about ten seconds for 300 000 splats)."""
+    """Capture > Estimate normals: each splat's normal, seen finely (about three seconds for 300 000 splats)."""
     return await _request("estimate_normals", timeout=600)
 
 

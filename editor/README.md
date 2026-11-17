@@ -481,28 +481,41 @@ configuration in QSettings and stores it in the current project. The panel uses
 its own metadata/processing preset scope, sharing the same folder as the editor.
 Loading a metadata preset does not modify capture or crop transforms.
 
-**Write normals** (off by default) stores every splat's outward surface normal in the
-exported `.vgs`, for renderers that light splats (FORMAT.md, Normals); **Rig** names the
-studio that recorded the capture, SMNV1 or THE4DSCANNER, whose cameras are built into the
-editor (`normalrigs.cpp`, from SMNForge's `camera_priors`, both in the capture frame: Y up,
-metres), or *None of ours* for a capture from anywhere else. The method is SMNForge's *Fill
-Gaussian normals* (`gaussiannormals.cpp`, kept the same in both): the shortest axis on flat
+**Normals** stores every splat's outward surface normal in the exported `.vgs`, for renderers
+that light splats (FORMAT.md, Normals): *Yes* (the default) or *No*; the capture panel says
+whether the open capture carries them. They are made as *Fine* below; *Normal*,
+offered until it cost more than half as much, is now only how earlier exports may name theirs. The method
+is SMNForge's *Fill Gaussian normals* (`gaussiannormals.cpp`): the shortest axis on flat
 splats, the neighbourhood plane on round ones, the side facing the cameras that see the
-splat through a coarse depth buffer, propagated, outliers given their neighbours' normal,
-and smoothed. Without a rig of ours, or when the rig's cameras see less than half of the
-opaque splats (the wrong rig, or a capture not in its own frame), 256 cameras spread all
-around the splats decide the sides instead (`surroundingViews`, `estimateNormals`), a splat
-counting as seen up to 0.1 % of its distance behind the nearest (`kSurroundingVisibility`; a
-rig's cameras keep SMNForge's 1 %). Against gs2mesh's dense mesh of two captures that put the
-side wrong on 0.40 % of the splats, where 100 cameras at 1 % did on 1.3 %: at 1 % the back of
-fingers, ears and cloth edges passed as seen from the front. Twice as long as 100 cameras:
-1 s for 300 000 splats.
-It runs on what is written, with the cameras moved by the capture transform, at one instant
-per splat and chunk; the normal is stored in the splat's own frame, so it turns with it.
-The export notes say which cameras decided, and how much of the capture the rig's saw. On the boxing capture (SMNV1): +2.8% size,
-1.7 s to 2.3 s, 97.5% of opaque splats seen. A `.ply`, one frame or a sequence, carries them
-as `nx ny nz` (zero otherwise, as 3DGS training writes them), which the PLY importer of
-the Blender build here reads. MINT cannot hold normals; exporting one says so.
+splat, propagated, outliers given their neighbours' normal, and smoothed. The cameras are 256
+spread all around the splats (`surroundingViews`), whichever rig recorded them and wherever
+the capture has been moved; each draws the opaque splats as their own ellipses, and the side
+is also tried from points 16, 8 and 4 mm either side of each splat. *Normal* sees in 320
+pixels with a splat counting as seen up to 0.1 % of its distance behind the nearest
+(`kSurroundingVisibility`, about 1.3 s per 300 000-splat frame); *Fine* in 1024 pixels at 0.05 %
+(`kFineVisibility`, about 3 s). Against gs2mesh's dense mesh of two captures (2026-11-17) the
+side was wrong on 0.25 % / 0.15 % of the splats with Normal and 0.19 % / 0.10 % with Fine; the
+studio rigs' own cameras, which this used to take, put it wrong on 0.9–3.8 % (2.6 % with the
+couple's wrong rig, which went unnoticed: it still "saw" 99.7 %): at their 1 % the back of fingers,
+tubes and cloth hems passed as seen from the front. On a second of `maria_simbo_carrito` and
+`arabs` the rigs' disagreed with Fine on 4–9 % of the splats, Normal on 1.3 %. From one frame
+to the next 0.13–0.2 % of the splats turn over with Fine, a little more with Normal.
+It runs on what is written, at one instant per splat and chunk: the middle of the chunk for
+every splat alive then (96 to 99 %), and one more estimate for the rest, each where it is at the
+instant of its life nearest the middle (it replaced one estimate per instant, about nine a
+chunk: 4 times faster, 0.07 % of the splats on the other side). The estimate itself draws each
+camera's footprints into one buffer, eight pixels at a time where the processor has AVX, the
+same normals bit for bit 1.9 (Normal) to 3.6 (Fine) times faster. The normal is stored in the
+splat's own frame, so it turns with it. The export's metadata records how they were made
+(`normals`: `mode` and `gaussiannormals::kNormalsVersion`, raised whenever the method changes);
+exporting such a `.vgs` again keeps a chunk's normals instead of computing them when they were
+made by this version, as finely or finer than asked, and the chunk keeps every splat with its
+opacity and size (moving, turning or scaling the capture, colour and SH changes do not count;
+a crop, Remove green, Purge, Prune or Erase that removes any, an opacity change or Bake
+anti-aliasing does). The export notes say which was written and how many chunks kept theirs. A `.ply`, one
+frame or a sequence, carries them as `nx ny nz` (zero with None, as 3DGS training writes
+them), which the PLY importer of the Blender build here reads. MINT cannot hold normals;
+exporting one says so.
 
 These options are applied during **File > Export capture…** (Ctrl+E); preview
 colours continue to use source data. Export writes signed encoding-0 VGS (compressed)

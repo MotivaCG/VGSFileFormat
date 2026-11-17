@@ -53,26 +53,20 @@ void SgsCapture::estimateNormals(QString *note,int surrounding,bool fine) {
 SgsCapture::NormalsEstimate SgsCapture::computeNormals(int surrounding,bool fine) const {
     gaussiannormals::Splats splats;splats.count=size_t(frame.count);splats.position=frame.position.data();splats.rotation=frame.rotation.data();
     splats.scale=frame.scale.data();splats.opacity=frame.opacity.data();splats.use=frame.active.data();
-    const auto named=rig();
-    const auto views=named ? gaussiannormals::rigViews(*named) : std::vector<gaussiannormals::View>{};
+    // Cameras all around, whichever rig the PLY names: a rig's own cameras, at SMNForge's 1 %,
+    // put the side wrong several times as often (editor/README.md, Normals).
     NormalsEstimate out;out.surrounding=surrounding;out.fine=fine;
     out.normals.assign(size_t(frame.count)*3,0.f);
-    out.result=gaussiannormals::estimateNormals(splats,views,out.normals.data(),surrounding,
+    out.result=gaussiannormals::estimateNormals(splats,{},out.normals.data(),surrounding,
                                                 fine ? gaussiannormals::kFineVisibility : gaussiannormals::kSurroundingVisibility);
     return out;
 }
 
 void SgsCapture::applyNormals(NormalsEstimate estimate,QString *note) {
-    const auto named=rig();const auto &result=estimate.result;const int surrounding=estimate.surrounding;
+    const int surrounding=estimate.surrounding;
     frame.normal=std::move(estimate.normals);
-    normals=result.surrounding ? NormalsSource::Surrounding : NormalsSource::Rig;
-    if (note) {
-        const QString rigName=named==gaussiannormals::Rig::The4DScanner ? QStringLiteral("THE4DSCANNER") : QStringLiteral("SMNV1");
-        const double seen=result.opaque ? 100.0*double(result.rigOpaqueSeen)/double(result.opaque) : 0;
-        if (!named) *note=QStringLiteral("The PLY names no capture rig: %1 cameras all around the splats decided which way each faces%2.").arg(surrounding).arg(estimate.fine ? QStringLiteral(", seeing finely") : QString());
-        else if (result.surrounding) *note=QStringLiteral("The %1 cameras the PLY names saw only %2% of the splats (another rig, or not in its frame?): %3 cameras all around decided instead.").arg(rigName).arg(seen,0,'f',1).arg(surrounding);
-        else *note=QStringLiteral("The %1 cameras the PLY names decided which way each splat faces; they see %2% of them.").arg(rigName).arg(seen,0,'f',1);
-    }
+    normals=NormalsSource::Surrounding;
+    if (note) *note=QStringLiteral("%1 cameras all around the splats decided which way each faces%2.").arg(surrounding).arg(estimate.fine ? QStringLiteral(", seeing finely") : QString());
 }
 
 FramePtr SgsCapture::renderFrame() const {

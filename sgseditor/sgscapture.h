@@ -15,7 +15,7 @@
 enum class NormalsSource {
     None,        // none yet: the splats cannot be lit
     File,        // the PLY's own nx, ny, nz
-    Rig,         // our estimate, sides decided by the cameras of the rig the PLY names
+    Rig,         // our estimate with a rig's cameras: no longer made (Surrounding instead)
     Surrounding  // our estimate, sides decided by cameras all around the splats
 };
 QString normalsSourceText(NormalsSource);
@@ -34,12 +34,11 @@ struct SgsCapture {
     static SgsCapture load(const QString &path); // throws std::runtime_error
     // The rig the PLY names (`comment capture_rig SMNV1` or THE4DSCANNER), if any.
     std::optional<gaussiannormals::Rig> rig() const;
-    // Our estimate (gaussiannormals::estimateNormals, as the VGS editor's export and SMNForge
-    // make them): the sides decided by the cameras of the rig the PLY names, or by cameras all
-    // around when it names none or its cameras see less than half of it. Replaces the
-    // normals; `note`, when given, says what decided the sides. `fine`: the cameras all around
-    // see finer (gaussiannormals::kFineVisibility), some ten times slower.
-    void estimateNormals(QString *note = nullptr, int surrounding = SurroundingViews, bool fine = false);
+    // Our estimate (gaussiannormals, as the VGS editor's export makes them): the sides decided
+    // by cameras all around the splats, whichever rig the PLY names. Replaces the normals;
+    // `note`, when given, says what decided the sides. `fine`: the cameras see finer
+    // (gaussiannormals::kFineVisibility, the editor's Fine), some 2.3 times slower.
+    void estimateNormals(QString *note = nullptr, int surrounding = SurroundingViews, bool fine = true);
     // The same in two steps: the estimate, which only reads the capture (another thread may make
     // it while nothing changes the capture), and taking it.
     struct NormalsEstimate {
@@ -48,9 +47,9 @@ struct SgsCapture {
         int surrounding = 0;
         bool fine = false;
     };
-    NormalsEstimate computeNormals(int surrounding = SurroundingViews, bool fine = false) const;
+    NormalsEstimate computeNormals(int surrounding = SurroundingViews, bool fine = true) const;
     void applyNormals(NormalsEstimate estimate, QString *note = nullptr);
-    // Cameras all around when the PLY names no rig, as the VGS editor's export.
+    // The cameras all around, as the VGS editor's export.
     static constexpr int SurroundingViews = gaussiannormals::kSurroundingViews;
     // What the viewport draws: the splats and their normals.
     FramePtr renderFrame() const;

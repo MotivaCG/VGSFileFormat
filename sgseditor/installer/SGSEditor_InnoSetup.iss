@@ -77,7 +77,7 @@ DefaultDirName={autopf}\SGS Editor
 DefaultGroupName={#MyAppName}
 UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName} {#MyAppVersion}
-SetupIconFile=..\..\editor\assets\gracia\logo.ico
+SetupIconFile=..\..\editor\assets\gracia\logo_sgs.ico
 LicenseFile=..\..\editor\LICENSE.md
 ; 64-bit only, installed in the 64-bit Program Files.
 ArchitecturesAllowed=x64compatible

@@ -772,6 +772,16 @@ private slots:
         QVERIFY2(CaptureSettings::fromJson(settings.json(),&restored,&error),qPrintable(error)); QCOMPARE(restored.json(),settings.json());
         auto older = settings.json(); older.remove("shPrune");
         QVERIFY2(CaptureSettings::fromJson(older,&restored,&error),qPrintable(error)); QCOMPARE(restored.shPrune,0.);
+        // Normals: Fine by default, kept as NONE / NORMAL / FINE; the earlier on/off and rig
+        // are not read and leave Fine.
+        QCOMPARE(CaptureSettings().normals,int(CaptureSettings::NormalsFine));
+        settings.normals = CaptureSettings::NormalsFine; QCOMPARE(settings.json()["normalsMode"].toString(),QString("FINE"));
+        QVERIFY2(CaptureSettings::fromJson(settings.json(),&restored,&error),qPrintable(error)); QCOMPARE(restored.normals,int(CaptureSettings::NormalsFine));
+        auto earlier = settings.json(); earlier.remove("normalsMode"); earlier["normals"] = false; earlier["normalRig"] = "THE4DSCANNER";
+        QVERIFY2(CaptureSettings::fromJson(earlier,&restored,&error),qPrintable(error)); QCOMPARE(restored.normals,int(CaptureSettings::NormalsFine));
+        auto normal = settings.json(); normal["normalsMode"] = "NORMAL"; // no longer offered: Fine
+        QVERIFY2(CaptureSettings::fromJson(normal,&restored,&error),qPrintable(error)); QCOMPARE(restored.normals,int(CaptureSettings::NormalsFine));
+        auto unknown = settings.json(); unknown["normalsMode"] = "SOME"; QVERIFY(!CaptureSettings::fromJson(unknown,&restored,&error));
         auto invalid = settings.json(); invalid["extraJson"] = "invalid JSON";
         QVERIFY(!CaptureSettings::fromJson(invalid,&restored,&error)); QCOMPARE(restored.title,settings.title);
         CropVolume crop; crop.enabled = true; crop.radius = crop.radiusZ = 0.4f; crop.height = 1; crop.width = crop.depth = 0.8f;

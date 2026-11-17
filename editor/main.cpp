@@ -42,7 +42,7 @@ int main(int argc, char *argv[])
     QApplication a(argc, argv);
     a.setApplicationName("VGS Editor"); a.setOrganizationName("VGS");
     a.setApplicationVersion(QStringLiteral(VERSION_NAME).mid(1)); // "v1.0.0" -> "1.0.0"
-    a.setWindowIcon(QIcon(":/icons/logo.png"));
+    a.setWindowIcon(QIcon(":/icons/logo_vgs.png")); // the VGS editor's green logo
     EditorTheme::install();
     QCommandLineParser parser; parser.addHelpOption();
     parser.addPositionalArgument("capture", "A .vgs, .pgs, .mint, .ply or .vgsproj file.");

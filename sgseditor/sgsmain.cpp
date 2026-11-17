@@ -25,7 +25,7 @@ int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
     app.setApplicationName("SGS Editor"); app.setOrganizationName("VGS");
     app.setApplicationVersion(QStringLiteral(SGS_EDITOR_VERSION_NAME).mid(1));
-    app.setWindowIcon(QIcon(":/icons/logo.png"));
+    app.setWindowIcon(QIcon(":/icons/logo_sgs.png")); // the SGS editor's red logo
     // --self-test <file>: whether gs2mesh loads, written to the file, and out: for a deployment
     // or an installation to be checked without opening a window.
     if (const int at=int(app.arguments().indexOf("--self-test"));at>0 && at+1<app.arguments().size()) {

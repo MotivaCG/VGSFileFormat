@@ -1384,7 +1384,7 @@ void MainWindow::buildUi() {
     helpMenu->addAction(tr("About VGS Editor"), this, [this] {
         QMessageBox dialog(this);
         dialog.setWindowTitle(tr("About VGS Editor"));
-        dialog.setIconPixmap(QPixmap(":/icons/logo.png").scaled(64,64,Qt::KeepAspectRatio,Qt::SmoothTransformation));
+        dialog.setIconPixmap(QPixmap(":/icons/logo_vgs.png").scaled(64,64,Qt::KeepAspectRatio,Qt::SmoothTransformation));
         dialog.setTextFormat(Qt::RichText);
         dialog.setText(tr("<h2>VGS Editor</h2><p>Version %1</p><p>4D Gaussian capture editor</p>"
                           "<p>Víctor M. Feliz</p>"
@@ -1631,7 +1631,8 @@ void MainWindow::syncUi() {
     if (!project_.plySequence.empty() && project_.plySequence.chunks.isEmpty())
         for (auto *action:{saveAction_,saveAsAction_,exportAction_,plyAction_,taskAction_,estimateAction_}) action->setEnabled(false);
     assetLabel_->setToolTip(project_.asset);
-    metadata_->setText(loaded_ ? tr("%1 · %2 fps\n%3 s · %4 frames").arg(info_.format).arg(info_.fps,0,'f',2).arg(info_.duration,0,'f',3).arg(info_.frames) : QString());
+    metadata_->setText(loaded_ ? tr("%1 · %2 fps\n%3 s · %4 frames").arg(info_.format).arg(info_.fps,0,'f',2).arg(info_.duration,0,'f',3).arg(info_.frames)
+                                     +(info_.normals.isEmpty() ? QString() : tr("\nNormals: %1").arg(info_.normals)) : QString());
     const auto target = viewport_->displayedTransform();
     const QVector3D vectors[] = {target.position,target.rotation,target.scale};
     for (int g=0; g<3; ++g) for (int a=0; a<3; ++a) transform_[g][a]->setValue(vectors[g][a]);
@@ -2495,6 +2496,16 @@ void MainWindow::receiveFrame(FramePtr frame) {
         qInfo("New project and reopen saved crop/orthographic view OK"); setWindowModified(false); qApp->exit(0);
     }
 }
+// After Cancel the export thread stops at its next check, which can be a moment away (a
+// chunk being decoded): the window keeps painting meanwhile, saying so, instead of freezing.
+static void waitForCanceledJob(QWidget *parent,QThread *job) {
+    if (job->isFinished()) {job->wait();return;}
+    QProgressDialog stopping(QObject::tr("Canceling export\u2026"),QString(),0,0,parent);
+    stopping.setWindowTitle(QObject::tr("Export capture"));stopping.setWindowModality(Qt::ApplicationModal);stopping.setMinimumDuration(0);
+    QObject::connect(job,&QThread::finished,&stopping,&QDialog::accept);
+    if (!job->isFinished()) stopping.exec();
+    job->wait();
+}
 void MainWindow::exportCapture() {
     if (!loaded_ || loading_) return;
     play(false);
@@ -2529,7 +2540,7 @@ void MainWindow::exportCapture() {
         catch (const std::exception &e) {failure=QString::fromUtf8(e.what());}
     });
     connect(job,&QThread::finished,&progress,&QDialog::accept);
-    job->start();progress.exec();cancelled = cancelled || progress.wasCanceled();job->wait();delete job;
+    job->start();progress.exec();cancelled = cancelled || progress.wasCanceled();waitForCanceledJob(this,job);delete job;
     if (!failure.isEmpty()) {if (!cancelled) showError(failure);return;}
     settings_.setValue("Export/Directory",QFileInfo(destination).absolutePath());
     settings_.setValue("Export/LastFile",destination);
@@ -2591,7 +2602,7 @@ void MainWindow::exportFrame() {
         catch (const std::exception &e) {failure=QString::fromUtf8(e.what());}
     });
     connect(job,&QThread::finished,&progress,&QDialog::accept);
-    job->start();progress.exec();cancelled = cancelled || progress.wasCanceled();job->wait();delete job;
+    job->start();progress.exec();cancelled = cancelled || progress.wasCanceled();waitForCanceledJob(this,job);delete job;
     if (!failure.isEmpty()) {if (!cancelled) showError(failure);return;}
     settings_.setValue("Export/PlyDirectory",QFileInfo(destination).absolutePath());
     statusBar()->showMessage(tr("Frame %1 saved to %2: %3 Gaussians, %4 removed by modifiers.").arg(frame).arg(destination).arg(result.kept).arg(result.removed),15000);

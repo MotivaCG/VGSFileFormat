@@ -14,7 +14,23 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <atomic>
+#include <cstdlib>
+#include <cstring>
+#include <condition_variable>
+#include <mutex>
 #include <thread>
+#if defined(_M_X64) || defined(__x86_64__)
+#define GAUSSIANNORMALS_X86 1
+#include <immintrin.h>
+#if defined(_MSC_VER) && !defined(__clang__)
+#include <intrin.h>
+#define GAUSSIANNORMALS_AVX
+#else
+#include <cpuid.h>
+#define GAUSSIANNORMALS_AVX __attribute__((target("avx")))
+#endif
+#endif
 
 namespace gaussiannormals {
 namespace {
@@ -58,19 +74,160 @@ struct Cloud {
     template <class Box> bool kdtree_get_bbox(Box &) const { return false; }
 };
 
+// The machine's cores, kept for one computeNormals: its parallel loops hand them blocks of
+// work instead of starting threads of their own every time (several per camera).
+class Pool {
+public:
+    explicit Pool(int threads) {
+        for (int t = 1; t < threads; ++t) workers_.emplace_back([this] { serve(); });
+    }
+    ~Pool() {
+        { std::lock_guard<std::mutex> lock(mutex_); quit_ = true; }
+        wake_.notify_all();
+        for (auto &w : workers_) w.join();
+    }
+    int size() const { return int(workers_.size()) + 1; }
+    // job(k) for k in [0, jobs), on every thread including this one; returns when all are done.
+    void run(int jobs, const std::function<void(int)> &job) {
+        if (jobs <= 0) return;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            job_ = &job; jobs_ = jobs; next_ = 0; pending_ = jobs; ++generation_;
+        }
+        wake_.notify_all();
+        work();
+        std::unique_lock<std::mutex> lock(mutex_);
+        done_.wait(lock, [&] { return pending_ == 0; });
+        job_ = nullptr;
+    }
+private:
+    void work() {
+        for (;;) {
+            const int k = next_.fetch_add(1);
+            if (k >= jobs_) return;
+            (*job_)(k);
+            if (pending_.fetch_sub(1) == 1) { std::lock_guard<std::mutex> lock(mutex_); done_.notify_all(); }
+        }
+    }
+    void serve() {
+        unsigned seen = 0;
+        for (;;) {
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                wake_.wait(lock, [&] { return quit_ || generation_ != seen; });
+                if (quit_) return;
+                seen = generation_;
+            }
+            work();
+        }
+    }
+    std::vector<std::thread> workers_;
+    std::mutex mutex_;
+    std::condition_variable wake_, done_;
+    const std::function<void(int)> *job_ = nullptr;
+    int jobs_ = 0;
+    std::atomic<int> next_{0}, pending_{0};
+    unsigned generation_ = 0;
+    bool quit_ = false;
+};
+thread_local Pool *currentPool = nullptr;
+// A splat's 2-sigma ellipse in one camera (Visibility::footprints); reachPx < 0: not drawn.
+struct Footprint { float u, v, ia, ib, ic, np, z, reach; Eigen::Vector3f n; int reachPx; };
+// The camera's intrinsics at the depth buffer's scale.
+struct Intrinsics { float fx, fy, cx, cy; };
+
+// Depths as integers that order as the floats do, so the nearest wins by an atomic minimum.
+inline uint32_t orderedBits(float z) {
+    uint32_t b;
+    std::memcpy(&b, &z, 4);
+    return (b & 0x80000000u) ? ~b : (b | 0x80000000u);
+}
+inline void atomicMin(std::atomic<uint32_t> &cell, uint32_t bits) {
+    uint32_t seen = cell.load(std::memory_order_relaxed);
+    while (bits < seen && !cell.compare_exchange_weak(seen, bits, std::memory_order_relaxed)) {}
+}
+
+// Row y of a footprint, pixels x0 to x1: those inside its ellipse take the depth of its plane
+// along their ray, held within its reach of its centre.
+inline void drawRow(const Footprint &f, const Intrinsics &k, int y, int x0, int x1, std::atomic<uint32_t> *row) {
+    const float dy = y + 0.5f - f.v;
+    for (int x = x0; x <= x1; ++x) {
+        const float dx = x + 0.5f - f.u;
+        if (f.ia * dx * dx + 2.0f * f.ib * dx * dy + f.ic * dy * dy > kFootprintSigmas * kFootprintSigmas) continue;
+        const float nr = f.n.dot(Eigen::Vector3f((x + 0.5f - k.cx) / k.fx, (y + 0.5f - k.cy) / k.fy, 1.0f));
+        const float z = std::clamp(std::abs(nr) > 0.2f ? f.np / nr : f.z, f.z - f.reach, f.z + f.reach);
+        atomicMin(row[x], orderedBits(z));
+    }
+}
+
+#ifdef GAUSSIANNORMALS_X86
+// drawRow eight pixels at a time with AVX (no AVX2 needed), the same operations in the same order
+// (no fused multiply-adds), so the depths are bit for bit the same.
+GAUSSIANNORMALS_AVX void drawRowAvx(const Footprint &f, const Intrinsics &k, int y, int x0, int x1, std::atomic<uint32_t> *row) {
+    const float dy = y + 0.5f - f.v;
+    // Eigen's dot product adds as x + (y + z): y + z is the same along the row.
+    const float dyTerm = f.ic * dy * dy, rayYZ = f.n.y() * ((y + 0.5f - k.cy) / k.fy) + f.n.z() * 1.0f;
+    const __m256 half = _mm256_set1_ps(0.5f), u = _mm256_set1_ps(f.u), ia = _mm256_set1_ps(f.ia), ib2 = _mm256_set1_ps(2.0f * f.ib);
+    const __m256 dyv = _mm256_set1_ps(dy), dyt = _mm256_set1_ps(dyTerm), limit = _mm256_set1_ps(kFootprintSigmas * kFootprintSigmas);
+    const __m256 cx = _mm256_set1_ps(k.cx), fx = _mm256_set1_ps(k.fx), nx = _mm256_set1_ps(f.n.x()), ryz = _mm256_set1_ps(rayYZ);
+    const __m256 np = _mm256_set1_ps(f.np), z0 = _mm256_set1_ps(f.z), lo = _mm256_set1_ps(f.z - f.reach), hi = _mm256_set1_ps(f.z + f.reach);
+    const __m256 tilt = _mm256_set1_ps(0.2f), signless = _mm256_castsi256_ps(_mm256_set1_epi32(0x7fffffff));
+    // Pixel columns as floats (exact: far below 2^24), which AVX compares without AVX2's integers.
+    const __m256 lanes = _mm256_setr_ps(0, 1, 2, 3, 4, 5, 6, 7), last = _mm256_set1_ps(float(x1));
+    alignas(32) float depths[8];
+    for (int x = x0; x <= x1; x += 8) {
+        const __m256 column = _mm256_add_ps(_mm256_set1_ps(float(x)), lanes);
+        const __m256 xf = _mm256_add_ps(column, half);
+        const __m256 dx = _mm256_sub_ps(xf, u);
+        const __m256 q = _mm256_add_ps(_mm256_add_ps(_mm256_mul_ps(_mm256_mul_ps(ia, dx), dx), _mm256_mul_ps(_mm256_mul_ps(ib2, dx), dyv)), dyt);
+        const __m256 inside = _mm256_and_ps(_mm256_cmp_ps(q, limit, _CMP_NGT_UQ),
+                                            _mm256_cmp_ps(column, last, _CMP_LE_OQ));
+        const int mask = _mm256_movemask_ps(inside);
+        if (!mask) continue;
+        const __m256 nr = _mm256_add_ps(_mm256_mul_ps(nx, _mm256_div_ps(_mm256_sub_ps(xf, cx), fx)), ryz);
+        const __m256 tilted = _mm256_cmp_ps(_mm256_and_ps(nr, signless), tilt, _CMP_GT_OQ);
+        const __m256 v = _mm256_blendv_ps(z0, _mm256_div_ps(np, nr), tilted);
+        const __m256 held = _mm256_blendv_ps(_mm256_blendv_ps(v, hi, _mm256_cmp_ps(hi, v, _CMP_LT_OQ)), lo, _mm256_cmp_ps(v, lo, _CMP_LT_OQ));
+        _mm256_store_ps(depths, held);
+        for (int lane = 0; lane < 8; ++lane)
+            if (mask & (1 << lane)) atomicMin(row[x + lane], orderedBits(depths[lane]));
+    }
+    _mm256_zeroupper(); // back to the SSE code around it without the transition's penalty
+}
+
+// Whether this processor and system run AVX (checked once).
+bool avx() {
+    static const bool available = [] {
+        if (const char *off = std::getenv("GAUSSIANNORMALS_NO_AVX")) if (*off && *off != '0') return false;
+#if defined(_MSC_VER) && !defined(__clang__)
+        int r[4];
+        __cpuid(r, 1);
+        if (!(r[2] & (1 << 27)) || !(r[2] & (1 << 28))) return false; // OSXSAVE, AVX
+        return (_xgetbv(0) & 6) == 6;                                   // the system saves the registers
+#else
+        return __builtin_cpu_supports("avx") != 0;
+#endif
+    }();
+    return available;
+}
+#else
+bool avx() { return false; }
+#endif
+
 // Runs body(i) for i in [0, count) on the machine's cores, in contiguous blocks.
 template <class Body> void parallelFor(int count, Body body) {
-    const int threads = std::max(1, std::min<int>(int(std::thread::hardware_concurrency()), count / 4096));
+    const int threads = std::max(1, std::min<int>(currentPool ? currentPool->size() : int(std::thread::hardware_concurrency()), count / 4096));
     if (threads <= 1) {
         for (int i = 0; i < count; ++i) body(i);
         return;
     }
-    std::vector<std::thread> pool;
     const int block = (count + threads - 1) / threads;
-    for (int t = 0; t < threads; ++t)
-        pool.emplace_back([&, t] {
-            for (int i = t * block, end = std::min(count, i + block); i < end; ++i) body(i);
-        });
+    const std::function<void(int)> job = [&](int t) {
+        for (int i = t * block, end = std::min(count, i + block); i < end; ++i) body(i);
+    };
+    if (currentPool) { currentPool->run(threads, job); return; }
+    std::vector<std::thread> pool;
+    for (int t = 0; t < threads; ++t) pool.emplace_back(job, t);
     for (auto &thread : pool) thread.join();
 }
 
@@ -142,7 +299,10 @@ std::vector<View> surroundingViews(const Splats &s, int count, int resolution) {
     return views;
 }
 
-Result computeNormals(const Splats &s, const std::vector<View> &views, float *normalsOut, const Visibility &visibility) {
+Result computeNormals(const Splats &s, const std::vector<View> &views, float *normalsOut, const Visibility &visibility,
+                      const std::function<void()> &poll) {
+    Pool pool(std::max(1, int(std::thread::hardware_concurrency())));
+    struct Current { Current(Pool *p) { currentPool = p; } ~Current() { currentPool = nullptr; } } current(&pool);
     Result result;
     std::vector<size_t> ids;
     ids.reserve(s.count);
@@ -283,7 +443,10 @@ Result computeNormals(const Splats &s, const std::vector<View> &views, float *no
             spacing = gaps[gaps.size() / 2];
         }
     }
+    std::vector<Footprint> footprints; // each opaque splat's ellipse in the camera at hand
+    std::vector<std::atomic<uint32_t>> depthBits; // the footprints' depth buffer, drawn from every thread
     for (const View &view : views) {
+        if (poll) poll();
         if (view.width <= 0 || view.height <= 0 || view.fx <= 0.0f || view.fy <= 0.0f) continue;
         float scale = std::min(1.0f, float(visibility.resolution) / float(std::max(view.width, view.height)));
         if (spacing > 0.0f) {
@@ -302,72 +465,75 @@ Result computeNormals(const Splats &s, const std::vector<View> &views, float *no
             const int v = int(std::floor((view.fy * p.y() / p.z() + view.cy) * scale));
             if (u >= 0 && u < width && v >= 0 && v < height) pixel[size_t(i)] = v * width + u;
         });
-        std::vector<float> nearest(size_t(width) * height, std::numeric_limits<float>::infinity());
-        for (int i = 0; i < count; ++i)
-            if (pixel[size_t(i)] >= 0 && alpha[size_t(i)] > kNormalOccluderOpacity)
-                nearest[size_t(pixel[size_t(i)])] = std::min(nearest[size_t(pixel[size_t(i)])], depth[size_t(i)]);
-        std::vector<float> closed(nearest.size(), std::numeric_limits<float>::infinity());
+        std::vector<float> closed(size_t(width) * height, std::numeric_limits<float>::infinity());
         if (visibility.footprints) {
             // Each opaque splat over its 2-sigma ellipse, at the depth of its own plane along each ray (held within
-            // twice its size of its centre), into one buffer per thread, then the nearest of them.
+            // twice its size of its centre): first each one's ellipse in this camera, then drawn.
             const float fx = view.fx * scale, fy = view.fy * scale, cx = view.cx * scale, cy = view.cy * scale;
-            const int threads = std::clamp(int(std::thread::hardware_concurrency()), 1, 16);
-            std::vector<std::vector<float>> part(static_cast<size_t>(threads));
-            std::vector<std::thread> pool;
-            for (int t = 0; t < threads; ++t)
-                pool.emplace_back([&, t] {
-                    std::vector<float> &buffer = part[size_t(t)];
-                    buffer.assign(closed.size(), std::numeric_limits<float>::infinity());
-                    for (int i = t; i < count; i += threads) {
-                        if (!(alpha[size_t(i)] > kNormalOccluderOpacity)) continue;
-                        const Eigen::Vector3f p = view.worldToCamera * cloud.pts[size_t(i)] + view.translation;
-                        if (p.z() <= 1e-3f) continue;
-                        Eigen::Matrix<float, 2, 3> J;
-                        J << fx / p.z(), 0, -fx * p.x() / (p.z() * p.z()), 0, fy / p.z(), -fy * p.y() / (p.z() * p.z());
-                        const Eigen::Matrix2f S = J * (view.worldToCamera * shape[size_t(i)] * view.worldToCamera.transpose()) * J.transpose()
-                                                + 0.3f * Eigen::Matrix2f::Identity();
-                        const float det = S.determinant();
-                        if (!(det > 0.0f)) continue;
-                        const float mid = 0.5f * (S(0, 0) + S(1, 1)), largest = mid + std::sqrt(std::max(0.0f, mid * mid - det));
-                        const int reachPx = std::min(kFootprintMaxPixels, int(std::ceil(kFootprintSigmas * std::sqrt(largest))));
-                        const float u = fx * p.x() / p.z() + cx, v = fy * p.y() / p.z() + cy;
-                        const float ia = S(1, 1) / det, ib = -S(0, 1) / det, ic = S(0, 0) / det;
-                        const Eigen::Vector3f n = view.worldToCamera * axis[size_t(i)];
-                        const float np = n.dot(p), reach = 2.0f * radius[size_t(i)];
-                        for (int y = std::max(0, int(v) - reachPx); y <= std::min(height - 1, int(v) + reachPx); ++y)
-                            for (int x = std::max(0, int(u) - reachPx); x <= std::min(width - 1, int(u) + reachPx); ++x) {
-                                const float dx = x + 0.5f - u, dy = y + 0.5f - v;
-                                if (ia * dx * dx + 2.0f * ib * dx * dy + ic * dy * dy > kFootprintSigmas * kFootprintSigmas) continue;
-                                const float nr = n.dot(Eigen::Vector3f((x + 0.5f - cx) / fx, (y + 0.5f - cy) / fy, 1.0f));
-                                const float z = std::clamp(std::abs(nr) > 0.2f ? np / nr : p.z(), p.z() - reach, p.z() + reach);
-                                float &b = buffer[size_t(y) * width + x];
-                                b = std::min(b, z);
-                            }
-                    }
-                });
-            for (auto &thread : pool) thread.join();
-            parallelFor(height, [&](int y) {
-                for (int x = 0; x < width; ++x) {
-                    float m = std::numeric_limits<float>::infinity();
-                    for (const auto &b : part) m = std::min(m, b[size_t(y) * width + x]);
-                    closed[size_t(y) * width + x] = m;
+            if (footprints.size() != size_t(count)) footprints.resize(size_t(count));
+            parallelFor(count, [&](int i) {
+                Footprint &f = footprints[size_t(i)];
+                f.reachPx = -1;
+                if (!(alpha[size_t(i)] > kNormalOccluderOpacity)) return;
+                const Eigen::Vector3f p = view.worldToCamera * cloud.pts[size_t(i)] + view.translation;
+                if (p.z() <= 1e-3f) return;
+                Eigen::Matrix<float, 2, 3> J;
+                J << fx / p.z(), 0, -fx * p.x() / (p.z() * p.z()), 0, fy / p.z(), -fy * p.y() / (p.z() * p.z());
+                const Eigen::Matrix2f S = J * (view.worldToCamera * shape[size_t(i)] * view.worldToCamera.transpose()) * J.transpose()
+                                        + 0.3f * Eigen::Matrix2f::Identity();
+                const float det = S.determinant();
+                if (!(det > 0.0f)) return;
+                const float mid = 0.5f * (S(0, 0) + S(1, 1)), largest = mid + std::sqrt(std::max(0.0f, mid * mid - det));
+                f.reachPx = std::min(kFootprintMaxPixels, int(std::ceil(kFootprintSigmas * std::sqrt(largest))));
+                f.u = fx * p.x() / p.z() + cx; f.v = fy * p.y() / p.z() + cy;
+                f.ia = S(1, 1) / det; f.ib = -S(0, 1) / det; f.ic = S(0, 0) / det;
+                f.n = view.worldToCamera * axis[size_t(i)];
+                f.np = f.n.dot(p); f.z = p.z(); f.reach = 2.0f * radius[size_t(i)];
+            });
+            // Drawn straight into one buffer from every thread, the nearest winning by an atomic
+            // minimum whatever the order; with AVX, eight pixels of a row at a time.
+            if (depthBits.size() < closed.size()) depthBits = std::vector<std::atomic<uint32_t>>(closed.size());
+            const uint32_t far = orderedBits(std::numeric_limits<float>::infinity());
+            parallelFor(int(closed.size()), [&](int k) { depthBits[size_t(k)].store(far, std::memory_order_relaxed); });
+            const Intrinsics intrinsics{fx, fy, cx, cy};
+            const bool wide = avx();
+            parallelFor(count, [&](int i) {
+                const Footprint &f = footprints[size_t(i)];
+                if (f.reachPx < 0) return;
+                const int x0 = std::max(0, int(f.u) - f.reachPx), x1 = std::min(width - 1, int(f.u) + f.reachPx);
+                for (int y = std::max(0, int(f.v) - f.reachPx); y <= std::min(height - 1, int(f.v) + f.reachPx); ++y) {
+                    std::atomic<uint32_t> *row = depthBits.data() + size_t(y) * width;
+#ifdef GAUSSIANNORMALS_X86
+                    if (wide) {drawRowAvx(f, intrinsics, y, x0, x1, row); continue;}
+#endif
+                    drawRow(f, intrinsics, y, x0, x1, row);
                 }
             });
-        } else
-        // Close the pinholes left between point samples.
-        parallelFor(height, [&](int y) {
-            const int close = visibility.closePixels;
-            for (int x = 0; x < width; ++x) {
-                float value = std::numeric_limits<float>::infinity();
-                for (int dy = -close; dy <= close; ++dy)
-                    for (int dx = -close; dx <= close; ++dx) {
-                        const int sx = x + dx, sy = y + dy;
-                        if (sx >= 0 && sx < width && sy >= 0 && sy < height)
-                            value = std::min(value, nearest[size_t(sy) * width + sx]);
-                    }
-                closed[size_t(y) * width + x] = value;
-            }
-        });
+            parallelFor(int(closed.size()), [&](int k) {
+                uint32_t b = depthBits[size_t(k)].load(std::memory_order_relaxed);
+                b = (b & 0x80000000u) ? (b & 0x7fffffffu) : ~b;
+                std::memcpy(&closed[size_t(k)], &b, 4);
+            });
+        } else {
+            std::vector<float> nearest(size_t(width) * height, std::numeric_limits<float>::infinity());
+            for (int i = 0; i < count; ++i)
+                if (pixel[size_t(i)] >= 0 && alpha[size_t(i)] > kNormalOccluderOpacity)
+                    nearest[size_t(pixel[size_t(i)])] = std::min(nearest[size_t(pixel[size_t(i)])], depth[size_t(i)]);
+            // Close the pinholes left between point samples.
+            parallelFor(height, [&](int y) {
+                const int close = visibility.closePixels;
+                for (int x = 0; x < width; ++x) {
+                    float value = std::numeric_limits<float>::infinity();
+                    for (int dy = -close; dy <= close; ++dy)
+                        for (int dx = -close; dx <= close; ++dx) {
+                            const int sx = x + dx, sy = y + dy;
+                            if (sx >= 0 && sx < width && sy >= 0 && sy < height)
+                                value = std::min(value, nearest[size_t(sy) * width + sx]);
+                        }
+                    closed[size_t(y) * width + x] = value;
+                }
+            });
+        }
         parallelFor(count, [&](int i) {
             if (pixel[size_t(i)] < 0) return;
             const float z = depth[size_t(i)];

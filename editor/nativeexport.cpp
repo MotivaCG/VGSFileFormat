@@ -600,12 +600,15 @@ void setFrameNormals(vgs::DecodedChunk &c,const vgs::Frame &frame) {
     vgs::DecodedPage page;page.descriptor.attribute=vgs::Normals;page.descriptor.group=1;page.bytes=std::move(codes);c.pages.push_back(std::move(page));
     normalizeSchemas(c);
 }
-gaussiannormals::Result addNormals(vgs::DecodedChunk &c,const std::vector<gaussiannormals::View> &views,const ExportProgress &progress) {
+void addNormals(vgs::DecodedChunk &c,const gaussiannormals::Visibility &visibility,const ExportProgress &progress) {
+    // A source that carries normals already (a .vgs exported with them) has them computed again
+    // on what is written now, in place of its own.
+    c.pages.erase(std::remove_if(c.pages.begin(),c.pages.end(),[](const auto &p) {return p.descriptor.attribute==vgs::Normals;}),c.pages.end());
     normalizeSchemas(c);const size_t T=c.groups[0].intervals;
     std::vector<size_t> offsets(c.groups.size()+1,0);
     for (size_t group=1;group<c.groups.size();++group) offsets[group+1]=offsets[group]+size_t(c.groups[group].splats);
-    const size_t records=offsets.back();gaussiannormals::Result total;
-    std::vector<uint8_t> pending(records,1),codes(records*2);
+    const size_t records=offsets.back();
+    std::vector<uint8_t> codes(records*2);
     for (size_t i=0;i<records;++i) {codes[i*2]=128;codes[i*2+1]=128;} // the shortest axis, for a splat never alive
     // Alive at interval s: lifetime begin <= s < end, as the frame decoder counts it.
     std::vector<uint8_t> lifetimes(records*2);
@@ -613,47 +616,79 @@ gaussiannormals::Result addNormals(vgs::DecodedChunk &c,const std::vector<gaussi
         const auto &life=get(c,vgs::Lifetimes,uint32_t(group)).bytes;
         std::copy(life.begin(),life.begin()+ptrdiff_t((offsets[group+1]-offsets[group])*2),lifetimes.begin()+ptrdiff_t(offsets[group]*2));
     }
-    auto alive=[&](size_t record,size_t s) {return s>=lifetimes[record*2] && s+1<=lifetimes[record*2+1];};
     vgs::FrameDecoder decoder(c);vgs::Frame frame;std::vector<float> world(records*3,0.f);
     // A normal is constant over the chunk in its splat's frame, so each splat is taken at one
-    // instant it is alive at, with everything alive then as its neighbourhood: the middle
-    // first, then wherever most of the ones still missing are.
-    for (size_t s=T/2,round=0;T>0;++round) {
-        if (round) {
-            size_t best=0,most=0;
-            for (size_t k=0;k<T;++k) {size_t n=0;for (size_t i=0;i<records;++i) n+=pending[i] && alive(i,k);if (n>most) {most=n;best=k;}}
-            if (!most) break;s=best;
-        }
-        report(progress,QStringLiteral("Computing normals at sample %1 / %2").arg(s+1).arg(T));
-        // Halfway into interval s: s/T itself can come back from the decoder's float time as
-        // interval s-1, where the splats born at s are not alive yet.
-        decoder.evaluateInto(std::min((s+0.5)/double(T),1.-1e-9),false,&frame);
-        if (frame.count!=records) throw std::runtime_error("Normals: the decoded frame does not match the chunk.");
-        gaussiannormals::Splats splats;splats.count=records;splats.position=frame.position.data();splats.rotation=frame.rotation.data();
-        splats.scale=frame.scale.data();splats.opacity=frame.opacity.data();splats.use=frame.active.data();
-        const auto result=gaussiannormals::estimateNormals(splats,views,world.data());
-        if (!round) total=result;
-        total.surrounding=total.surrounding || result.surrounding;
+    // instant: the middle for every splat alive then (most: 96 to 99 % of a chunk of arabs and
+    // maria_simbo_carrito), then the rest in one more estimate, each where it is at the instant
+    // of its life nearest the middle, among all the others as they are at theirs. That second
+    // estimate replaced one per instant that still had splats missing (about eight more): on a
+    // second of those two captures 3.7 to 3.9 times faster, with 0.07 % / 0.006 % of the splats
+    // on the other side of the earlier normals and 0.19 % / 0.03 % more than 30 degrees apart.
+    std::vector<uint8_t> done(records,0);
+    std::vector<int> at(records,-1); // the instant each record is taken at
+    const size_t middle=T/2;
+    for (size_t i=0;i<records && T>0;++i) {
+        const size_t b=lifetimes[i*2],e=std::min<size_t>(lifetimes[i*2+1],T);
+        if (e>b) at[i]=int(std::min(std::max(middle,b),e-1));
+    }
+    // Into each splat's own frame (the inverse of its rotation, q in xyzw) and its code.
+    auto encode=[&](const float *rotations,const std::vector<uint8_t> &take) {
         for (size_t group=1;group<c.groups.size();++group) {
             const auto &indices=get(c,vgs::ScaleIndices,uint32_t(group)).bytes;
             for (size_t row=0;row<c.groups[group].splats;++row) {
-                const size_t record=offsets[group]+row;if (!pending[record] || !frame.active[record]) continue;
-                // Into the splat's own frame: the inverse of its rotation, q in xyzw.
-                const float *q=frame.rotation.data()+record*4;const QQuaternion inverse=QQuaternion(q[3],q[0],q[1],q[2]).conjugated();
+                const size_t record=offsets[group]+row;if (!take[record] || done[record]) continue;
+                const float *q=rotations+record*4;const QQuaternion inverse=QQuaternion(q[3],q[0],q[1],q[2]).conjugated();
                 const QVector3D local=inverse.rotatedVector({world[record*3],world[record*3+1],world[record*3+2]});
                 const float n[3]={local.x(),local.y(),local.z()};
-                vgs::encodeNormal(n,indices.data()+row*3,codes.data()+record*2);pending[record]=0;
+                vgs::encodeNormal(n,indices.data()+row*3,codes.data()+record*2);done[record]=1;
             }
         }
-        // Every record alive at s has had its turn: one the decoder still left out keeps the
-        // shortest axis rather than pick the same instant again for ever.
-        for (size_t i=0;i<records;++i) if (alive(i,s)) pending[i]=0;
+    };
+    auto estimate=[&](const gaussiannormals::Splats &splats,const QString &message) {
+        report(progress,message);
+        // Asked between cameras, so that canceling stops it within one of them.
+        gaussiannormals::computeNormals(splats,gaussiannormals::surroundingViews(splats,gaussiannormals::kSurroundingViews,visibility.resolution),world.data(),visibility,
+                                        [&] {report(progress,message);});
+    };
+    // Halfway into an interval: s/T itself can come back from the decoder's float time as
+    // interval s-1, where the splats born at s are not alive yet.
+    auto decode=[&](size_t s) {
+        decoder.evaluateInto(std::min((s+0.5)/double(T),1.-1e-9),false,&frame);
+        if (frame.count!=records) throw std::runtime_error("Normals: the decoded frame does not match the chunk.");
+    };
+    if (T>0) {
+        decode(middle);
+        gaussiannormals::Splats splats;splats.count=records;splats.position=frame.position.data();splats.rotation=frame.rotation.data();
+        splats.scale=frame.scale.data();splats.opacity=frame.opacity.data();splats.use=frame.active.data();
+        estimate(splats,QStringLiteral("Computing normals at the middle of the chunk"));
+        encode(frame.rotation.data(),frame.active);
     }
+    std::vector<uint8_t> rest(records,0);bool more=false;
+    for (size_t i=0;i<records;++i) if (!done[i] && at[i]>=0) {rest[i]=1;more=true;}
+    if (more) {
+        // Every splat alive in the chunk, each at its own instant.
+        std::vector<float> position(records*3),rotation(records*4),scale(records*3),opacity(records);std::vector<uint8_t> use(records,0);
+        std::vector<uint8_t> needed(T,0);for (size_t i=0;i<records;++i) if (at[i]>=0) needed[size_t(at[i])]=1;
+        for (size_t s=0;s<T;++s) {
+            if (!needed[s]) continue;
+            decode(s);
+            for (size_t i=0;i<records;++i) if (at[i]==int(s) && frame.active[i]) {
+                std::copy_n(frame.position.data()+i*3,3,position.data()+i*3);std::copy_n(frame.rotation.data()+i*4,4,rotation.data()+i*4);
+                std::copy_n(frame.scale.data()+i*3,3,scale.data()+i*3);opacity[i]=frame.opacity[i];use[i]=1;
+            }
+        }
+        gaussiannormals::Splats splats;splats.count=records;splats.position=position.data();splats.rotation=rotation.data();
+        splats.scale=scale.data();splats.opacity=opacity.data();splats.use=use.data();
+        estimate(splats,QStringLiteral("Computing normals of the splats born or gone by the middle"));
+        for (size_t i=0;i<records;++i) rest[i]=rest[i] && use[i];
+        encode(rotation.data(),rest);
+    }
+    // A splat never alive, or one the decoder still left out, keeps the shortest axis (code 128).
     for (uint32_t group=1;group<c.groups.size();++group) {
         vgs::DecodedPage page;page.descriptor.attribute=vgs::Normals;page.descriptor.group=group;
         page.bytes.assign(codes.begin()+ptrdiff_t(offsets[group]*2),codes.begin()+ptrdiff_t(offsets[group+1]*2));c.pages.push_back(std::move(page));
     }
-    normalizeSchemas(c);return total;
+    normalizeSchemas(c);
 }
 
 bool supportsNativeTransform(const Project &p) {
@@ -719,8 +754,9 @@ void setNativeShDegree(vgs::DecodedChunk &c,int sourceDegree,int targetDegree) {
     }
     normalizeSchemas(c);
 }
-vgs::DecodedChunk editNativeChunk(vgs::DecodedChunk chunk,const NativeChunkPlan &plan,const Project &project,ExportResult *statistics,const ExportProgress &progress,const vgs::DecodedChunk *classificationSource,const std::vector<QMatrix4x4> *sampleModels,int sourceStartFrame,const std::vector<uint8_t> *pruned,const ExportVisibilityLookup &cachedVisibility) {
+vgs::DecodedChunk editNativeChunk(vgs::DecodedChunk chunk,const NativeChunkPlan &plan,const Project &project,ExportResult *statistics,const ExportProgress &progress,const vgs::DecodedChunk *classificationSource,const std::vector<QMatrix4x4> *sampleModels,int sourceStartFrame,const std::vector<uint8_t> *pruned,const ExportVisibilityLookup &cachedVisibility,bool *geometryKept) {
     if (sampleModels && sampleModels->size()!=size_t(plan.intervals)+1) throw std::runtime_error("Motion export needs one world model per sample.");
+    size_t removedHere=0;bool opacityChanged=false;
     report(progress,QStringLiteral("Filtering native Gaussian lifetimes"));
     normalizeSchemas(chunk);const size_t T=chunk.groups[0].intervals;
     vgs::FrameDecoder decoder(chunk,1./30,vgs::FrameDecoder::Contents::Positions);
@@ -769,6 +805,7 @@ vgs::DecodedChunk editNativeChunk(vgs::DecodedChunk chunk,const NativeChunkPlan 
                     Q_UNUSED(index);inside=visibility[record];
                 }
                 if (statistics && active) {if (inside) ++statistics->kept;else ++statistics->removed;}
+                removedHere+=active && !inside;
                 if (inside && starts[group][row]<0) starts[group][row]=sample;
                 if (!inside && starts[group][row]>=0) {kept[group].push_back({row,uint8_t(starts[group][row]),uint8_t(sample)});starts[group][row]=-1;}
             }
@@ -795,8 +832,12 @@ vgs::DecodedChunk editNativeChunk(vgs::DecodedChunk chunk,const NativeChunkPlan 
         // rows scales the opacity, and the clamp keeps it at most 1.
         if (colour.opacity!=1) for (auto &p:chunk.pages) if (p.descriptor.attribute==vgs::OpacityTrajectories)
             for (size_t at=0;at+2<=p.bytes.size();at+=2) putHalf(p.bytes.data()+at,half(p.bytes.data()+at)*colour.opacity);
+        opacityChanged=colour.opacity!=1;
     }
     bakeAntialiasing(chunk,project.antialiasingBake());
+    // What decides normals is untouched when no splat was removed and none changed opacity or
+    // size: moving, turning and scaling the whole capture, colour and SH leave them as they were.
+    if (geometryKept) *geometryKept=!removedHere && !opacityChanged && !(project.antialiasingBake()>0);
     compactRq(chunk,vgs::Sh0Terms,vgs::Sh0Trajectories,2,3);compactRq(chunk,vgs::OpacityTerms,vgs::OpacityTrajectories,3,1);
     compactResidual(chunk,true);compactResidual(chunk,false);compactSh(chunk,false);compactSh(chunk,true);
     normalizeSchemas(chunk);return chunk;

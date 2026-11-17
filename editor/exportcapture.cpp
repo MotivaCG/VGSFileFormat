@@ -376,7 +376,9 @@ vgs::Frame copyFrame(const vgsdec::Frame &f) {
     vgs::Frame out;out.count=f.splatCount;out.seconds=f.seconds;out.shCoefficients=f.shCoefficients;
     const size_t n=size_t(f.splatCount);out.position.assign(f.positions,f.positions+3*n);out.rotation.assign(f.rotations,f.rotations+4*n);
     out.scale.assign(f.scales,f.scales+3*n);out.opacity.assign(f.opacities,f.opacities+n);out.colorDc.assign(f.colors,f.colors+3*n);out.active.assign(f.active,f.active+n);
-    if (f.sphericalHarmonics) out.shRest.assign(f.sphericalHarmonics,f.sphericalHarmonics+n*f.shCoefficients*3);return out;
+    if (f.sphericalHarmonics) out.shRest.assign(f.sphericalHarmonics,f.sphericalHarmonics+n*f.shCoefficients*3);
+    if (f.normals) out.normal.assign(f.normals,f.normals+3*n); // a .ply export can keep them (keptSourceNormals)
+    return out;
 }
 // ---- motion ------------------------------------------------------------------------
 //
@@ -467,37 +469,70 @@ void despillFrame(vgs::Frame &frame,const CaptureSettings &settings) {CaptureSet
 void despillSh(std::vector<float> &sh,const CaptureSettings &settings) {processSh(sh,settings);}
 // What the rig's cameras saw, in the export's notes. Cameras that see little of it describe
 // another frame: the sides are then guessed.
-// What decided the sides, in the export's notes: the rig's cameras, or cameras all around when
-// it is none of ours, or when the rig's see too little of it (another rig, or another frame).
-static void normalsNote(const gaussiannormals::Result &seen,const CaptureSettings &s,ExportResult *result) {
-    if (!seen.opaque) return;
-    const double share=100.0*double(seen.rigOpaqueSeen)/double(seen.opaque);
-    const QString rig=s.normalRig==1 ? QStringLiteral("THE4DSCANNER") : QStringLiteral("SMNV1");
-    if (s.normalRig==2) result->notes << QStringLiteral("Normals written, their sides decided by cameras all around the splats.");
-    else if (seen.surrounding) result->notes << QStringLiteral("Normals written, but the %1 cameras saw only %2% of the opaque splats (another rig, or not its frame?): "
-                                                               "cameras all around decided the sides instead.").arg(rig).arg(share,0,'f',1);
-    else result->notes << QStringLiteral("Normals written: the %1 cameras see %2% of the opaque splats.").arg(rig).arg(share,0,'f',1);
+// How the cameras all around the splats see for the chosen normals (CaptureSettings::normals).
+const gaussiannormals::Visibility &normalsVisibility(const CaptureSettings &s) {
+    return s.normals==CaptureSettings::NormalsFine ? gaussiannormals::kFineVisibility : gaussiannormals::kSurroundingVisibility;
 }
-// The rig's cameras for data baked with `model`: a rotation with uniform scale moves them.
-static std::vector<gaussiannormals::View> rigViewsFor(const CaptureSettings &s,const QMatrix4x4 &model) {
-    if (s.normalRig==2) return {}; // none of ours: estimateNormals puts cameras all around
-    Eigen::Matrix3f linear;for (int i=0;i<3;++i) for (int j=0;j<3;++j) linear(i,j)=model(i,j);
-    return gaussiannormals::transformedViews(gaussiannormals::rigViews(s.normalRig==1 ? gaussiannormals::Rig::The4DScanner : gaussiannormals::Rig::SmnV1),
-                                             linear,Eigen::Vector3f(model(0,3),model(1,3),model(2,3)));
+// How the normals of an export were made, in its provenance: {"mode": "NORMAL" | "FINE",
+// "version": gaussiannormals::kNormalsVersion}.
+static QJsonObject normalsRecord(int mode) {
+    return {{"mode",mode==CaptureSettings::NormalsFine ? QStringLiteral("FINE") : QStringLiteral("NORMAL")},{"version",gaussiannormals::kNormalsVersion}};
 }
-// Outward normals into a baked frame's `normal`, seen from the rig moved by its pose. Returns
-// what the cameras saw.
-static gaussiannormals::Result bakeFrameNormals(vgs::Frame &baked,const Project &project,double frameRate) {
-    const auto views=rigViewsFor(project.captureSettings,project.transformAtFrame(baked.seconds*frameRate).matrix());
+// The mode a record names when it is this version's, None otherwise (another method, or none).
+static int normalsMode(const QJsonObject &record) {
+    if (record["version"].toInt()!=gaussiannormals::kNormalsVersion) return CaptureSettings::NormalsNone;
+    const auto mode=record["mode"].toString();
+    return mode==QLatin1String("FINE") ? CaptureSettings::NormalsFine : mode==QLatin1String("NORMAL") ? CaptureSettings::NormalsNormal : CaptureSettings::NormalsNone;
+}
+// Every splat group of the chunk carries normals.
+static bool hasNormals(const vgs::DecodedChunk &chunk) {
+    for (uint32_t group=1;group<chunk.groups.size();++group)
+        if (std::none_of(chunk.pages.begin(),chunk.pages.end(),[&](const auto &p) {return p.descriptor.attribute==vgs::Normals && p.descriptor.group==group;})) return false;
+    return chunk.groups.size()>1;
+}
+static void normalsNote(const CaptureSettings &s,ExportResult *result,int kept=0,int computed=0,const QString &units=QStringLiteral("chunks")) {
+    const QString mode=s.normals==CaptureSettings::NormalsFine ? QStringLiteral("Fine") : QStringLiteral("Normal");
+    if (!kept) result->notes << QStringLiteral("Normals written (%1).").arg(mode);
+    else if (!computed) result->notes << QStringLiteral("Normals written (%1): the source's kept, made the same way and nothing that decides them changed.").arg(mode);
+    else result->notes << QStringLiteral("Normals written (%1): the source's kept in %2 of %3 %4, computed again where splats were removed or changed.").arg(mode).arg(kept).arg(kept+computed).arg(units);
+}
+// Outward normals into a baked frame's `normal`, decided by cameras all around its splats.
+static void bakeFrameNormals(vgs::Frame &baked,const Project &project,const ExportProgress &progress,int percent) {
     gaussiannormals::Splats splats;splats.count=size_t(baked.count);splats.position=baked.position.data();splats.rotation=baked.rotation.data();
     splats.scale=baked.scale.data();splats.opacity=baked.opacity.data();splats.use=baked.active.size()==baked.count ? baked.active.data() : nullptr;
     baked.normal.assign(size_t(baked.count)*3,0.f);
-    return gaussiannormals::estimateNormals(splats,views,baked.normal.data());
+    const auto &visibility=normalsVisibility(project.captureSettings);
+    gaussiannormals::computeNormals(splats,gaussiannormals::surroundingViews(splats,gaussiannormals::kSurroundingViews,visibility.resolution),
+                                    baked.normal.data(),visibility,[&] {report(progress,percent,QStringLiteral("Computing normals"));});
 }
-vgs::Frame bakeExportFrame(const vgs::Frame &frame,const Project &project,int degree,const ExportProgress &progress,double frameRate,const std::vector<uint8_t> *pruned) {
+// A .ply frame's normals taken from its source .vgs where they still hold: made by this method as
+// finely or finer, no splat removed, none with its opacity or size changed, and the capture only
+// moved, turned or evenly scaled (the normals turn with it). False: they are to be computed.
+static bool keptSourceNormals(vgs::Frame &written,const vgs::Frame &source,const std::vector<uint32_t> &kept,const Project &project,double frameRate,int sourceMode) {
+    const auto &s=project.captureSettings;
+    if (s.normals==CaptureSettings::NormalsNone || sourceMode<s.normals) return false;
+    if (source.normal.size()!=size_t(source.count)*3 || kept.size()!=size_t(written.count)) return false;
+    if (size_t(std::count(source.active.begin(),source.active.end(),uint8_t(1)))!=size_t(written.count)) return false;
+    if (project.antialiasingBake()>0 || CompiledModifiers(project.modifiersAtFrame(std::round(source.seconds*frameRate))).opacity!=1) return false;
+    const QMatrix4x4 model=project.transformAtFrame(source.seconds*frameRate).matrix();
+    Matrix linear;for (int i=0;i<3;++i) for (int j=0;j<3;++j) linear(i,j)=model(i,j);
+    const double determinant=linear.determinant();
+    if (!(determinant>0) || !std::isfinite(determinant)) return false;
+    const Matrix rotation=linear/std::cbrt(determinant);
+    if (!(rotation.transpose()*rotation).isApprox(Matrix::Identity(),1e-4)) return false;
+    written.normal.resize(size_t(written.count)*3);
+    for (size_t i=0;i<size_t(written.count);++i) {
+        const size_t k=kept[i];
+        Eigen::Vector3d n=rotation*Eigen::Vector3d(source.normal[k*3],source.normal[k*3+1],source.normal[k*3+2]);
+        if (const double length=n.norm();length>0) n/=length;
+        for (int c=0;c<3;++c) written.normal[i*3+c]=float(n[c]);
+    }
+    return true;
+}
+vgs::Frame bakeExportFrame(const vgs::Frame &frame,const Project &project,int degree,const ExportProgress &progress,double frameRate,const std::vector<uint8_t> *pruned,std::vector<uint32_t> *kept) {
     if (degree<0 || degree>3) throw std::runtime_error("Invalid export SH degree.");
     Project pose=withModifierDespill(project);pose.transform=project.transformAtFrame(frame.seconds*frameRate);pose.modifiers=project.modifiersAtFrame(std::round(frame.seconds*frameRate));
-    return Baker(pose,degree).bake(frame,progress,pruned);
+    return Baker(pose,degree).bake(frame,progress,pruned,kept);
 }
 
 // A Loop morph's End or Start frame as the modifiers above it leave it, carried by `into` into
@@ -927,6 +962,12 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
             return QJsonObject{{"target",QJsonArray{c.target.x(),c.target.y(),c.target.z()}},{"position",QJsonArray{eye.x(),eye.y(),eye.z()}},{"verticalFov",45}};}()}};
     if (!s.extraJson.trimmed().isEmpty()) {const auto doc=QJsonDocument::fromJson(s.extraJson.toUtf8());provenance["userMetadata"]=doc.isArray() ? QJsonValue(doc.array()) : QJsonValue(doc.object());}
     for (const auto &extra : options.extras) if (extra.type==vgs::MetadataExtra2) provenance["sourceMetadata"]=QJsonDocument::fromJson(QByteArray(reinterpret_cast<const char *>(extra.bytes.data()),qsizetype(extra.bytes.size()))).object();
+    // Normals: how they were made, so that a re-export can keep them (normalsRecord). A chunk
+    // keeps its source's only when they are as fine or finer, so the mode asked for holds for all.
+    const bool normals=s.normals!=CaptureSettings::NormalsNone && !mintOutput;
+    if (normals) provenance["normals"]=normalsRecord(s.normals);
+    const auto sourceNormals=normalsMode(provenance["sourceMetadata"].toObject()["normals"].toObject());
+    const bool keepSourceNormals=normals && native && sourceNormals>=s.normals;
     options.extras.erase(std::remove_if(options.extras.begin(),options.extras.end(),[](const auto &e) {return e.type==vgs::MetadataExtra2;}),options.extras.end());
     const auto json=QJsonDocument(provenance).toJson(QJsonDocument::Compact);options.extras.push_back({vgs::MetadataExtra2,vgs::JsonUtf8,vgs::Bytes(json.begin(),json.end())});
     QTemporaryFile temporary(QFileInfo(destination).absolutePath()+"/.vgs-export-XXXXXX");if (!temporary.open()) throw std::runtime_error(temporary.errorString().toStdString());
@@ -968,15 +1009,14 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
             return copyFrame(capture->setTime(t,false));},sourceAntialiased,pruneFilters,[&] {report(progress,currentPercent,QStringLiteral("Prune low contribution: scoring splats"));return false;},&stats);
         countPruning(result,stats,keep);return keep;
     };
-    // Normals are computed on what is written, so the rig's cameras are moved into its frame:
-    // the transform baked into the data, a rotation with uniform scale.
-    const bool normals=s.normals && !mintOutput;
-    if (s.normals && mintOutput) result.notes << QStringLiteral("MINT cannot hold normals: they are not written.");
-    std::vector<gaussiannormals::View> normalViews;std::atomic<size_t> normalOpaque{0},normalSeen{0};std::atomic<bool> normalSurrounding{false};
-    if (normals) normalViews=rigViewsFor(s,project.transform.matrix());
-    auto withNormals=[&](vgs::DecodedChunk chunk) {
+    // Normals are computed on what is written, with cameras all around it, unless the source's
+    // still hold: made the same way or finer, and the chunk keeps every splat as it was.
+    if (s.normals!=CaptureSettings::NormalsNone && mintOutput) result.notes << QStringLiteral("MINT cannot hold normals: they are not written.");
+    std::atomic<int> normalsKept{0},normalsComputed{0};
+    auto withNormals=[&](vgs::DecodedChunk chunk,bool geometryKept=false) {
         if (!normals) return chunk;
-        const auto seen=addNormals(chunk,normalViews,innerProgress);normalOpaque+=seen.opaque;normalSeen+=seen.rigOpaqueSeen;if (seen.surrounding) normalSurrounding=true;
+        if (geometryKept && keepSourceNormals && hasNormals(chunk)) {++normalsKept;return chunk;}
+        addNormals(chunk,normalsVisibility(s),innerProgress);++normalsComputed;
         return chunk;
     };
     // The Loop morph: fitted once here for the End and Start frames as the modifiers above it
@@ -1102,10 +1142,11 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
                 if (!cachedVisibility(frame,original,sourceKeep) || sourceKeep.size()!=original.size()) return false;
                 keep.resize(sourceKeep.size());for (size_t i=0;i<plyOrder.size();++i) keep[i]=sourceKeep[plyOrder[i]];return true;
             };
+            bool geometryKept=false;
             auto edited=editNativeChunk(std::move(chunk),plan,project,writing ? nullptr : &chunkResult,innerProgress,classification ? &*classification : nullptr,moving ? &models : nullptr,
-                                        int(sourceHeader.chunks[plan.sourceIndex].startTick)+plan.first,pruned,orderedVisibility);
+                                        int(sourceHeader.chunks[plan.sourceIndex].startTick)+plan.first,pruned,orderedVisibility,&geometryKept);
             if (!writing) {std::lock_guard<std::mutex> guard(stateMutex);chunkStatistics[index]=std::move(chunkResult);}
-            edited=withNormals(std::move(edited));
+            edited=withNormals(std::move(edited),geometryKept);
             if (moving) edited.pages.push_back(motionPage(samples));
             return edited;
         }
@@ -1137,14 +1178,17 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
     auto sink=[&](uint64_t offset,const uint8_t *data,size_t count) {
         if (!temporary.seek(qint64(offset)) || temporary.write(reinterpret_cast<const char *>(data),qint64(count))!=qint64(count)) throw std::runtime_error(temporary.errorString().toStdString());
     };
-    auto encodingProgress=[&](int done,int total) {writing=done>=int(header.chunks.size());currentPercent=total ? 85*done/total : 0;report(progress,currentPercent,QStringLiteral("Encoding capture"));return true;};
+    // Canceled here, while chunks are prepared on the workers, they hear of it too (reportHere
+    // sets `cancelled`): otherwise each would finish its chunk - minutes of Fine normals - before
+    // the encoder could stop waiting for it.
+    auto encodingProgress=[&](int done,int total) {writing=done>=int(header.chunks.size());currentPercent=total ? 85*done/total : 0;reportHere(QStringLiteral("Encoding capture"));return true;};
     if (mintOutput) writeMintSequence(header,provider,sink,encodingProgress,mintAudio);
     else vgs::encodeSequence(header,provider,sink,options,encodingProgress);
     for (const auto &entry : chunkStatistics) {
         result.kept+=entry.second.kept;result.removed+=entry.second.removed;result.notes << entry.second.notes;
     }
     if (ply && native) result.notes << plyChunks.check.note();
-    if (normals) {gaussiannormals::Result seen;seen.opaque=normalOpaque;seen.rigOpaqueSeen=normalSeen;seen.surrounding=normalSurrounding;normalsNote(seen,s,&result);}
+    if (normals) normalsNote(s,&result,normalsKept,normalsComputed);
     if (!result.kept) throw std::runtime_error("The selected range contains no Gaussian records after applying active modifiers.");
     if (!temporary.flush()) throw std::runtime_error(temporary.errorString().toStdString());
     if (mintOutput) {
@@ -1302,6 +1346,12 @@ public:
         return copyFrame(capture_->setTime(at,true));
     }
     bool antialiased() const {return antialiased_;}
+    // How the source .vgs's normals were made (its provenance's record); None for any other source.
+    int sourceNormalsMode() const {
+        if (!capture_ || !capture_->hasMetadataJson2()) return CaptureSettings::NormalsNone;
+        const auto json=capture_->metadataJson2();
+        return normalsMode(QJsonDocument::fromJson(QByteArray(json.data(),qsizetype(json.size()))).object()["normals"].toObject());
+    }
     // The frame at `seconds`, and in `keep` what survives pruning and erasing (empty: all).
     vgs::Frame frame(double seconds,std::vector<uint8_t> *keep,ExportResult &result) {
         QString error;int chunk=0;double chunkStart=0,chunkEnd=0;
@@ -1353,8 +1403,9 @@ ExportResult exportFramePly(const Project &projectAsGiven,double seconds,const Q
     PlySource source(project,progress);ExportResult result;std::vector<uint8_t> keep;
     source.protectDestination(destination);
     const int degree=project.captureSettings.shDegree<0 ? source.sourceDegree : project.captureSettings.shDegree;
-    vgs::Frame frame,baked;double fraction=0;
+    vgs::Frame frame,baked;double fraction=0;std::vector<uint32_t> kept;bool morphed=false;
     if (project.inMorph(seconds,source.rate,&fraction)) {
+        morphed=true;
         const int first=int(std::lround(project.in*source.rate)),last=int(std::lround(project.out*source.rate));
         const ExportMorph morph(project,first,last,source.rate,degree,source.antialiased(),
             [&](double time,int *chunk,double *start,double *end) {return source.raw(time,chunk,start,end);},progress);
@@ -1363,11 +1414,15 @@ ExportResult exportFramePly(const Project &projectAsGiven,double seconds,const Q
         baked=Baker(pose,degree).bake(frame,progress);
     } else {
         frame=source.frame(seconds,&keep,result);
-        baked=bakeExportFrame(frame,project,degree,progress,source.rate,keep.empty() ? nullptr : &keep);
+        baked=bakeExportFrame(frame,project,degree,progress,source.rate,keep.empty() ? nullptr : &keep,&kept);
     }
     if (!baked.count) throw std::runtime_error("No Gaussian records remain at this frame after applying active modifiers.");
     auto written=baked;
-    if (project.captureSettings.normals) {report(progress,80,QStringLiteral("Computing normals"));normalsNote(bakeFrameNormals(written,project,source.rate),project.captureSettings,&result);}
+    if (project.captureSettings.normals) {
+        const bool reused=!morphed && keptSourceNormals(written,frame,kept,project,source.rate,source.sourceNormalsMode());
+        if (!reused) {report(progress,80,QStringLiteral("Computing normals"));bakeFrameNormals(written,project,progress,80);}
+        normalsNote(project.captureSettings,&result,reused ? 1 : 0,0,QStringLiteral("frames"));
+    }
     report(progress,90,QStringLiteral("Writing the .ply"));writePly(written,destination);
     result.frames=1;result.kept=baked.count;result.bytes=quint64(QFileInfo(destination).size());
     if (const auto note=pruningNote(result);!note.isEmpty()) result.notes << note;
@@ -1398,17 +1453,21 @@ ExportResult exportPlySequence(const Project &projectAsGiven,const QString &dest
     const int digits=std::max(4,int(QString::number(lastWritten).size()));
     for (int frame=first;frame<=lastWritten;++frame) source.protectDestination(plySequenceFile(destination,frame,digits));
     const int degree=project.captureSettings.shDegree<0 ? source.sourceDegree : project.captureSettings.shDegree;
-    ExportResult result;std::vector<uint8_t> keep;int empty=0;size_t seenOpaque=0,seenBy=0;bool seenAround=false;
+    ExportResult result;std::vector<uint8_t> keep;std::vector<uint32_t> kept;int empty=0,normalsKept=0,normalsComputed=0;
+    const int sourceNormals=source.sourceNormalsMode();
     for (int f=first;f<=plainLast;++f) {
         const int percent=int(100.0*(f-first)/std::max(1,lastWritten-first+1));
         report(progress,percent,QStringLiteral("Frame %1 of %2").arg(f-first+1).arg(lastWritten-first+1));
         const auto frame=source.frame(f/rate,&keep,result);
         // Each frame through its own pose and keyframed modifiers, as the capture export does;
         // the progress of baking it stays inside the frame's step.
-        const auto baked=bakeExportFrame(frame,project,degree,[&](int,const QString &message) {return !progress || progress(percent,message);},rate,keep.empty() ? nullptr : &keep);
+        const auto baked=bakeExportFrame(frame,project,degree,[&](int,const QString &message) {return !progress || progress(percent,message);},rate,keep.empty() ? nullptr : &keep,&kept);
         if (!baked.count) ++empty;
         auto written=baked;
-        if (project.captureSettings.normals) {const auto seen=bakeFrameNormals(written,project,rate);seenOpaque+=seen.opaque;seenBy+=seen.rigOpaqueSeen;seenAround|=seen.surrounding;}
+        if (project.captureSettings.normals) {
+            if (keptSourceNormals(written,frame,kept,project,rate,sourceNormals)) ++normalsKept;
+            else {bakeFrameNormals(written,project,progress,percent);++normalsComputed;}
+        }
         const QString file=plySequenceFile(destination,f,digits);writePly(written,file);
         result.kept+=baked.count;result.removed+=quint64(std::count(frame.active.begin(),frame.active.end(),uint8_t(1)))-baked.count;
         result.bytes+=quint64(QFileInfo(file).size());++result.frames;
@@ -1421,7 +1480,7 @@ ExportResult exportPlySequence(const Project &projectAsGiven,const QString &dest
             report(progress,percent,QStringLiteral("Loop morph frame %1 of %2").arg(k).arg(morphFrames));
             auto written=bakeMorphFrame(morph,k,project,last,degree,progress,(plainLast+k)/rate);
             if (!written.count) ++empty;result.kept+=written.count;
-            if (project.captureSettings.normals) {const auto seen=bakeFrameNormals(written,project,rate);seenOpaque+=seen.opaque;seenBy+=seen.rigOpaqueSeen;seenAround|=seen.surrounding;}
+            if (project.captureSettings.normals) {bakeFrameNormals(written,project,progress,percent);++normalsComputed;}
             const QString file=plySequenceFile(destination,plainLast+k,digits);writePly(written,file);
             result.bytes+=quint64(QFileInfo(file).size());++result.frames;
         }
@@ -1429,7 +1488,7 @@ ExportResult exportPlySequence(const Project &projectAsGiven,const QString &dest
             .arg(QFileInfo(plySequenceFile(destination,firstMorph,digits)).fileName(),QFileInfo(plySequenceFile(destination,lastWritten,digits)).fileName());
     }
     report(progress,100,QStringLiteral("Finishing export"));
-    if (project.captureSettings.normals) {gaussiannormals::Result seen;seen.opaque=seenOpaque;seen.rigOpaqueSeen=seenBy;seen.surrounding=seenAround;normalsNote(seen,project.captureSettings,&result);}
+    if (project.captureSettings.normals) normalsNote(project.captureSettings,&result,normalsKept,normalsComputed,QStringLiteral("frames"));
     result.notes << QStringLiteral("%1 .ply files, %2 to %3, numbered by the source's frame.").arg(result.frames)
         .arg(QFileInfo(plySequenceFile(destination,first,digits)).fileName(),QFileInfo(plySequenceFile(destination,lastWritten,digits)).fileName());
     if (empty) result.notes << QStringLiteral("%1 frame(s) kept no Gaussian records and are empty .ply files.").arg(empty);

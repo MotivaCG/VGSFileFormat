@@ -55,7 +55,7 @@ HEADERS += $$EDITOR/viewport.h $$EDITOR/viewcube.h $$EDITOR/captureworker.h
 RESOURCES += $$EDITOR/resources.qrc
 msvc: QMAKE_CXXFLAGS += /utf-8 /bigobj /openmp
 win32: LIBS += -lopengl32 -luser32
-win32: RC_ICONS = $$EDITOR/assets/gracia/logo.ico
+win32: RC_ICONS = $$EDITOR/assets/gracia/logo_sgs.ico
 
 # The version is set once, in sgsversion.h.
 VGS_HEADER_LINES = $$cat($$PWD/sgsversion.h, lines)
