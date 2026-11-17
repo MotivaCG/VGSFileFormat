@@ -97,7 +97,7 @@ int main(int argc, char **argv) {
     }
 
     std::printf("\n%-18s VFGS v%u, %s pages, SH degree %u\n", "format",
-                capture.version(), capture.isPlain() ? "plain" : "compressed",
+                capture.version(), capture.isUncompressed() ? "uncompressed" : "compressed",
                 capture.shDegree());
     std::printf("%-18s %.3f s, %llu frames at %.3f fps, %zu chunks\n", "timeline",
                 capture.duration(),

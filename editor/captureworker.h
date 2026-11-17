@@ -114,7 +114,7 @@ struct CaptureInfo {
     double startSeconds = 0;
     // Internal chunk changes, in seconds on the capture timeline; editor display only.
     QVector<double> chunkBoundaries;
-    // A .vgs/.pgs: whether it carries normals, as the capture panel says it ("Yes", "No", "Yes,
+    // A .vgs: whether it carries normals, as the capture panel says it ("Yes", "No", "Yes,
     // made by an earlier method"...); empty for other formats.
     QString normals;
     QVector3D minimum, maximum;
@@ -152,7 +152,7 @@ public slots:
 public:
     // Cancellation is safe from the GUI thread, including before the job starts.
     void cancelPrecalculate(quint64 request) {cancelCacheRequest_.store(request);}
-    // The viewer plays .vgs/.pgs in the decoder's Packed mode: chunks go to the GPU once and
+    // The viewer plays .vgs in the decoder's Packed mode: chunks go to the GPU once and
     // the shader evaluates every frame, so a frame costs positions for sorting and nothing
     // else. Set before the first open; modifiers and the editor's processing do not apply.
     void setPackedPlayback(bool enabled) {packedPlayback_=enabled;}

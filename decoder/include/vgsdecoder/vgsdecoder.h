@@ -457,8 +457,9 @@ public:
   uint64_t createdMillis() const;
   const Signature &signature() const;
   uint32_t version() const;
-  /** True when the pages are stored without entropy coding, which is what .pgs means. */
-  bool isPlain() const;
+  /** True when the pages are stored without entropy coding: the header says so per attribute. */
+  bool isUncompressed() const;
+  [[deprecated("use isUncompressed")]] bool isPlain() const { return isUncompressed(); }
 
   // ---- the timeline --------------------------------------------------------------
 

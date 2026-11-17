@@ -9,10 +9,10 @@ The native reader also accepts the reexport of `tempboxing_sinsh3.mint`, preserv
 absence of higher SH dictionaries and indices. Both companions retain the original 42,840
 MP3 bytes unchanged in the no-ffmpeg roundtrip test.
 
-On `tempboxing.mint`, a 31-frame PGS export with Purge Isolated took 6,692.6 ms without
+On `tempboxing.mint`, a 31-frame uncompressed VGS export with Purge Isolated took 6,692.6 ms without
 preview visibility and 3,372.6 ms after precalculation (4,227.5 ms to bake). There were 31
 export cache hits, with 4,048,284 bytes of visibility retention. Positions, colours, opacity
-and full SH matched at the compared times. This measures an uncompressed PGS export of
+and full SH matched at the compared times. This measures an uncompressed VGS export of
 this short capture, not compressed VGS performance or the cost of exporting a morph.
 
 Export visibility access uses weak references to existing masks and checks source identity,

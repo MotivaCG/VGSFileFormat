@@ -261,8 +261,8 @@ QJsonObject MainWindow::automationCommand(const QString &method,const QJsonObjec
     if (method=="add_export_task") {
         // As File > Export > Export task: the project and range now, to export later.
         QString output=QFileInfo(text(a,"path")).absoluteFilePath();const QString suffix=QFileInfo(output).suffix().toLower();
-        if (suffix!="vgs" && suffix!="pgs" && suffix!="mint" && suffix!="ply") fail("The task's output must be .vgs, .pgs, .mint or .ply.");
-        ExportTask task;task.output=output;task.project=w.project_;task.project.camera=w.viewport_->camera();task.path=exportTaskPath(output);task.frames=exportFrameCount(w.project_,w.info_.fps);
+        if (suffix!="vgs" && suffix!="mint" && suffix!="ply") fail("The task's output must be .vgs, .mint or .ply.");
+        ExportTask task;task.output=output;task.project=w.project_;task.project.captureSettings.uncompressed=flag(a,"uncompressed");task.project.camera=w.viewport_->camera();task.path=exportTaskPath(output);task.frames=exportFrameCount(w.project_,w.info_.fps);
         if (QFileInfo(task.path).exists() && !flag(a,"overwrite")) fail("That task file exists. Set overwrite=true to replace it.");
         if (suffix!="mint" && suffix!="ply" && w.viewport_->isValid()) task.thumbnail=w.thumbnailJpeg();
         const QString problem=checkExportTask(task);if (!problem.isEmpty()) fail(problem);
@@ -397,13 +397,13 @@ QJsonObject MainWindow::automationCommand(const QString &method,const QJsonObjec
     fail("Unknown editor operation: "+method);
 }
 
-ExportTask MainWindow::prepareAutomationExport(const QString &path, bool overwrite) {
+ExportTask MainWindow::prepareAutomationExport(const QString &path, bool overwrite, bool uncompressed) {
     if (closePending_) fail("The editor is closing.");
     requireAutomationReady();
     const QString output=QFileInfo(path).absoluteFilePath();const QString suffix=QFileInfo(output).suffix().toLower();
-    if (suffix!="vgs" && suffix!="pgs" && suffix!="mint" && suffix!="ply") fail("Export to .vgs, .pgs, .mint, or .ply for a numbered frame sequence.");
+    if (suffix!="vgs" && suffix!="mint" && suffix!="ply") fail("Export to .vgs, .mint, or .ply for a numbered frame sequence.");
     if (QFileInfo(output).exists() && !overwrite) fail("Destination exists. Set overwrite=true explicitly.");
-    ExportTask task;task.output=output;task.project=project_;task.project.camera=viewport_->camera();task.project.captureSettings.plain=suffix=="pgs";
+    ExportTask task;task.output=output;task.project=project_;task.project.camera=viewport_->camera();task.project.captureSettings.uncompressed=uncompressed;
     task.thumbnail=viewport_->isValid() && suffix!="ply" && suffix!="mint" ? thumbnailJpeg() : QByteArray();task.frames=exportFrameCount(task.project,info_.fps);
     const QString error=checkExportTask(task);if (!error.isEmpty()) fail(error);
     return task;

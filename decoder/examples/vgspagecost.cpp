@@ -143,7 +143,7 @@ int main(int argc, char **argv) {
                 " %u thread(s)\n\n",
                 argv[1], chunks, averageChunkSeconds,
                 static_cast<unsigned long long>(capture.maxSplatsPerFrame()), capture.shDegree(),
-                capture.isPlain() ? "plain" : "compressed", threads);
+                capture.isUncompressed() ? "uncompressed" : "compressed", threads);
 
     // ---- 1. bytes, by attribute --------------------------------------------------------
     std::map<std::string, AttributeTotals> attributes;

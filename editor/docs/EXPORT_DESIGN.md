@@ -1,4 +1,4 @@
-# Edited VGS/PGS export
+# Edited VGS export
 
 Implemented in `exportcapture.cpp`, `nativeexport.cpp` and `core/src/vgsencode.cpp`.
 
@@ -8,7 +8,7 @@ Implemented in `exportcapture.cpp`, `nativeexport.cpp` and `core/src/vgsencode.c
 repeatable decoded-chunk provider and a random-access sink. Measurement and writing
 are separate passes. Only one source chunk, decoded frame, packed frame and encoded
 chunk are retained, not the whole output. MINT's current reader still holds its source
-file in memory. VGS/PGS sources stream through the decoder with a small cache.
+file in memory. VGS sources stream through the decoder with a small cache.
 
 Only `editor_authoring` compiles the writer and signer with VGS_AUTHORING.
 `editor_decoder` still contains neither writer nor signing key. qmake links the
@@ -84,7 +84,7 @@ The sampled fallback uses a 256-entry logarithmic scale LUT, two staged DC dicti
 and static/temporal residual SH grids. Typed numerical descriptors are used for
 integer fields, half floats, lifetime runs and temporal/quaternion predictors; encoding
 all those arrays as generic byte streams was another source of inefficient coding.
-PGS bypasses entropy coding, not attribute quantization.
+An uncompressed VGS bypasses entropy coding, not attribute quantization.
 
 Regression: the supplied `arab.vgsproj` with a 31,302,800-byte MINT produced a
 339,491,851-byte VGS in the previous frame-expanded writer. Native temporal export
@@ -120,7 +120,7 @@ error preserves an existing destination. Exporting over the source is refused.
 
 Tests cover world-space cylinder/box membership, zero-opacity records, affine covariance,
 reflections, SH directional invariance under rotations, despill and skin recovery,
-signed PGS/VGS reexports, trim and empty frames, large dictionaries, metadata JSON arrays,
+signed VGS reexports, trim and empty frames, large dictionaries, metadata JSON arrays,
 atomic cancellation/empty-crop failure, and a real MINT sample via EDITOR_TEST_CAPTURE.
 Qt tests also cover independent In/Out marker dragging and Tab from the viewport and
 transform fields.

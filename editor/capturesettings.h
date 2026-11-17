@@ -16,9 +16,10 @@ struct CaptureSettings {
     QString catalogueId,title,author = "SMN|The4DSCanner",projectName,takeName,studio = "Valladolid",copyright;
     QString softwareName = "VGS Editor",softwareVersion = "0.1",extraJson;
     QStringList tags;
-    // plain: uncompressed (.pgs). Exports set it from the output file's extension; it is
-    // only read from older projects and presets, never chosen in the editor.
-    bool plain = false,despill = false,recoverSkin = true;
+    // uncompressed: a .vgs whose pages are stored as they are, quicker to read and larger; the
+    // header tells readers. Chosen whenever a .vgs is saved (Export capture, export tasks, the
+    // command line, the MCP), and kept in the task or project that export is made from.
+    bool uncompressed = false,despill = false,recoverSkin = true;
     // Outward normals in the exported .vgs or .ply, their sides decided by cameras all around the
     // splats: NormalsNone or NormalsFine (gaussiannormals::kFineVisibility, about 3 s per 300 000-
     // splat frame), the editor's Write normals. NormalsNormal (kSurroundingVisibility, 1.3 s) is no
@@ -27,7 +28,7 @@ struct CaptureSettings {
     enum { NormalsNone = 0, NormalsNormal = 1, NormalsFine = 2 };
     int normals = NormalsFine;
     int shDegree = -1,playbackMode = -1; // -1 preserves the source setting.
-    // Lossy SH reduction per splat at VGS/PGS export (EncodeOptions::shPruneTolerance):
+    // Lossy SH reduction per splat at VGS export (EncodeOptions::shPruneTolerance):
     // 0 off, otherwise the RMS a splat's dropped bands may differ by.
     double shPrune = 0;
     double plyFps = 30;

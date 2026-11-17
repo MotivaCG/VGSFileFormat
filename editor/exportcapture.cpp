@@ -770,9 +770,7 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
     vgs::Bytes sourceAudio,mintAudio;uint32_t sourceAudioFormat=0;
     Project project=inputProject;const bool animated=project.hasAnimatedMotion();if (!animated) project.transform=inputProject.transformAtFrame(0);
     const bool mintOutput=QFileInfo(destination).suffix().compare("mint",Qt::CaseInsensitive)==0;
-    // .pgs is the plain container and .vgs the compressed one: the extension decides.
-    project.captureSettings.plain=QFileInfo(destination).suffix().compare("pgs",Qt::CaseInsensitive)==0;
-    if (animated && mintOutput) throw std::runtime_error("MINT cannot store an animated transform. Export to .vgs or .pgs, which carry it as motion samples, or remove the animation.");
+    if (animated && mintOutput) throw std::runtime_error("MINT cannot store an animated transform. Export to .vgs, which carries it as motion samples, or remove the animation.");
     QString error;if (!project.captureSettings.validate(&error)) throw std::runtime_error(error.toStdString());
     if (QFileInfo(project.asset).absoluteFilePath().compare(QFileInfo(destination).absoluteFilePath(),Qt::CaseInsensitive)==0)
         throw std::runtime_error("Choose a destination different from the source capture.");
@@ -813,7 +811,7 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
         vgs::Bytes structural(size_t(vgs::structuralSize(prefix.data(),prefix.size())));
         if (!source->read(0,structural.size(),structural.data())) throw std::runtime_error("Cannot read source structure.");
         const auto original=vgs::readHeader(structural.data(),structural.size());header.timeNumerator=original.timeNumerator;header.timeDenominator=original.timeDenominator;
-        if (mintOutput && vgs::declaresMotion(original)) throw std::runtime_error("This capture moves as a whole, and MINT cannot store that motion. Export to .vgs or .pgs instead.");
+        if (mintOutput && vgs::declaresMotion(original)) throw std::runtime_error("This capture moves as a whole, and MINT cannot store that motion. Export to .vgs instead.");
         header.motionType=original.motionType;header.movingSpeed=original.movingSpeed;sourceHeader=original;
         for (const auto &extra : original.extras) {
             // A new thumbnail replaces the source's; the audio is kept whole (startTick places it)
@@ -937,11 +935,11 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
     // through one reader and one baker, which are not shared.
     options.threadSafeProvider=native && !ply;
     if (ply) {options.chunkThreads=1;options.chunkMemoryBudget=512*previewmemory::MiB;options.preparedCacheBudget=0;}
-    options.shDegree=degree;options.shPruneTolerance=float(project.captureSettings.shPrune);options.signer=vgs::authoringSigner();options.compression=project.captureSettings.plain ? vgs::Compression::None : vgs::Compression::Auto;
+    options.shDegree=degree;options.shPruneTolerance=float(project.captureSettings.shPrune);options.signer=vgs::authoringSigner();options.compression=project.captureSettings.uncompressed ? vgs::Compression::None : vgs::Compression::Auto;
     options.playbackMode=project.captureSettings.playbackMode<0 ? (capture ? vgs::PlaybackMode(capture->playbackMode()) : vgs::PlaybackMode::Loop) : vgs::PlaybackMode(project.captureSettings.playbackMode);
     options.motionType=header.motionType;options.movingSpeed=header.movingSpeed;
     // How the splats are meant to be drawn travels with them: Gracia trains with
-    // anti-aliasing, and a .vgs/.pgs source says so (or not) in its own header.
+    // anti-aliasing, and a .vgs source says so (or not) in its own header.
     options.renderHints=mint ? uint32_t(vgs::AntialiasedSplats) : sourceHeader.renderHints;
     // Baked for plain renderers: the result no longer wants the compensation.
     // Pruning scores the source as it is drawn, compensated when it was trained with anti-aliasing.
@@ -1269,7 +1267,7 @@ ExportEstimate estimateExportSize(const Project &project,const ExportProgress &p
     double chunkBytes=0,chunkSeconds=0,overhead=0;
     for (size_t k=0;k<starts.size();++k) {
         Project part=project;part.in=starts[k]/rate;part.out=(estimate.exact ? last : starts[k]+window-1)/rate;part.time=part.in;
-        const QString path=dir.filePath(QStringLiteral("window-%1.vgs").arg(k));part.captureSettings.plain=false;
+        const QString path=dir.filePath(QStringLiteral("window-%1.vgs").arg(k));part.captureSettings.uncompressed=false;
         exportCaptureFile(part,path,[&](int percent,const QString &message) {
             return !progress || progress(int((k*100+percent)/starts.size()),QStringLiteral("Estimating: window %1 of %2 - %3").arg(k+1).arg(starts.size()).arg(message));},thumbnailJpeg);
         const auto capture=vgsdec::Capture::openFile(path.toStdString());double inChunks=0;

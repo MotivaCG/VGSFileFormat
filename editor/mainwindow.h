@@ -68,7 +68,7 @@ public:
     // Application operations used by automation; the transport never accesses UI internals.
     QJsonObject automationState(const QString &connectionId) const;
     QJsonObject automationCommand(const QString &method, const QJsonObject &arguments, const QString &connectionId);
-    ExportTask prepareAutomationExport(const QString &path, bool overwrite);
+    ExportTask prepareAutomationExport(const QString &path, bool overwrite, bool uncompressed);
     // Automation's other background jobs, prepared on the editor's thread: the frame shown as a
     // PLY (its project's time is that frame), the size estimate, and a saved task file.
     ExportTask prepareAutomationFramePly(const QString &path, bool overwrite);
@@ -165,6 +165,7 @@ private:
     void exportFrame();
     // A .vgstask beside the chosen output, and the queue that runs such tasks.
     void exportTask();
+    QString chooseExportDestination(const QString &title, bool *uncompressed);
     void processTasks();
     void showError(const QString &message);
     void updateRecentMenu();

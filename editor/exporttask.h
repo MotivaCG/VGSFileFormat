@@ -28,7 +28,7 @@ private:
 // made - later edits to the project do not change it - and where its export goes.
 struct ExportTask {
     QString path;        // the .vgstask itself
-    QString output;      // destination: .vgs, .pgs or .mint
+    QString output;      // destination: .vgs, .mint or .ply (compressed or not: the project's captureSettings)
     Project project;
     int frames = 0;      // how many frames it exports; 0 when not known
     QByteArray thumbnail; // JPEG of the viewport when the task was made; may be empty
@@ -38,7 +38,7 @@ struct ExportTask {
 // with its captures and outputs still runs: whichever of the two exists is used.
 bool writeExportTask(const ExportTask &task, QString *error);
 // Where the task for an output is written: beside it, named after the whole file name with
-// its extension, so result.vgs and result.pgs get tasks of their own.
+// its extension, so result.vgs and result.mint get tasks of their own.
 QString exportTaskPath(const QString &output);
 bool readExportTask(const QString &path, ExportTask *task, QString *error);
 // The frames a project's Start/End range exports at a frame rate, as the export counts them.

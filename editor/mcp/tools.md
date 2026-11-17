@@ -20,10 +20,10 @@ several poses to evaluate them. Animation varies a modifier over time where supp
 | `colour` | Adjust exposure, white balance, saturation, opacity and green spill while retaining capture colour representation. | `colour`: exposure, temperature, tint, saturation, opacity, despillMode/strength and related fields. Exposure is stops, opacity a multiplier. Despill modes `none`/`export`/`always` determine whether the viewport shows it. This corrects appearance; it does not identify floating geometry. |
 | `prune-low-contribution` | Reduce splats contributing little to rendered images, including faint, tiny or hidden data. | `prune.percent` is an upper reduction share, `protectAbove` protects higher average 1080p pixel coverage. Evaluated per chunk from surrounding views. It is a visual-contribution optimization; it may preserve highly visible unwanted junk and remove valid weak detail. Validate separately from spatial cleanup. |
 | `bake-antialiasing` | Prepare an antialias-trained capture, such as Gracia MINT, for renderers without the matching compensation. | `bake.distance`, `screenHeight` at 45-degree vertical FOV. Widens thin splats and compensates opacity for the target viewing conditions. Changes rendering preparation, not semantic noise selection. |
-| `animate-transform` | Apply keyed position/rotation/scale offsets to the whole subject over time. | `animation.keys` in reference-offset space, using the returned native schema. Key arrays are replaced in full when patched. VGS/PGS can carry motion samples; MINT cannot preserve this motion representation. |
+| `animate-transform` | Apply keyed position/rotation/scale offsets to the whole subject over time. | `animation.keys` in reference-offset space, using the returned native schema. Key arrays are replaced in full when patched. VGS can carry motion samples; MINT cannot preserve this motion representation. |
 | `walk` | Mark the capture as walking along +Z with a speed. | `walk.speed` in metres/second, optional display units. Preview moves the floor; VGS export records walking metadata and leaves point positions in place. Does not create limb animation or clean geometry. |
-| `audio` | Attach the capture's own soundtrack or an external file, with offset, volume and optional looping. | `audio.source`, `file`, `offset` in seconds, `volume` 0..1 and `loop`. Paths belong to the editor's computer. Multiple tracks mix; VGS/PGS carry synchronized AAC audio and MINT carries MP3. |
-| `loop-morph` | Close a loop without a jump: frames added after End that morph the End frame back into the Start frame - or, with a negative length, the range's last frames carrying the playing capture into Start (End stands for Start and is not played). | `morph.seconds` (length of the added frames; negative: the frames before End it overlaps, at most all but Start's), `morph.leadIn` (overlapping only: also blend into the motion of as many frames before Start, when the source has them) and `morph.markers`: `{number, end, endFrame, start, startFrame}` with `end`/`start` the same point of the subject in capture-local coordinates (before the transform) on the End and Start frames. Only markers whose frames match the current End/Start are used. Rather than writing coordinates, seek Start or End, take a snapshot and use `place_morph_marker` with points on it; `get_loop_morph` reads the markers, how far off each is and a suggested point for the next one; `remove_morph_markers` removes them. Removing modifiers above it shape the two frames it morphs; those below it apply to its frames. Seek past End to inspect the added frames (overlapping, the frames before End). Every export (.vgs, .pgs, .mint, .ply sequence) writes them after the range, or in place of its last frames. |
+| `audio` | Attach the capture's own soundtrack or an external file, with offset, volume and optional looping. | `audio.source`, `file`, `offset` in seconds, `volume` 0..1 and `loop`. Paths belong to the editor's computer. Multiple tracks mix; VGS carry synchronized AAC audio and MINT carries MP3. |
+| `loop-morph` | Close a loop without a jump: frames added after End that morph the End frame back into the Start frame - or, with a negative length, the range's last frames carrying the playing capture into Start (End stands for Start and is not played). | `morph.seconds` (length of the added frames; negative: the frames before End it overlaps, at most all but Start's), `morph.leadIn` (overlapping only: also blend into the motion of as many frames before Start, when the source has them) and `morph.markers`: `{number, end, endFrame, start, startFrame}` with `end`/`start` the same point of the subject in capture-local coordinates (before the transform) on the End and Start frames. Only markers whose frames match the current End/Start are used. Rather than writing coordinates, seek Start or End, take a snapshot and use `place_morph_marker` with points on it; `get_loop_morph` reads the markers, how far off each is and a suggested point for the next one; `remove_morph_markers` removes them. Removing modifiers above it shape the two frames it morphs; those below it apply to its frames. Seek past End to inspect the added frames (overlapping, the frames before End). Every export (.vgs, .mint, .ply sequence) writes them after the range, or in place of its last frames. |
 
 ## Importing PLY frames and sequences
 
@@ -66,14 +66,14 @@ The timeline starts at frame zero. A missing next file ends discovery normally;
 an existing unreadable/corrupt PLY fails the import with its error. Frames are read
 progressively and the identity index is spooled to disk. Export retains compatible
 temporal chunks and uses disk spooling to avoid keeping all fitted chunks in RAM.
-Native VGS/PGS export fits encoding 0 using the `vgsplyseq` algorithm, including
+Native VGS export fits encoding 0 using the `vgsplyseq` algorithm, including
 residual rotations and constant median higher SH per record. Source-frame preview
 and PLY snapshots keep the original per-frame SH. Rank ordering is mapped back to
 source record IDs when applying Erase and preview visibility caches.
 
 ## Audio sources and saved projects
 
-Importing a MINT or VGS/PGS with embedded audio automatically creates an enabled
+Importing a MINT or VGS with embedded audio automatically creates an enabled
 `audio` modifier named **Capture audio**. Read `get_project` first and reuse its ID;
 adding another capture-source Audio layer plays the same track twice. Opening a saved
 project preserves its layers, including disabled or removed Audio layers.
@@ -104,7 +104,7 @@ Switch back to the embedded track with:
 Mute a layer with `{"modifier_id":"AUDIO_ID","patch":{"enabled":false}}`.
 Disabling all Audio layers also silences exports. With no Audio layers at all, export
 retains the source track for compatibility; removing a layer is therefore different
-from muting it. With ffmpeg, VGS/PGS exports bake the mix to AAC and MINT to MP3,
+from muting it. With ffmpeg, VGS exports bake the mix to AAC and MINT to MP3,
 including timing, volume and looping. Without it, only one unchanged track is kept;
 MINT requires an MP3 starting with the capture. MINT export also writes the companion
 MP3 used by GraciaStudio.

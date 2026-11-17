@@ -171,7 +171,7 @@ private slots:
     }
     void cacheMenuPrecalculatesAndShowsPerLayerIndicators() {
         QTemporaryDir dir;QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());
-        const auto source=dir.filePath("cache.pgs");vgs::Frame f;
+        const auto source=dir.filePath("cache.vgs");vgs::Frame f;
         for (int i=0;i<16;++i) {f.position.insert(f.position.end(),{.05f*(i%4),1+.05f*(i/4),0});f.rotation.insert(f.rotation.end(),{0,0,0,1});f.scale.insert(f.scale.end(),{.02f,.02f,.02f});f.colorDc.insert(f.colorDc.end(),{.7f,.8f,.3f});f.opacity.push_back(.8f);f.active.push_back(1);}
         f.count=16;vgs::Header h;h.shDegree=0;h.frameCount=h.durationTicks=6;h.timeDenominator=25;h.chunks.resize(6);for (int i=0;i<6;++i) {h.chunks[i].startTick=i;h.chunks[i].intervals=1;}
         vgs::EncodeOptions options;options.signer=vgs::authoringSigner();options.shDegree=0;options.compression=vgs::Compression::None;
@@ -493,7 +493,7 @@ private slots:
     void cropSwitchesBetweenStaticAndAnimatedKeepingKeys() {
         QTemporaryDir dir;QVERIFY(dir.isValid());
         QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());
-        QString capture=dir.filePath("source.pgs");
+        QString capture=dir.filePath("source.vgs");
         vgs::Frame f;f.count=1;f.active={1};f.position={0,1,0};f.rotation={0,0,0,1};f.scale={.01f,.02f,.03f};f.colorDc={.5f,.5f,.5f};f.opacity={1};
         vgs::Header h;h.shDegree=0;h.frameCount=h.durationTicks=5;h.chunks.resize(5);
         for (size_t i=0;i<5;++i) {h.chunks[i].startTick=i;h.chunks[i].intervals=1;}
@@ -576,7 +576,7 @@ private slots:
         vgs::Frame f;f.count=1;f.active={1};f.position={0,1,0};f.rotation={0,0,0,1};f.scale={.01f,.02f,.03f};f.colorDc={.5f,.5f,.5f};f.opacity={1};
         vgs::Header h;h.shDegree=0;h.frameCount=h.durationTicks=5;h.chunks.resize(5);for (size_t i=0;i<5;++i) {h.chunks[i].startTick=i;h.chunks[i].intervals=1;}
         vgs::EncodeOptions options;options.signer=vgs::authoringSigner();options.shDegree=0;options.compression=vgs::Compression::None;
-        const QString capture=dir.filePath("source.pgs");QFile file(capture);QVERIFY(file.open(QIODevice::WriteOnly));
+        const QString capture=dir.filePath("source.vgs");QFile file(capture);QVERIFY(file.open(QIODevice::WriteOnly));
         vgs::encodeSequence(h,[&](size_t) {return packExportFrame(f,0);},[&](uint64_t offset,const uint8_t *data,size_t count) {file.seek(qint64(offset));file.write(reinterpret_cast<const char *>(data),qint64(count));},options);file.close();
         MainWindow window(nullptr,dir.filePath("presets"));window.show();QVERIFY(QTest::qWaitForWindowExposed(&window));
         // While it opens, the overlay says so and neither the timeline nor the tools take input; it goes once it is open.
@@ -637,7 +637,7 @@ private slots:
         vgs::Frame f;f.count=1;f.active={1};f.position={0,1,0};f.rotation={0,0,0,1};f.scale={.01f,.02f,.03f};f.colorDc={.5f,.5f,.5f};f.opacity={1};
         vgs::Header h;h.shDegree=0;h.frameCount=h.durationTicks=5;h.chunks.resize(5);for (size_t i=0;i<5;++i) {h.chunks[i].startTick=i;h.chunks[i].intervals=1;}
         vgs::EncodeOptions options;options.signer=vgs::authoringSigner();options.shDegree=0;options.compression=vgs::Compression::None;
-        const QString capture=dir.filePath("source.pgs");QFile file(capture);QVERIFY(file.open(QIODevice::WriteOnly));
+        const QString capture=dir.filePath("source.vgs");QFile file(capture);QVERIFY(file.open(QIODevice::WriteOnly));
         vgs::encodeSequence(h,[&](size_t) {return packExportFrame(f,0);},[&](uint64_t offset,const uint8_t *data,size_t count) {file.seek(qint64(offset));file.write(reinterpret_cast<const char *>(data),qint64(count));},options);file.close();
         const QString autosaves=dir.filePath("autosave");
         double edited=0;QString copy;
@@ -666,11 +666,11 @@ private slots:
         vgs::Frame f;f.count=1;f.active={1};f.position={0,1,0};f.rotation={0,0,0,1};f.scale={.01f,.02f,.03f};f.colorDc={.5f,.5f,.5f};f.opacity={1};
         vgs::Header h;h.shDegree=0;h.frameCount=h.durationTicks=5;h.chunks.resize(5);for (size_t i=0;i<5;++i) {h.chunks[i].startTick=i;h.chunks[i].intervals=1;}
         vgs::EncodeOptions options;options.signer=vgs::authoringSigner();options.shDegree=0;options.compression=vgs::Compression::None;
-        QFile file(dir.filePath("source.pgs"));QVERIFY(file.open(QIODevice::WriteOnly));
+        QFile file(dir.filePath("source.vgs"));QVERIFY(file.open(QIODevice::WriteOnly));
         vgs::encodeSequence(h,[&](size_t) {return packExportFrame(f,0);},[&](uint64_t offset,const uint8_t *data,size_t count) {file.seek(qint64(offset));file.write(reinterpret_cast<const char *>(data),qint64(count));},options);file.close();
-        Project project;project.asset=dir.filePath("source.pgs");project.in=0;project.out=4.0/30;
+        Project project;project.asset=dir.filePath("source.vgs");project.in=0;project.out=4.0/30;
         ExportTask good;good.project=project;good.output=dir.filePath("good.vgs");good.path=dir.filePath("good.vgstask");good.frames=5;
-        ExportTask broken=good;broken.project.asset=dir.filePath("gone.pgs");broken.output=dir.filePath("broken.vgs");broken.path=dir.filePath("broken.vgstask");
+        ExportTask broken=good;broken.project.asset=dir.filePath("gone.vgs");broken.output=dir.filePath("broken.vgs");broken.path=dir.filePath("broken.vgstask");
         QString error;QVERIFY(writeExportTask(good,&error));QVERIFY(writeExportTask(broken,&error));
         TaskQueueDialog queue;queue.show();queue.addTasks({good.path,broken.path,good.path});QCOMPARE(queue.list()->topLevelItemCount(),2); // no duplicates
         queue.start();QTRY_VERIFY_WITH_TIMEOUT(!queue.running(),20000);
@@ -710,7 +710,7 @@ private slots:
     void tabTogglesCropFromViewportAndFields() {
         QTemporaryDir dir;QVERIFY(dir.isValid());
         QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());
-        QString capture=dir.filePath("source.pgs");
+        QString capture=dir.filePath("source.vgs");
         vgs::Frame f;f.count=1;f.active={1};f.position={0,1,0};f.rotation={0,0,0,1};f.scale={.01f,.02f,.03f};f.colorDc={.5f,.5f,.5f};f.opacity={1};
         vgs::Header h;h.shDegree=0;h.frameCount=h.durationTicks=5;h.chunks.resize(5);
         for (size_t i=0;i<5;++i) {h.chunks[i].startTick=i;h.chunks[i].intervals=1;}

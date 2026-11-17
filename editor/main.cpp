@@ -49,11 +49,12 @@ int main(int argc, char *argv[])
     QCommandLineOption smoke("smoke-test", "Open, seek, verify a project and save a PNG preview.", "output");
     QCommandLineOption playbackReport("playback-report", "Measure actual editor playback and write a JSON report.", "output");
     QCommandLineOption smokeScreen("smoke-screen", "Maximize an automated preview on the specified screen index.", "index");
-    QCommandLineOption exportOption("export-capture", "Export a .vgsproj to VGS/PGS/MINT without opening the editor window.", "output");
+    QCommandLineOption exportOption("export-capture", "Export a .vgsproj to VGS or MINT without opening the editor window.", "output");
+    QCommandLineOption uncompressedOption("uncompressed", "With --export-capture to a .vgs: store its pages uncompressed (quicker to read, larger).");
     QCommandLineOption tasksOption("process-tasks", "Export the .vgstask files given, one after another, without opening the editor window.");
     QCommandLineOption noMcp("no-mcp", "Start with MCP disabled, overriding the saved preference.");
     QCommandLineOption mcpDirectory("mcp-session-dir", "Directory for local MCP session discovery.", "directory");
-    parser.addOption(smoke);parser.addOption(playbackReport);parser.addOption(smokeScreen); parser.addOption(exportOption); parser.addOption(tasksOption);
+    parser.addOption(smoke);parser.addOption(playbackReport);parser.addOption(smokeScreen); parser.addOption(exportOption); parser.addOption(uncompressedOption); parser.addOption(tasksOption);
     parser.addOption(noMcp);parser.addOption(mcpDirectory);parser.process(a);
     if (parser.isSet(tasksOption)) {
         const auto paths=parser.positionalArguments();
@@ -78,8 +79,8 @@ int main(int argc, char *argv[])
             std::fprintf(stderr,"%s\n",paths.size()!=1 ? "Provide one .vgsproj file." : qPrintable(error));return 2;
         }
         const QString output=parser.value(exportOption),extension=QFileInfo(output).suffix().toLower();
-        if (extension!="vgs" && extension!="pgs" && extension!="mint") {std::fprintf(stderr,"Choose a .vgs, .pgs or .mint output.\n");return 2;}
-        project.captureSettings.plain=extension=="pgs";
+        if (extension!="vgs" && extension!="mint") {std::fprintf(stderr,"Choose a .vgs or .mint output.\n");return 2;}
+        project.captureSettings.uncompressed=parser.isSet(uncompressedOption);
         try {
             int last=-1;QString lastMessage;const auto result=exportCaptureFile(project,output,[&](int percent,const QString &message) {
                 if (percent!=last || message!=lastMessage) {std::fprintf(stderr,"%d%% %s\n",percent,qPrintable(message));std::fflush(stderr);last=percent;lastMessage=message;}return true;

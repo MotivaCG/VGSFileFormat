@@ -259,7 +259,7 @@ Writing a capture is a handful of setters and a call:
 
 vgsenc::Encoder encoder;
 encoder.setInputFile("boxing.mint");
-encoder.setCoding(vgsenc::Coding::Compressed);   // Plain writes a .pgs
+encoder.setCoding(vgsenc::Coding::Compressed);   // or Uncompressed: still a .vgs
 encoder.setSphericalHarmonicDegree(2);
 encoder.setAuthor("SMN|The4DSCanner");
 encoder.setCaptureStudio("Valladolid");
@@ -306,7 +306,7 @@ including the JavaScript one, on purpose.
 
 | | |
 |---|---|
-| `vgsencode in.mint out.vgs [options]` | writes a capture; `--plain` for `.pgs`, `--sh 0..3`, and a flag per metadata field |
+| `vgsencode in.mint out.vgs [options]` | writes a capture; `--uncompressed` for pages without entropy coding, `--sh 0..3`, and a flag per metadata field |
 | `vgsinfo capture.vgs` | prints what the capture says about itself |
 | `vgsplay capture.vgs` | walks the whole timeline and reports what decoding it cost |
 | `vgsdump capture.vgs 1.5 frame.ply` | one instant as a Gaussian splat `.ply` |

@@ -488,7 +488,7 @@ private slots:
     void projectAtTheLimitsReadsBack() {
         // A crop fitted to a single point sits at the 0.0001 m minimum; stored as a float it reads
         // a rounding below it, and the project must still open.
-        QTemporaryDir dir;Project project;project.asset=dir.filePath("source.pgs");
+        QTemporaryDir dir;Project project;project.asset=dir.filePath("source.vgs");
         auto &crop=project.modifiers[0].crop;crop.radius=crop.radiusZ=crop.height=crop.width=crop.depth=0.0001f;
         Project back;QString error;QVERIFY2(Project::fromJson(project.json(dir.filePath("a.vgsproj")),dir.path(),&back,&error),qPrintable(error));
         QVERIFY(back.modifiers[0].crop.height>=0.0001f*0.999f);
@@ -767,9 +767,12 @@ private slots:
     }
     void metadataConfigurationAndBoxContainment() {
         CaptureSettings settings; settings.title = "Title"; settings.catalogueId = "catalogue"; settings.author = "Studio";
-        settings.plain = true; settings.despill = true; settings.despillStrength = 0.75; settings.shDegree = 2; settings.shPrune = 0.06; settings.tags = {"scene","actor"};
+        settings.uncompressed = true; settings.despill = true; settings.despillStrength = 0.75; settings.shDegree = 2; settings.shPrune = 0.06; settings.tags = {"scene","actor"};
         settings.extraJson = "{\"take\": 7}"; QString error; CaptureSettings restored;
         QVERIFY2(CaptureSettings::fromJson(settings.json(),&restored,&error),qPrintable(error)); QCOMPARE(restored.json(),settings.json());
+        // "plain", which editors set from a .pgs extension, is not read; "uncompressed" is optional.
+        auto legacy = settings.json(); legacy.remove("uncompressed"); legacy["plain"] = true;
+        QVERIFY2(CaptureSettings::fromJson(legacy,&restored,&error),qPrintable(error)); QVERIFY(!restored.uncompressed);
         auto older = settings.json(); older.remove("shPrune");
         QVERIFY2(CaptureSettings::fromJson(older,&restored,&error),qPrintable(error)); QCOMPARE(restored.shPrune,0.);
         // Normals: Fine by default, kept as NONE / NORMAL / FINE; the earlier on/off and rig

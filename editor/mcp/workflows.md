@@ -3,7 +3,7 @@
 ## Purpose and capture context
 
 VGS Editor is a desktop editor for cleaning and preparing animated volumetric captures
-represented as 3D Gaussian splats/points (.vgs, .pgs and .mint). Its primary workflow is
+represented as 3D Gaussian splats/points (.vgs and .mint). Its primary workflow is
 to remove floaters and other reconstruction junk while preserving the captured subject
 and its motion, then save a reversible project or export a cleaned capture.
 
@@ -58,7 +58,7 @@ Use tool discovery for each tool's purpose, schema, defaults and effects. Read
 particular, brush/lasso select projected point centres through depth, so inspect from
 another view before selecting a region overlapping the subject.
 
-An imported MINT or VGS/PGS with embedded audio already has a Capture audio layer.
+An imported MINT or VGS with embedded audio already has a Capture audio layer.
 Preserve it during cleanup; inspect `get_project` before adding another Audio layer.
 `vgs-editor://tools` documents the capture/external source selector, audio patches,
 muting, and how `save_project` preserves the settings and file references in `.vgsproj`.

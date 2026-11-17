@@ -65,7 +65,7 @@ CaptureSettingsDialog::CaptureSettingsDialog(const Project &project,PresetStore 
     shPrune_ = new QComboBox; shPrune_->setObjectName("shPrune");
     shPrune_->addItem(tr("Off"),0.0); shPrune_->addItem(tr("Light"),0.04); shPrune_->addItem(tr("Medium"),0.06); shPrune_->addItem(tr("Strong"),0.08);
     shPrune_->setToolTip(tr("Drops spherical harmonic bands per splat where they barely show, keeping the degree above for the splats that need it. "
-        "Lossy, VGS/PGS only. On boxing at degree 2: Light about 2% smaller, Medium 7%, Strong 12%; Degree 1 is 15% smaller but loses every splat's highlights. "
+        "Lossy, VGS only. On boxing at degree 2: Light about 2% smaller, Medium 7%, Strong 12%; Degree 1 is 15% smaller but loses every splat's highlights. "
         "Saves bytes, not decoding time."));
     options->addRow(tr("SH reduction"),shPrune_);
     connect(shDegree_,&QComboBox::currentIndexChanged,this,[this] {shPrune_->setEnabled(shDegree_->currentData().toInt()!=0);});

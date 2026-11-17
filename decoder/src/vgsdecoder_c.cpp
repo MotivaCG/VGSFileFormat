@@ -187,7 +187,8 @@ VGS_DECODER_API uint64_t vgs_signed_bytes(const vgs_capture *h) {
   return self(h)->capture.signature().signedBytes;
 }
 VGS_DECODER_API uint32_t vgs_version(const vgs_capture *h) { return self(h)->capture.version(); }
-VGS_DECODER_API int vgs_is_plain(const vgs_capture *h) { return self(h)->capture.isPlain() ? 1 : 0; }
+VGS_DECODER_API int vgs_is_uncompressed(const vgs_capture *h) { return self(h)->capture.isUncompressed() ? 1 : 0; }
+VGS_DECODER_API int vgs_is_plain(const vgs_capture *h) { return vgs_is_uncompressed(h); }
 
 VGS_DECODER_API double vgs_duration(const vgs_capture *h) { return self(h)->capture.duration(); }
 VGS_DECODER_API uint64_t vgs_frame_count(const vgs_capture *h) { return self(h)->capture.frameCount(); }

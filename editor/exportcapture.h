@@ -34,9 +34,9 @@ vgs::Frame bakeExportFrame(const vgs::Frame &, const Project &, int degree,
                           const ExportProgress & = {},double frameRate = 30,
                           const std::vector<uint8_t> *pruned = nullptr,
                           std::vector<uint32_t> *kept = nullptr); // which source record each baked splat is
-// `thumbnailJpeg`, when given, becomes the capture's thumbnail (VGS/PGS); without it a .vgs
+// `thumbnailJpeg`, when given, becomes the capture's thumbnail (VGS); without it a .vgs
 // source keeps its own. The soundtrack - every active Audio modifier's track mixed at its
-// volume, or with none the source's own - is cut to the range as AAC (VGS/PGS) or MP3 (MINT)
+// volume, or with none the source's own - is cut to the range as AAC (VGS) or MP3 (MINT)
 // with ffmpeg (audiomix.h),
 // starting with it. Without ffmpeg one track travels as delivered, and startTick says where
 // the range starts on it. MINT without ffmpeg can only keep an unchanged MP3 at offset zero.

@@ -553,7 +553,7 @@ FramePtr CaptureWorker::frame(double time, bool includeSh) {
     trimFramePool();
     return out;
 }
-// The normals a .vgs/.pgs carries, as the capture panel names them: how the editor's export made
+// The normals a .vgs carries, as the capture panel names them: how the editor's export made
 // them (its provenance's "normals"), else whether the header declares any at all. Not in the
 // viewer, which shows no such panel.
 #ifdef VGS_VIEWER
@@ -629,6 +629,8 @@ void CaptureWorker::open(const QString &path, quint64 generation, bool sh) {
             if (!candidate.vgs_->metadata().title.empty()) candidate.info_.title = QString::fromStdString(candidate.vgs_->metadata().title);
             bounds = candidate.vgs_->bounds();
             candidate.info_.antialiased = candidate.vgs_->antialiased();
+            // Compressed or not is in the header, not the extension.
+            if (candidate.vgs_->isUncompressed()) candidate.info_.format += QStringLiteral(" uncompressed");
             candidate.info_.startSeconds = candidate.vgs_->startSeconds();
             candidate.info_.normals = captureNormals(path,*candidate.vgs_);
             if (candidate.vgs_->hasAudio()) {

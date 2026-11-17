@@ -113,7 +113,7 @@ async def main():
         await call("set_render_mode", mode="splats")
         await image_id("clean-splats.png")
         await call("save_project", path=str(Path(output, "edited.vgsproj")))
-        job = await call("start_export", path=str(Path(output, "result.pgs")))
+        job = await call("start_export", path=str(Path(output, "result.vgs")), uncompressed=True)
         deadline = time.monotonic() + 30
         while True:
             status = await call("get_export_status", job_id=job["job_id"])
@@ -122,7 +122,7 @@ async def main():
                 break
             assert time.monotonic() < deadline
             await asyncio.sleep(.05)
-        assert Path(output, "result.pgs").stat().st_size > 0
+        assert Path(output, "result.vgs").stat().st_size > 0
         print(json.dumps({"mcp": "passed", "transport": transport, "images": images, "brush_and_lasso": "passed", "export": status["status"]}))
 
 

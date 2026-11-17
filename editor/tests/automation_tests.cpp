@@ -8,6 +8,7 @@
 #include "viewport.h"
 #include "taskqueuedialog.h"
 #include "modifierpanel.h"
+#include "vgsdecoder/vgsdecoder.h"
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QMessageBox>
@@ -33,7 +34,7 @@
 class AutomationTests : public QObject {
     Q_OBJECT
     static QString capture(const QString &directory, int frames=4,const vgs::Bytes &audio={}) {
-        const QString path=directory+"/source.pgs";
+        const QString path=directory+"/source.vgs";
         vgs::Frame f;f.count=3;f.active={1,1,1};f.position={-.2f,1,0,.2f,1,0,0,1.3f,0};
         f.rotation={0,0,0,1,0,0,0,1,0,0,0,1};f.scale={.01f,.02f,.03f,.01f,.02f,.03f,.01f,.02f,.03f};
         f.colorDc={.5f,.5f,.5f,.5f,.5f,.5f,.5f,.5f,.5f};f.opacity={1,1,1};
@@ -190,7 +191,7 @@ private slots:
         QVERIFY(window.statusBar()->currentMessage().contains("saved",Qt::CaseInsensitive));
         bridge.execute("seek",{{"frame",3}});
         // A GUI failure while the remote decode is active must still show its own dialog.
-        window.openPath(dir.path()+"/missing.pgs");
+        window.openPath(dir.path()+"/missing.vgs");
         QTRY_VERIFY_WITH_TIMEOUT(!bridge.state()["processing"].toBool(),5000);
         QCOMPARE(dialogs.size(),1);QVERIFY(dialogs[0].contains("exist"));
         QVERIFY2(!bridge.state()["error"].toString().isEmpty(),"Corrupt chunk should fail the remote decode.");
@@ -209,18 +210,22 @@ private slots:
         MainWindow window(nullptr,dir.path()+"/presets");EditorAutomation bridge(&window,dir.path()+"/sessions");
         bridge.execute("open",{{"path",path}});QTRY_VERIFY_WITH_TIMEOUT(bridge.state()["ready"].toBool(),5000);
         Project p;QString error;const auto root=bridge.execute("project",{});QVERIFY(Project::fromJson(root,dir.path(),&p,&error));
-        ExportTask task;task.path=dir.path()+"/queued.vgstask";task.output=dir.path()+"/queued.pgs";task.project=p;
+        ExportTask task;task.path=dir.path()+"/queued.vgstask";task.output=dir.path()+"/queued.vgs";task.project=p;
         QVERIFY2(writeExportTask(task,&error),qPrintable(error));
         TaskQueueDialog queue(&window);queue.addTasks({task.path});
         auto guiExport=ExportLease::tryAcquire();QVERIFY(guiExport);
-        QVERIFY_EXCEPTION_THROWN(bridge.execute("export",{{"path",dir.path()+"/blocked.pgs"}}),std::runtime_error);
+        QVERIFY_EXCEPTION_THROWN(bridge.execute("export",{{"path",dir.path()+"/blocked.vgs"}}),std::runtime_error);
         queue.start();QVERIFY(!queue.running());QVERIFY(!QFile::exists(task.output));
         guiExport.reset();queue.start();QVERIFY(queue.running());
-        QVERIFY_EXCEPTION_THROWN(bridge.execute("export",{{"path",dir.path()+"/still-blocked.pgs"}}),std::runtime_error);
+        QVERIFY_EXCEPTION_THROWN(bridge.execute("export",{{"path",dir.path()+"/still-blocked.vgs"}}),std::runtime_error);
         QTRY_VERIFY_WITH_TIMEOUT(!queue.running(),10000);QVERIFY(QFileInfo(task.output).size()>0);
-        const auto started=bridge.execute("export",{{"path",dir.path()+"/mcp.pgs"}});
+        // Compressed or not is asked for with the export, and read back from the header.
+        const auto started=bridge.execute("export",{{"path",dir.path()+"/mcp.vgs"},{"uncompressed",true}});
         const QString job=started["job_id"].toString();
         QTRY_COMPARE_WITH_TIMEOUT(bridge.execute("export_status",{{"job_id",job}})["status"].toString(),QString("done"),10000);
+        QVERIFY(vgsdec::Capture::openFile((dir.path()+"/mcp.vgs").toStdString()).isUncompressed());
+        QVERIFY(!vgsdec::Capture::openFile(task.output.toStdString()).isUncompressed());
+        QVERIFY_EXCEPTION_THROWN(bridge.execute("export",{{"path",dir.path()+"/animated.pgs"}}),std::runtime_error);
         auto available=ExportLease::tryAcquire();QVERIFY(available);
     }
     void closingDuringExportKeepsTheEventLoopResponsive() {
@@ -267,13 +272,13 @@ private slots:
         MainWindow window(nullptr,dir.path()+"/presets");window.show();EditorAutomation bridge(&window,dir.path()+"/sessions");
         bridge.execute("open",{{"path",path}});QTRY_VERIFY_WITH_TIMEOUT(bridge.state()["ready"].toBool(),5000);
         bridge.execute("save",{{"path",dir.path()+"/keep-open.vgsproj"}});
-        const QString id=bridge.execute("export",{{"path",dir.path()+"/keep-exporting.pgs"}})["job_id"].toString();
+        const QString id=bridge.execute("export",{{"path",dir.path()+"/keep-exporting.vgs"}})["job_id"].toString();
         QTimer answer;answer.setInterval(5);connect(&answer,&QTimer::timeout,this,[&] {
             for (auto *box:window.findChildren<QMessageBox *>()) if (box->isVisible()) box->button(QMessageBox::No)->click();
         });answer.start();
         QVERIFY(!window.close());QVERIFY(window.isVisible());
         QTRY_COMPARE_WITH_TIMEOUT(bridge.execute("export_status",{{"job_id",id}})["status"].toString(),QString("done"),10000);
-        QVERIFY(QFileInfo(dir.path()+"/keep-exporting.pgs").size()>0);
+        QVERIFY(QFileInfo(dir.path()+"/keep-exporting.vgs").size()>0);
     }
     void completedExportsReleaseReservationsAndKeepBoundedHistory() {
         QTemporaryDir dir;QVERIFY(dir.isValid());settings(dir.path());const auto path=capture(dir.path());
@@ -282,7 +287,7 @@ private slots:
         bridge.execute("open",{{"path",path}});QTRY_VERIFY_WITH_TIMEOUT(bridge.state()["ready"].toBool(),5000);
         QString oldest,newest;
         for (int i=0;i<34;++i) {
-            const auto started=bridge.execute("export",{{"path",dir.path()+"/repeated.pgs"},{"overwrite",true}});
+            const auto started=bridge.execute("export",{{"path",dir.path()+"/repeated.vgs"},{"overwrite",true}});
             newest=started["job_id"].toString();if (i==0) oldest=newest;
             QTRY_COMPARE_WITH_TIMEOUT(bridge.execute("export_status",{{"job_id",newest}})["status"].toString(),QString("done"),10000);
             auto lease=ExportLease::tryAcquire();QVERIFY(lease);
@@ -493,7 +498,7 @@ private slots:
         bridge.execute("redo",{});QTRY_VERIFY_WITH_TIMEOUT(bridge.state()["ready"].toBool(),5000);
         bridge.execute("seek",{{"frame",2}});QTRY_VERIFY_WITH_TIMEOUT(bridge.state()["ready"].toBool(),5000);QCOMPARE(bridge.state()["chunk"].toInt(),2);
         bridge.execute("save",{{"path",dir.path()+"/edited.vgsproj"}});QVERIFY(!bridge.state()["modified"].toBool());
-        QVERIFY_EXCEPTION_THROWN(bridge.execute("open",{{"path",dir.path()+"/missing.pgs"},{"discard_unsaved",true}}),std::runtime_error);
+        QVERIFY_EXCEPTION_THROWN(bridge.execute("open",{{"path",dir.path()+"/missing.vgs"},{"discard_unsaved",true}}),std::runtime_error);
     }
     void brushPicksAreChunkLocalAndStaleViewsAreRejected() {
         try {
@@ -525,7 +530,7 @@ private slots:
         QTemporaryDir dir;QVERIFY(dir.isValid());settings(dir.path());const auto path=capture(dir.path());
         MainWindow window(nullptr,dir.path()+"/presets");EditorAutomation bridge(&window,dir.path()+"/sessions");
         bridge.execute("open",{{"path",path}});QTRY_VERIFY_WITH_TIMEOUT(bridge.state()["ready"].toBool(),5000);
-        const QString output=dir.path()+"/result.pgs";
+        const QString output=dir.path()+"/result.vgs";
         const auto started=bridge.execute("export",{{"path",output}});const QString id=started["job_id"].toString();QVERIFY(!id.isEmpty());
         QTRY_COMPARE_WITH_TIMEOUT(bridge.execute("export_status",{{"job_id",id}})["status"].toString(),QString("done"),10000);
         QVERIFY(QFileInfo(output).size()>0);

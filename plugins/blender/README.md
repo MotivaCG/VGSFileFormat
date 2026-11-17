@@ -180,7 +180,7 @@ an existing one.
 
 Test capture: `D:\Trabajos\ScanMeNow\SMNWebviewer\Playcanvas\dist\data\boxing_despill.vgs`
 (7.07 s, 7 chunks, about 240k splats, harmonics of degree 2, 30 fps). The smaller
-`build_tests/tests/roundtrip.vgs` and `.pgs` exist once the tests have run with a `.mint`.
+`build_tests/tests/roundtrip.vgs` and `roundtrip_uncompressed.vgs` exist once the tests have run with a `.mint`.
 
 - **In the background:** `blender --background --factory-startup --python script.py`, with
   the unpacked add-on on `sys.path` (`build_win64/plugins/blender/Release`) and

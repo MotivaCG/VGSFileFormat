@@ -262,8 +262,10 @@ export class VgsCapture {
     });
   }
   get version() { return this.#module._vgs_number(Number_.version); }
-  /** True when the pages are stored without entropy coding, which is what .pgs means. */
-  get isPlain() { return this.#module._vgs_number(Number_.isPlain) === 1; }
+  /** True when the pages are stored without entropy coding: the header says so per attribute. */
+  get isUncompressed() { return this.#module._vgs_number(Number_.isPlain) === 1; }
+  /** @deprecated The earlier name of isUncompressed. */
+  get isPlain() { return this.isUncompressed; }
 
   // ---- the timeline ----------------------------------------------------------------
 

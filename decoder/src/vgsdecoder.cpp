@@ -640,7 +640,7 @@ const Signature &Capture::signature() const { return state->signature; }
 uint64_t Capture::createdMillis() const { return state->header.createdMillis; }
 uint32_t Capture::version() const { return vgs::Version; }
 
-bool Capture::isPlain() const {
+bool Capture::isUncompressed() const {
   for (const auto &policy : state->header.policies)
     if (policy.codec != vgs::Raw)
       return false;

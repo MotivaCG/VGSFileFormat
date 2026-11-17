@@ -124,7 +124,9 @@ VGS_DECODER_API uint32_t vgs_signature_algorithm(const vgs_capture *);
 VGS_DECODER_API uint32_t vgs_signature_key_id(const vgs_capture *);
 VGS_DECODER_API uint64_t vgs_signed_bytes(const vgs_capture *);
 VGS_DECODER_API uint32_t vgs_version(const vgs_capture *);
-/** 1 when the pages are stored without entropy coding, which is what .pgs means. */
+/** 1 when the pages are stored without entropy coding: the header says so per attribute. */
+VGS_DECODER_API int vgs_is_uncompressed(const vgs_capture *);
+/** The earlier name of vgs_is_uncompressed. */
 VGS_DECODER_API int vgs_is_plain(const vgs_capture *);
 
 /* ---- the timeline ---- */

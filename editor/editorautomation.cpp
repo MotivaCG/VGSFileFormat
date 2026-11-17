@@ -214,7 +214,7 @@ QJsonObject EditorAutomation::execute(const QString &method,const QJsonObject &a
     if (!exporting && !frame && !estimate && !saved) return window_->automationCommand(method,a,connectionId());
     auto lease=ExportLease::tryAcquire();
     if (!lease) fail("An export is already running in the editor or task queue. Wait for it to finish.");
-    const ExportTask task=exporting ? window_->prepareAutomationExport(text(a,"path"),flag(a,"overwrite"))
+    const ExportTask task=exporting ? window_->prepareAutomationExport(text(a,"path"),flag(a,"overwrite"),flag(a,"uncompressed"))
         : frame ? window_->prepareAutomationFramePly(text(a,"path"),flag(a,"overwrite"))
         : estimate ? window_->prepareAutomationEstimate() : window_->prepareAutomationTask(text(a,"task_path"));
     const QString id=QUuid::createUuid().toString(QUuid::WithoutBraces);auto job=std::make_shared<Job>();

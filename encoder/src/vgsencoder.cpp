@@ -130,7 +130,7 @@ void Encoder::setInputMemory(const uint8_t *data, size_t size) {
 void Encoder::setCoding(Coding coding) {
   state->coding = coding;
   state->options.compression =
-      coding == Coding::Plain ? vgs::Compression::None : vgs::Compression::Auto;
+      coding == Coding::Uncompressed ? vgs::Compression::None : vgs::Compression::Auto;
 }
 
 void Encoder::setSphericalHarmonicDegree(uint32_t degree) {

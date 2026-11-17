@@ -71,7 +71,7 @@ private slots:
         text(dir.filePath("birth_events.tsv"),"2\t0\t1\n2\t1\t1\n2\t2\t1\n");PlySequence source(first);
         QCOMPARE(source.spec().chunks,QVector<int>({0,2}));QCOMPARE(source.chunks()[0].records,size_t(2));QCOMPARE(source.chunks()[1].records,size_t(2));
         Project project;project.asset=first;project.plySequence=source.spec();project.modifiers.clear();project.out=3/30.;
-        const auto output=dir.filePath("out.pgs");exportCaptureFile(project,output);auto capture=vgsdec::Capture::openFile(output.toStdString());
+        const auto output=dir.filePath("out.vgs");exportCaptureFile(project,output);auto capture=vgsdec::Capture::openFile(output.toStdString());
         QCOMPARE(capture.chunkCount(),size_t(2));QCOMPARE(capture.chunk(0).intervals,quint64(2));QCOMPARE(capture.chunk(1).intervals,quint64(2));
         for (int frame=0;frame<4;++frame) QCOMPARE(capture.setTime(frame/30.,true).activeCount,quint64(2));
     }
@@ -146,11 +146,11 @@ private slots:
     void plyExportsUseTheSameRecordIdsAsPreview() {
         QTemporaryDir dir;const auto first=ply(dir.path(),48,sample());ply(dir.path(),49,sample(1,false));ply(dir.path(),50,sample(2,true,.06f));PlySequence source(first);
         Project project;project.asset=first;project.plySequence=source.spec();project.modifiers.clear();project.out=2/30.;
-        const auto path=dir.filePath("plain.pgs");exportCaptureFile(project,path);auto capture=vgsdec::Capture::openFile(path.toStdString());QCOMPARE(capture.chunkCount(),size_t(1));QCOMPARE(capture.shDegree(),1u);
+        const auto path=dir.filePath("plain.vgs");exportCaptureFile(project,path);auto capture=vgsdec::Capture::openFile(path.toStdString());QCOMPARE(capture.chunkCount(),size_t(1));QCOMPARE(capture.shDegree(),1u);
         for (int frame=0;frame<3;++frame) QCOMPARE(capture.setTime(frame/30.,true).activeCount,quint64(frame==1 ? 1 : 2));
         int old=-1;const auto records=source.records(0);for (size_t i=0;i<records.size();++i) if (records[i].row==2 && records[i].first==0) old=int(i);QVERIFY(old>=0);
         Modifier erase;erase.id=Project::newId();erase.type=ModifierType::Erase;erase.erased[0].push_back(uint32_t(old));project.modifiers={erase};
-        const auto edited=dir.filePath("edited.pgs");exportCaptureFile(project,edited);auto output=vgsdec::Capture::openFile(edited.toStdString());QCOMPARE(output.setTime(0,false).activeCount,quint64(1));QCOMPARE(output.setTime(2/30.,false).activeCount,quint64(2));
+        const auto edited=dir.filePath("edited.vgs");exportCaptureFile(project,edited);auto output=vgsdec::Capture::openFile(edited.toStdString());QCOMPARE(output.setTime(0,false).activeCount,quint64(1));QCOMPARE(output.setTime(2/30.,false).activeCount,quint64(2));
         const auto asPly=dir.filePath("snapshot.ply");QCOMPARE(exportFramePly(project,2/30.,asPly).kept,quint64(2));PlySequence snapshot(asPly);QCOMPARE(alive(snapshot.frame(0)),2);
         const auto originalSize=QFileInfo(dir.filePath("00000049.ply")).size();QVERIFY_EXCEPTION_THROWN(exportFramePly(project,0,dir.filePath("00000049.ply")),std::runtime_error);QCOMPARE(QFileInfo(dir.filePath("00000049.ply")).size(),originalSize);
         const auto estimate=estimateExportSize(project);QVERIFY(estimate.exact);QVERIFY(estimate.bytes>0);
@@ -180,7 +180,7 @@ private slots:
         // vgsplyseq uses a static median SH codebook per identity record.
         qInfo("DN1 sampled maximum errors: position=%g m, DC=%g, SH=%g (SH RMS=%g)",positionError,colourError,shError,shRms);QVERIFY(std::sqrt(positionSquared/baseSamples)<.0005);QVERIFY(std::sqrt(colourSquared/baseSamples)<.003);QVERIFY(shRms<.02);
         Project project;project.asset=path;project.plySequence=source.spec();project.modifiers.clear();project.out=6/30.;QTemporaryDir dir;
-        exportCaptureFile(project,dir.filePath("dn1.pgs"));auto capture=vgsdec::Capture::openFile(dir.filePath("dn1.pgs").toStdString());QCOMPARE(capture.frameRate(),30.);
+        exportCaptureFile(project,dir.filePath("dn1.vgs"));auto capture=vgsdec::Capture::openFile(dir.filePath("dn1.vgs").toStdString());QCOMPARE(capture.frameRate(),30.);
         for (int frame:{0,3,6}) QCOMPARE(capture.setTime(frame/30.,false).activeCount,quint64(alive(source.frame(frame/30.,false))));
     }
     void realForgeTakeFromPublishedFrames() {

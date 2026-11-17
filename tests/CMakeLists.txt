@@ -187,14 +187,15 @@ add_test(NAME tool_dump COMMAND vgsdump ${fixture} 0.5 ${CMAKE_CURRENT_BINARY_DI
 add_test(NAME tool_pagecost COMMAND vgspagecost ${fixture} --rounds 1)
 set_tests_properties(tool_info tool_play tool_dump tool_pagecost PROPERTIES FIXTURES_REQUIRED capture)
 
-# A .pgs of the same source must decode to the same thing: the two extensions are one
-# container and a reader is not allowed to need to know which it has.
-add_test(NAME plain_encode
-         COMMAND vgsencode ${VGS_TEST_MINT} ${CMAKE_CURRENT_BINARY_DIR}/roundtrip.pgs
-                 --plain --quiet)
-add_test(NAME plain_info COMMAND vgsinfo ${CMAKE_CURRENT_BINARY_DIR}/roundtrip.pgs)
-set_tests_properties(plain_encode PROPERTIES FIXTURES_SETUP plain)
-set_tests_properties(plain_info PROPERTIES FIXTURES_REQUIRED plain)
+# The same source uncompressed is still a .vgs, read by the same code: the header, not
+# the extension, says its pages are stored as they are.
+add_test(NAME uncompressed_encode
+         COMMAND vgsencode ${VGS_TEST_MINT} ${CMAKE_CURRENT_BINARY_DIR}/roundtrip_uncompressed.vgs
+                 --uncompressed --quiet)
+add_test(NAME uncompressed_info COMMAND vgsinfo ${CMAKE_CURRENT_BINARY_DIR}/roundtrip_uncompressed.vgs)
+set_tests_properties(uncompressed_encode PROPERTIES FIXTURES_SETUP uncompressed)
+set_tests_properties(uncompressed_info PROPERTIES FIXTURES_REQUIRED uncompressed
+                     PASS_REGULAR_EXPRESSION "uncompressed pages")
 
 # The web read-ahead's byte bookkeeping, which decides whether a capture is downloaded
 # once or twice and is the kind of thing only a test can keep honest. It needs no

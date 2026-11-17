@@ -192,7 +192,7 @@ class ExportTests : public QObject {
     Q_OBJECT
 private slots:
     void animatedOffsetsBakeReferenceTrimCovarianceAndSh() {
-        QTemporaryDir dir;const auto source=dir.filePath("source.pgs");sourceFile(source,5);Project project;project.asset=source;project.in=.08;project.out=.16;project.transform.position={1,2,3};project.modifiers.clear();
+        QTemporaryDir dir;const auto source=dir.filePath("source.vgs");sourceFile(source,5);Project project;project.asset=source;project.in=.08;project.out=.16;project.transform.position={1,2,3};project.modifiers.clear();
         Modifier animation;animation.id=Project::newId();animation.name="Motion";animation.type=ModifierType::AnimateTransform;Transform end;end.position={2,0,0};end.rotation={0,90,0};end.scale={2,1,1};animation.animation.setKey(0,{});animation.animation.setKey(4,end);project.modifiers.append(animation);
         auto original=vgsdec::Capture::openFile(source.toStdString());
         const auto guardedOutput=dir.filePath("existing.vgs");QFile guardedFile(guardedOutput);QVERIFY(guardedFile.open(QIODevice::WriteOnly));guardedFile.write("existing");guardedFile.close();
@@ -201,8 +201,8 @@ private slots:
         // refused; the reference bake it would be compared with is still checked here.
         for (int frame=2;frame<5;++frame) {const auto input=copy(original.setTime(frame/25.,true));const auto expected=bakeExportFrame(input,project,3,{},25);QVERIFY(expected.count>0);}
         animation.animation.keys={animation.animation.keys.back()};project.modifiers[0]=animation;
-        for (const auto &extension:{QString("vgs"),QString("pgs"),QString("mint")}) {
-            project.captureSettings.plain=extension=="pgs";const auto path=dir.filePath("animated."+extension);const auto result=exportCaptureFile(project,path);QCOMPARE(result.frames,3);
+        for (const auto &extension:{QString("vgs"),QString("uncompressed.vgs"),QString("mint")}) {
+            project.captureSettings.uncompressed=extension.startsWith("uncompressed");const auto path=dir.filePath("animated."+extension);const auto result=exportCaptureFile(project,path);QCOMPARE(result.frames,3);
             std::unique_ptr<vgsdec::Capture> capture;MintFile mint;QString error;if (extension=="mint") QVERIFY(mint.open(path,&error));else capture=std::make_unique<vgsdec::Capture>(vgsdec::Capture::openFile(path.toStdString()));
             for (int sample=0;sample<3;++sample) {
                 const auto input=copy(original.setTime((sample+2)/25.,true));const auto expected=bakeExportFrame(input,project,3,{},25);vgs::Frame actual;
@@ -255,7 +255,7 @@ private slots:
         QVERIFY(changed>0);
     }
     void animatedMotionIsStoredAsSamples() {
-        QTemporaryDir dir;const auto source=dir.filePath("source.pgs");sourceFile(source,5);
+        QTemporaryDir dir;const auto source=dir.filePath("source.vgs");sourceFile(source,5);
         Project project;project.asset=source;project.in=.08;project.out=.16;project.transform.position={1,2,3};project.transform.rotation={0,20,0};project.modifiers.clear();
         Modifier animation;animation.id=Project::newId();animation.name="Walk";animation.type=ModifierType::AnimateTransform;
         Transform end;end.position={2,0,1};end.rotation={10,90,30};end.scale={1.5f,1.5f,1.5f};animation.animation.setKey(0,{});animation.animation.setKey(4,end);project.modifiers.append(animation);
@@ -278,8 +278,8 @@ private slots:
                     QVERIFY(actual.position[row*3+c]>=box[c]-1e-5f && actual.position[row*3+c]<=box[c+3]+1e-5f);
             }
         };
-        for (const auto &extension:{QString("vgs"),QString("pgs")}) {
-            project.captureSettings.plain=extension=="pgs";const auto path=dir.filePath("moving."+extension);const auto result=exportCaptureFile(project,path);QCOMPARE(result.frames,3);
+        for (const auto &extension:{QString("vgs"),QString("uncompressed.vgs")}) {
+            project.captureSettings.uncompressed=extension.startsWith("uncompressed");const auto path=dir.filePath("moving."+extension);const auto result=exportCaptureFile(project,path);QCOMPARE(result.frames,3);
             auto capture=vgsdec::Capture::openFile(path.toStdString());QVERIFY(capture.hasMotion());
             compare(capture,project,1e-4);
             // The first exported frame is what is baked, so the motion starts at the identity.
@@ -306,7 +306,7 @@ private slots:
     }
     void pruneRemovesWhatAddsLeastAndNothingElse() {
         // Forty splats that make a picture and eight faint specks: 15% of 48 is seven, all specks.
-        QTemporaryDir dir;const auto source=dir.filePath("source.pgs");
+        QTemporaryDir dir;const auto source=dir.filePath("source.vgs");
         vgs::Frame f;f.count=0;f.shCoefficients=0;
         auto add=[&](float x,float y,float scale,float opacity) {f.position.insert(f.position.end(),{x,y,0});f.rotation.insert(f.rotation.end(),{0,0,0,1});
             f.scale.insert(f.scale.end(),{scale,scale,scale});f.colorDc.insert(f.colorDc.end(),{.5f,.5f,.5f});f.opacity.push_back(opacity);f.active.push_back(1);++f.count;};
@@ -338,7 +338,7 @@ private slots:
     void plySequenceIsNumberedByTheSourceFrame() {
         // A range from frame 2 to 4 of a 5-frame source: name0002.ply to name0004.ply, each
         // the frame Export current frame as PLY writes, and nothing else beside them.
-        QTemporaryDir dir;const auto source=dir.filePath("source.pgs");sourceFile(source,5);
+        QTemporaryDir dir;const auto source=dir.filePath("source.vgs");sourceFile(source,5);
         Project project;project.asset=source;project.in=2./25;project.out=4./25;project.time=project.in;project.modifiers.clear();
         const auto destination=dir.filePath("take.ply");const auto result=exportCaptureFile(project,destination);
         QCOMPARE(result.frames,3);QVERIFY(!QFileInfo::exists(destination));QVERIFY(result.bytes>0);
@@ -356,7 +356,7 @@ private slots:
         if (ffmpegPath().isEmpty()) QSKIP("No ffmpeg beside the tests (tools/ffmpeg.exe).");
         // Two modifiers - a song and a short looped jingle at a lower volume - mix into one AAC
         // track exactly as long as the range, which players start with it.
-        QTemporaryDir dir;const auto source=dir.filePath("source.pgs");sourceFile(source,5);
+        QTemporaryDir dir;const auto source=dir.filePath("source.vgs");sourceFile(source,5);
         writeTone(dir.filePath("song.wav"),3,440);writeTone(dir.filePath("jingle.wav"),.05,880);
         Project project;project.asset=source;project.in=1./25;project.out=4./25;project.time=project.in;project.modifiers.clear();
         Modifier song;song.id=Project::newId();song.name="Song";song.type=ModifierType::Audio;song.audioFile=dir.filePath("song.wav");song.audioOffset=-1;
@@ -402,7 +402,7 @@ private slots:
     }
     void audioModifierBringsItsFileInSync() {
         NoFfmpeg noFfmpeg;
-        QTemporaryDir dir;const auto source=dir.filePath("source.pgs");sourceFile(source,5);
+        QTemporaryDir dir;const auto source=dir.filePath("source.vgs");sourceFile(source,5);
         QFile song(dir.filePath("song.mp3"));QVERIFY(song.open(QIODevice::WriteOnly));song.write("ID3 song");song.close();
         Project project;project.asset=source;project.in=2./25;project.out=4./25;project.time=project.in;project.modifiers.clear();
         Modifier audio;audio.id=Project::newId();audio.name="Song";audio.type=ModifierType::Audio;audio.audioFile=song.fileName();audio.audioOffset=1./25;project.modifiers={audio};
@@ -474,7 +474,7 @@ private slots:
     }
     void mintSoundtrackIsMixedAsMp3() {
         if (ffmpegPath().isEmpty()) QSKIP("No ffmpeg beside the tests (tools/ffmpeg.exe).");
-        QTemporaryDir dir;const auto source=dir.filePath("source.pgs");sourceFile(source,5);writeTone(dir.filePath("tone.wav"),1,440);
+        QTemporaryDir dir;const auto source=dir.filePath("source.vgs");sourceFile(source,5);writeTone(dir.filePath("tone.wav"),1,440);
         Project project;project.asset=source;project.in=1./25;project.out=4./25;project.modifiers.clear();
         Modifier song;song.id=Project::newId();song.type=ModifierType::Audio;song.audioFile=dir.filePath("tone.wav");song.audioOffset=.08;song.audioVolume=.4;
         Modifier loop=song;loop.id=Project::newId();loop.audioLoop=true;loop.audioOffset=-.04;project.modifiers={song,loop};
@@ -506,7 +506,7 @@ private slots:
         QFile companion(QFileInfo(output).dir().filePath(QFileInfo(output).completeBaseName()+".mp3"));QVERIFY(companion.open(QIODevice::ReadOnly));QCOMPARE(companion.readAll(),expected);
     }
     void mintOmitsHigherShAtDegreeZero() {
-        QTemporaryDir dir;const auto source=dir.filePath("source.pgs");sourceFile(source);QString error;
+        QTemporaryDir dir;const auto source=dir.filePath("source.vgs");sourceFile(source);QString error;
         Project project;project.asset=source;project.out=.08;project.modifiers.clear();project.captureSettings.shDegree=0;
         const auto path=dir.filePath("base.mint");exportCaptureFile(project,path);
         MintFile mint;QVERIFY2(mint.openReadOnly(path,&error),qPrintable(error));QCOMPARE(mint.shDegree(),0);
@@ -567,7 +567,7 @@ private slots:
         qInfo("Unchanged attributes: position max %.3g, DC max %.3g.",positionMax,dcMax);
     }
     void exportReusesOnlyMatchingPreviewVisibility() {
-        QTemporaryDir dir;const auto source=dir.filePath("source.pgs");ballFile(source,2000);
+        QTemporaryDir dir;const auto source=dir.filePath("source.vgs");ballFile(source,2000);
         Project project;project.asset=source;project.in=0;project.out=1./25;project.modifiers.clear();
         Modifier purge;purge.id=Project::newId();purge.type=ModifierType::PurgeIsolated;purge.isolation={4,300};project.modifiers={purge};
         CaptureWorker worker;worker.open(source,1,true);QSignalSpy finished(&worker,&CaptureWorker::cacheFinished);worker.precalculate(project,1,701);QCOMPARE(finished.size(),1);QVERIFY(finished[0][3].toString().isEmpty());
@@ -584,23 +584,23 @@ private slots:
         NoFfmpeg noFfmpeg;QTemporaryDir dir;MintFile mint;QString error;QVERIFY2(mint.openReadOnly(source,&error),qPrintable(error));
         Project project;project.asset=source;project.in=0;project.out=std::min(1.,(mint.frameCount()-1)/mint.frameRate());project.modifiers.clear();
         Modifier purge;purge.id=Project::newId();purge.type=ModifierType::PurgeIsolated;purge.isolation={4,300};project.modifiers={purge};
-        QElapsedTimer timer;timer.start();const auto cold=dir.filePath("cold.pgs");exportCaptureFile(project,cold);const double coldMs=timer.nsecsElapsed()/1e6;
+        QElapsedTimer timer;timer.start();const auto cold=dir.filePath("cold.vgs");exportCaptureFile(project,cold);const double coldMs=timer.nsecsElapsed()/1e6;
         CaptureWorker worker;worker.open(source,1,true);QSignalSpy finished(&worker,&CaptureWorker::cacheFinished);timer.restart();worker.precalculate(project,1,801);const double bakeMs=timer.nsecsElapsed()/1e6;
         QCOMPARE(finished.size(),1);QVERIFY2(finished[0][3].toString().isEmpty(),qPrintable(finished[0][3].toString()));
-        timer.restart();const auto warm=dir.filePath("warm.pgs");exportCaptureFile(project,warm);const double warmMs=timer.nsecsElapsed()/1e6;
+        timer.restart();const auto warm=dir.filePath("warm.vgs");exportCaptureFile(project,warm);const double warmMs=timer.nsecsElapsed()/1e6;
         QVERIFY(worker.exportVisibilityHits()>0);qInfo("EXPORT_CACHE cold_ms=%.1f bake_ms=%.1f warm_ms=%.1f hits=%zu visibility_bytes=%zu",coldMs,bakeMs,warmMs,worker.exportVisibilityHits(),worker.visibilityBytes());
         auto a=vgsdec::Capture::openFile(cold.toStdString()),b=vgsdec::Capture::openFile(warm.toStdString());
         for (double t:{.01,.5,.99}) {const auto x=copy(a.setTime(t,true)),y=copy(b.setTime(t,true));QCOMPARE(x.position,y.position);QCOMPARE(x.colorDc,y.colorDc);QCOMPARE(x.opacity,y.opacity);QCOMPARE(x.shRest,y.shRest);}
     }
     void estimateMatchesTheExport() {
         // A short range is exported whole: the estimate is the file. A long one is sampled.
-        QTemporaryDir dir;const auto shortSource=dir.filePath("short.pgs");sourceFile(shortSource,5);
+        QTemporaryDir dir;const auto shortSource=dir.filePath("short_source.vgs");sourceFile(shortSource,5);
         Project project;project.asset=shortSource;project.in=0;project.out=4./25;project.modifiers.clear();
         const auto estimate=estimateExportSize(project);QVERIFY(estimate.exact);QCOMPARE(estimate.windows,1);
         const auto real=dir.filePath("short.vgs");exportCaptureFile(project,real);
         QVERIFY2(std::abs(estimate.bytes-double(QFileInfo(real).size()))<64,qPrintable(QString("%1 vs %2").arg(estimate.bytes).arg(QFileInfo(real).size())));
         QVERIFY(std::abs(estimate.seconds-5./25)<1e-9);QVERIFY(estimate.averageMbps>0 && estimate.peakMbps>=estimate.averageMbps*0.99);
-        const auto longSource=dir.filePath("long.pgs");sourceFile(longSource,250);project.asset=longSource;project.out=249./25;
+        const auto longSource=dir.filePath("long_source.vgs");sourceFile(longSource,250);project.asset=longSource;project.out=249./25;
         const auto sampled=estimateExportSize(project);QVERIFY(!sampled.exact);QCOMPARE(sampled.windows,4);
         const auto full=dir.filePath("long.vgs");exportCaptureFile(project,full);const double size=double(QFileInfo(full).size());
         QVERIFY2(std::abs(sampled.bytes-size)<0.15*size,qPrintable(QString("%1 vs %2").arg(sampled.bytes).arg(size)));
@@ -608,7 +608,7 @@ private slots:
     void loopMorphFramesFollowTheRangeAndCloseTheLoop() {
         // Four frames of a body with an arm that turns 10 degrees about Y each frame, and a
         // floater above it in every frame. A Loop morph after End carries it back to Start.
-        QTemporaryDir dir;const auto source=dir.filePath("arm.pgs");
+        QTemporaryDir dir;const auto source=dir.filePath("arm.vgs");
         auto armFrame=[](int f) {
             vgs::Frame frame;std::mt19937 random(11+f);std::uniform_real_distribution<float> unit(0,1);
             QMatrix4x4 turn;turn.rotate(10.f*f,0,1,0);
@@ -707,7 +707,7 @@ private slots:
         // A body and an arm swinging about Y, wider each cycle: twelve frames make a cycle, so End
         // (frame 15) is on Start's pose (frame 3) but 6 degrees further. Every frame is a chunk of
         // its own, so following the frames back always crosses a chunk change.
-        QTemporaryDir dir;const auto source=dir.filePath("swing.pgs");
+        QTemporaryDir dir;const auto source=dir.filePath("swing.vgs");
         auto swing=[](int f) {return (4+.5*f)*std::sin(2*M_PI*f/12);};
         {
             constexpr int frames=18;vgs::Header h;h.frameCount=h.durationTicks=frames;h.timeDenominator=25;h.chunks.resize(frames);
@@ -783,7 +783,7 @@ private slots:
         }
     }
     void mintPlaybackReaderIsReadOnlyAndChecksRankTables() {
-        QTemporaryDir dir;const auto source=dir.filePath("clip.pgs");sourceFile(source,3);
+        QTemporaryDir dir;const auto source=dir.filePath("clip.vgs");sourceFile(source,3);
         Project project;project.asset=source;project.out=2./25;project.modifiers.clear();const auto path=dir.filePath("clip.mint");exportCaptureFile(project,path);
         // The playback reader maps the file: it decodes, and refuses to be edited in place.
         MintFile reader;QString error;QVERIFY2(reader.openReadOnly(path,&error),qPrintable(error));
@@ -806,7 +806,7 @@ private slots:
         QVERIFY(refused);QVERIFY2(error.contains("malformed rank table"),qPrintable(error));
     }
     void visibilityIsKeptAsPlayedAndDroppedOnAnyChange() {
-        QTemporaryDir dir;const auto source=dir.filePath("cached.pgs");sourceFile(source,5);
+        QTemporaryDir dir;const auto source=dir.filePath("cached.vgs");sourceFile(source,5);
         Project project;project.asset=source;project.in=0;project.out=4./25;project.modifiers.clear();
         Modifier purge;purge.id=Project::newId();purge.name="Purge";purge.type=ModifierType::PurgeIsolated;purge.isolation={4,300};project.modifiers={purge};
         CaptureWorker worker;QSignalSpy decoded(&worker,&CaptureWorker::decoded);worker.open(source,1,true);
@@ -826,7 +826,7 @@ private slots:
     }
     void precalculationWarmsTheTimelineWithoutPublishingFrames() {
         using namespace previewmemory;
-        QTemporaryDir dir;const auto path=dir.filePath("precalculate.pgs");sourceFile(path,5);
+        QTemporaryDir dir;const auto path=dir.filePath("precalculate.vgs");sourceFile(path,5);
         CaptureWorker worker(nullptr,[] {return Snapshot{32*GiB,16*GiB,64*GiB,32*GiB,true,false};});worker.open(path,1,true);
         QSignalSpy decoded(&worker,&CaptureWorker::decoded),progress(&worker,&CaptureWorker::cacheProgress),finished(&worker,&CaptureWorker::cacheFinished);
         Project project;project.modifiers.clear();project.in=0;project.out=4/25.;project.previewRevision=42;
@@ -847,7 +847,7 @@ private slots:
     }
     void morphEditsPreserveUpstreamVisibilityAndCacheCanBeDisabled() {
         using namespace previewmemory;
-        QTemporaryDir dir;const auto path=dir.filePath("dependencies.pgs");sourceFile(path,5);
+        QTemporaryDir dir;const auto path=dir.filePath("dependencies.vgs");sourceFile(path,5);
         CaptureWorker worker(nullptr,[] {return Snapshot{32*GiB,16*GiB,64*GiB,32*GiB,true,false};});worker.open(path,1,true);
         QSignalSpy decoded(&worker,&CaptureWorker::decoded),fits(&worker,&CaptureWorker::morphFitting),computing(&worker,&CaptureWorker::cacheComputing);
         Project project;project.modifiers.clear();project.in=0;project.out=4/25.;project.previewPlaying=true;
@@ -866,7 +866,7 @@ private slots:
         worker.decode(5/25.,1,true,project);QVERIFY(qvariant_cast<FramePtr>(decoded.back()[0])->morphShapeFromCache);
     }
     void frameBufferReusePreservesPublishedSnapshots() {
-        QTemporaryDir dir;const auto path=dir.filePath("buffers.pgs");sourceFile(path,5);
+        QTemporaryDir dir;const auto path=dir.filePath("buffers.vgs");sourceFile(path,5);
         CaptureWorker worker;FramePtr current;
         connect(&worker,&CaptureWorker::decoded,[&](FramePtr frame,quint64) {current=std::move(frame);});
         worker.open(path,1,true);worker.decode(0,1,true);QVERIFY(current);
@@ -933,7 +933,7 @@ private slots:
     void erasedSplatsAreNotExported() {
         // The fixture's chunks each hold three records (live at x=0 and x=3, and a dead one).
         // Erasing the one at x=3 in the last chunk removes it there and nowhere else.
-        QTemporaryDir dir;const auto source=dir.filePath("source.pgs");sourceFile(source,3);
+        QTemporaryDir dir;const auto source=dir.filePath("source.vgs");sourceFile(source,3);
         uint32_t atThree=0;{auto original=vgsdec::Capture::openFile(source.toStdString());const auto f=copy(original.setTime(2./25,false));
             for (size_t i=0;i<f.count;++i) if (f.active[i] && std::abs(f.position[i*3]-3)<1e-3f) atThree=uint32_t(i);}
         Project project;project.asset=source;project.in=0;project.out=2./25;project.modifiers.clear();
@@ -948,7 +948,7 @@ private slots:
     }
     void removeCropDeletesWhatIsInsideIt() {
         // The fixture's live splats sit at x=0 and x=3; a Remove cylinder at the origin takes the first.
-        QTemporaryDir dir;const auto source=dir.filePath("source.pgs");sourceFile(source,3);
+        QTemporaryDir dir;const auto source=dir.filePath("source.vgs");sourceFile(source,3);
         Project project;project.asset=source;project.in=0;project.out=0;project.modifiers.clear();
         Modifier remove;remove.id=Project::newId();remove.name="Remove";remove.crop.enabled=true;remove.crop.remove=true;remove.crop.radius=1;remove.crop.height=3;
         project.modifiers.append(remove);project.selectedModifier=remove.id;
@@ -960,14 +960,14 @@ private slots:
     void antialiasingHintTravelsWithTheSplats() {
         // A plain source has no hint; a .vgs keeps the one it carries; a Gracia .mint is
         // trained with anti-aliasing, so what is exported from it says so.
-        QTemporaryDir dir;const auto plain=dir.filePath("plain.pgs");sourceFile(plain,3);
+        QTemporaryDir dir;const auto plain=dir.filePath("plain.vgs");sourceFile(plain,3);
         Project project;project.asset=plain;project.in=0;project.out=2.0/25;project.modifiers.clear();
         auto hinted=[](const QString &path) {return vgsdec::Capture::openFile(path.toStdString()).antialiased();};
         QVERIFY(!hinted(plain));
         const auto fromPlain=dir.filePath("from_plain.vgs");exportCaptureFile(project,fromPlain);QVERIFY(!hinted(fromPlain));
         const auto mint=dir.filePath("source.mint");exportCaptureFile(project,mint);
         Project fromMint=project;fromMint.asset=mint;const auto viaMint=dir.filePath("via_mint.vgs");exportCaptureFile(fromMint,viaMint);QVERIFY(hinted(viaMint));
-        Project again=project;again.asset=viaMint;const auto kept=dir.filePath("kept.pgs");exportCaptureFile(again,kept);QVERIFY(hinted(kept));
+        Project again=project;again.asset=viaMint;const auto kept=dir.filePath("kept.vgs");exportCaptureFile(again,kept);QVERIFY(hinted(kept));
         // The editor reads it when it opens a capture: that is what its Gaussian view draws with.
         auto opened=[](const QString &path) {CaptureWorker worker;CaptureInfo info;bool done=false;
             QObject::connect(&worker,&CaptureWorker::opened,[&](CaptureInfo i,FramePtr,quint64) {info=i;done=true;});worker.open(path,1,false);return done ? int(info.antialiased) : -1;};
@@ -1118,7 +1118,7 @@ private slots:
     void bakedAntialiasingWidensSplatsAndFadesThem() {
         // From a Gracia source (anti-aliased), unbaked and baked: every axis grows to
         // sqrt(s^2+b^2) and the opacity falls by s/s' of the two largest, native and sampled.
-        QTemporaryDir dir;const auto plain=dir.filePath("plain.pgs");sourceFile(plain,3);
+        QTemporaryDir dir;const auto plain=dir.filePath("plain.vgs");sourceFile(plain,3);
         Project base;base.asset=plain;base.in=0;base.out=2.0/25;base.modifiers.clear();
         const auto mint=dir.filePath("source.mint");exportCaptureFile(base,mint);base.asset=mint;
         Project baked=base;Modifier bake;bake.id=Project::newId();bake.name="Bake";bake.type=ModifierType::BakeAntialiasing;bake.bakeDistance=300;bake.bakeScreenHeight=1080;
@@ -1152,10 +1152,10 @@ private slots:
     }
     void exportTasksKeepTheProjectAndFollowAMovedFolder() {
         QTemporaryDir root;const QString first=root.filePath("first");QVERIFY(QDir().mkpath(first+"/out"));
-        sourceFile(first+"/source.pgs",3);
-        Project project;project.asset=first+"/source.pgs";project.in=0;project.out=2.0/25;project.transform.position={.5f,0,0};
+        sourceFile(first+"/source.vgs",3);
+        Project project;project.asset=first+"/source.vgs";project.in=0;project.out=2.0/25;project.transform.position={.5f,0,0};
         // The same output name with another extension gets a task of its own.
-        QCOMPARE(exportTaskPath(first+"/out/result.vgs"),first+"/out/result.vgs.vgstask");QVERIFY(exportTaskPath(first+"/out/result.pgs")!=exportTaskPath(first+"/out/result.vgs"));
+        QCOMPARE(exportTaskPath(first+"/out/result.vgs"),first+"/out/result.vgs.vgstask");QVERIFY(exportTaskPath(first+"/out/result.mint")!=exportTaskPath(first+"/out/result.vgs"));
         ExportTask task;task.project=project;task.output=first+"/out/result.vgs";task.path=first+"/out/result.vgstask";task.frames=exportFrameCount(project,25);
         QCOMPARE(task.frames,3);QString error;QVERIFY2(writeExportTask(task,&error),qPrintable(error));
         // The project is a copy: editing it afterwards does not change the task.
@@ -1169,10 +1169,10 @@ private slots:
         // The whole folder moved: the absolute paths are gone, the relative ones lead home.
         const QString moved=root.filePath("moved");QVERIFY(QDir().rename(first,moved));
         QVERIFY2(readExportTask(moved+"/out/result.vgstask",&read,&error),qPrintable(error));
-        QCOMPARE(QFileInfo(read.project.asset).absoluteFilePath(),QFileInfo(moved+"/source.pgs").absoluteFilePath());
+        QCOMPARE(QFileInfo(read.project.asset).absoluteFilePath(),QFileInfo(moved+"/source.vgs").absoluteFilePath());
         QCOMPARE(QFileInfo(read.output).absoluteFilePath(),QFileInfo(moved+"/out/result.vgs").absoluteFilePath());QCOMPARE(checkExportTask(read),QString());
         // What cannot run says why, before anything runs.
-        ExportTask missing=read;missing.project.asset=moved+"/nowhere.pgs";QVERIFY(checkExportTask(missing).contains("missing"));
+        ExportTask missing=read;missing.project.asset=moved+"/nowhere.vgs";QVERIFY(checkExportTask(missing).contains("missing"));
         ExportTask animated=read;animated.output=moved+"/out/result.mint";Modifier move;move.id=Project::newId();move.type=ModifierType::AnimateTransform;
         Transform a,b;b.position={1,0,0};move.animation.setKey(0,a);move.animation.setKey(2,b);animated.project.modifiers.append(move);
         QVERIFY(checkExportTask(animated).contains("MINT"));
@@ -1180,7 +1180,7 @@ private slots:
     }
     void currentFrameIsWrittenAsAnEditedPly() {
         // Frame 0 has live splats at x=0 and x=3; the capture moves 1 m along X and keeps SH1.
-        QTemporaryDir dir;const auto source=dir.filePath("source.pgs");sourceFile(source,3);
+        QTemporaryDir dir;const auto source=dir.filePath("source.vgs");sourceFile(source,3);
         Project project;project.asset=source;project.in=0;project.out=2.0/25;project.modifiers.clear();
         project.transform.position={1,0,0};project.captureSettings.shDegree=1;
         const auto path=dir.filePath("frame.ply");const auto result=exportFramePly(project,0,path);
@@ -1249,7 +1249,7 @@ private slots:
         QVERIFY(outwards(dir.filePath("cut.ply"))>=.98);
     }
     void walkMarksTheHeaderAndLeavesTheDataInPlace() {
-        QTemporaryDir dir;const auto source=dir.filePath("source.pgs");sourceFile(source,5);
+        QTemporaryDir dir;const auto source=dir.filePath("source.vgs");sourceFile(source,5);
         Project project;project.asset=source;project.in=.08;project.out=.16;project.modifiers.clear();
         Modifier walk;walk.id=Project::newId();walk.name="Walk";walk.type=ModifierType::Walk;walk.walkSpeed=1.5;walk.walkKmh=true;project.modifiers.append(walk);project.selectedModifier=walk.id;project.time=project.in;
         QCOMPARE(project.walkSpeed(),1.5);QCOMPARE(project.walkDistance(.08+2),3.);
@@ -1269,7 +1269,7 @@ private slots:
         QVERIFY(std::any_of(mint.notes.begin(),mint.notes.end(),[](const QString &n) {return n.contains("Walk");}));
     }
     void isolationMatchesNativeSampledAndWorkerPreview() {
-        QTemporaryDir dir;const auto source=dir.filePath("cloud.pgs");vgs::Frame cloud;cloud.count=26;cloud.active.assign(26,1);cloud.opacity.assign(26,1);
+        QTemporaryDir dir;const auto source=dir.filePath("cloud.vgs");vgs::Frame cloud;cloud.count=26;cloud.active.assign(26,1);cloud.opacity.assign(26,1);
         for (int i=0;i<26;++i) {cloud.position.insert(cloud.position.end(),{i==25 ? 5.f : (i%5)*.01f,i==25 ? 5.f : 1.f,i==25 ? 5.f : (i/5)*.01f});cloud.rotation.insert(cloud.rotation.end(),{0,0,0,1});cloud.scale.insert(cloud.scale.end(),{.01f,.02f,.03f});cloud.colorDc.insert(cloud.colorDc.end(),{.8f,.4f,.2f});}
         vgs::Header h;h.shDegree=0;h.frameCount=h.durationTicks=2;h.chunks.resize(2);for (int i=0;i<2;++i) {h.chunks[i].startTick=i;h.chunks[i].intervals=1;}vgs::EncodeOptions options;options.signer=vgs::authoringSigner();options.shDegree=0;QFile file(source);QVERIFY(file.open(QIODevice::WriteOnly));
         vgs::encodeSequence(h,[&](size_t frame) {auto sample=cloud;if (frame) {sample.position[75]=.025f;sample.position[76]=1;sample.position[77]=.025f;}return packExportFrame(sample,0);},[&](uint64_t at,const uint8_t *data,size_t n) {if (!file.seek(at) || file.write(reinterpret_cast<const char *>(data),n)!=qint64(n)) throw std::runtime_error("Fixture write failed.");},options);file.close();
@@ -1279,7 +1279,7 @@ private slots:
         project.modifiers[0].enabled=false;worker.decode(0,1,true,project);const auto disabled=qvariant_cast<FramePtr>(decoded[1][0]);QCOMPARE(std::count_if(disabled->points.begin(),disabled->points.end(),[](const auto &point) {return point.modifierVisibility>.5;}),26);
     }
     void mintExportPreservesEditedAttributesAndEmptyFrames() {
-        QTemporaryDir dir;const auto source=dir.filePath("source.pgs");sourceFile(source);
+        QTemporaryDir dir;const auto source=dir.filePath("source.vgs");sourceFile(source);
         Project project;project.asset=source;project.out=.08;project.crop().enabled=true;project.transform.position={.2f,0,0};project.captureSettings.shDegree=1;QString error;
         for (bool sampled:{false,true}) {
             project.transform.scale=sampled ? QVector3D(1,.8f,1) : QVector3D(1,1,1);
@@ -1475,7 +1475,7 @@ private slots:
         QVERIFY(counts[2]<counts[1] && counts[3]<counts[4] && counts[0]==counts[1]);
     }
     void rangedModifiersAreSampledAndTheirSoundFades() {
-        QTemporaryDir dir;const auto source=dir.filePath("source.pgs");sourceFile(source,5);
+        QTemporaryDir dir;const auto source=dir.filePath("source.vgs");sourceFile(source,5);
         Project project;project.asset=source;project.in=0;project.out=4./25;project.time=0;project.modifiers.clear();
         Modifier colour;colour.id=Project::newId();colour.name="Grade";colour.type=ModifierType::Colour;colour.colourExposure=1;colour.start=2;colour.fadeIn=2;
         project.modifiers={colour};project.selectedModifier=colour.id;
@@ -1773,7 +1773,7 @@ private slots:
         Project settingsOnly;settingsOnly.modifiers.clear();settingsOnly.captureSettings.despill=true;QCOMPARE(bakeExportFrame(f,settingsOnly,3).colorDc,bakeExportFrame(f,Project{},3).colorDc);
     }
     void despillAndSkinCachePreservesRgbAndSh() {
-        QTemporaryDir dir;const auto source=dir.filePath("colours.pgs");sourceFile(source,5);
+        QTemporaryDir dir;const auto source=dir.filePath("colours.vgs");sourceFile(source,5);
         for (bool skin:{false,true}) {
             const auto healthy=[] {using namespace previewmemory;return Snapshot{32*GiB,16*GiB,64*GiB,32*GiB,true,false};};
             CaptureWorker worker(nullptr,healthy);FramePtr shown;
@@ -1802,7 +1802,7 @@ private slots:
     void colourCacheEvictsByUseAndShrinksWhenWindowsIsUnderPressure() {
         using namespace previewmemory;
         Snapshot memory{32*GiB,16*GiB,64*GiB,32*GiB,true,false};
-        QTemporaryDir dir;const auto source=dir.filePath("memory.pgs");sourceFile(source,5);
+        QTemporaryDir dir;const auto source=dir.filePath("memory.vgs");sourceFile(source,5);
         CaptureWorker worker(nullptr,[&] {return memory;});FramePtr shown;
         connect(&worker,&CaptureWorker::decoded,[&](FramePtr f,quint64) {shown=std::move(f);});worker.open(source,1,true);
         Project project;project.modifiers.clear();project.previewPlaying=true;
@@ -1830,7 +1830,7 @@ private slots:
     void despillAlwaysShowsInThePreview() {
         // Always: the preview's frame carries the export's despilled colour. Only on export: it
         // carries the source's.
-        QTemporaryDir dir;const auto source=dir.filePath("source.pgs");sourceFile(source,3);
+        QTemporaryDir dir;const auto source=dir.filePath("source.vgs");sourceFile(source,3);
         CaptureWorker worker;FramePtr shown;connect(&worker,&CaptureWorker::decoded,this,[&](FramePtr f,quint64) {shown=f;});
         connect(&worker,&CaptureWorker::opened,this,[&](CaptureInfo,FramePtr,quint64) {});
         worker.open(source,1,true);
@@ -1845,7 +1845,7 @@ private slots:
     void colourModifierExportsTheColourItShows() {
         // Half the exposure halves every colour, base and view-dependent, in the native and the
         // sampled export alike.
-        QTemporaryDir dir;const auto source=dir.filePath("source.pgs");sourceFile(source,3);
+        QTemporaryDir dir;const auto source=dir.filePath("source.vgs");sourceFile(source,3);
         Project project;project.asset=source;project.in=0;project.out=2./25;project.modifiers.clear();
         const auto plainPath=dir.filePath("plain.vgs");exportCaptureFile(project,plainPath);
         Modifier colour;colour.id=Project::newId();colour.name="Colour";colour.type=ModifierType::Colour;colour.colourExposure=-1;project.modifiers={colour};
@@ -1874,12 +1874,12 @@ private slots:
          for (size_t i=0;i<c.count;++i) if (c.active[i]) QVERIFY2(std::abs(c.opacity[i]-std::min(1.f,a0.opacity[i]*1.5f))<.01f,qPrintable(QString("%1 vs %2").arg(c.opacity[i]).arg(a0.opacity[i])));}
     }
     void compatibleSignedExportTrimMetadataCropAndEmptyFrame() {
-        QTemporaryDir dir;QString source=dir.filePath("source.pgs");sourceFile(source);
+        QTemporaryDir dir;QString source=dir.filePath("source.vgs");sourceFile(source);
         Project p;p.asset=source;p.in=1./25;p.out=2./25;p.crop().enabled=true;p.crop().radius=1;p.crop().height=2;
         p.transform.position={.25f,0,0};p.transform.rotation={0,25,0};p.transform.scale={2,1,.5f};
-        p.captureSettings.title="Edited metadata";p.captureSettings.extraJson="[1,2,3]";p.captureSettings.plain=false; // the extension decides, not this
-        auto destination=dir.filePath("edited.pgs");auto result=exportCaptureFile(p,destination);QCOMPARE(result.frames,2);QCOMPARE(result.kept,1ull);QCOMPARE(result.removed,1ull);
-        auto decoded=vgsdec::Capture::openFile(destination.toStdString());QCOMPARE(decoded.frameCount(),2ull);QCOMPARE(decoded.frameRate(),25.);QCOMPARE(decoded.metadata().title,std::string("Edited metadata"));QVERIFY(decoded.hasMetadataJson2());
+        p.captureSettings.title="Edited metadata";p.captureSettings.extraJson="[1,2,3]";p.captureSettings.uncompressed=true;
+        auto destination=dir.filePath("edited.vgs");auto result=exportCaptureFile(p,destination);QCOMPARE(result.frames,2);QCOMPARE(result.kept,1ull);QCOMPARE(result.removed,1ull);
+        auto decoded=vgsdec::Capture::openFile(destination.toStdString());QCOMPARE(decoded.frameCount(),2ull);QVERIFY(decoded.isUncompressed());QCOMPARE(decoded.frameRate(),25.);QCOMPARE(decoded.metadata().title,std::string("Edited metadata"));QVERIFY(decoded.hasMetadataJson2());
         QVERIFY(decoded.metadataJson2().find("[1,2,3]")!=std::string::npos);QCOMPARE(decoded.playbackMode(),vgsdec::PlaybackMode::PingPong);
         QCOMPARE(decoded.setTime(0,true).activeCount,0ull);const auto &frame=decoded.setTime(.04,true);QCOMPARE(frame.activeCount,1ull);
         QVERIFY(std::abs(frame.positions[0]-.25f)<2e-5f);QVERIFY(std::abs(frame.positions[1]-1)<2e-5f);
@@ -1889,8 +1889,9 @@ private slots:
         for (int k=0;k<45;++k) QVERIFY(std::abs(frame.sphericalHarmonics[k]-expected.shRest[k])<.0001f);
         QFile file(destination);QVERIFY(file.open(QIODevice::ReadOnly));auto bytes=file.readAll();auto header=vgs::readHeader(reinterpret_cast<const uint8_t *>(bytes.constData()),size_t(bytes.size()));
         QCOMPARE(header.encoding,0u);for (const auto &policy : header.policies) QCOMPARE(policy.codec,uint32_t(vgs::Raw));file.close();
-        p.captureSettings.plain=true;p.captureSettings.shDegree=1;auto compressed=dir.filePath("edited.vgs");exportCaptureFile(p,compressed);
-        auto compressedCapture=vgsdec::Capture::openFile(compressed.toStdString());QCOMPARE(compressedCapture.shDegree(),1u);QCOMPARE(compressedCapture.setTime(.04,true).shCoefficients,3);
+        // The same extension, compressed: chosen by the settings, read back from the header.
+        p.captureSettings.uncompressed=false;p.captureSettings.shDegree=1;auto compressed=dir.filePath("edited_compressed.vgs");exportCaptureFile(p,compressed);
+        auto compressedCapture=vgsdec::Capture::openFile(compressed.toStdString());QVERIFY(!compressedCapture.isUncompressed());QCOMPARE(compressedCapture.shDegree(),1u);QCOMPARE(compressedCapture.setTime(.04,true).shCoefficients,3);
         QVERIFY(QFileInfo(compressed).size()<QFileInfo(destination).size());
     }
     void realMintExportWithCrop() {
@@ -1920,7 +1921,7 @@ private slots:
         }
     }
     void cancellationAndEmptyCropLeaveDestinationUntouched() {
-        QTemporaryDir dir;QString source=dir.filePath("source.pgs");sourceFile(source);Project p;p.asset=source;p.out=.08;
+        QTemporaryDir dir;QString source=dir.filePath("source.vgs");sourceFile(source);Project p;p.asset=source;p.out=.08;
         QString output=dir.filePath("output.vgs");QFile file(output);QVERIFY(file.open(QIODevice::WriteOnly));file.write("existing");file.close();
         QVERIFY_EXCEPTION_THROWN(exportCaptureFile(p,output,[](int value,const QString &) {return value<95;}),std::runtime_error);
         QVERIFY(file.open(QIODevice::ReadOnly));QCOMPARE(file.readAll(),QByteArray("existing"));file.close();

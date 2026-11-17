@@ -670,7 +670,7 @@ void MainWindow::buildUi() {
     connect(cacheAction_,&QAction::changed,cacheInfo,[this,cacheInfo] {cacheInfo->setEnabled(cacheAction_->isEnabled());});
     auto *exportMenu = menuBar()->addMenu(tr("Export")); exportMenu->setToolTipsVisible(true);
     exportAction_ = exportMenu->addAction(tr("Export capture\u2026"), QKeySequence("Ctrl+E"), this, &MainWindow::exportCapture);
-    exportAction_->setToolTip(tr("Export the selected Start/End range to VGS, PGS or MINT, baking capture transforms and active modifiers (Ctrl+E). MINT omits capture metadata."));
+    exportAction_->setToolTip(tr("Export the selected Start/End range to VGS (compressed or not) or MINT, baking capture transforms and active modifiers (Ctrl+E). MINT omits capture metadata."));
     plyAction_ = exportMenu->addAction(tr("Export current frame as PLY\u2026"), QKeySequence("Ctrl+Alt+E"), this, &MainWindow::exportFrame);
     plyAction_->setToolTip(tr("Write the frame on screen as a 3D Gaussian Splatting .ply, edited as Export capture would write it: transform, modifiers, color processing and SH degree (Ctrl+Alt+E)."));
     estimateAction_ = exportMenu->addAction(tr("Estimate export size\u2026"), QKeySequence("Ctrl+Alt+S"), this, &MainWindow::estimateExport);
@@ -1028,10 +1028,10 @@ void MainWindow::buildUi() {
     audioProperties_->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Maximum);
     audioSourceType_=new QComboBox;audioSourceType_->setObjectName("audioSourceType");
     audioSourceType_->addItem(tr("Included in capture"));audioSourceType_->addItem(tr("External file"));
-    audioSourceType_->setToolTip(tr("Use the audio embedded in the MINT or VGS/PGS capture, or choose a separate sound file."));audioForm->addRow(tr("Source"),audioSourceType_);
+    audioSourceType_->setToolTip(tr("Use the audio embedded in the MINT or VGS capture, or choose a separate sound file."));audioForm->addRow(tr("Source"),audioSourceType_);
     audioSource_=new AudioPathLabel;audioSource_->setObjectName("audioSource");audioForm->addRow(tr("Track"),audioSource_);
     auto *audioButtons=new QWidget;auto *audioRow=new QHBoxLayout(audioButtons);audioRow->setContentsMargins(0,0,0,0);
-    auto *audioFile=new QPushButton(tr("Choose file\u2026"));audioFile->setObjectName("audioChooseFile");audioFile->setToolTip(tr("Play a sound file with the capture: MP3, AAC (.m4a), Opus or WAV.\nExports mix it with the other Audio modifiers into one track, cut to the exported range: AAC for VGS/PGS, MP3 for MINT."));
+    auto *audioFile=new QPushButton(tr("Choose file\u2026"));audioFile->setObjectName("audioChooseFile");audioFile->setToolTip(tr("Play a sound file with the capture: MP3, AAC (.m4a), Opus or WAV.\nExports mix it with the other Audio modifiers into one track, cut to the exported range: AAC for VGS, MP3 for MINT."));
     audioRow->addWidget(audioFile);audioForm->addRow(audioButtons);
     audioOffset_=new QDoubleSpinBox;audioOffset_->setObjectName("audioOffset");audioOffset_->setRange(-3600,3600);audioOffset_->setDecimals(3);audioOffset_->setSingleStep(0.04);audioOffset_->setSuffix(" s");
     audioOffset_->setToolTip(tr("When the track starts on the capture's timeline: positive delays it, negative starts it earlier.\nUse it to line the sound up with the picture."));
@@ -1042,7 +1042,7 @@ void MainWindow::buildUi() {
     audioLoop_=new QCheckBox(tr("Loop"));audioLoop_->setObjectName("audioLoop");audioLoop_->setToolTip(tr("Repeat the track from its start whenever it ends, for as long as the capture plays."));
     audioForm->addRow(audioLoop_);
     auto *audioNote=new QLabel(tr("Plays with the timeline, at its speed; every enabled Audio modifier plays, mixed. Disable one to mute it. "
-                                  "Exports mix them into one track cut to the exported range: AAC for VGS/PGS, MP3 for MINT."));
+                                  "Exports mix them into one track cut to the exported range: AAC for VGS, MP3 for MINT."));
     audioNote->setWordWrap(true);audioForm->addRow(audioNote);side->addWidget(audioProperties_);
     SpinScrubber::attachFormLabel(audioOffset_,0.005);SpinScrubber::attachFormLabel(audioVolume_,0.5);
     auto chooseAudioFile=[this] {
@@ -1145,7 +1145,7 @@ void MainWindow::buildUi() {
     walkUnits_->setToolTip(tr("Show the speed in km/h instead of m/s. It is always stored in m/s."));
     auto *walkRow=new QWidget;auto *walkRowLayout=new QHBoxLayout(walkRow);walkRowLayout->setContentsMargins(0,0,0,0);walkRowLayout->setSpacing(4);
     walkRowLayout->addWidget(walkSpeed_,1);walkRowLayout->addWidget(walkUnits_);walkForm->addRow(tr("Speed"),walkRow);
-    auto *walkNote=new QLabel(tr("Preview: the capture stays and the floor slides back under it, with a finer grid. At the right speed a planted foot stays on the grid. Export does not move the capture: VGS/PGS mark it as walking at this speed along +Z in the header, for players to carry it. Rotate the capture to choose the direction."));walkNote->setWordWrap(true);walkForm->addRow(walkNote);side->addWidget(walkProperties_);
+    auto *walkNote=new QLabel(tr("Preview: the capture stays and the floor slides back under it, with a finer grid. At the right speed a planted foot stays on the grid. Export does not move the capture: VGS mark it as walking at this speed along +Z in the header, for players to carry it. Rotate the capture to choose the direction."));walkNote->setWordWrap(true);walkForm->addRow(walkNote);side->addWidget(walkProperties_);
     // Loop morph: frames after End that carry the capture back to Start, guided by markers
     // placed by clicking the same points of the subject on both frames.
     morphProperties_=new QGroupBox(tr("Loop morph"));morphProperties_->setObjectName("loopMorphProperties");auto *morphForm=new QFormLayout(morphProperties_);
@@ -2459,7 +2459,7 @@ void MainWindow::receiveFrame(FramePtr frame) {
             QMetaObject::invokeMethod(cropShapeCombo_,"activated",Qt::DirectConnection,Q_ARG(int,cropShapeCombo_->currentIndex()));
             if (project_.crop().shape!=CropShape::Box || !cropWidth_->isVisible() || cropRadius_->isVisible()) { qApp->exit(2); return; }
             if (!viewport_->grabFramebuffer().save(smokeOutput_+".box-edit.png")) { qApp->exit(2); return; }
-            CaptureSettings options = project_.captureSettings; options.title = "Editor metadata smoke"; options.despill = false; options.plain = false; options.tags = {"test","crop"};
+            CaptureSettings options = project_.captureSettings; options.title = "Editor metadata smoke"; options.despill = false; options.uncompressed = false; options.tags = {"test","crop"};
             CaptureSettingsDialog metadataDialog(project_,presetStore_,this); metadataDialog.setSettings(options);
             if (metadataDialog.settings().json()!=options.json() || !metadataDialog.grab().save(smokeOutput_+".metadata.ui.png")) { qApp->exit(2); return; }
             project_.captureSettings = options;
@@ -2506,25 +2506,34 @@ static void waitForCanceledJob(QWidget *parent,QThread *job) {
     if (!job->isFinished()) stopping.exec();
     job->wait();
 }
+// Where Export capture and Export task write, and how: a .vgs compressed or not (one
+// extension: the header tells readers which), a MINT, or a numbered PLY sequence. The dialog
+// offers the last format used. Empty when cancelled or refused.
+QString MainWindow::chooseExportDestination(const QString &title,bool *uncompressed) {
+    const QString compressedFilter=tr("VGS capture (*.vgs)"),uncompressedFilter=tr("VGS capture, uncompressed: quicker to read, larger (*.vgs)");
+    const QString mintFilter=tr("Gracia MINT capture (*.mint)"),plyFilter=tr("3DGS frame sequence (*.ply)");
+    const QString last=QFileInfo(settings_.value("Export/LastFile").toString()).suffix().toLower();
+    const QString extension=last=="mint" || last=="ply" ? last : "vgs";
+    const QString suggested=QDir(settings_.value("Export/Directory",QFileInfo(project_.asset).absolutePath()).toString()).filePath(QFileInfo(project_.asset).completeBaseName()+"_edited."+extension);
+    QString selectedFilter=extension=="mint" ? mintFilter : extension=="ply" ? plyFilter : settings_.value("Export/Uncompressed",false).toBool() ? uncompressedFilter : compressedFilter;
+    QString destination=QFileDialog::getSaveFileName(this,title,suggested,QStringList{compressedFilter,uncompressedFilter,mintFilter,plyFilter}.join(";;"),&selectedFilter);
+    if (destination.isEmpty()) return {};
+    if (QFileInfo(destination).suffix().isEmpty()) destination+=selectedFilter==mintFilter ? ".mint" : selectedFilter==plyFilter ? ".ply" : ".vgs";
+    const auto outputExtension=QFileInfo(destination).suffix().toLower();
+    if (outputExtension!="vgs" && outputExtension!="mint" && outputExtension!="ply") {showError(tr("Select a .vgs, .mint or .ply destination."));return {};}
+    *uncompressed=outputExtension=="vgs" && selectedFilter==uncompressedFilter;
+    if (outputExtension=="vgs") settings_.setValue("Export/Uncompressed",*uncompressed);
+    return destination;
+}
 void MainWindow::exportCapture() {
     if (!loaded_ || loading_) return;
     play(false);
-    // The format is the extension chosen here; the dialog offers the last one used.
-    const QString last=QFileInfo(settings_.value("Export/LastFile").toString()).suffix().toLower();
-    const QString extension=last=="pgs" || last=="mint" || last=="ply" ? last : "vgs";
-    const QString suggested=QDir(settings_.value("Export/Directory",QFileInfo(project_.asset).absolutePath()).toString()).filePath(QFileInfo(project_.asset).completeBaseName()+"_edited."+extension);
-    QString selectedFilter=extension=="pgs" ? tr("Plain Gaussian capture (*.pgs)") : extension=="mint" ? tr("Gracia MINT capture (*.mint)") : extension=="ply" ? tr("3DGS frame sequence (*.ply)") : tr("Compressed Gaussian capture (*.vgs)");
-    QString destination=QFileDialog::getSaveFileName(this,tr("Export capture"),suggested,
-        tr("Compressed Gaussian capture (*.vgs);;Plain Gaussian capture (*.pgs);;Gracia MINT capture (*.mint);;3DGS frame sequence (*.ply)"),&selectedFilter);
+    bool uncompressed=false;QString destination=chooseExportDestination(tr("Export capture"),&uncompressed);
     if (destination.isEmpty()) return;
-    if (QFileInfo(destination).suffix().isEmpty()) destination+=selectedFilter.contains("*.mint") ? ".mint" : selectedFilter.contains("*.pgs") ? ".pgs" : selectedFilter.contains("*.ply") ? ".ply" : ".vgs";
     const auto outputExtension=QFileInfo(destination).suffix().toLower();
-    if (outputExtension!="vgs" && outputExtension!="pgs" && outputExtension!="mint" && outputExtension!="ply") {
-        showError(tr("Select a .vgs, .pgs, .mint or .ply destination."));return;
-    }
     auto lease=ExportLease::tryAcquire();
     if (!lease) {showError(tr("An export is already running in the editor or task queue."));return;}
-    Project snapshot=project_;snapshot.captureSettings.plain=outputExtension=="pgs";
+    Project snapshot=project_;snapshot.captureSettings.uncompressed=uncompressed;
     const qint64 originalBytes=QFileInfo(snapshot.asset).size();const QByteArray thumbnail=outputExtension=="mint" || outputExtension=="ply" ? QByteArray() : thumbnailJpeg();
     QProgressDialog progress(tr("Preparing export"),tr("Cancel"),0,100,this);
     progress.setWindowTitle(tr("Export capture"));progress.setWindowModality(Qt::ApplicationModal);
@@ -2555,15 +2564,9 @@ void MainWindow::exportCapture() {
 void MainWindow::exportTask() {
     if (!loaded_ || loading_) return;
     play(false);
-    const QString last=QFileInfo(settings_.value("Export/LastFile").toString()).suffix().toLower();
-    const QString extension=last=="pgs" || last=="mint" || last=="ply" ? last : "vgs";
-    const QString suggested=QDir(settings_.value("Export/Directory",QFileInfo(project_.asset).absolutePath()).toString()).filePath(QFileInfo(project_.asset).completeBaseName()+"_edited."+extension);
-    QString selectedFilter=extension=="pgs" ? tr("Plain Gaussian capture (*.pgs)") : extension=="mint" ? tr("Gracia MINT capture (*.mint)") : extension=="ply" ? tr("3DGS frame sequence (*.ply)") : tr("Compressed Gaussian capture (*.vgs)");
-    QString destination=QFileDialog::getSaveFileName(this,tr("Export task: choose the output"),suggested,
-        tr("Compressed Gaussian capture (*.vgs);;Plain Gaussian capture (*.pgs);;Gracia MINT capture (*.mint);;3DGS frame sequence (*.ply)"),&selectedFilter);
+    bool uncompressed=false;const QString destination=chooseExportDestination(tr("Export task: choose the output"),&uncompressed);
     if (destination.isEmpty()) return;
-    if (QFileInfo(destination).suffix().isEmpty()) destination+=selectedFilter.contains("*.mint") ? ".mint" : selectedFilter.contains("*.pgs") ? ".pgs" : selectedFilter.contains("*.ply") ? ".ply" : ".vgs";
-    ExportTask task;task.output=QFileInfo(destination).absoluteFilePath();task.project=project_;
+    ExportTask task;task.output=QFileInfo(destination).absoluteFilePath();task.project=project_;task.project.captureSettings.uncompressed=uncompressed;
     task.path=exportTaskPath(destination);
     task.frames=exportFrameCount(project_,info_.fps);
     if (QFileInfo(destination).suffix().compare("mint",Qt::CaseInsensitive)!=0 && QFileInfo(destination).suffix().compare("ply",Qt::CaseInsensitive)!=0) task.thumbnail=thumbnailJpeg();

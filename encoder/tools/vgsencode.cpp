@@ -8,7 +8,7 @@
 // See ../LICENSE.md for the limited use grant and applicable terms.
 // Other uses require prior written authorisation, subject to mandatory law.
 
-// vgsencode - turns a MINT capture into a signed .vgs or .pgs.
+// vgsencode - turns a MINT capture into a signed .vgs.
 //
 //   vgsencode boxing.mint boxing.vgs --sh 2 --project "Summer shoot" --tag boxing
 //
@@ -26,9 +26,9 @@ namespace {
 
 int usage() {
   std::fprintf(stderr,
-               "usage: vgsencode <input.mint> <output.vgs|output.pgs> [options]\n"
+               "usage: vgsencode <input.mint> <output.vgs> [options]\n"
                "\n"
-               "  --plain                store pages without entropy coding (.pgs)\n"
+               "  --uncompressed         store pages without entropy coding (quicker to read)\n"
                "  --sh <0..3>            highest spherical harmonic degree to keep (default 3)\n"
                "  --sh-prune <rms>       lossy: drop SH bands per splat within this RMS (off; e.g. 0.06)\n"
                "  --page-rows <n>        target rows per page (1024..1048576, default 65536)\n"
@@ -105,11 +105,6 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  // A .pgs asked for by name is a .pgs, so the extension and the coding cannot disagree
-  // without someone having said so explicitly.
-  if (output.size() > 4 && output.compare(output.size() - 4, 4, ".pgs") == 0)
-    encoder.setCoding(vgsenc::Coding::Plain);
-
   encoder.setSoftwareName("vgsencode");
   bool quiet = false;
 
@@ -124,8 +119,8 @@ int main(int argc, char **argv) {
     };
     const char *v = nullptr;
 
-    if (flag == "--plain")
-      encoder.setCoding(vgsenc::Coding::Plain);
+    if (flag == "--uncompressed")
+      encoder.setCoding(vgsenc::Coding::Uncompressed);
     else if (flag == "--entropy-search")
       encoder.setEntropySearch(true);
     else if (flag == "--split-temporal-sh")

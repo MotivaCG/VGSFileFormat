@@ -80,7 +80,7 @@ VGS_ENCODER_API void vgs_encoder_set_input_memory(vgs_encoder *handle, const uin
 }
 
 VGS_ENCODER_API void vgs_encoder_set_coding(vgs_encoder *handle, int coding) {
-  self(handle)->encoder.setCoding(coding == VGS_CODING_PLAIN ? vgsenc::Coding::Plain
+  self(handle)->encoder.setCoding(coding == VGS_CODING_UNCOMPRESSED ? vgsenc::Coding::Uncompressed
                                                              : vgsenc::Coding::Compressed);
 }
 

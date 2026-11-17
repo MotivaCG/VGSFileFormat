@@ -1,4 +1,4 @@
-# VFGS version 5: the `.vgs` and `.pgs` container
+# VFGS version 5: the `.vgs` container
 
 A capture is a 4D Gaussian splat recording: a timeline of frames, each a few hundred
 thousand splats, laid out so a player fetches and decodes one chunk of time at a time
@@ -8,11 +8,13 @@ This document describes the bytes: what is in a capture and where. What to call 
 one is in the decoder's own README, and how the projects here are built is in the
 repository's.
 
-Two extensions share one container. `.vgs` codes its attribute pages with VGS's
-per-attribute FSE, Pcodec, rANS16 or Raw selection;
-`.pgs` stores them as they are. Nothing else differs, and a reader does not need to know
-which it has: the header declares the codec per attribute, so both are read by the same
-code. `.pgs` exists for cases where CPU time matters more than bytes.
+A `.vgs` is **compressed or uncompressed**. Compressed, its attribute pages are coded with
+VGS's per-attribute FSE, Pcodec, rANS16 or Raw selection; uncompressed, every page is stored
+as it is (Raw), for cases where CPU time matters more than bytes. Nothing else differs, and
+the extension is the same: the header declares the codec per attribute, so a reader learns
+which it has from there (`isUncompressed()` in the decoder) and reads both with the same
+code. Writers choose when saving. Files written as `.pgs` by earlier tools are uncompressed
+`.vgs` files under another name.
 
 A third extension is **`.sgs`, a static capture** (a scanned character or prop rather than a
 performance), written by the SGS Editor (`sgseditor/`). See *Static captures* below.
@@ -276,7 +278,7 @@ the layer table, then the extras table, then the chunk index, then the metadata.
 
 The version is exact. Version 5 retains the 256-byte header layout and numerical
 attribute semantics of version 4, and adds FSE/Pcodec policy codecs. Earlier VGS
-versions are rejected, including raw `.pgs` files. Re-exporting is required;
+versions are rejected, uncompressed files included. Re-exporting is required;
 rewriting the version field alone does not migrate payloads or signatures.
 The 64 reserved bytes remain zero.
 
@@ -407,9 +409,9 @@ Written by the SGS Editor (`sgseditor/`), from a 3D Gaussian Splatting PLY.
 
 An `.sgs` is this same container holding **one frame**: `frameCount` 1, one chunk of one
 interval, every splat alive for it. Nothing else differs, and a reader of `.vgs` reads it as
-it is; the extension only tells tools that it is a still (an asset to place, as a PLY is)
-rather than a clip, the way `.pgs` tells them how the pages are coded. Its pages may be
-entropy coded or plain; that is still declared per attribute. Being one frame, it carries no
+it is; the extension tells tools that it is a still (an asset to place, as a PLY is)
+rather than a clip, and so does the header (`frameCount` 1). Its pages may be compressed or
+uncompressed, declared per attribute as in any `.vgs`. Being one frame, it carries no
 temporal harmonics layer and no motion samples, and `playbackMode` is ignored.
 
 It may carry a **proxy mesh** (extra type 5, format 1: one glTF 2.0 binary, `.glb`): a
@@ -626,7 +628,7 @@ same take agree and two different takes never collide.
 
 vgsenc::Encoder encoder;
 encoder.setInputFile("boxing.mint");
-encoder.setCoding(vgsenc::Coding::Compressed);   // Plain writes a .pgs
+encoder.setCoding(vgsenc::Coding::Compressed);   // or Uncompressed: still a .vgs
 encoder.setSphericalHarmonicDegree(2);
 encoder.setAuthor("SMN|The4DSCanner");
 encoder.setPlaybackMode(vgsenc::PlaybackMode::PingPong);   // Loop unless set
@@ -649,7 +651,7 @@ From the command line:
 
 ```sh
 vgsencode capture.mint capture.vgs --sh 2 --author "SMN|The4DSCanner"
-vgsencode capture.mint capture.pgs --plain
+vgsencode capture.mint capture.vgs --uncompressed
 vgsencode capture.mint capture.vgs --playback pingpong   # once, loop (default) or pingpong
 vgsinfo capture.vgs
 vgsexport capture.vgs frames/        # the whole timeline as a .ply sequence

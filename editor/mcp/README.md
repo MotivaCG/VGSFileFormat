@@ -153,7 +153,7 @@ too), point/splat display, the ghost, grid, axes and front marker, standard/cust
 saved as PNG), inspection images (returned or saved), point sampling, modifiers, the Loop
 morph's markers (placed on images, read, removed), presets (listed, applied, saved), reference
 transforms, brush/lasso, undo/redo, save, and background jobs polled the same way: export to
-.vgs/.pgs/.mint or a .ply sequence, the frame shown as .ply, the export size estimate, and
+.vgs (compressed or not)/.mint or a .ply sequence, the frame shown as .ply, the export size estimate, and
 export tasks (added, listed, run).
 Tool discovery is the source of truth for each tool's description and typed input schema,
 including numeric ranges, stroke lengths, optional camera/transform fields and defaults.
@@ -161,7 +161,8 @@ Titles and operation hints describe which calls are idempotent or replace existi
 See [modifier meanings and cleanup examples](tools.md), also exposed as
 `vgs-editor://tools`, for the eleven modifier types and an example cleanup sequence.
 
-Version 1.3 splits `open_capture` into `import_capture` (.vgs, .pgs, .mint) and `open_project`
+Version 1.4 drops `.pgs` as an export: an uncompressed capture is a `.vgs` too, asked for
+with `uncompressed=true` on `start_export` and `add_export_task`. Version 1.3 splits `open_capture` into `import_capture` (.vgs, .pgs, .mint) and `open_project`
 (.vgsproj), as the editor's File menu does. Version 1.2 uses `erase_brush`, `erase_lasso` and `set_erase_editing` consistently for Erase
 operations (previously `paint_brush`, `select_lasso`, `set_eraser_editing`). Reload tool
 discovery after updating; update saved workflows using the previous names. Changing render

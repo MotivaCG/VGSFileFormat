@@ -137,7 +137,7 @@ int main(int argc, char **argv) {
     equals(capture.uuidText(), uuid, "the decoder derives the identifier the encoder did");
     check(capture.createdMillis() > 0, "the capture records when it was written");
     equals(capture.signature().keyId, uint32_t(1), "it is signed with the authoring key");
-    check(!capture.isPlain(), "a .vgs reports itself as compressed");
+    check(!capture.isUncompressed(), "a compressed .vgs reports itself as compressed");
     check(capture.playbackMode() == vgsdec::PlaybackMode::PingPong,
           "the playback mode survives");
     check(capture.motionType() == vgsdec::MotionType::Walking, "the motion type survives");

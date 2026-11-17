@@ -8,7 +8,7 @@ or ownership rights. Other uses require a separate written licence and the
 agreed payment conditions.
 The free VGS Decoder licence does not grant permission to use this editor.
 
-Qt 6 desktop editor for animated `.vgs`, `.pgs`, `.mint` and PLY sequences or single frames.
+Qt 6 desktop editor for animated `.vgs`, `.mint` and PLY sequences or single frames.
 The viewport draws **opaque points** with depth testing. Point size is fixed in
 pixels and adjustable; Gaussian opacity and individual scale do not affect the
 preview. Temporal activity determines which records are displayed. The scene
@@ -49,7 +49,7 @@ FPS and birth mapping, with relative source paths, so new neighboring files do n
 extend an existing project on reopening. Existing corrupt files are errors, not gaps.
 Frames are read progressively and identity indices/fitted export chunks are spooled to
 temporary disk files instead of retaining the entire take in RAM.
-Native VGS/PGS export uses the encoding-0 fitter from `vgsplyseq`: weighted position
+Native VGS export uses the encoding-0 fitter from `vgsplyseq`: weighted position
 atoms, a base colour plus residual curves, residual rotations, and median higher SH
 per identity record. Preview and PLY snapshots retain each frame's original SH.
 Each fitted chunk is decoded at every source frame and compared with its PLY rows; the
@@ -294,7 +294,7 @@ disabled, labels included, with None. Despill lives only here now: Metadata and 
 longer has it, and a project, preset or task that despilled there reads with a Color modifier
 named Despill, only on export, with its settings.
 
-**Audio** plays a sound track with the timeline. Importing a MINT or VGS/PGS with embedded
+**Audio** plays a sound track with the timeline. Importing a MINT or VGS with embedded
 audio automatically adds a **Capture audio** layer. Its **Source** dropdown selects
 **Included in capture** or **External file** (MP3, AAC .m4a, Opus or WAV). Opening a saved
 project preserves its Audio layers, including disabled or removed ones.
@@ -308,7 +308,7 @@ and effects can each have their own level. The editor plays them at the timeline
 keeps them in step through seeks and loops, and a track is silent before it starts and, unless
 looped, after it ends; disabling a modifier mutes it.
 
-Exports to VGS/PGS make the soundtrack with ffmpeg (`tools/ffmpeg.exe` beside the program, or
+Exports to VGS make the soundtrack with ffmpeg (`tools/ffmpeg.exe` beside the program, or
 `VGS_FFMPEG`): every enabled Audio modifier's track - or, with no Audio layers, the source's own - placed
 where it plays, at its volume, mixed and cut to exactly the exported range as AAC (.m4a,
 160 kb/s, which every browser and iOS play), so nothing outside the range is stored and the
@@ -317,14 +317,14 @@ delivered, or a .vgs source's own track whole, with `startTick` saying where the
 on it, and a note says so. MINT exports embed a mixed MP3 track (320 kb/s), cut and aligned
 with the same audio settings. Without ffmpeg they can only retain an unchanged MP3 starting
 with the capture; conversion, mixing or an offset requires ffmpeg. Embedded MINT audio is
-also available to the editor's Audio modifiers and is retained when converting to VGS/PGS.
+also available to the editor's Audio modifiers and is retained when converting to VGS.
 MINT export also writes an MP3 with the same basename beside the capture: GraciaStudio's
 desktop interface loads that companion file when opening the MINT.
 Disabling all Audio layers also mutes the exported capture.
 The build copies ffmpeg beside the editor
 from the CMake cache path `VGS_FFMPEG`; it is not part of the repository.
 
-Exports to VGS/PGS take the viewport, as it is when the export starts (or when an export task
+Exports to VGS take the viewport, as it is when the export starts (or when an export task
 is made), as the capture's thumbnail: the centre square, 256 px, JPEG, without the grid, gizmo,
 crop wires, ghost or help text. They also write the editor's view (target, camera position and the
 45 degree vertical field of view, in the exported coordinates) as `view` in the second
@@ -341,9 +341,9 @@ Purge Isolated, Eraser and Prune leave visible on each frame is kept in memory a
 plays - a bit per splat, stored as runs, at most 256 MB, the oldest frames going first - so
 the next time round those frames are not worked out again. Any change to the modifiers,
 the transform or the processing settings empties it, and only playing fills it again;
-it is never written to disk. VGS/PGS/MINT export uses
+it is never written to disk. VGS/MINT export uses
 the same rule, retaining temporal blocks when the capture transform is constant.
-An animated transform (moving, rotating, uniform scale) exports to VGS/PGS as the
+An animated transform (moving, rotating, uniform scale) exports to VGS as the
 native temporal blocks plus the capture's motion stored as samples, so the file is
 the size of a static export. Readers apply the motion; readers built before it refuse
 the file rather than play it in place. Non-uniform animated scale or shear is refused
@@ -354,7 +354,7 @@ its motion when edited again. See docs/ANIMATED_EXPORT.md.
 the floor slides back under it at the set speed (m/s), with a quarter-metre grid added
 and its edge faded out. At the right speed a planted foot stays on the grid, which is
 how to set it. The axes stay fixed; time is counted from the start of the export range. It is
-not baked: VGS/PGS exports keep the capture in place and write `motionType = walking`
+not baked: VGS exports keep the capture in place and write `motionType = walking`
 and `movingSpeed` to the header, for players to carry it along +Z (rotate the capture to
 choose the direction). Several active Walk modifiers add up. MINT has no such field and
 reports that the walk is not stored.
@@ -409,14 +409,14 @@ apply to its frames as to any other, except Eraser and Prune, whose picks belong
 chunks. Every other kind applies to its frames wherever it is; during them the transform holds
 as it is at End. The first of its frames shown fits it (under a second on a 400 000-splat
 capture), pausing playback and dimming the view with a message in its middle as it works; after that each frame takes tens of milliseconds. Every export writes its frames
-after the range: VGS/PGS and MINT as single-frame chunks (VGS/PGS with motion samples when the
+after the range: VGS and MINT as single-frame chunks (VGS with motion samples when the
 capture moves), a .ply sequence as further files numbered on from End.
 
 **Anti-aliased splats.** Gracia trains its captures with anti-aliasing, which leaves needle
 splats far thinner than a pixel; drawn at full opacity they show as solid coloured lines.
 The Gaussian view draws a `.mint` with the matching opacity compensation, and a `.vgs` when
 its header carries the anti-aliasing render hint. Exports write that hint for anything
-converted from a `.mint` and keep whatever a `.vgs`/`.pgs` source says.
+converted from a `.mint` and keep whatever a `.vgs` source says.
 
 Projects and editor presets preserve the flat stack, activation and selected row.
 Older projects/presets migrate their one crop to one crop modifier without changing
@@ -472,10 +472,10 @@ the saved crop preview. Export permanently excludes outside centres in each samp
 
 **Metadata & processing…** (Ctrl+M) is a main Tools button, independent of the
 export command. It follows the converter's metadata fields and adds tags, software
-information and extra JSON. Configure VGS/PGS, SH degree, playback and despill
+information and extra JSON. Configure VGS, SH degree, playback and despill
 (strength, green gain, view chroma and skin recovery). **SH reduction** (Off, Light,
 Medium, Strong: 0.04, 0.06, 0.08) drops spherical harmonic bands per splat where they
-barely show, at VGS/PGS export only; it is lossy and saves bytes, not decoding time
+barely show, at VGS export only; it is lossy and saves bytes, not decoding time
 (FORMAT.md, Spherical harmonic degree). Apply remembers the last
 configuration in QSettings and stores it in the current project. The panel uses
 its own metadata/processing preset scope, sharing the same folder as the editor.
@@ -529,8 +529,9 @@ them), which the PLY importer of the Blender build here reads. MINT cannot hold 
 exporting one says so.
 
 These options are applied during **File > Export capture…** (Ctrl+E); preview
-colours continue to use source data. Export writes signed encoding-0 VGS (compressed)
-or PGS (plain), with baked positions, full affine covariance, SH colour and the world
+colours continue to use source data. Export writes a signed encoding-0 VGS, compressed or
+uncompressed as chosen in the save dialog (one extension: readers learn which from the
+header; uncompressed is quicker to read and larger), with baked positions, full affine covariance, SH colour and the world
 crop, for the inclusive Start/End range. It runs off the UI thread with progress/cancel,
 checks every output frame with the decoder and atomically publishes the verified file.
 
@@ -573,9 +574,9 @@ rate and that of the heaviest chunk sampled, and whether the capture streams wit
 
 ## Export tasks
 
-**Export > Export task…** asks for an output exactly as Export capture does (`.vgs`, `.pgs`,
-`.mint` or a `.ply` sequence), but writes a `.vgstask` beside it instead of exporting (`result.vgs` gets
-`result.vgs.vgstask`, so the same project queued to `.vgs` and `.pgs` keeps both): a copy of the project as
+**Export > Export task…** asks for an output exactly as Export capture does (`.vgs` compressed or
+not, `.mint` or a `.ply` sequence), but writes a `.vgstask` beside it instead of exporting (`result.vgs` gets
+`result.vgs.vgstask`, so the same project queued to `.vgs` and `.mint` keeps both): a copy of the project as
 it is at that moment (capture, transform, modifiers, export settings and metadata), the
 output, and how many frames it exports. Later edits to the project do not change the task.
 Paths are stored absolute and relative to the task, so a folder of tasks moved together with
@@ -803,7 +804,7 @@ editing and GPU crop visibility. Source records are preserved.
 To exercise decoding with a real capture:
 
 ```powershell
-$env:EDITOR_TEST_CAPTURE = 'D:\path\capture.mint' # or .vgs / .pgs
+$env:EDITOR_TEST_CAPTURE = 'D:\path\capture.mint' # or .vgs
 ctest --test-dir build/cmake-msvc -C Release --output-on-failure
 ```
 
@@ -818,7 +819,8 @@ Batch export uses the same writer without opening the editor window:
 VGSEditor.exe capture.vgsproj --export-capture capture-edited.vgs
 ```
 
-The output extension selects VGS/PGS/MINT; the project supplies crop, transforms,
+The output extension selects VGS or MINT, and `--uncompressed` a VGS without entropy coding;
+the project supplies crop, transforms,
 metadata and processing. Files are verified and atomically saved as in the UI.
 
 Export also supports **MINT format 6** through the native save dialog or a `.mint`

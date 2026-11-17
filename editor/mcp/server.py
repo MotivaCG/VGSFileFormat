@@ -20,7 +20,7 @@ from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
 HERE = Path(__file__).resolve().parent
 WORKFLOW = (HERE / "workflows.md").read_text(encoding="utf-8")
 TOOLS_REFERENCE = (HERE / "tools.md").read_text(encoding="utf-8")
-mcp = MCPServer("VGS Editor", version="1.3.0", instructions=WORKFLOW)
+mcp = MCPServer("VGS Editor", version="1.4.0", instructions=WORKFLOW)
 READ = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
 EDIT = ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=False)
 SET = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False)
@@ -491,9 +491,9 @@ async def estimate_export() -> dict[str, Any]:
 
 
 @mcp.tool(title="Add export task", annotations=WRITE)
-async def add_export_task(path: str, overwrite: bool = False) -> dict[str, Any]:
-    """Save the current project and range as an export task to run later (.vgstask beside the .vgs/.pgs/.mint/.ply output), as File > Export task does. Returns task_path."""
-    return await _edit("add_export_task", {"path": path, "overwrite": overwrite})
+async def add_export_task(path: str, overwrite: bool = False, uncompressed: bool = False) -> dict[str, Any]:
+    """Save the current project and range as an export task to run later (.vgstask beside the .vgs/.mint/.ply output), as File > Export task does. uncompressed=true stores a .vgs's pages without entropy coding (quicker to read, larger). Returns task_path."""
+    return await _edit("add_export_task", {"path": path, "overwrite": overwrite, "uncompressed": uncompressed})
 
 
 @mcp.tool(title="List export tasks", annotations=READ)
@@ -655,14 +655,14 @@ async def save_project(path: str, overwrite: bool = False) -> dict[str, Any]:
 
 @mcp.tool(title="Set metadata and export options", annotations=EDIT)
 async def set_export_settings(patch: dict[str, Any]) -> dict[str, Any]:
-    """Undoably patch exact get_project.captureSettings fields, e.g. title/author/tags, shDegree, playbackMode or normalsMode ('FINE', the default: written, cameras all around the splats deciding the sides; or 'NONE'. 'NORMAL' is no longer offered and reads as 'FINE'). For PLY, plyFps (1..1000, default 30) retimes playback/range/export while preserving frame indices; plyRowOffset (default 0) shifts birth-event row IDs, reindexes records and clears Erase picks (Undo restores both). Unknown/invalid fields fail. Does not select an output path or launch export. Extension selects output format; plain is legacy."""
+    """Undoably patch exact get_project.captureSettings fields, e.g. title/author/tags, shDegree, playbackMode or normalsMode ('FINE', the default: written, cameras all around the splats deciding the sides; or 'NONE'. 'NORMAL' is no longer offered and reads as 'FINE'). For PLY, plyFps (1..1000, default 30) retimes playback/range/export while preserving frame indices; plyRowOffset (default 0) shifts birth-event row IDs, reindexes records and clears Erase picks (Undo restores both). Unknown/invalid fields fail. Does not select an output path or launch export. Extension selects output format; compression is chosen with start_export/add_export_task (uncompressed)."""
     return await _edit("export_settings", patch)
 
 
 @mcp.tool(title="Start capture export", annotations=WRITE)
-async def start_export(path: str, overwrite: bool = False) -> dict[str, Any]:
-    """Start background .vgs/.pgs/.mint export to a local path (or .ply: a numbered 3DGS frame sequence beside it), freezing current project/modifiers/range. One export across GUI, MCP and task queues. Source overwrite is forbidden; existing output needs overwrite=true. Returns job_id, NOT completion: poll status. Does not save the project. Inspect format notes."""
-    return await _edit("export", {"path": path, "overwrite": overwrite})
+async def start_export(path: str, overwrite: bool = False, uncompressed: bool = False) -> dict[str, Any]:
+    """Start background .vgs/.mint export to a local path (or .ply: a numbered 3DGS frame sequence beside it), freezing current project/modifiers/range. One export across GUI, MCP and task queues. Source overwrite is forbidden; existing output needs overwrite=true. uncompressed=true stores a .vgs's pages without entropy coding: quicker to read, larger; readers learn it from the header. Returns job_id, NOT completion: poll status. Does not save the project. Inspect format notes."""
+    return await _edit("export", {"path": path, "overwrite": overwrite, "uncompressed": uncompressed})
 
 
 @mcp.tool(title="Read export progress", annotations=READ)
