@@ -55,9 +55,13 @@ grant a general right to use, modify or distribute its contents.
                  with its own build, deploy and installer (sgseditor/README.md)
     tests/       the conformance and separation tests
     cmake/       package files for find_package
-    logo.png     the mark, full size, on white; docs/logo.png is a copy for documents
-    logo_trans.png  the same on a transparent background: the source of every icon
-    logo.svg     the same as vector art, transparent
+    logo.svg     the mark as vector art, transparent, with a small margin: the source of
+                 every icon and picture of it (rendered in a browser; other SVG renderers
+                 draw its blends wrong)
+    logo_red.svg, logo_green.svg  the same in one colour each: the SGS editor's (red) and
+                 the VGS editor's (green) icons
+    logo.png     the mark, 1024 pixels, on white; docs/logo.png is a copy for documents
+    logo_trans.png  the same on a transparent background
     logo.ico     the mark as a Windows icon, 16 to 256 pixels, compiled into the tools
     logo_text_trans.png  the mark with the name, transparent: light lettering above, for
                  dark backgrounds, dark below, for light ones
