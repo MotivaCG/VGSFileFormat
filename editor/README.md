@@ -503,7 +503,18 @@ to the next 0.13–0.2 % of the splats turn over with Fine, a little more with N
 It runs on what is written, at one instant per splat and chunk: the middle of the chunk for
 every splat alive then (96 to 99 %), and one more estimate for the rest, each where it is at the
 instant of its life nearest the middle (it replaced one estimate per instant, about nine a
-chunk: 4 times faster, 0.07 % of the splats on the other side). The estimate itself draws each
+chunk: 4 times faster, 0.07 % of the splats on the other side). Then every splat of the chunk
+takes the opacity- and distance-weighted mean of its neighbours' normals within 4 cm, those facing
+the other way left out, 20 times over (`harmonizeNormals`, version 3): the estimate alone left
+neighbours 15 degrees apart on average (31 at the 90th percentile), which a still capture never
+shows but a video lit in Unreal did, as a hard terminator across the cheek that moved every frame
+while the splats covering each pixel changed; after it, 5.7 / 9.9 degrees on arabs, a soft and
+steady terminator, the robe's folds kept. Each chunk is also tied to the one before: its splats
+near where that chunk's splats are at its last instant count those normals as fixed neighbours
+(anchors), carried with each splat's rotation, so the lighting does not jump where chunks meet
+(chunks are estimated apart, from different splats; on arabs the jump at a chunk change went from
+15 degrees, more than from one frame to the next inside a chunk, to 4-6). A chunk waits for the
+one before only for this last step; the export took no longer. The estimate itself draws each
 camera's footprints into one buffer, eight pixels at a time where the processor has AVX, the
 same normals bit for bit 1.9 (Normal) to 3.6 (Fine) times faster. The normal is stored in the
 splat's own frame, so it turns with it. The export's metadata records how they were made

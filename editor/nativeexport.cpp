@@ -600,7 +600,29 @@ void setFrameNormals(vgs::DecodedChunk &c,const vgs::Frame &frame) {
     vgs::DecodedPage page;page.descriptor.attribute=vgs::Normals;page.descriptor.group=1;page.bytes=std::move(codes);c.pages.push_back(std::move(page));
     normalizeSchemas(c);
 }
-void addNormals(vgs::DecodedChunk &c,const gaussiannormals::Visibility &visibility,const ExportProgress &progress) {
+// Neighbouring normals brought into agreement after the estimate (gaussiannormals::harmonizeNormals),
+// so that a lit capture does not flicker as the splats covering a pixel change from frame to frame.
+// Chosen on 2 s of arabs in Unreal, close on the face under a low sun: the estimate alone left a
+// hard terminator across the cheek that moved every frame (neighbours 14.6 degrees apart on
+// average, 31 at the 90th percentile); 2 cm x 2 to 8 passes or 3 cm x 16 softened it but kept an
+// edge; 4 cm x 20 (5.4 / 9.5 degrees) left a soft, steady terminator and the robe's folds; 5 cm x 30
+// looked the same. Each neighbour counts unless it faces the other way (the two sides of a thin
+// part stay apart). A few percent of the export's time.
+constexpr float kHarmonyRadius=0.04f; // metres
+constexpr int kHarmonyPasses=20;
+void publishNormals(NormalsChain &chain,size_t index,NormalsChain::Boundary boundary) {
+    {std::lock_guard<std::mutex> guard(chain.mutex);
+     // The first one stands: an encoder that prepares a chunk again makes the same.
+     chain.last.emplace(index,std::make_shared<const NormalsChain::Boundary>(std::move(boundary)));}
+    chain.published.notify_all();
+}
+// A normal at the instant it was taken (rotation `from`, xyzw) as it is at another (`to`): it
+// turns with its splat.
+static QVector3D carried(const float *from,const float *to,QVector3D normal) {
+    const QQuaternion a(from[3],from[0],from[1],from[2]),b(to[3],to[0],to[1],to[2]);
+    return b.rotatedVector(a.conjugated().rotatedVector(normal));
+}
+void addNormals(vgs::DecodedChunk &c,const gaussiannormals::Visibility &visibility,const ExportProgress &progress,NormalsChain *chain,size_t index) {
     // A source that carries normals already (a .vgs exported with them) has them computed again
     // on what is written now, in place of its own.
     c.pages.erase(std::remove_if(c.pages.begin(),c.pages.end(),[](const auto &p) {return p.descriptor.attribute==vgs::Normals;}),c.pages.end());
@@ -631,16 +653,26 @@ void addNormals(vgs::DecodedChunk &c,const gaussiannormals::Visibility &visibili
         const size_t b=lifetimes[i*2],e=std::min<size_t>(lifetimes[i*2+1],T);
         if (e>b) at[i]=int(std::min(std::max(middle,b),e-1));
     }
+    // Each record as it is at the instant it is taken at, with its estimated normal: all of them
+    // are brought into agreement together (harmonizeNormals) before they are encoded.
+    std::vector<float> takenPosition(records*3,0.f),takenRotation(records*4,0.f),takenOpacity(records,0.f),takenNormal(records*3,0.f);
+    auto take=[&](const float *positions,const float *rotations,const float *opacities,const std::vector<uint8_t> &which) {
+        for (size_t record=0;record<records;++record) {
+            if (!which[record] || done[record]) continue;
+            std::copy_n(positions+record*3,3,takenPosition.data()+record*3);std::copy_n(rotations+record*4,4,takenRotation.data()+record*4);
+            takenOpacity[record]=opacities[record];std::copy_n(world.data()+record*3,3,takenNormal.data()+record*3);done[record]=1;
+        }
+    };
     // Into each splat's own frame (the inverse of its rotation, q in xyzw) and its code.
-    auto encode=[&](const float *rotations,const std::vector<uint8_t> &take) {
+    auto encode=[&] {
         for (size_t group=1;group<c.groups.size();++group) {
             const auto &indices=get(c,vgs::ScaleIndices,uint32_t(group)).bytes;
             for (size_t row=0;row<c.groups[group].splats;++row) {
-                const size_t record=offsets[group]+row;if (!take[record] || done[record]) continue;
-                const float *q=rotations+record*4;const QQuaternion inverse=QQuaternion(q[3],q[0],q[1],q[2]).conjugated();
-                const QVector3D local=inverse.rotatedVector({world[record*3],world[record*3+1],world[record*3+2]});
+                const size_t record=offsets[group]+row;if (!done[record]) continue;
+                const float *q=takenRotation.data()+record*4;const QQuaternion inverse=QQuaternion(q[3],q[0],q[1],q[2]).conjugated();
+                const QVector3D local=inverse.rotatedVector({takenNormal[record*3],takenNormal[record*3+1],takenNormal[record*3+2]});
                 const float n[3]={local.x(),local.y(),local.z()};
-                vgs::encodeNormal(n,indices.data()+row*3,codes.data()+record*2);done[record]=1;
+                vgs::encodeNormal(n,indices.data()+row*3,codes.data()+record*2);
             }
         }
     };
@@ -661,7 +693,7 @@ void addNormals(vgs::DecodedChunk &c,const gaussiannormals::Visibility &visibili
         gaussiannormals::Splats splats;splats.count=records;splats.position=frame.position.data();splats.rotation=frame.rotation.data();
         splats.scale=frame.scale.data();splats.opacity=frame.opacity.data();splats.use=frame.active.data();
         estimate(splats,QStringLiteral("Computing normals at the middle of the chunk"));
-        encode(frame.rotation.data(),frame.active);
+        take(frame.position.data(),frame.rotation.data(),frame.opacity.data(),frame.active);
     }
     std::vector<uint8_t> rest(records,0);bool more=false;
     for (size_t i=0;i<records;++i) if (!done[i] && at[i]>=0) {rest[i]=1;more=true;}
@@ -681,7 +713,57 @@ void addNormals(vgs::DecodedChunk &c,const gaussiannormals::Visibility &visibili
         splats.scale=scale.data();splats.opacity=opacity.data();splats.use=use.data();
         estimate(splats,QStringLiteral("Computing normals of the splats born or gone by the middle"));
         for (size_t i=0;i<records;++i) rest[i]=rest[i] && use[i];
-        encode(rotation.data(),rest);
+        take(position.data(),rotation.data(),opacity.data(),rest);
+    }
+    // Anchors: where the chunk before left its splats at its last instant, with their normals,
+    // met by this chunk's splats at its first instant and carried to the instant each was taken at.
+    std::vector<float> anchorNormal,anchorWeight;
+    if (chain && index>0 && T>0) {
+        std::shared_ptr<const NormalsChain::Boundary> before;
+        {
+            std::unique_lock<std::mutex> lock(chain->mutex);
+            for (;;) {
+                if (auto found=chain->last.find(index-1);found!=chain->last.end()) {before=found->second;break;}
+                chain->published.wait_for(lock,std::chrono::milliseconds(100));
+                lock.unlock();report(progress,QStringLiteral("Waiting for the normals of the chunk before"));lock.lock();
+            }
+        }
+        if (!before->opacity.empty()) {
+            decode(0);
+            std::vector<uint8_t> meet(records,0);
+            for (size_t i=0;i<records;++i) meet[i]=done[i] && frame.active[i];
+            std::vector<float> met(records*3),weight(records);
+            gaussiannormals::anchorNormals(frame.position.data(),meet.data(),records,before->position.data(),before->normal.data(),before->opacity.data(),
+                                           before->opacity.size(),kHarmonyRadius,met.data(),weight.data());
+            anchorNormal.assign(records*3,0.f);anchorWeight=std::move(weight);
+            for (size_t i=0;i<records;++i) {
+                if (!(anchorWeight[i]>0)) continue;
+                const QVector3D n=carried(frame.rotation.data()+i*4,takenRotation.data()+i*4,{met[i*3],met[i*3+1],met[i*3+2]});
+                anchorNormal[i*3]=n.x();anchorNormal[i*3+1]=n.y();anchorNormal[i*3+2]=n.z();
+            }
+        }
+    }
+    {
+        report(progress,QStringLiteral("Bringing neighbouring normals into agreement"));
+        gaussiannormals::Splats splats;splats.count=records;splats.position=takenPosition.data();splats.rotation=takenRotation.data();
+        splats.opacity=takenOpacity.data();splats.use=done.data();
+        gaussiannormals::harmonizeNormals(splats,takenNormal.data(),kHarmonyRadius,kHarmonyPasses,
+                                          anchorNormal.empty() ? nullptr : anchorNormal.data(),anchorWeight.empty() ? nullptr : anchorWeight.data());
+    }
+    encode();
+    // What the next chunk meets: this one's splats at its last instant, with their normals there.
+    if (chain) {
+        NormalsChain::Boundary boundary;
+        if (T>0) {
+            decode(T-1);
+            for (size_t i=0;i<records;++i) {
+                if (!done[i] || !frame.active[i] || frame.opacity[i]<0.05f) continue;
+                const QVector3D n=carried(takenRotation.data()+i*4,frame.rotation.data()+i*4,{takenNormal[i*3],takenNormal[i*3+1],takenNormal[i*3+2]});
+                boundary.position.insert(boundary.position.end(),frame.position.begin()+ptrdiff_t(i*3),frame.position.begin()+ptrdiff_t(i*3+3));
+                boundary.normal.insert(boundary.normal.end(),{n.x(),n.y(),n.z()});boundary.opacity.push_back(frame.opacity[i]);
+            }
+        }
+        publishNormals(*chain,index,std::move(boundary));
     }
     // A splat never alive, or one the decoder still left out, keeps the shortest axis (code 128).
     for (uint32_t group=1;group<c.groups.size();++group) {

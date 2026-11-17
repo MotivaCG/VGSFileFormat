@@ -84,8 +84,9 @@ inline constexpr Visibility kFineVisibility{1024, 3, 0.0005f, true, true, {0.016
 inline constexpr int kSurroundingViews = 256;
 // The method's version, written with the normals it made (the VGS editor's export provenance)
 // so that a re-export can keep them rather than compute them again. Raise it whenever the
-// normals it gives change: 2 is cameras all around with footprints and probes (2026-11-16).
-inline constexpr int kNormalsVersion = 2;
+// normals it gives change: 2 is cameras all around with footprints and probes (2026-11-16); 3 adds
+// harmonizeNormals to the VGS export's normals (2026-11-17).
+inline constexpr int kNormalsVersion = 3;
 
 struct Splats {
     size_t count = 0;
@@ -123,6 +124,29 @@ Result computeNormals(const Splats &splats, const std::vector<View> &views, floa
 // `rig` is empty or its cameras see less than half of the opaque splats (not that rig's capture,
 // or not in its frame): there they would only guess the sides. The rig's cameras see as
 // kRigVisibility; those all around as `around`.
+/*
+ * Brings neighbouring normals into agreement: each becomes the mean of those around it within
+ * `radius` (metres), weighted by opacity and by a Gaussian of the distance (sigma radius / 2),
+ * leaving out those that face the other way, `passes` times. computeNormals'
+ * own smoothing keeps creases by hardly listening beyond 35 degrees; that leaves neighbouring
+ * splats 15 to 30 degrees apart, which a static capture never shows but a video does: as the
+ * splats that cover a pixel change from frame to frame, a lit surface flickers. VGS export only.
+ * Anchors, when given (3 normals and 1 weight per splat, as `normals`), count every pass as fixed
+ * neighbours of that weight, unless they face the other way: the VGS export ties a chunk to the
+ * one before it that way, so that the lighting does not jump where they meet.
+ */
+void harmonizeNormals(const Splats &splats, float *normals, float radius, int passes,
+                      const float *anchorNormals = nullptr, const float *anchorWeights = nullptr);
+
+/*
+ * For harmonizeNormals' anchors: for each query position (where `use` is non-zero, or all), the
+ * opacity- and distance-weighted mean of the anchor normals within `radius` (as harmonizeNormals
+ * weighs neighbours), and the sum of those weights; 0 where none is near.
+ */
+void anchorNormals(const float *queryPositions, const uint8_t *use, size_t count,
+                   const float *anchorPositions, const float *anchorNormals, const float *anchorOpacities,
+                   size_t anchors, float radius, float *outNormals, float *outWeights);
+
 Result estimateNormals(const Splats &splats, const std::vector<View> &rig, float *normals,
                        int surrounding = kSurroundingViews, const Visibility &around = kSurroundingVisibility);
 

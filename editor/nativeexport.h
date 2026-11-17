@@ -10,6 +10,10 @@
 
 #pragma once
 #include <algorithm>
+#include <condition_variable>
+#include <map>
+#include <memory>
+#include <mutex>
 #include "exportcapture.h"
 #include "gaussiannormals.h"
 
@@ -18,7 +22,21 @@ bool supportsNativeTransform(const Project &);
 // Writes every splat's outward normal into the chunk's optional normals attribute
 // (FORMAT.md, Normals), its side decided by cameras all around the splats that see as
 // `visibility`. Call it before motion samples are added.
-void addNormals(vgs::DecodedChunk &, const gaussiannormals::Visibility &visibility, const ExportProgress &);
+//
+// With a chain, chunk `index` is tied to the one before it: its splats near where that chunk's
+// splats are at its last instant start from their normals (anchors in harmonizeNormals), so the
+// lighting does not jump where they meet. It waits for that chunk (every export prepares chunks
+// in order), then leaves its own last instant for the next. A chunk whose normals are not
+// computed (kept from the source) must still be published, empty, with publishNormals.
+struct NormalsChain {
+    struct Boundary { std::vector<float> position, normal, opacity; };
+    std::mutex mutex;
+    std::condition_variable published;
+    std::map<size_t, std::shared_ptr<const Boundary>> last;
+};
+void addNormals(vgs::DecodedChunk &, const gaussiannormals::Visibility &visibility, const ExportProgress &,
+                NormalsChain *chain = nullptr, size_t index = 0);
+void publishNormals(NormalsChain &, size_t index, NormalsChain::Boundary boundary = {});
 // The visibility of the chosen normals (CaptureSettings::normals): Normal or Fine.
 const gaussiannormals::Visibility &normalsVisibility(const CaptureSettings &);
 // Writes the frame's own normals (Frame::normal, xyz per record) into the optional normals

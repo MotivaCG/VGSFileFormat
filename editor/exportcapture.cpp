@@ -1013,10 +1013,12 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
     // still hold: made the same way or finer, and the chunk keeps every splat as it was.
     if (s.normals!=CaptureSettings::NormalsNone && mintOutput) result.notes << QStringLiteral("MINT cannot hold normals: they are not written.");
     std::atomic<int> normalsKept{0},normalsComputed{0};
-    auto withNormals=[&](vgs::DecodedChunk chunk,bool geometryKept=false) {
+    // Each chunk's normals tied to those of the chunk before where they meet (addNormals).
+    NormalsChain normalsChain;
+    auto withNormals=[&](size_t index,vgs::DecodedChunk chunk,bool geometryKept=false) {
         if (!normals) return chunk;
-        if (geometryKept && keepSourceNormals && hasNormals(chunk)) {++normalsKept;return chunk;}
-        addNormals(chunk,normalsVisibility(s),innerProgress);++normalsComputed;
+        if (geometryKept && keepSourceNormals && hasNormals(chunk)) {++normalsKept;publishNormals(normalsChain,index);return chunk;}
+        addNormals(chunk,normalsVisibility(s),innerProgress,&normalsChain,index);++normalsComputed;
         return chunk;
     };
     // The Loop morph: fitted once here for the End and Start frames as the modifiers above it
@@ -1069,7 +1071,7 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
                 kept+=baked.count;packed.add(baked,identity);
             }
             if (!writing) {std::lock_guard<std::mutex> guard(stateMutex);result.kept+=kept;}
-            auto chunk=withNormals(packed.finish(degree,innerProgress));
+            auto chunk=withNormals(index,packed.finish(degree,innerProgress));
             if (moving) {const auto sample=similarityFrom(morphWorld*unbake,last);chunk.pages.push_back(motionPage(std::vector<vgs::Motion>(size_t(length)+1,sample)));}
             return chunk;
         }
@@ -1146,7 +1148,7 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
             auto edited=editNativeChunk(std::move(chunk),plan,project,writing ? nullptr : &chunkResult,innerProgress,classification ? &*classification : nullptr,moving ? &models : nullptr,
                                         int(sourceHeader.chunks[plan.sourceIndex].startTick)+plan.first,pruned,orderedVisibility,&geometryKept);
             if (!writing) {std::lock_guard<std::mutex> guard(stateMutex);chunkStatistics[index]=std::move(chunkResult);}
-            edited=withNormals(std::move(edited),geometryKept);
+            edited=withNormals(index,std::move(edited),geometryKept);
             if (moving) edited.pages.push_back(motionPage(samples));
             return edited;
         }
@@ -1173,7 +1175,7 @@ ExportResult exportCaptureFile(const Project &projectAsGiven,const QString &dest
             Project pose=project;if (animated) pose.transform=inputProject.transformAtFrame(first+int(index));
             pose.modifiers=inputProject.modifiersAtFrame(first+int(index));return Baker(pose,degree,cachedVisibility,rate).bake(frame,innerProgress,pruned);}();
         if (!writing) {result.kept+=baked.count;result.removed+=std::count(frame.active.begin(),frame.active.end(),uint8_t(1))-baked.count;}
-        return withNormals(packFrame(std::move(baked),degree));
+        return withNormals(index,packFrame(std::move(baked),degree));
     };
     auto sink=[&](uint64_t offset,const uint8_t *data,size_t count) {
         if (!temporary.seek(qint64(offset)) || temporary.write(reinterpret_cast<const char *>(data),qint64(count))!=qint64(count)) throw std::runtime_error(temporary.errorString().toStdString());

@@ -636,6 +636,117 @@ Result computeNormals(const Splats &s, const std::vector<View> &views, float *no
     return result;
 }
 
+void harmonizeNormals(const Splats &s, float *normals, float radius, int passes, const float *anchorNormals,
+                      const float *anchorWeights) {
+    if (passes <= 0 || !(radius > 0.0f)) return;
+    Pool pool(std::max(1, int(std::thread::hardware_concurrency())));
+    struct Current { Current(Pool *p) { currentPool = p; } ~Current() { currentPool = nullptr; } } current(&pool);
+    std::vector<size_t> ids;
+    for (size_t i = 0; i < s.count; ++i)
+        if (!s.use || s.use[i]) ids.push_back(i);
+    const int count = int(ids.size());
+    if (count < 2) return;
+    Cloud cloud;
+    cloud.pts.resize(ids.size());
+    std::vector<float> alpha(ids.size());
+    std::vector<Eigen::Vector3f> normal(ids.size());
+    for (int i = 0; i < count; ++i) {
+        const size_t id = ids[size_t(i)];
+        cloud.pts[size_t(i)] = Eigen::Vector3f(s.position[id * 3], s.position[id * 3 + 1], s.position[id * 3 + 2]);
+        alpha[size_t(i)] = std::clamp(s.opacity[id], 0.0f, 1.0f);
+        normal[size_t(i)] = Eigen::Vector3f(normals[id * 3], normals[id * 3 + 1], normals[id * 3 + 2]);
+    }
+    std::vector<Eigen::Vector3f> anchor(anchorNormals && anchorWeights ? ids.size() : 0);
+    std::vector<float> anchorWeight(anchor.size(), 0.0f);
+    for (size_t i = 0; i < anchor.size(); ++i) {
+        const size_t id = ids[i];
+        anchor[i] = Eigen::Vector3f(anchorNormals[id * 3], anchorNormals[id * 3 + 1], anchorNormals[id * 3 + 2]);
+        anchorWeight[i] = anchorWeights[id];
+    }
+    using KDTree = nanoflann::KDTreeSingleIndexAdaptor<nanoflann::L2_Simple_Adaptor<float, Cloud>, Cloud, 3>;
+    KDTree tree(3, cloud, nanoflann::KDTreeSingleIndexAdaptorParams(10));
+    tree.buildIndex();
+    // The nearest kHarmonyNeighbors within the radius: enough for a dense face, bounded work.
+    constexpr int kHarmonyNeighbors = 64;
+    const int k = std::min(kHarmonyNeighbors, count);
+    std::vector<uint32_t> hoods(size_t(count) * size_t(k));
+    std::vector<float> hoodDistance(size_t(count) * size_t(k));
+    std::vector<int> hoodSize(static_cast<size_t>(count));
+    const float radius2 = radius * radius, inverseTwoSigma2 = 1.0f / (2.0f * 0.25f * radius2);
+    parallelFor(count, [&](int i) {
+        size_t found[kHarmonyNeighbors];
+        float distance[kHarmonyNeighbors];
+        nanoflann::KNNResultSet<float> result{size_t(k)};
+        result.init(found, distance);
+        tree.findNeighbors(result, cloud.pts[size_t(i)].data(), nanoflann::SearchParameters());
+        int n = 0;
+        for (size_t j = 0; j < result.size(); ++j)
+            if (distance[j] <= radius2) {
+                hoods[size_t(i) * size_t(k) + size_t(n)] = uint32_t(found[j]);
+                hoodDistance[size_t(i) * size_t(k) + size_t(n)] = std::exp(-distance[j] * inverseTwoSigma2);
+                ++n;
+            }
+        hoodSize[size_t(i)] = n;
+    });
+    for (int pass = 0; pass < passes; ++pass) {
+        const std::vector<Eigen::Vector3f> previous = normal;
+        parallelFor(count, [&](int i) {
+            const Eigen::Vector3f own = previous[size_t(i)];
+            Eigen::Vector3f sum = Eigen::Vector3f::Zero();
+            for (int j = 0; j < hoodSize[size_t(i)]; ++j) {
+                const uint32_t other = hoods[size_t(i) * size_t(k) + size_t(j)];
+                if (previous[other].dot(own) <= 0.0f) continue; // the other side of a thin part
+                sum += alpha[other] * hoodDistance[size_t(i) * size_t(k) + size_t(j)] * previous[other];
+            }
+            if (!anchor.empty() && anchorWeight[size_t(i)] > 0.0f && anchor[size_t(i)].dot(own) > 0.0f)
+                sum += anchorWeight[size_t(i)] * anchor[size_t(i)];
+            if (sum.squaredNorm() > 1e-12f) normal[size_t(i)] = sum.normalized();
+        });
+    }
+    for (int i = 0; i < count; ++i)
+        for (int c = 0; c < 3; ++c) normals[ids[size_t(i)] * 3 + c] = normal[size_t(i)][c];
+}
+
+void anchorNormals(const float *queryPositions, const uint8_t *use, size_t count, const float *anchorPositions,
+                   const float *anchorNormalsIn, const float *anchorOpacities, size_t anchors, float radius,
+                   float *outNormals, float *outWeights) {
+    std::fill(outNormals, outNormals + count * 3, 0.0f);
+    std::fill(outWeights, outWeights + count, 0.0f);
+    if (!anchors || !(radius > 0.0f)) return;
+    Pool pool(std::max(1, int(std::thread::hardware_concurrency())));
+    struct Current { Current(Pool *p) { currentPool = p; } ~Current() { currentPool = nullptr; } } current(&pool);
+    Cloud cloud;
+    cloud.pts.resize(anchors);
+    for (size_t i = 0; i < anchors; ++i)
+        cloud.pts[i] = Eigen::Vector3f(anchorPositions[i * 3], anchorPositions[i * 3 + 1], anchorPositions[i * 3 + 2]);
+    using KDTree = nanoflann::KDTreeSingleIndexAdaptor<nanoflann::L2_Simple_Adaptor<float, Cloud>, Cloud, 3>;
+    KDTree tree(3, cloud, nanoflann::KDTreeSingleIndexAdaptorParams(10));
+    tree.buildIndex();
+    constexpr int kAnchorNeighbors = 64;
+    const size_t k = std::min<size_t>(kAnchorNeighbors, anchors);
+    const float radius2 = radius * radius, inverseTwoSigma2 = 1.0f / (2.0f * 0.25f * radius2);
+    parallelFor(int(count), [&](int i) {
+        if (use && !use[i]) return;
+        size_t found[kAnchorNeighbors];
+        float distance[kAnchorNeighbors];
+        nanoflann::KNNResultSet<float> result{k};
+        result.init(found, distance);
+        tree.findNeighbors(result, queryPositions + size_t(i) * 3, nanoflann::SearchParameters());
+        Eigen::Vector3f sum = Eigen::Vector3f::Zero();
+        float weight = 0.0f;
+        for (size_t j = 0; j < result.size(); ++j) {
+            if (distance[j] > radius2) continue;
+            const float w = std::clamp(anchorOpacities[found[j]], 0.0f, 1.0f) * std::exp(-distance[j] * inverseTwoSigma2);
+            sum += w * Eigen::Vector3f(anchorNormalsIn[found[j] * 3], anchorNormalsIn[found[j] * 3 + 1], anchorNormalsIn[found[j] * 3 + 2]);
+            weight += w;
+        }
+        if (sum.squaredNorm() <= 1e-12f) return;
+        sum.normalize();
+        for (int c = 0; c < 3; ++c) outNormals[size_t(i) * 3 + c] = sum[c];
+        outWeights[i] = weight;
+    });
+}
+
 Result estimateNormals(const Splats &s, const std::vector<View> &rig, float *normalsOut, int surrounding,
                        const Visibility &around) {
     if (!rig.empty()) {
