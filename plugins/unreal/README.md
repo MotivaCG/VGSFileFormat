@@ -3,8 +3,8 @@
 Two plugins sharing one renderer:
 
 - **VGS** plays VGS captures (4D, from `.vgs` files).
-- **VGSStatic** shows static Gaussian splat characters, imported from PLY files as assets
-  ([VGSStatic](#vgsstatic-static-characters-from-ply) below).
+- **SGS** shows static Gaussian splat characters, imported from PLY files as assets
+  ([SGS](#sgs-static-characters-from-ply) below).
 
 Both draw through a copy of Epic's Gaussian Splat renderer (`Engine/Plugins/GaussianSplat`,
 experimental in 5.9), changed to blend splats as they were trained, with exposure, a grade
@@ -33,16 +33,16 @@ VGS/                         the plugin as it goes into a project's Plugins fold
     Private/VGSSplatLayout.h       plain C++: a frame into the renderer's buffer layouts
     Private/VGSSplatSource.*       render thread: uploads, the evaluation pass, the proxy
     Private/VGSCaptureComponent.cpp time, scheduling, acquiring, packing (CPU)
-VGSStatic/                   the static plugin's own files (the shared ones are added when assembled)
-  Source/VGSStaticRuntime/   the asset, its GPU copy, the component and actor; VGSStaticPly.h
+SGS/                   the static plugin's own files (the shared ones are added when assembled)
+  Source/SGSRuntime/   the asset, its GPU copy, the component and actor; SGSPly.h
                              (plain C++: reading a PLY, clusters, normal words)
-  Source/VGSStaticEditor/    the PLY importer and its dialog, reimport, placing the asset;
-                             VGSStaticNormals.h/.inl (normals for PLYs without them);
-                             VGSStaticProxy.h (plain C++: the shadow proxy mesh)
+  Source/SGSEditor/    the PLY importer and its dialog, reimport, placing the asset;
+                             SGSNormals.h/.inl (normals for PLYs without them);
+                             SGSProxy.h (plain C++: the shadow proxy mesh)
 CMakeLists.txt               assembles both plugins (VGS with the bridge beside it) and their zips
 EPIC_RENDERER_COPY.md        what of Epic's is copied, what changed, how to update it
 tools/                       the copy script, the patch of VGS's changes to the copy, the
-                             LUT packer, assemble_vgsstatic.cmake
+                             LUT packer, assemble_sgs.cmake
 ```
 
 ## Dependent controls
@@ -52,16 +52,24 @@ Dependent controls stay visible but grey out when they do not apply, retaining t
 - Shaded material controls (self-illumination amount, roughness, specular and normal smoothing)
   require Lighting **Shaded**. Intensity (EV) needs self-illumination, either as the lighting mode
   or as a nonzero amount in Shaded.
-- Invert UE Tone Curve applies to **Self-illumination** only. Its strength needs the switch on;
+- Invert UE Tone Curve applies to what shows the capture's own colour: **Self-illumination**, or the
+  Self-illumination Amount part of **Shaded** (never the lit colour), so that Shaded at an amount of 1
+  looks the same as Self-illumination. Its strength needs the switch on;
   Invert Default Expand Gamut also needs nonzero strength.
+- A capture trained with anti-aliasing (the *anti-aliased splats* render hint, every one
+  converted from Gracia `.mint`; `vgsb_render_hints`) is drawn with Mip-Splatting's opacity
+  compensation: the dilation that widens a splat to a pixel lowers its opacity by the square root
+  of its footprint's determinant before over after (`VGSSplatShading.usf`, `ProjectVGSSplat`), as
+  the VGS editor and PlayCanvas do. Without it the needle splats along silhouettes show as solid
+  coloured lines (a red edge down a white robe).
 - A capture's GPU Layout applies to **CPU** evaluation, including the `vgs.EvaluateOn` override.
-- Shadow Caster (static) and Shadow Inset require dynamic shadow casting. Shadow Inset is also
-  inactive for a mesh proxy or project **No Shadows**. It remains available for the native
+- Shadow Inset requires dynamic shadow casting and is inactive for project **No Shadows**.
+  It remains available for the native
   fallback of Splat Shadow Map; the own map's bias is the project's Shadow Bias.
-- Proxy Collision needs an asset with a proxy mesh, independently of the chosen shadow caster
+- Proxy Collision needs an asset with a proxy mesh, independently of shadow casting
   and whether shadows are enabled. Selecting Proxy Mesh without a mesh still falls back to splats.
 - Import/reimport normal neighbours and radius apply only to **Shortest axes (PGSR)** with
-  normal estimation enabled. The proxy-building controls require Make Shadow Proxy.
+  normal estimation enabled. The proxy-building controls require Make Collision Proxy.
 
 These are editor dependencies; changing modes does not erase saved values or alter Blueprint access.
 
@@ -76,14 +84,14 @@ cmake --build build_win64 --config Release --target vgs_unreal_plugin
 which gives `build_win64/plugins/unreal/Release/VGS/` (sources, `vgsbridge.h`,
 `vgsbridge.dll` and its licence, icon) and `vgs-unreal-<version>.zip` of the same. Copy or
 link that `VGS` folder into `<Project>/Plugins/`, or unzip the zip there, and open the
-project: Unreal builds the module. Target `vgs_static_unreal_plugin` does the same for
-VGSStatic (`VGSStatic/`, `vgsstatic-unreal-<version>.zip`). Both can be enabled in one
+project: Unreal builds the module. Target `sgs_unreal_plugin` does the same for
+SGS (`SGS/`, `sgs-unreal-<version>.zip`). Both can be enabled in one
 project, with Epic's GaussianSplat plugin or without it.
 Use the assembled folder, not `plugins/unreal/VGS` from the tree — the bridge's header and
 DLL are only in the assembled one. `cmake --install ... --component unreal` copies the zip
 to `INSTALL/unreal`.
 
-In a level: *Place Actors*, search *VGS Capture*, drop it, pick the `.vgs` in *File*. A
+In a level: *Place Actors*, search *VGS*, drop it, pick the `.vgs` in *File*. A
 relative path is looked for under the project's `Content` folder, then the project folder.
 For a packaged game the file has to be staged loose, not inside a .pak (the bridge maps the
 file itself): put captures under e.g. `Content/VGS` and add that folder to *Project
@@ -153,8 +161,15 @@ only its own sources; Epic's plugin, where it is enabled, draws its assets untou
   the skylight, Lumen and fog reach it as they reach a mesh. The splats are drawn front to
   back into a scratch target that keeps, per pixel, their coverage, colour, expected depth
   and opacity-weighted view-space normal; `VGSSplatGBuffer.usf` turns that into base colour
-  (the graded colour made linear), normal, surface depth, *Roughness* and *Specular*, and writes
-  *Self-illumination Amount* of the colour as emissive. Pixels the splats only partly cover
+  (the graded colour made linear), normal, composited expected depth, *Roughness* and *Specular*, and writes
+  *Self-illumination Amount* as an HDR lerp between the complete UE-lit result and the
+  original colour. 0 uses only the lit path; 1 bypasses GBuffer lighting and uses the unlit
+  splat path (also without the extra VGS motion-history buffer). Values strictly between
+  0 and 1 draw the splats once and blend after opaque lighting, before translucency.
+  Only mixed views allocate an RGBA16F reference (8 bytes/pixel) and run the blend pass.
+  The existing R32F receiver mask also stores the winning depth: no separate depth snapshot
+  or depth copy. The depth comparison rejects surfaces replaced by another renderer or
+  single-layer water. Intensity scales the original-colour branch only. Pixels the splats only partly cover
   are written where they cover half or more; `r.VGSSplat.Lit.Dither 1` writes them at random
   in proportion instead, for TSR to smooth, but TSR leaves it speckled along edges (seen
   2026-11-11 on a static character's trousers and shoes, with and without TSR history), so it
@@ -173,8 +188,8 @@ only its own sources; Epic's plugin, where it is enabled, draws its assets untou
   ms shaded).
 - **Shadows** (*Lighting* > *Cast Shadow* per actor, on by default, shaded or
   self-illuminated). How, for the whole project: Project Settings > Plugins > **VGS**
-  (`UVGSSplatSettings`, written to the `r.VGSSplat.Shadow.*` console variables; VGSStatic has
-  the same page, *VGSStatic*, for its own actors):
+  (`UVGSSplatSettings`, written to the `r.VGSSplat.Shadow.*` console variables; SGS has
+  the same page, *SGS*, for its own actors):
   Every light lights a Shaded actor whichever the method, and every mesh's shadow falls on
   it; the method is only about the shadows the splats cast. In the order the settings list
   them (`r.VGSSplat.Shadow.Method` 0 to 3):
@@ -188,7 +203,7 @@ only its own sources; Epic's plugin, where it is enabled, draws its assets untou
     *Self Shadowing* enables reception on Shaded captures, including self-shadow and shadows
     between captures of that renderer. Off excludes their visible pixels, using a mask written
     with the GBuffer's depth test; ordinary UE receivers between casters still receive shadows.
-    The grid is shared by the family's views; VGS and VGSStatic share one Light Function with
+    The grid is shared by the family's views; VGS and SGS share one Light Function with
     independent grids, without modifying the light component's saved material. A user Light
     Function is kept and uses native shadow casters as fallback. The preferred light is still
     the atmosphere sun at index 0, otherwise the brightest directional light casting shadows.
@@ -204,7 +219,7 @@ only its own sources; Epic's plugin, where it is enabled, draws its assets untou
     the first method's (mean difference 0.24 of 255). Level `/Game/Stress/Lit` (a red point
     light beside the sun) shows the point light's shadow added.
   - *Unreal Shadow Maps (all lights)*: the component is a primitive whose only part in
-    Unreal's scene is its shadow casters, drawn as VGSStatic's are (below, with the same
+    Unreal's scene is its shadow casters, drawn as SGS's are (below, with the same
     *Shadow Inset*), from the instant on the GPU. For the shadows to cast the frame on screen,
     the instant is uploaded or evaluated before the frame's shadow depths, when the renderer
     starts each view family (`FOnPrepareVGSSplatSources`, `FVGSSplatSource::Prepare_RenderThread`),
@@ -228,20 +243,55 @@ only its own sources; Epic's plugin, where it is enabled, draws its assets untou
 - **Normals in the details panel**: *Normals* (under *Capture*) says whether the capture has
   them (on the GPU path), or not, or that they are not used on the CPU path.
 
-## VGSStatic: static characters from PLY
+## SGS: static characters from PLY or SGS
+
+SGS actors start in **Shaded** and respond to scene lights. Shadows always come from splats,
+using the project's Shadow Method. The approximate mesh is collision-only: it cannot cast
+self-shadows or shadows onto other objects. No Shadows disables splat casting while
+Proxy Collision remains independent. The Mesh Proxy / Shadow Caster override has been removed.
+
+SGS asset thumbnails render the actual capture through the SGS renderer in a reusable preview
+scene, framed by its bounds, without scene lighting, shadow casting or the actor billboard.
+
+The plugin and reflected types are named SGS directly; no redirects from VGSStatic are
+provided. Reimport source SGS/PLY files and place new actors after updating older test projects.
 
 A Gaussian splat PLY (the 3DGS trainer's layout: x y z, f_dc, f_rest, opacity, scale, rot,
-optionally nx ny nz; binary or ASCII) dropped in the Content Browser becomes a **VGS Static
+optionally nx ny nz; binary or ASCII) dropped in the Content Browser becomes a **SGS
 Splat** asset; dropped in a level, an actor showing it, with the capture's controls
 (*Intensity (EV)*, *Blend Space*, the grade, *Invert UE Tone Curve*, *Lighting* and the
 lighting settings, *Up Axis*: Y up, Y down as COLMAP, Z up). Its details panel says how
 many splats, the SH degree, and whether it has normals and where they come from.
 
-- **Importer.** `UVGSStaticSplatFactory`, before Epic's `.ply` importer: Unreal picks the
+An **SGS static capture (`.sgs`) imports the same way**: drag it into the Content Browser,
+then drag the resulting SGS asset into the level. Import authenticates and
+decodes its one frame once, preserving SH and supplied normals. The closed decoder ships
+with SGS's editor module; importing SGS does not require enabling the animated VGS plugin.
+Its splats are saved as UE records, clusters and normal data, not as an external file reference.
+The original SGS is needed for reimport only. This can make the UE asset larger than the
+compressed source SGS.
+See [assets, packaging and multiple machines](ASSETS_AND_PACKAGING.md) for the difference
+between static assets and animated VGS files, and the current limits for future Pixotope integration.
+
+If the SGS carries its authored GLB proxy, Make Collision Proxy imports that mesh's geometry
+for shadows/collision, preserving its shape and triangle count instead of voxelizing it again.
+The generated-proxy settings grey out in this case. This supports the SGS Editor's single
+identity-node triangle mesh; other GLB layouts fail explicitly instead of silently using the
+wrong geometry. The embedded display textures/material are not imported: this collision proxy is hidden,
+and the visible image still comes from the splats. Without an embedded mesh, the existing
+generated-proxy path remains available. Supplied normals are kept unless Replace File Normals
+is enabled.
+
+Both placement paths use the same updated renderer as before. Place Actors > VGS
+uses the new green project logo; SGS uses the red SGS logo, including its
+editor billboard and asset/class icons. The proposals from the Unity review are not included.
+
+- **Importer.** `USGSSplatFactory`, before Epic's `.ply` importer: Unreal picks the
   highest priority and shows no choice, so its dialog has *Import as Epic's Gaussian Splat*
-  where Epic's plugin is enabled (5.9), which hands the file to Epic's importer. Only PLYs
+  where Epic's plugin is enabled (5.9), which hands the PLY file to Epic's importer. SGS is
+  handled by SGS, without offering Epic's PLY importer. Only PLYs
   with f_dc_0 and rot_0 are taken; meshes and point clouds are left to others. A script
-  imports with an `AssetImportTask` whose `options` is a `VGSStaticImportOptions`.
+  imports with an `AssetImportTask` whose `options` is a `SGSImportOptions`.
   Reimport repeats the import with the asset's *Import Settings*.
 - **Normals**, worked out once, at import, never per frame:
   - the PLY's own when it has them (SMNForge's and the VGS editor's, from the capture's own
@@ -260,76 +310,22 @@ many splats, the SH degree, and whether it has normals and where they come from.
     (`FVGSSplatRenderProxy::bNormalsFaceCamera`). Rougher: on andreavictor |cos| 0.91 (84 %).
   The VGS and SGS editors use the same estimate and the same cameras all around (the VGS
   editor's export settings: *Normals* Yes, made as Fine, or No).
-- **Shadow proxy** (the default *Shadow Caster*). The import makes a closed mesh of where the
-  splats are opaque (`VGSStaticProxy.h`, plain C++, checked by `tests/unreal_static.cpp`) and
-  keeps it in the asset as a static mesh (*Shadow Proxy* > *Mesh*, in the asset's package).
-  Each component attaches a hidden `UStaticMeshComponent` with it (transient, made on
-  register): never drawn, not even into depth, it casts the character's shadows from every
-  light as any mesh does, and with *Proxy Collision* it blocks everything (its triangles as
-  collision). The splats then cast nothing themselves.
-  - Made as PlayCanvas splat-transform's collision mesh starts (MIT; its GPU voxelisation and
-    block clean-up, ported to the CPU on a dense grid): every 1 cm voxel adds up its splats'
-    opacity·exp(-d²/2) at its point nearest each one, solid where 1 - exp(-sum) reaches 0.6;
-    lone voxels go and single holes close. Then this plugin's:
-    - For an elongated splat, "nearest" is in its own metric (a few steps of coordinate
-      descent within the voxel). The nearest point in metres can miss a thin splat lying
-      across the voxel: a thin diagonal splat found 4 voxels that way and 61 this way, and
-      andreavictor 5 % more solid voxels.
-    - The grid's bounds come from each splat's reach, not its centre.
-    - Pieces under 0.5 % of the largest go (floaters).
-    - What the outside cannot reach is filled (the splats are a shell).
-    - Surface nets on the occupancy, the vertices placed where the occupancy blurred over 3x3x3
-      voxels crosses one half. The blur alone would erase parts one voxel thin.
-    - Taubin smoothing.
-    - The surface goes 4 cm inwards along the normals, but never more than 45 % of the
-      thickness behind each vertex, so that thin parts are not turned inside out. With 2 cm
-      the dress still showed self-shadow specks under virtual shadow maps; with 4 cm they are
-      gone, and the feet still meet their shadow. The normals and the amounts are smoothed
-      over the neighbours first: each vertex along its own normal by its own amount broke the
-      surface into spikes up to 9 voxels long, which stood out through the face.
-    - Opacity 0.6, not splat-transform's 0.3: at 0.3 the haze before a face and the blur
-      around a straw made the proxy stand out in front of the lit splats, and close up under
-      point lights (virtual shadow maps) the face showed black blotches. At 0.6 the face is
-      clean and the shadows from afar look the same.
-  - On andreavictor (221k splats): 125,000 triangles in 0.6 s, reduced by Unreal to 20,000
-    when the mesh is built (its LOD 0 *Reduction Settings*, about 10 s on import). gs2mesh
-    (`3dgs2mesh/gs2mesh_cpp`) with only the PLY takes about 60 s: it renders about a thousand
-    views of the splats twice and fuses each into a TSDF, then reduces and unwraps, for a
-    textured millimetre surface; splat-transform's command line about 1.5 s.
-  - Import options *Shadow Proxy* (voxel size, opacity, inset, triangles; centimetres for a
-    PLY in metres), kept by the asset for reimport. The mesh is made for the default *Up Axis*
-    and *Unit Scale*; a component with others turns and scales it (`ProxyToComponent`).
-  - Seen: floor shadows like the splats' own shadow map; every light's (level
-    `/Game/Static/Static_Shadow_Point`, the sun and an orange point light); Shaded, the
-    character also shadows itself, with somewhat grainy edges where the splats lie in front of
-    and behind the proxy. Collision: 14 of 15 traces through the character hit with *Proxy
-    Collision*, none without.
-- **Shadows** from the splats (*Shadow Caster* *Splats*, or an asset without a proxy), as
-  captures' (above; Project Settings > Plugins > *VGSStatic*), by default in
-  the splats' own shadow map. With *Unreal Shadow Maps* the component is a primitive whose
-  only part in Unreal's scene is its shadow casters (*Lighting* > *Cast Shadow*, on by
-  default; off per actor costs nothing): in shadow depth passes every splat is drawn as a
-  small opaque octahedron spanning the ellipse where its opacity reaches a cutoff of its own,
-  drawn at random (so that on average the shadow is as dense as the splats), read straight
-  from the asset's GPU copy by `FVGSSplatShadowVertexFactory` (VGS's own, in the renderer
-  copy; `Shaders/Private/SplatRenderer/VGSSplatShadowVertexFactory.ush`), with Unreal's
-  default material. It supports GPU Scene, so virtual shadow maps take it as they take
-  meshes, and every light that casts shadows does: directional (cascaded or virtual), spot,
-  point. Shaded, the character also shadows itself (an arm on the torso); each caster is
-  moved *Shadow Inset* (3 cm) inwards along its normal, or the lit surface, which lies among
-  its own splats, shadows itself in blotches. Memory: one shared index buffer of 512 KB,
-  nothing per asset. Cost on andreavictor (221k splats, one sun, 1280x720): ShadowDepths 0.15
-  to 0.57 ms with virtual shadow maps, 0.12 to 0.20 ms with cascades (1.8M triangles in one
-  cascade). Levels `/Game/Static/Static_Shadow` (and `_Off`, `_Self`, `_Close`, `_Close_Off`).
+- **Collision proxy**. The optional embedded mesh or generated occupancy mesh is retained
+  for **Proxy Collision** (BlockAll). Its component is excluded from the main pass, depth
+  pass and all shadow passes. Mesh-based shadows have been removed because the approximation
+  does not coincide with the splat receiver and produces severe patchy self-shadowing.
+- **Shadows** always use the splats, like VGS. **Splat Shadow Map** is recommended for the sun;
+  **Mixed** adds native casters for other lights. Native maps remain an approximation and may
+  show grain. **Cast Shadow** controls casting independently of the lighting mix.
 - **Static, so:** uploaded once per asset and shared by every actor showing it; the splats
   are ordered along a Morton curve and cut into clusters of 64 that the renderer culls
   against each view (Epic's cluster record, one level of detail); no tick work beyond
   noticing a setting changed from Blueprint; *GPU Layout* Quantized keeps a third of the
   memory (Epic's compressed layout, packed once).
 - **Shared code.** The renderer copy, its shaders, the shared headers, the LUTs and
-  `VGSSplatLayout.h` are the VGS plugin's, copied when VGSStatic is assembled and renamed
-  (`VGSSplat` to `VGSStaticSplat`, `/Plugin/VGS/` to `/Plugin/VGSStatic/`, the shaders
-  module) by `tools/assemble_vgsstatic.cmake`, which fails if a name that would collide is
+  `VGSSplatLayout.h` are the VGS plugin's, copied when SGS is assembled and renamed
+  (`VGSSplat` to `SGSSplat`, `/Plugin/VGS/` to `/Plugin/SGS/`, the shaders
+  module) by `tools/assemble_sgs.cmake`, which fails if a name that would collide is
   left: edit them in `VGS/`, never in the assembled copy. The normals estimate is the VGS
   editor's (`editor/gaussiannormals.cpp`, `normalrigs.cpp`, nanoflann), copied in as
   `.inl` files and built with the engine's Eigen; it ships as source with the plugin.
@@ -477,8 +473,6 @@ From Epic's renderer, which the copy keeps (`VGSSplatRenderPipeline.cpp`,
   main directional light only, and is not seen by translucency, fog or Lumen; *Unreal Shadow
   Maps* (alone, or for the other lights) reach every light but are grainy, and a character
   shadowing another shows dappled where the splats leave gaps.
-- A static character's shadow proxy cannot leave out its own splats: Shaded, it always
-  shadows itself (Unreal has no per-receiver exclusion). Its sizes assume a PLY in metres.
 - The depth-resolved Light Function uses the conventional per-light path, as its material
   needs world and screen position. Support for fog, translucency, Lumen surface cache and
   ray-traced shadows is not established by the deferred receiver tests. Existing user Light
@@ -499,3 +493,14 @@ From this plugin, for later phases:
 - The plugin's own licence is still to be written (the decoder's is included beside the
   DLL). `VGSPacked.usf` ships as source, as Unreal compiles shaders from source, so how a
   packed chunk is read is readable in every install, as it is in the web viewer.
+
+The self-illumination blend preserves the unlit path's existing behavior: its original-colour
+reference is not fog-lit, and at exactly 1 the silhouette uses unlit alpha compositing rather
+than Shaded's dithered opaque coverage. Interior colours interpolate in HDR; silhouette
+coverage can differ at that endpoint. Shadow casting remains independent of the mix.
+
+Self-shadow receiver depth uses the same front-to-back opacity/transmittance weights as
+visible splat colour. Do not select the nearest individual splat above alpha 0.5: a hidden
+opaque layer can win over many visible faint front splats, causing circular self-shadow acne.
+The removed R32F minimum-depth target was also an unnecessary raster attachment. The weighted
+surface remains a single-layer approximation for transparent or widely separated layers.

@@ -2,6 +2,9 @@
 #include "VGSSplatSettings.h"
 
 #include "HAL/IConsoleManager.h"
+#if WITH_EDITOR
+#include "EditorSupportDelegates.h"
+#endif
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(VGSSplatSettings)
 
@@ -17,18 +20,22 @@ void UVGSSplatSettings::PostInitProperties()
 #if WITH_EDITOR
 FText UVGSSplatSettings::GetSectionText() const
 {
-	return FText::FromString(VGSSPLAT_PLUGIN_NAME);
+	return FText::FromString(FCString::Strcmp(VGSSPLAT_PLUGIN_NAME, TEXT("VGS")) == 0 ? TEXT("VGS") : TEXT("SGS"));
 }
 
 FText UVGSSplatSettings::GetSectionDescription() const
 {
-	return FText::FromString(TEXT("How the plugin's splats cast shadows, for the whole project."));
+	return FText::FromString(FCString::Strcmp(VGSSPLAT_PLUGIN_NAME, TEXT("VGS")) == 0
+		? TEXT("VGS (Video Gaussian Static). Project-wide shadow controls.")
+		: TEXT("SGS (Static Gaussian Splatting). Actors follow this Shadow Method by default. No Shadows also disables mesh proxies."));
 }
 
 void UVGSSplatSettings::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {
 	Super::PostEditChangeProperty(PropertyChangedEvent);
 	ApplyToConsoleVariables();
+	IConsoleManager::Get().CallAllConsoleVariableSinks();
+	FEditorSupportDelegates::RedrawAllViewports.Broadcast();
 }
 #endif
 

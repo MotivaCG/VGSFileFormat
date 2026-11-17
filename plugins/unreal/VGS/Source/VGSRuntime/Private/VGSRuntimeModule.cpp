@@ -4,6 +4,12 @@
 #include "Misc/Paths.h"
 #include "Modules/ModuleManager.h"
 
+#if WITH_EDITOR
+#include "Brushes/SlateImageBrush.h"
+#include "Styling/SlateStyle.h"
+#include "Styling/SlateStyleRegistry.h"
+#endif
+
 class FVGSRuntimeModule : public IModuleInterface
 {
 public:
@@ -19,12 +25,28 @@ public:
 		}
 		const FString Dll = FPaths::Combine(Plugin->GetBaseDir(), TEXT("Binaries/ThirdParty/vgsbridge/Win64/vgsbridge.dll"));
 		VGS::LoadBridge(FPaths::ConvertRelativePathToFull(Dll));
+#if WITH_EDITOR
+		Icons = MakeShared<FSlateStyleSet>(TEXT("VGSActorIcons"));
+		const FString Icon = FPaths::Combine(Plugin->GetBaseDir(), TEXT("Resources/IconVGS.png"));
+		Icons->Set("ClassIcon.VGSCaptureActor", new FSlateImageBrush(Icon, FVector2D(16, 16)));
+		Icons->Set("ClassThumbnail.VGSCaptureActor", new FSlateImageBrush(Icon, FVector2D(64, 64)));
+		Icons->Set("ClassIcon.VGSCaptureComponent", new FSlateImageBrush(Icon, FVector2D(16, 16)));
+		FSlateStyleRegistry::RegisterSlateStyle(*Icons);
+#endif
 	}
 
 	virtual void ShutdownModule() override
 	{
 		VGS::UnloadBridge();
+#if WITH_EDITOR
+		if (Icons) { FSlateStyleRegistry::UnRegisterSlateStyle(*Icons); Icons.Reset(); }
+#endif
 	}
+
+private:
+#if WITH_EDITOR
+	TSharedPtr<FSlateStyleSet> Icons;
+#endif
 };
 
 IMPLEMENT_MODULE(FVGSRuntimeModule, VGSRuntime)

@@ -108,4 +108,9 @@ if(SGS_BUILD_TESTS)
         target_compile_options(sgseditor_tests PRIVATE /utf-8)
     endif()
     add_test(NAME sgseditor_tests COMMAND sgseditor_tests)
+
+    # Signed static captures consumed by the UE importer acceptance script.
+    add_executable(sgs_unreal_fixture tests/unreal_fixture.cpp)
+    target_include_directories(sgs_unreal_fixture PRIVATE ${VGS_ROOT}/plugins/vgsbridge/include)
+    target_link_libraries(sgs_unreal_fixture PRIVATE sgs_support)
 endif()

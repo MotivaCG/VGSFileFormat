@@ -17,6 +17,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -441,6 +442,7 @@ struct vgsb_player {
   size_t laneCount = 0;
 
   vgsb_info info{};
+  uint32_t renderHints = 0; // the header's renderHints (FORMAT.md, How it is drawn)
   std::string title, author, project, take, studio, copyright, id, uuid;
   size_t chunkCount = 0;
 
@@ -784,7 +786,51 @@ void unpin(vgsb_player &player) {
 
 } // namespace
 
+struct vgsb_still {
+  vgsbdetail::FrameBuffers frame;
+  std::vector<uint8_t> proxy;
+};
+
 extern "C" {
+
+vgsb_still *vgsb_open_still(const char *path, vgsb_frame *out,
+                           const uint8_t **proxyGlb, size_t *proxySize) {
+  if (out) *out = {};
+  if (proxyGlb) *proxyGlb = nullptr;
+  if (proxySize) *proxySize = 0;
+  if (!path || !out || !proxyGlb || !proxySize) {
+    lastError = "a still import needs a path and frame/proxy outputs";
+    return nullptr;
+  }
+  try {
+    MappedFile file;
+    if (!file.open(path, lastError)) return nullptr;
+    auto capture = vgsdec::Capture::openMemory(file.data(), file.size());
+    if (capture.frameCount() != 1 || capture.chunkCount() != 1)
+      throw std::runtime_error("an SGS asset must contain exactly one frame and one chunk");
+    auto still = std::make_unique<vgsb_still>();
+    vgsbdetail::packFrame(capture.setTime(0, true), still->frame, true, 1.0f);
+    if (capture.hasProxyMesh()) still->proxy = capture.proxyMesh();
+    auto &f = still->frame;
+    out->count = f.count;
+    out->sh_coefficients = f.shCoefficients;
+    out->positions = f.positions.data();
+    out->rotations = f.rotations.data();
+    out->scales = f.scales.data();
+    out->radiance = f.radiance.data();
+    out->sh = f.shCoefficients ? f.sh.data() : nullptr;
+    out->normals = f.hasNormals ? f.normals.data() : nullptr;
+    *proxyGlb = still->proxy.empty() ? nullptr : still->proxy.data();
+    *proxySize = still->proxy.size();
+    lastError.clear();
+    return still.release();
+  } catch (const std::exception &e) {
+    lastError = e.what();
+    return nullptr;
+  }
+}
+
+void vgsb_close_still(vgsb_still *still) { delete still; }
 
 int vgsb_api_version(void) { return VGSB_API_VERSION; }
 
@@ -861,6 +907,7 @@ vgsb_player *openPlayer(const char *path, int includeSh, int slots, int threads,
     info.sh_degree = capture.shDegree();
     info.sh_coefficients = coefficientsForDegree(info.sh_degree);
     info.playback_mode = int32_t(capture.playbackMode());
+    player->renderHints = capture.renderHints();
     info.title = player->title.c_str();
     info.author = player->author.c_str();
     info.project = player->project.c_str();
@@ -998,6 +1045,8 @@ int vgsb_get_info(const vgsb_player *player, vgsb_info *out) {
   *out = player->info;
   return VGSB_OK;
 }
+
+uint32_t vgsb_render_hints(const vgsb_player *player) { return player ? player->renderHints : 0; }
 
 void vgsb_schedule(vgsb_player *player, const double *seconds, int count) {
   if (!player)

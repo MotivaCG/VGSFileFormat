@@ -113,7 +113,7 @@ enum class EVGSGpuLayout : uint8
  * Time runs with the world's (so it pauses and dilates with it), snapped to the capture's
  * own frames, which is what lets the bridge have each frame decoded before it is due.
  */
-UCLASS(ClassGroup = Rendering, meta = (BlueprintSpawnableComponent, DisplayName = "VGS Capture"),
+UCLASS(ClassGroup = Rendering, meta = (BlueprintSpawnableComponent, DisplayName = "VGS (Video Gaussian Static)"),
 	HideCategories = (Mobility, Physics, Collision, LOD, Cooking, Navigation, HLOD, Mobile, RayTracing, VirtualTexture, TextureStreaming, MaterialParameters, PathTracing))
 class VGSRUNTIME_API UVGSCaptureComponent : public UPrimitiveComponent
 {
@@ -204,10 +204,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Lighting")
 	EVGSLighting Lighting = EVGSLighting::SelfIllumination;
 
-	/** How much of the colour still glows when Shaded: 0 is lit only by the scene, 1 as bright as self-illuminated plus the lights. */
+	/** Mix of scene-lit and original colour: 0 fully lit, 1 fully unlit. Endpoints skip the unused path. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Lighting",
 		meta = (DisplayName = "Self-illumination Amount", ClampMin = "0.0", ClampMax = "1.0", EditCondition = "Lighting == EVGSLighting::Shaded"))
-	float SelfIlluminationAmount = 0.1f;
+	float SelfIlluminationAmount = 0.25f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Lighting",
 		meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "Lighting == EVGSLighting::Shaded"))
@@ -263,18 +263,19 @@ public:
 	 * Show the capture's colours as captured, as the VGS viewer does, by undoing Unreal's
 	 * filmic tone curve on the splats (Epic's inverse LUT, applied when they are composited).
 	 * Off, the tone curve applies to them as to the rest of the scene: more contrast, crushed
-	 * darks and warmer skin. Only applies to Self-illumination, not the Shaded material.
+	 * darks and warmer skin. In Shaded it applies to the Self-illumination Amount part only
+	 * (never to the lit colour), so that an amount of 1 looks as Self-illumination.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Rendering", meta = (DisplayName = "Invert UE Tone Curve",
-		EditCondition = "Lighting == EVGSLighting::SelfIllumination"))
+		EditCondition = "Lighting == EVGSLighting::SelfIllumination || SelfIlluminationAmount > 0.0"))
 	bool bInvertToneCurve = true;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Rendering", AdvancedDisplay,
-		meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "Lighting == EVGSLighting::SelfIllumination && bInvertToneCurve"))
+		meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "(Lighting == EVGSLighting::SelfIllumination || SelfIlluminationAmount > 0.0) && bInvertToneCurve"))
 	float InverseToneCurveStrength = 1.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Rendering", AdvancedDisplay,
-		meta = (DisplayName = "Invert Default Expand Gamut", EditCondition = "Lighting == EVGSLighting::SelfIllumination && bInvertToneCurve && InverseToneCurveStrength > 0.0"))
+		meta = (DisplayName = "Invert Default Expand Gamut", EditCondition = "(Lighting == EVGSLighting::SelfIllumination || SelfIlluminationAmount > 0.0) && bInvertToneCurve && InverseToneCurveStrength > 0.0"))
 	bool bInvertExpandGamut = true;
 
 	// ---- what the capture says about itself --------------------------------------------
@@ -381,6 +382,8 @@ private:
 
 	TSharedPtr<VGS::FPlayer> Player;
 	TSharedPtr<FVGSSplatSource, ESPMode::ThreadSafe> Source;
+	/** The world Source is registered with: kept across the editor's unregister and register. */
+	TWeakObjectPtr<UWorld> SourceWorld;
 
 	/** Packed instants: the one on screen, and spares the next one is packed into once the render thread lets go. */
 	TArray<TSharedPtr<FVGSPackedFrame, ESPMode::ThreadSafe>> FrameBuffers;

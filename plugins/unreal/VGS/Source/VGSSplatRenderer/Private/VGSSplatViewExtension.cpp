@@ -3,6 +3,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "VGSSplatViewExtension.h"
+#include "RendererInterface.h"
+#include "EngineModule.h"
+#include "RenderGraphUtils.h"
 // VGS CHANGE: no GaussianSplatRenderResource.h, VGSSplatTransform.h or GaussianSplatComponent.h:
 // the copy draws only the sources registered with it, never Epic's components, and does not
 // need Epic's GaussianSplat plugin (only Unreal 5.9 has it).
@@ -53,10 +56,26 @@ FVGSSplatViewExtension::FVGSSplatViewExtension(const FAutoRegister& AutoRegister
 
 FVGSSplatViewExtension::~FVGSSplatViewExtension()
 {
+ if (PostOpaqueHandle.IsValid() && FModuleManager::Get().IsModuleLoaded("Renderer"))
+  GetRendererModule().RemovePostOpaqueRenderDelegate(PostOpaqueHandle);
+}
+
+void FVGSSplatViewExtension::BlendAfterOpaque(FPostOpaqueRenderParameters& Parameters)
+{
+ if (!Parameters.View || !Parameters.GraphBuilder || !Parameters.ColorTexture || !Parameters.DepthTexture) return;
+ FMixFrame Frame;
+ if (MixFrames.RemoveAndCopyValue(Parameters.View, Frame))
+ {
+  if (Frame.bExternalDepth) Parameters.GraphBuilder->UseInternalAccessMode(Frame.Depth);
+  VGSSplat::BlendSelfIllumination(*Parameters.GraphBuilder, *Parameters.View, Parameters.ColorTexture, Parameters.DepthTexture, Frame.Color, Frame.Depth);
+  if (Frame.bExternalDepth) Parameters.GraphBuilder->UseExternalAccessMode(Frame.Depth, ERHIAccess::SRVMask);
+ }
 }
 
 void FVGSSplatViewExtension::SetupViewFamily(FSceneViewFamily& InViewFamily)
 {
+ if (!PostOpaqueHandle.IsValid())
+  PostOpaqueHandle = GetRendererModule().RegisterPostOpaqueRenderDelegate(FPostOpaqueRenderDelegate::CreateSP(StaticCastSharedRef<FVGSSplatViewExtension>(AsShared()), &FVGSSplatViewExtension::BlendAfterOpaque));
 	VGSSplat::FDeepShadowFrame Frame;
 	if (UVGSSplatSubsystem* Subsystem = GetWorld()->GetSubsystem<UVGSSplatSubsystem>())
 	{
@@ -248,14 +267,18 @@ void FVGSSplatViewExtension::Render(FRDGBuilder& GraphBuilder, const FSceneView&
 		}
 		// VGS CHANGE: a lit proxy is drawn in one pass or the other, never both; where lit
 		// drawing is not supported it stays in the post-process pass, self-illuminated.
-		const bool bDrawnLit = RenderProxy->bLit && VGSSplat::SupportsLit(View);
+		// Endpoint 1 takes the existing unlit path: no normals, lit raster or GBuffer lighting.
+  const bool bDrawnLit = RenderProxy->bLit && RenderProxy->SelfIllumination < 1.0f && VGSSplat::SupportsLit(View);
 		if (bDrawnLit != (LitTargets != nullptr))
 		{
 			continue;
 		}
 
+		// The inverse tone curve goes on whatever shows the capture's own colour: a capture drawn
+		// self-illuminated (Self-illumination, or Shaded at an amount of 1 or unsupported) and the
+		// self-illuminated part of a Shaded one, so that both ends of the amount match.
 		FRHITexture* ProxyLUTRHI = nullptr;
-		if (RenderProxy->InverseToneCurveStrength > 0.0f)
+		if ((!bDrawnLit || RenderProxy->SelfIllumination > 0.0f) && RenderProxy->InverseToneCurveStrength > 0.0f)
 		{
 			const VGSSplat::EInverseToneCurveLUTVariant Variant = static_cast<VGSSplat::EInverseToneCurveLUTVariant>(RenderProxy->bInvertExpandGamutLUT);
 			FRHITexture*& CachedLUTRHI = LUTRHI.FindOrAdd(Variant);
@@ -295,7 +318,27 @@ void FVGSSplatViewExtension::Render(FRDGBuilder& GraphBuilder, const FSceneView&
 	VGSSplat::FRenderStats& RenderStats = Module.GetRenderStats_RenderThread();
 	if (LitTargets != nullptr)
 	{
-		VGSSplat::RenderLit(GraphBuilder, View, RenderItems, RenderStats, *LitTargets); // VGS CHANGE
+		if (RenderItems.IsEmpty()) return;
+  VGSSplat::FLitTargets Targets = *LitTargets;
+  if (!Targets.CaptureReceiverMask)
+  {
+   Targets.CaptureReceiverMask = GraphBuilder.CreateTexture(FRDGTextureDesc::Create2D(Targets.SceneColor->Desc.Extent,
+    PF_R32_FLOAT, FClearValueBinding::Black, TexCreate_ShaderResource | TexCreate_RenderTargetable), TEXT("VGSSplat.ReceiverDepth"));
+   AddClearRenderTargetPass(GraphBuilder, Targets.CaptureReceiverMask, FLinearColor::Black);
+  }
+  const bool bNeedsMix = RenderItems.ContainsByPredicate([](const FVGSSplatRenderItem& Item) { return Item.Proxy->SelfIllumination > 0.0f; });
+  if (bNeedsMix)
+  {
+   Targets.MixReference = GraphBuilder.CreateTexture(FRDGTextureDesc::Create2D(Targets.SceneColor->Desc.Extent,
+    PF_FloatRGBA, FClearValueBinding::Transparent, TexCreate_ShaderResource | TexCreate_RenderTargetable), TEXT("VGSSplat.MixReference"));
+   AddClearRenderTargetPass(GraphBuilder, Targets.MixReference, FLinearColor::Transparent);
+  }
+  VGSSplat::RenderLit(GraphBuilder, View, RenderItems, RenderStats, Targets);
+  if (bNeedsMix)
+  {
+   // The existing receiver mask stores the winning device depth. Reuse it without a depth copy.
+   MixFrames.Add(&View, {Targets.MixReference, Targets.CaptureReceiverMask, LitTargets->CaptureReceiverMask != nullptr});
+  }
 		return;
 	}
 	VGSSplat::Render(GraphBuilder, View, RenderItems, RenderStats, Output, SceneDepthTexture, SceneVelocityTexture);
@@ -323,6 +366,7 @@ void FVGSSplatViewExtension::AddExternalProxySource(FOnCollectVGSSplatProxies::F
 // VGS CHANGE: before anything of the family is drawn, shadow depths included.
 void FVGSSplatViewExtension::PreRenderViewFamily_RenderThread(FRDGBuilder& GraphBuilder, FSceneViewFamily& InViewFamily)
 {
+	MixFrames.Reset();
 	if (VGSSplat::IsEnabled() && InViewFamily.Scene)
 	{
 		PrepareSources_RenderThread.Broadcast(GraphBuilder);

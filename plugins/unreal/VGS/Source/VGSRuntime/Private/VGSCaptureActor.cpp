@@ -21,6 +21,9 @@ AVGSCaptureActor::AVGSCaptureActor()
 		Sprite->Sprite = Icon.Get();
 		Sprite->SetupAttachment(Capture);
 		Sprite->bIsScreenSizeScaled = true;
+		Sprite->SetRelativeScale3D(FVector(0.125f)); // 512 px icon -> 16 cm billboard in UE
+		Sprite->SetRelativeLocation(FVector(0.0, 0.0, 40.0));
+		Sprite->bUseInEditorScaling = false;
 	}
 #endif
 }

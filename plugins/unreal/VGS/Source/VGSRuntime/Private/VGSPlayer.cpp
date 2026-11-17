@@ -74,6 +74,7 @@ namespace VGS
 		Resolve(Api.Open, TEXT("vgsb_open"));
 		Resolve(Api.Close, TEXT("vgsb_close"));
 		Resolve(Api.GetInfo, TEXT("vgsb_get_info"));
+		Resolve(Api.RenderHints, TEXT("vgsb_render_hints"));
 		Resolve(Api.Schedule, TEXT("vgsb_schedule"));
 		Resolve(Api.Acquire, TEXT("vgsb_acquire"));
 		Resolve(Api.AcquireBetween, TEXT("vgsb_acquire_between"));
@@ -177,6 +178,7 @@ namespace VGS
 		Result->bOnTaskGraph = bOnTaskGraph;
 		Result->bPacked = true;
 		Api->GetInfo(Player, &Result->Info);
+		Result->RenderHints = Api->RenderHints(Player);
 		return Result;
 	}
 
@@ -209,6 +211,7 @@ namespace VGS
 		Result->Threads = FMath::Max(Threads, 0);
 		Result->bOnTaskGraph = bOnTaskGraph;
 		Api->GetInfo(Player, &Result->Info);
+		Result->RenderHints = Api->RenderHints(Player);
 		return Result;
 	}
 

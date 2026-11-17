@@ -61,14 +61,13 @@ void FSubstratePixelHeader::UpdateAllBSDFWithBottomUpOperatorVisit_FullySimplifi
 Texture2D<float4> SplatColorTexture;
 Texture2D<float4> DepthMomentsTexture;
 Texture2D<float4> NormalZTexture; // the normals' z, weighted as the moments' x and y
-Texture2D<float> SurfaceDepthTexture;
 uint SmoothingMode;         // 0: neighbours near the pixel's depth; 1: near its local plane
 float SmoothingTolerance;   // how far off they may lie, a share of the distance ...
 float SmoothingBias;        // ... plus this, in Unreal units
 
 float ExpectedDepthScale;
 uint BlendInSRGB;       // the colour target holds sRGB values (VGSSplatShading.usf), else linear
-float SelfIllumination; // the share of the colour kept as emissive
+float SelfIllumination; // lerp weight, never additive emission
 float Intensity;        // on the emissive part, as on a self-illuminated capture
 float Roughness;
 float Specular;
@@ -76,6 +75,13 @@ float MinCoverage;      // below this a pixel is never written
 uint Dither;            // 0: written where coverage reaches one half, no dithering
 float NormalSmoothing;  // the bilateral filter's radius, in Unreal units; 0 leaves each pixel's own normal
 uint Deforming;
+// The self-illuminated part is the capture's colour as a Self-illumination capture shows it,
+// inverse tone curve included (VGSSplatInverseToneCurvePostBlend.usf), so that an amount of 1
+// matches Self-illumination. Strength 0 leaves it out.
+Texture3D InverseToneCurveLUT;
+SamplerState InverseToneCurveLUTSampler;
+float InverseToneCurveStrength;
+float InverseToneCurveLUTEdge;
 
 // The splats' mean view-space normal at a pixel, and how much they cover it.
 // The weighted mean of the splats' normals: x, y and z each averaged, then normalised. (Not x
@@ -183,12 +189,18 @@ void MainPS(
 	out SUBSTRATE_TOP_LAYER_TYPE OutSubstrateTopLayer : SV_Target4,
 	out float4 OutVelocity : SV_Target5,
 	out float OutCaptureMask : SV_Target6,
+#if VGS_WRITE_MIX
+	out float4 OutMix : SV_Target7,
+#endif
 #else
 	out float4 OutGBufferA : SV_Target1,
 	out float4 OutGBufferB : SV_Target2,
 	out float4 OutGBufferC : SV_Target3,
 	out float4 OutVelocity : SV_Target4,
 	out float OutCaptureMask : SV_Target5,
+#if VGS_WRITE_MIX
+	out float4 OutMix : SV_Target6,
+#endif
 #endif
 	out float OutDepth : SV_Depth)
 {
@@ -234,8 +246,10 @@ void MainPS(
 		}
 	}
 
-	const float SurfaceDepth = SurfaceDepthTexture.Load(Pixel);
-	const float Depth = (SurfaceDepth < 1e19f ? SurfaceDepth : Moments.r * InvCoverage) * ExpectedDepthScale;
+	// Match the visible front-to-back compositing weights. Selecting the nearest
+	// splat above an individual alpha threshold can select a hidden/back layer and
+	// creates discontinuous receiver depths (circular self-shadow acne).
+	const float Depth = Moments.r * InvCoverage * ExpectedDepthScale;
 	float3 ViewNormal = VGSPixelViewNormal(Pixel.xy, Moments);
 	if (NormalSmoothing > 0.0f)
 	{
@@ -244,7 +258,7 @@ void MainPS(
 	const float3 WorldNormal = normalize(mul(ViewNormal, (float3x3)View.ViewToTranslatedWorld));
 
 	OutDepth = ConvertToDeviceZ(Depth);
-	OutCaptureMask = 1.0f;
+	OutCaptureMask = OutDepth; // zero outside captures; also the mixed reference depth
 	// Camera motion at the actual receiver depth, plus the opacity-weighted object
 	// displacement evaluated in the previous camera. The temporal jitter is removed once.
 	const float4 CurrentClip = float4(SvPositionToScreenPosition(SvPosition).xy, OutDepth, 1.0f);
@@ -348,6 +362,18 @@ void MainPS(
 	EncodeGBuffer(GBuffer, OutGBufferA, OutGBufferB, OutGBufferC, OutGBufferD, OutGBufferE, UnusedVelocity, 0.0f);
 #endif
 
-	// The base pass writes emissive (and baked lighting) to scene colour; this is the capture's.
-	OutSceneColor = float4(Linear * (SelfIllumination * Intensity * View.PreExposure), 0.0f);
+	// UE evaluates the full lit material. Composite the unlit reference after opaque lighting.
+ OutSceneColor = 0.0f;
+#if VGS_WRITE_MIX
+	float3 Reference = Linear;
+	if (InverseToneCurveStrength > 0.0f)
+	{
+		// As the post-blend pass: the linear sRGB colour through Epic's inverse LUT.
+		const float3 LinearSRGB = saturate(VGSWorkingColorSpaceToSRGB(Linear));
+		const float3 UVW = LinearSRGB * ((InverseToneCurveLUTEdge - 1.0f) / InverseToneCurveLUTEdge) + 0.5f / InverseToneCurveLUTEdge;
+		const float3 Inversed = InverseToneCurveLUT.SampleLevel(InverseToneCurveLUTSampler, UVW, 0).rgb;
+		Reference = SRGBColorToWorkingColorSpace(lerp(LinearSRGB, Inversed, InverseToneCurveStrength));
+	}
+	OutMix = float4(Reference * (Intensity * View.PreExposure), SelfIllumination);
+#endif
 }

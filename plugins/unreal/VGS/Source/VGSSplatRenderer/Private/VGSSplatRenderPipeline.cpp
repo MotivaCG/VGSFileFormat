@@ -698,6 +698,7 @@ class FShadeVGSSplatCS : public FGlobalShader
 		// Spherical harmonics
 		SHADER_PARAMETER(uint32, SHCoordinateSpace)
 		SHADER_PARAMETER(uint32, BlendInSRGB) // VGS CHANGE
+		SHADER_PARAMETER(uint32, Antialiased) // VGS CHANGE: opacity compensation for the dilation
 
 		// VGS CHANGE: a lit proxy's normals (VGSSplatShading.usf, VGSShadedNormal)
 		SHADER_PARAMETER(uint32, Lit)
@@ -1234,17 +1235,44 @@ static TAutoConsoleVariable<float> CVarVGSSplatLitSmoothingBias(
 	TEXT("Lit splats: the part of the normal smoothing's tolerance that does not grow with distance, in cm."),
 	ECVF_RenderThreadSafe);
 
+class FVGSSplatMixPS : public FGlobalShader
+{
+ DECLARE_GLOBAL_SHADER(FVGSSplatMixPS);
+ SHADER_USE_PARAMETER_STRUCT(FVGSSplatMixPS, FGlobalShader);
+ BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+  SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, MixReference)
+  SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float>, MixDepth)
+  SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float>, SceneDepth)
+  RENDER_TARGET_BINDING_SLOTS()
+ END_SHADER_PARAMETER_STRUCT()
+};
+IMPLEMENT_GLOBAL_SHADER(FVGSSplatMixPS, "/Plugin/VGS/Private/SplatRenderer/VGSSplatMix.usf", "MainPS", SF_Pixel);
+
+void VGSSplat::BlendSelfIllumination(FRDGBuilder& GraphBuilder, const FSceneView& View, FRDGTextureRef SceneColor, FRDGTextureRef SceneDepth, FRDGTextureRef Reference, FRDGTextureRef ReferenceDepth)
+{
+ auto* Params = GraphBuilder.AllocParameters<FVGSSplatMixPS::FParameters>();
+ Params->MixReference = Reference;
+ Params->MixDepth = ReferenceDepth;
+ Params->SceneDepth = SceneDepth;
+ Params->RenderTargets[0] = FRenderTargetBinding(SceneColor, ERenderTargetLoadAction::ELoad);
+ TShaderMapRef<FVGSSplatMixPS> Shader(GetGlobalShaderMap(View.GetShaderPlatform()));
+ FPixelShaderUtils::AddFullscreenPass(GraphBuilder, GetGlobalShaderMap(View.GetShaderPlatform()),
+  RDG_EVENT_NAME("VGSSplat.SelfIlluminationMix"), Shader, Params, static_cast<const FViewInfo&>(View).ViewRect,
+  TStaticBlendState<CW_RGB, BO_Add, BF_SourceAlpha, BF_InverseSourceAlpha>::GetRHI());
+}
+
 class FVGSSplatGBufferPS : public FGlobalShader
 {
 	DECLARE_GLOBAL_SHADER(FVGSSplatGBufferPS);
 	SHADER_USE_PARAMETER_STRUCT(FVGSSplatGBufferPS, FGlobalShader);
+	class FWriteMix : SHADER_PERMUTATION_BOOL("VGS_WRITE_MIX");
+	using FPermutationDomain = TShaderPermutationDomain<FWriteMix>;
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, SplatColorTexture)
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, DepthMomentsTexture)
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, NormalZTexture)
-		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float>, SurfaceDepthTexture)
 		SHADER_PARAMETER(float, ExpectedDepthScale)
 		SHADER_PARAMETER(uint32, SmoothingMode)
 		SHADER_PARAMETER(float, SmoothingTolerance)
@@ -1260,6 +1288,11 @@ class FVGSSplatGBufferPS : public FGlobalShader
 		SHADER_PARAMETER(FVector3f, Grade)
 		SHADER_PARAMETER(FVector3f, Tint)
 		SHADER_PARAMETER(uint32, GradeActive)
+		// The self-illuminated part's inverse tone curve, as a Self-illumination capture's.
+		SHADER_PARAMETER_TEXTURE(Texture3D, InverseToneCurveLUT)
+		SHADER_PARAMETER_SAMPLER(SamplerState, InverseToneCurveLUTSampler)
+		SHADER_PARAMETER(float, InverseToneCurveStrength)
+		SHADER_PARAMETER(float, InverseToneCurveLUTEdge)
 		// Substrate's material buffer, when it has its own (not the blendable GBuffer).
 		SHADER_PARAMETER(uint32, Deforming)
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<uint>, MaterialTextureArrayUAV)
@@ -1401,8 +1434,7 @@ void RasterizeHardware(
 	FRDGBufferRef ShadedNormalBuffer = nullptr,
 	FRDGBufferRef ShadedMotionBuffer = nullptr,
 	FRDGTextureRef* OutDepthMoments = nullptr,
-	FRDGTextureRef* OutNormalZ = nullptr, // VGS CHANGE: and the normals' z, blended alike
-	FRDGTextureRef* OutSurfaceDepth = nullptr
+	FRDGTextureRef* OutNormalZ = nullptr // VGS CHANGE: and the normals' z, blended alike
 )
 {
 	const bool bGpuDrivenPipeline = (SplatCountBuffer != nullptr);
@@ -1588,7 +1620,6 @@ void RasterizeHardware(
 		DepthMomentsTexture = GraphBuilder.CreateTexture(MomentsDesc, TEXT("VGSSplat.DepthMoments"));
 	}
 	FRDGTextureRef NormalZTexture = nullptr; // VGS CHANGE
-	FRDGTextureRef SurfaceDepthTexture = nullptr;
 	if (bLit)
 	{
 		const FRDGTextureDesc NormalZDesc = FRDGTextureDesc::Create2D(
@@ -1597,8 +1628,6 @@ void RasterizeHardware(
 			FClearValueBinding::Black,
 			TexCreate_ShaderResource | TexCreate_RenderTargetable);
 		NormalZTexture = GraphBuilder.CreateTexture(NormalZDesc, TEXT("VGSSplat.NormalZ"));
-		SurfaceDepthTexture = GraphBuilder.CreateTexture(FRDGTextureDesc::Create2D(Output.Texture->Desc.Extent,
-			PF_R32_FLOAT, FClearValueBinding(FLinearColor(1e20f, 0, 0, 0)), TexCreate_ShaderResource | TexCreate_RenderTargetable), TEXT("VGSSplat.SurfaceDepth"));
 	}
 
 	// Rasterization
@@ -1652,7 +1681,6 @@ void RasterizeHardware(
 			if (NormalZTexture)
 			{
 				PassParameters->RenderTargets[2] = FRenderTargetBinding(NormalZTexture, ERenderTargetLoadAction::EClear); // VGS CHANGE
-				PassParameters->RenderTargets[3] = FRenderTargetBinding(SurfaceDepthTexture, ERenderTargetLoadAction::EClear);
 			}
 			const FExclusiveDepthStencil::Type DepthStencilAccess = bHardwareDepth
 				? FExclusiveDepthStencil::DepthWrite_StencilNop
@@ -1687,8 +1715,7 @@ void RasterizeHardware(
 					GraphicsPSOInit.BlendState = TStaticBlendState<
 						CW_RGBA, BO_Add, BF_DestAlpha, BF_One, BO_Add, BF_Zero, BF_InverseSourceAlpha,
 						CW_RGBA, BO_Add, BF_DestAlpha, BF_One, BO_Add, BF_Zero, BF_InverseSourceAlpha,
-						CW_RGBA, BO_Add, BF_DestAlpha, BF_One, BO_Add, BF_Zero, BF_InverseSourceAlpha,
-						CW_RED, BO_Min, BF_One, BF_One, BO_Min, BF_One, BF_One
+						CW_RGBA, BO_Add, BF_DestAlpha, BF_One, BO_Add, BF_Zero, BF_InverseSourceAlpha
 					>::GetRHI();
 				}
 				else if (bExpectedDepth)
@@ -1773,10 +1800,9 @@ void RasterizeHardware(
 	else if (bLit)
 	{
 		// VGS CHANGE: resolved by VGSSplatGBuffer.usf, which writes scene depth itself.
-		check(OutDepthMoments != nullptr && OutNormalZ != nullptr && OutSurfaceDepth != nullptr);
+		check(OutDepthMoments != nullptr && OutNormalZ != nullptr);
 		*OutDepthMoments = DepthMomentsTexture;
 		*OutNormalZ = NormalZTexture;
-		*OutSurfaceDepth = SurfaceDepthTexture;
 	}
 	else if (bExpectedDepth)
 	{
@@ -2307,6 +2333,7 @@ static void RenderProxyInternal(
 			// Spherical harmonics
 			PassParameters->SHCoordinateSpace = static_cast<uint32>(RenderProxy.SHCoordinateSpace);
 			PassParameters->BlendInSRGB = RenderProxy.bBlendInSRGB ? 1u : 0u; // VGS CHANGE
+			PassParameters->Antialiased = RenderProxy.bAntialiased ? 1u : 0u; // VGS CHANGE
 
 			// VGS CHANGE: a lit proxy's normals
 			const bool bHasNormals = bLit && RenderProxy.NormalBuffer.IsValid();
@@ -2357,14 +2384,13 @@ static void RenderProxyInternal(
 	// Rasterization
 	FRDGTextureRef DepthMoments = nullptr; // VGS CHANGE: a lit proxy's, for the GBuffer pass
 	FRDGTextureRef NormalZ = nullptr;
-	FRDGTextureRef SurfaceDepth = nullptr;
 	if (bHWRaster)
 	{
 		const ERenderTargetLoadAction ColorLoadAction = bUsesScratch ? ERenderTargetLoadAction::EClear : ERenderTargetLoadAction::ELoad;
 		const uint32 NumClusters = bClusterDispatch ? RenderProxy.NumClusters : 0u;
 		RasterizeHardware(GraphBuilder, View, ViewUniformBuffer, DownsampleFactor, SceneDepthTexture, SceneVelocityTexture, NumSplats, ShadedVGSSplatBuffer, RasterTarget, SplatCountBuffer,
 			SortKeyBuffer, SplatIndexBuffer, NumClusters, ClusterCountBuffer, RenderStats, ColorLoadAction,
-			ShadedNormalBuffer, bLit ? ShadedMotionBuffer : nullptr, bLit ? &DepthMoments : nullptr, bLit ? &NormalZ : nullptr, bLit ? &SurfaceDepth : nullptr); // VGS CHANGE
+			ShadedNormalBuffer, bLit ? ShadedMotionBuffer : nullptr, bLit ? &DepthMoments : nullptr, bLit ? &NormalZ : nullptr); // VGS CHANGE
 	}
 	else
 	{
@@ -2384,7 +2410,6 @@ static void RenderProxyInternal(
 		Params->SplatColorTexture = ProxyScratchRT.Texture;
 		Params->DepthMomentsTexture = DepthMoments;
 		Params->NormalZTexture = NormalZ;
-		Params->SurfaceDepthTexture = SurfaceDepth;
 		Params->Deforming = RenderProxy.bDeforming ? 1u : 0u;
 		FRDGTextureRef ReceiverMask = LitTargets->CaptureReceiverMask;
 		if (!ReceiverMask)
@@ -2394,6 +2419,7 @@ static void RenderProxyInternal(
 		}
 		if (!HasBeenProduced(ReceiverMask)) AddClearRenderTargetPass(GraphBuilder, ReceiverMask, FLinearColor::Black);
 		Params->RenderTargets[LitTargets->bSubstrateMaterial ? 6 : 5] = FRenderTargetBinding(ReceiverMask, ERenderTargetLoadAction::ELoad);
+		if (LitTargets->MixReference) Params->RenderTargets[LitTargets->bSubstrateMaterial ? 7 : 6] = FRenderTargetBinding(LitTargets->MixReference, ERenderTargetLoadAction::ELoad);
 		Params->ExpectedDepthScale = GetExpectedDepthScale();
 		Params->SmoothingMode = uint32(FMath::Clamp(CVarVGSSplatLitSmoothingMode.GetValueOnRenderThread(), 0, 3));
 		Params->SmoothingTolerance = FMath::Max(CVarVGSSplatLitSmoothingTolerance.GetValueOnRenderThread(), 0.0f);
@@ -2410,6 +2436,10 @@ static void RenderProxyInternal(
 		Params->Grade = RenderProxy.Grade;
 		Params->Tint = RenderProxy.Tint;
 		Params->GradeActive = (RenderProxy.Grade.Equals(FVector3f(1.0f, 1.0f, 1.0f), 1e-4f) && RenderProxy.Tint.Equals(FVector3f(1.0f, 1.0f, 1.0f), 1e-4f)) ? 0u : 1u;
+		Params->InverseToneCurveLUT = ProxyLUTRHI ? ProxyLUTRHI : GBlackVolumeTexture->TextureRHI.GetReference();
+		Params->InverseToneCurveLUTSampler = TStaticSamplerState<SF_Trilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
+		Params->InverseToneCurveStrength = ProxyLUTRHI ? RenderProxy.InverseToneCurveStrength : 0.0f;
+		Params->InverseToneCurveLUTEdge = ProxyLUTRHI ? float(ProxyLUTRHI->GetSizeX()) : 1.0f;
 		Params->RenderTargets[0] = FRenderTargetBinding(LitTargets->SceneColor, ERenderTargetLoadAction::ELoad);
 		if (LitTargets->bSubstrateMaterial)
 		{
@@ -2439,7 +2469,9 @@ static void RenderProxyInternal(
 		Params->RenderTargets[LitTargets->bSubstrateMaterial ? 5 : 4] = FRenderTargetBinding(VelocityTarget, ERenderTargetLoadAction::ELoad);
 		Params->RenderTargets.DepthStencil = FDepthStencilBinding(LitTargets->SceneDepth, ERenderTargetLoadAction::ELoad, ERenderTargetLoadAction::ELoad, FExclusiveDepthStencil::DepthWrite_StencilNop);
 
-		TShaderMapRef<FVGSSplatGBufferPS> PixelShader(GetGlobalShaderMap(View.GetShaderPlatform()));
+		FVGSSplatGBufferPS::FPermutationDomain Permutation;
+		Permutation.Set<FVGSSplatGBufferPS::FWriteMix>(LitTargets->MixReference != nullptr);
+		TShaderMapRef<FVGSSplatGBufferPS> PixelShader(GetGlobalShaderMap(View.GetShaderPlatform()), Permutation);
 		FPixelShaderUtils::AddFullscreenPass(
 			GraphBuilder,
 			GetGlobalShaderMap(View.GetShaderPlatform()),
@@ -2527,7 +2559,8 @@ void VGSSplat::RenderLit(
 	for (const FVGSSplatRenderItem& Item : RenderItems)
 	{
 		// Full resolution, the base pass's: no downsampling for a lit proxy.
-		RenderProxyInternal(GraphBuilder, View, View.ViewUniformBuffer, 1, *Item.Proxy, nullptr, RenderStats, Output, Targets.SceneDepth, nullptr, &Targets);
+		// The LUT is for the self-illuminated part only (the mix reference); lit colour never takes it.
+		RenderProxyInternal(GraphBuilder, View, View.ViewUniformBuffer, 1, *Item.Proxy, Item.InverseToneCurveLUTRHI, RenderStats, Output, Targets.SceneDepth, nullptr, &Targets);
 	}
 }
 
@@ -2631,3 +2664,59 @@ void VGSSplat::Render(
 			TStaticDepthStencilState<true, CF_GreaterEqual>::GetRHI());
 	}
 }
+
+#if WITH_DEV_AUTOMATION_TESTS
+#include "Misc/AutomationTest.h"
+#include "RHIGPUReadback.h"
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVGSSplatMixTest, VGSSPLAT_PLUGIN_NAME TEXT(".Lighting.SelfIlluminationMix"),
+ EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FVGSSplatMixTest::RunTest(const FString&)
+{
+ TArray<FLinearColor> Values;
+ ENQUEUE_RENDER_COMMAND(FVGSTestSelfIlluminationMix)([&Values](FRHICommandListImmediate& RHICmdList)
+ {
+  for (int32 Case = 0; Case < 4; ++Case)
+  {
+   FRDGBuilder Graph(RHICmdList);
+   auto Target = [&Graph](EPixelFormat Format, const TCHAR* Name, FLinearColor Clear)
+   {
+    auto* T = Graph.CreateTexture(FRDGTextureDesc::Create2D(FIntPoint(4), Format,
+     FClearValueBinding(Clear), TexCreate_RenderTargetable | TexCreate_ShaderResource), Name);
+    AddClearRenderTargetPass(Graph, T, Clear);
+    return T;
+   };
+   const float Amount = Case == 0 ? 0.0f : Case == 1 ? 0.5f : 1.0f;
+   auto* Color = Target(PF_FloatRGBA, TEXT("VGS.Test.Lit"), FLinearColor(2.0f, 0.2f, 0.1f, 0.6f));
+   auto* Reference = Target(PF_FloatRGBA, TEXT("VGS.Test.Unlit"), FLinearColor(0.5f, 2.0f, 4.0f, Amount));
+   auto* Depth = Target(PF_R32_FLOAT, TEXT("VGS.Test.Depth"), FLinearColor(0.75f, 0, 0, 0));
+   auto* SavedDepth = Target(PF_R32_FLOAT, TEXT("VGS.Test.SavedDepth"), FLinearColor(Case == 3 ? 0.5f : 0.75f, 0, 0, 0));
+   auto* P = Graph.AllocParameters<FVGSSplatMixPS::FParameters>();
+   P->MixReference = Reference; P->MixDepth = SavedDepth; P->SceneDepth = Depth;
+   P->RenderTargets[0] = FRenderTargetBinding(Color, ERenderTargetLoadAction::ELoad);
+   TShaderMapRef<FVGSSplatMixPS> Shader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+   FPixelShaderUtils::AddFullscreenPass(Graph, GetGlobalShaderMap(GMaxRHIFeatureLevel),
+    RDG_EVENT_NAME("VGS.Test.HDRMix"), Shader, P, FIntRect(0, 0, 4, 4),
+    TStaticBlendState<CW_RGB, BO_Add, BF_SourceAlpha, BF_InverseSourceAlpha>::GetRHI());
+   FRHIGPUTextureReadback Readback(TEXT("VGS.Test.Mix"));
+   AddEnqueueCopyPass(Graph, &Readback, Color);
+   Graph.Execute();
+   RHICmdList.SubmitAndBlockUntilGPUIdle();
+   RHICmdList.ImmediateFlush(EImmediateFlushType::FlushRHIThread);
+   if (!Readback.IsReady()) continue;
+   int32 Pitch = 0;
+   const auto* Pixels = static_cast<const FFloat16Color*>(Readback.Lock(Pitch));
+   Values.Add(Pixels[2 * Pitch + 2].GetFloats());
+   Readback.Unlock();
+  }
+ });
+ FlushRenderingCommands();
+ if (!TestEqual(TEXT("GPU readbacks"), Values.Num(), 4)) return false;
+ const FLinearColor Lit(2.0f, 0.2f, 0.1f, 0.6f), Unlit(0.5f, 2.0f, 4.0f, 0.6f);
+ TestTrue(TEXT("Zero preserves full lighting"), Values[0].Equals(Lit, 0.003f));
+ TestTrue(TEXT("Half is an HDR lerp of all lighting, not an additive emissive"), Values[1].Equals(FMath::Lerp(Lit, Unlit, 0.5f), 0.003f));
+ TestTrue(TEXT("One preserves original HDR color and scene alpha"), Values[2].Equals(Unlit, 0.003f));
+ TestTrue(TEXT("A replaced surface is not blended"), Values[3].Equals(Lit, 0.003f));
+ return true;
+}
+#endif

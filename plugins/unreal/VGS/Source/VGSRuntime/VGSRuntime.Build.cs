@@ -15,6 +15,10 @@ public class VGSRuntime : ModuleRules
 		bTreatAsEngineModule = true;
 
 		PublicDependencyModuleNames.AddRange(new[] { "Core", "CoreUObject", "Engine" });
+		if (Target.bBuildEditor)
+		{
+			PrivateDependencyModuleNames.Add("SlateCore");
+		}
 
 		PrivateDependencyModuleNames.AddRange(new[]
 		{

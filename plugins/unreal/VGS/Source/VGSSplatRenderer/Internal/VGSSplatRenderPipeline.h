@@ -90,6 +90,10 @@ public:
 	// VGS CHANGE: NormalBuffer holds directions whose side is not known (a splat's shortest
 	// axis, as PGSR takes it): each is turned to face the camera, as the shortest axis is.
 	bool bNormalsFaceCamera = false;
+	// VGS CHANGE: trained with anti-aliasing (Mip-Splatting's screen-space filter, the VGS
+	// AntialiasedSplats render hint): widening a splat to a pixel lowers its opacity by
+	// sqrt(det before / det after), as PlayCanvas' antiAlias and the VGS viewer do.
+	bool bAntialiased = false;
 	float InverseToneCurveStrength = 0.0f;
 	bool bInvertExpandGamutLUT = true;
 	// VGS CHANGE: casts a shadow (its component's Cast Shadow), for the renderer's own shadow
@@ -134,6 +138,7 @@ namespace VGSSplat
 		FRDGTextureRef SceneDepth = nullptr;
 		FRDGTextureRef SceneVelocity = nullptr;
 		FRDGTextureRef CaptureReceiverMask = nullptr;
+		FRDGTextureRef MixReference = nullptr; // only views with intermediate self-illumination
 		FRDGTextureRef GBufferA = nullptr;
 		FRDGTextureRef GBufferB = nullptr;
 		FRDGTextureRef GBufferC = nullptr;
@@ -148,6 +153,7 @@ namespace VGSSplat
 		FIntRect ViewRect;
 	};
 	bool SupportsLit(const FSceneView& View);
+	void BlendSelfIllumination(FRDGBuilder& GraphBuilder, const FSceneView& View, FRDGTextureRef SceneColor, FRDGTextureRef SceneDepth, FRDGTextureRef Reference, FRDGTextureRef ReferenceDepth);
 	void RenderLit(
 		FRDGBuilder& GraphBuilder,
 		const FSceneView& View,

@@ -71,6 +71,7 @@ float4 ColorBias;
 // Spherical harmonics
 uint SHCoordinateSpace;
 uint BlendInSRGB; // VGS CHANGE: see CalculateColor
+uint Antialiased; // VGS CHANGE: trained with anti-aliasing; see ProjectVGSSplat
 
 // Per-component overrides
 float PointScaleFactor;
@@ -257,7 +258,8 @@ bool ProjectVGSSplat(
 	FVGSSplatData SplatData,
 	inout float4 ClipPosition,
 	inout float2 Axis0,
-	inout float2 Axis1
+	inout float2 Axis1,
+	inout float OpacityCompensation // VGS CHANGE
 )
 {
 	const FLWCVector3 LwcWorldPosition = MakeLWCVector3(PrimaryView.ViewTilePosition, SplatData.Position);
@@ -268,6 +270,17 @@ bool ProjectVGSSplat(
 	{
 		const float3x3 Covariance3D = ComputeCovariance3D(SplatData.Rotation, SplatData.Scale);
 		const float3 Covariance2D = SG_CalcCovariance2D(TranslatedWorldPosition, Covariance3D, CovarianceScale);
+		// VGS CHANGE: a capture trained with anti-aliasing (Mip-Splatting) has needle splats far
+		// thinner than a pixel; the dilation widens them to one, so their opacity drops by the
+		// footprint's determinant before over after it (FORMAT.md, renderHints), or they show as
+		// solid coloured lines along silhouettes.
+		if (Antialiased != 0u)
+		{
+			const float Dilation = GAUSSIAN_SPLAT_COVARIANCE_DILATION * CovarianceScale;
+			const float After = Covariance2D.x * Covariance2D.z - Covariance2D.y * Covariance2D.y;
+			const float Before = (Covariance2D.x - Dilation) * (Covariance2D.z - Dilation) - Covariance2D.y * Covariance2D.y;
+			OpacityCompensation = After > 0.0f ? sqrt(max(Before, 0.0f) / After) : 0.0f;
+		}
 		if (!SG_DecomposeCovariance(Covariance2D, Axis0, Axis1, /* bClipAxis = */true, CovarianceScale))
 		{
 			ClipPosition = -FLOAT_MAX;
@@ -472,7 +485,10 @@ void MainCS(
 				SplatData.Scale *= PointScaleFactor;
 				SplatData.Position = mul(float4(SplatData.Position, 1.0f), LocalToWorld).xyz;
 
-				bVisible = ProjectVGSSplat(SplatData, ShadedSplatData.Position, ShadedSplatData.Axes.xy, ShadedSplatData.Axes.zw);
+				float OpacityCompensation = 1.0f;
+				bVisible = ProjectVGSSplat(SplatData, ShadedSplatData.Position, ShadedSplatData.Axes.xy, ShadedSplatData.Axes.zw, OpacityCompensation);
+				Opacity *= OpacityCompensation; // VGS CHANGE
+				bVisible = bVisible && Opacity >= OpacityThreshold;
 				if (bVisible)
 				{
 					float3 WorldCameraDir = GetCameraVectorFromWorldPosition(SplatData.Position);

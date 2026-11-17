@@ -109,6 +109,15 @@ typedef struct vgsb_frame {
                             * carries none */
 } vgsb_frame;
 
+/* Import a static (.sgs) capture once, without playback threads or a player. The frame
+ * and optional authenticated GLB proxy belong to this handle until close. Rejects
+ * captures with more than one frame. On failure returns NULL and clears the outputs.
+ * Additive API: existing player structs and their ABI are unchanged. */
+typedef struct vgsb_still vgsb_still;
+VGSB_API vgsb_still *vgsb_open_still(const char *path_utf8, vgsb_frame *out,
+                                   const uint8_t **proxy_glb, size_t *proxy_size);
+VGSB_API void vgsb_close_still(vgsb_still *);
+
 VGSB_API int vgsb_api_version(void);
 
 /* Why the last call on this thread failed. */
@@ -124,6 +133,15 @@ VGSB_API vgsb_player *vgsb_open(const char *path_utf8, int include_sh, int slots
 VGSB_API void vgsb_close(vgsb_player *);
 
 VGSB_API int vgsb_get_info(const vgsb_player *, vgsb_info *out);
+
+/*
+ * How the capture is meant to be drawn: the header's renderHints bits (FORMAT.md). Bit 0,
+ * VGSB_HINT_ANTIALIASED: trained with anti-aliasing, so a renderer that widens a splat to a
+ * pixel lowers its opacity by sqrt(det before / det after). A function rather than a field of
+ * vgsb_info, so that the struct, and VGSB_API_VERSION, stay as they are.
+ */
+#define VGSB_HINT_ANTIALIASED 1u
+VGSB_API uint32_t vgsb_render_hints(const vgsb_player *);
 
 /*
  * The times the host expects to ask for, soonest first. The first `slots` are decoded

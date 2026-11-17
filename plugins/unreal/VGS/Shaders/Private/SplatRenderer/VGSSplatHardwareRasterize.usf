@@ -198,7 +198,6 @@ void MainPS(
 	, out float4 OutDepthMoments : SV_Target1
 #if VGS_LIT
 	, out float4 OutNormalZ : SV_Target2 // VGS CHANGE: the normal's z, blended as the moments
-	, out float OutSurfaceDepth : SV_Target3
 #endif // VGS_LIT
 #endif
 #if WRITE_VELOCITY
@@ -245,9 +244,6 @@ void MainPS(
 #if VGS_LIT
 	OutDepthMoments = float4(LinearZ, Input.ViewNormal.xy, 1.0f) * SrcAlpha; // VGS CHANGE
 	OutNormalZ = float4(Input.ViewNormal.z, Input.ObjectMotion, 1.0f) * SrcAlpha;
-	// An opaque receiver belongs to the front supported surface, not the average
-	// between it and a second surface. Very faint layers retain the moment fallback.
-	OutSurfaceDepth = SrcAlpha >= 0.5f ? LinearZ : 1e20f;
 #else
 	OutDepthMoments = float4(LinearZ * SrcAlpha, 0.0f, 0.0f, SrcAlpha);
 #endif // VGS_LIT

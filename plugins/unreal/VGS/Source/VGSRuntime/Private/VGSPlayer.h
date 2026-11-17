@@ -24,6 +24,7 @@ namespace VGS
 		decltype(&vgsb_open) Open = nullptr;
 		decltype(&vgsb_close) Close = nullptr;
 		decltype(&vgsb_get_info) GetInfo = nullptr;
+		decltype(&vgsb_render_hints) RenderHints = nullptr;
 		decltype(&vgsb_schedule) Schedule = nullptr;
 		decltype(&vgsb_acquire) Acquire = nullptr;
 		decltype(&vgsb_acquire_between) AcquireBetween = nullptr;
@@ -91,6 +92,8 @@ namespace VGS
 		FPlayer& operator=(const FPlayer&) = delete;
 
 		const vgsb_info& GetInfo() const { return Info; }
+		/** Trained with anti-aliasing (the VGSB_HINT_ANTIALIASED render hint): drawn with opacity compensation. */
+		bool IsAntialiased() const { return (RenderHints & VGSB_HINT_ANTIALIASED) != 0; }
 		const FString& GetPath() const { return Path; }
 		int32 GetThreads() const { return Threads; }
 		bool IsOnTaskGraph() const { return bOnTaskGraph; }
@@ -122,6 +125,7 @@ namespace VGS
 
 		vgsb_player* Player = nullptr;
 		vgsb_info Info = {};
+		uint32 RenderHints = 0;
 		FString Path;
 		bool bIncludeSH = true;
 		float Density = 1.0f;

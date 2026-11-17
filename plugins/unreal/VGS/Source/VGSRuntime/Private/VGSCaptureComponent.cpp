@@ -761,6 +761,7 @@ void UVGSCaptureComponent::PushRenderState()
 	State.bBlendInSRGB = BlendSpace == EVGSBlendSpace::SRGB;
 	State.bLit = Lighting == EVGSLighting::Shaded;
 	State.SelfIllumination = FMath::Clamp(SelfIlluminationAmount, 0.0f, 1.0f);
+	State.bAntialiased = Player.IsValid() && Player->IsAntialiased();
 	State.Roughness = FMath::Clamp(Roughness, 0.0f, 1.0f);
 	State.Specular = FMath::Clamp(Specular, 0.0f, 1.0f);
 	State.NormalSmoothing = FMath::Max(NormalSmoothing, 0.0f);
@@ -788,17 +789,29 @@ void UVGSCaptureComponent::PushRenderState()
 
 void UVGSCaptureComponent::RegisterSource()
 {
-	if (Source.IsValid() || IsTemplate() || !FApp::CanEverRender())
+	UWorld* World = GetWorld();
+	if (Source.IsValid())
+	{
+		// Kept from before an editor re-registration: the frame and chunk on the GPU stay, and
+		// only the state (visible again, and whatever was edited) goes to it.
+		if (SourceWorld.Get() == World)
+		{
+			PushRenderState();
+			return;
+		}
+		ReleaseSource();
+	}
+	if (IsTemplate() || !FApp::CanEverRender())
 	{
 		return;
 	}
-	UWorld* World = GetWorld();
 	if (!World || !World->Scene)
 	{
 		return;
 	}
 
 	Source = MakeShared<FVGSSplatSource, ESPMode::ThreadSafe>();
+	SourceWorld = World;
 	VGSSplat::RegisterExternalProxySource(World,
 		FOnCollectVGSSplatProxies::FDelegate::CreateSP(Source.ToSharedRef(), &FVGSSplatSource::Collect_RenderThread),
 		FOnPrepareVGSSplatSources::FDelegate::CreateSP(Source.ToSharedRef(), &FVGSSplatSource::Prepare_RenderThread));
@@ -827,6 +840,7 @@ void UVGSCaptureComponent::ReleaseSource()
 		Released.Reset();
 	});
 	Source.Reset();
+	SourceWorld.Reset();
 }
 
 // ---- component lifetime -----------------------------------------------------------------
@@ -839,8 +853,26 @@ void UVGSCaptureComponent::OnRegister()
 
 void UVGSCaptureComponent::OnUnregister()
 {
-	// The capture stays open: in the editor every edit unregisters and registers again.
-	ReleaseSource();
+	// The capture stays open: in the editor every edit unregisters and registers again, every
+	// step of a drag in the details panel too. Releasing the source there left a new one with
+	// no frame until the chunk was uploaded again, so the capture flickered transparent while a
+	// slider was dragged (SGS's data lives in its asset and never showed it). In an editor
+	// world the source is kept, hidden, for OnRegister to show again; anywhere else, and when
+	// the component goes for good (OnComponentDestroyed), it is released.
+	UWorld* World = GetWorld();
+	if (Source.IsValid() && World && !World->IsGameWorld() && GIsEditor)
+	{
+		FVGSRenderState Hidden;
+		Hidden.bVisible = false;
+		ENQUEUE_RENDER_COMMAND(VGSHideSource)([Target = Source, Hidden](FRHICommandList&)
+		{
+			Target->SetState_RenderThread(Hidden);
+		});
+	}
+	else
+	{
+		ReleaseSource();
+	}
 	Super::OnUnregister();
 }
 

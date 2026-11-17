@@ -70,6 +70,7 @@ struct FVGSRenderState
 	float Roughness = 0.8f;
 	float Specular = 0.5f;
 	float NormalSmoothing = 2.0f;
+	bool bAntialiased = false; // trained with anti-aliasing: opacity compensation when drawn
 	/** For the shadow casters: capture axes and metres to the component's, and how they cast. */
 	FMatrix44f CaptureToComponent = FMatrix44f::Identity;
 	float ShadowInset = 3.0f; // cm

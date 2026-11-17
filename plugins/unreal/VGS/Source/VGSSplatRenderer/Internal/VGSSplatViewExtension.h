@@ -14,6 +14,7 @@ class FVGSSplatRenderProxy;
 class FRHIGPUBufferReadback;
 class FVGSSplatViewExtension;
 struct FScreenPassRenderTarget;
+class FPostOpaqueRenderParameters;
 namespace VGSSplat { struct FLitTargets; } // VGS CHANGE
 
 #define UE_API VGSSPLATRENDERER_API
@@ -77,6 +78,10 @@ protected:
 	void Render(FRDGBuilder& GraphBuilder, const FSceneView& View, const FScreenPassRenderTarget& Output, FRDGTexture* SceneDepthTexture, FRDGTexture* SceneVelocityTexture, const VGSSplat::FLitTargets* LitTargets = nullptr);
 
 private:
+ void BlendAfterOpaque(FPostOpaqueRenderParameters& Parameters);
+ FDelegateHandle PostOpaqueHandle;
+ struct FMixFrame { FRDGTextureRef Color; FRDGTextureRef Depth; bool bExternalDepth; };
+ TMap<const FSceneView*, FMixFrame> MixFrames;
 	VGSSplat::FDeepShadowFrame DeepShadowFrame;
 #if WITH_DEV_AUTOMATION_TESTS
 	TUniquePtr<FRHIGPUBufferReadback> MotionReadback;

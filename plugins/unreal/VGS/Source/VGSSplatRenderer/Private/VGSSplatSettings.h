@@ -11,7 +11,7 @@
  * Shaded actor whichever this is, and every mesh's shadow falls on it; this is only about the
  * shadows the splats cast.
  */
-UENUM()
+UENUM(BlueprintType)
 enum class EVGSSplatShadowMethod : uint8
 {
 	/**
@@ -19,7 +19,7 @@ enum class EVGSSplatShadowMethod : uint8
 	 * one marked Atmosphere Sun Light, otherwise the brightest that casts shadows). They are
 	 * drawn from it into a shadow map of their own, as soft Gaussians with their real opacity,
 	 * and cumulative transmittance is sampled at the receiver's depth by a Light Function
-	 * before UE evaluates the sun. Spot, point and rect lights use method Mixed for shadows.
+	 * before UE evaluates the sun. Select Mixed to also cast from spot, point and rect lights.
 	 * Existing user light functions use native casters as fallback.
 	 */
 	SplatShadowMap = 0 UMETA(DisplayName = "Splat Shadow Map (sun only)"),
@@ -35,15 +35,15 @@ enum class EVGSSplatShadowMethod : uint8
 	 * The splats go into Unreal's own shadow maps (virtual or cascaded) as small opaque shapes,
 	 * each at a random opacity: shadows from every light that casts them, the sun included, but
 	 * grainy and frayed, and Shaded characters shadow themselves in blotches (each actor's
-	 * Shadow Inset reduces them). About 0.4 ms for 300,000 splats per light.
+	 * Shadow Inset reduces them). SGS uses splats too; approximate meshes are used only for collision.
 	 */
 	UnrealShadowMaps = 2 UMETA(DisplayName = "Unreal Shadow Maps (all lights)"),
 
-	/** The splats cast no shadows at all, whatever each actor's Cast Shadow says. Costs nothing. */
+	/** No splat casts shadows, even with Cast Shadow enabled. Receiving light is controlled by Lighting on the actor. */
 	None = 3 UMETA(DisplayName = "No Shadows"),
 };
 
-UCLASS(config = Engine, defaultconfig)
+UCLASS(config = Engine, defaultconfig, BlueprintType)
 class UVGSSplatSettings : public UDeveloperSettings
 {
 	GENERATED_BODY()
@@ -83,7 +83,7 @@ public:
 	 * How far behind the splats a surface must be to be shadowed. Raise it if the ground right
 	 * under an actor shows dark specks; lower it if the shadow does not reach the feet.
 	 */
-	UPROPERTY(config, EditAnywhere, Category = "Shadows", AdvancedDisplay,
+	UPROPERTY(config, EditAnywhere, Category = "Shadows",
 		meta = (DisplayName = "Shadow Bias", Units = "cm", ClampMin = "0.0", UIMax = "20.0",
 			EditCondition = "ShadowMethod == EVGSSplatShadowMethod::SplatShadowMap || ShadowMethod == EVGSSplatShadowMethod::Mixed"))
 	float ShadowBias = 3.0f;

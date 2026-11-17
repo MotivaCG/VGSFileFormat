@@ -270,10 +270,11 @@ bool FVGSSplatSource::Advance_RenderThread(FRDGBuilder& GraphBuilder)
 {
 	if (HistoryFrame != GFrameNumberRenderThread)
 	{
-		Proxy.PreviousGpuBuffer = State.bLit ? SplatBuffer : nullptr;
-		if (!State.bLit) SpareSplatBuffer.SafeRelease();
+		const bool bLitMotion = State.bLit && State.SelfIllumination < 1.0f;
+		Proxy.PreviousGpuBuffer = bLitMotion ? SplatBuffer : nullptr;
+		if (!bLitMotion) SpareSplatBuffer.SafeRelease();
 		Proxy.PreviousLocalToWorld = LastRenderedTransform;
-		Proxy.bMotionHistoryValid = State.bLit && SplatBuffer.IsValid() && HistoryFrame != MAX_uint64 && HistoryFrame + 1 == GFrameNumberRenderThread;
+		Proxy.bMotionHistoryValid = bLitMotion && SplatBuffer.IsValid() && HistoryFrame != MAX_uint64 && HistoryFrame + 1 == GFrameNumberRenderThread;
 		Proxy.bSplatMotionHistoryValid = ChunkBuffers.Serial != 0;
 		HistoryFrame = GFrameNumberRenderThread;
 		LastRenderedTransform = State.LocalToWorld;
@@ -399,6 +400,7 @@ void FVGSSplatSource::Collect_RenderThread(FRDGBuilder& GraphBuilder, const FSce
 	Proxy.Tint = State.Tint;
 	Proxy.bLit = State.bLit;
 	Proxy.SelfIllumination = State.SelfIllumination;
+	Proxy.bAntialiased = State.bAntialiased;
 	Proxy.Roughness = State.Roughness;
 	Proxy.Specular = State.Specular;
 	Proxy.NormalSmoothing = State.NormalSmoothing;

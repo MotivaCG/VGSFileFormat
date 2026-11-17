@@ -21,7 +21,7 @@ float VGSSampleDeepShadow(Texture2D Atlas, SamplerState AtlasSampler, Texture2D 
 	const float4 Clip = mul(float4(DFAddDemote(PrimaryView.PreViewTranslation, WorldPosition), 1), PrimaryView.TranslatedWorldToClip);
 	const float2 ScreenUV = Clip.xy / Clip.w * float2(0.5f, -0.5f) + 0.5f;
 	const float2 BufferUV = (ScreenUV * View.ViewSizeAndInvSize.xy + View.ViewRectMin.xy) / float2(MaskWidth, MaskHeight);
-	if (SelfShadow < 0.5f && Texture2DSampleLevel(CaptureMask, CaptureMaskSampler, BufferUV, 0).r > 0.5f) return 1.0f;
+	if (SelfShadow < 0.5f && CaptureMask.Load(int3(clamp(int2(BufferUV * float2(MaskWidth, MaskHeight)), int2(0, 0), int2(MaskWidth, MaskHeight) - 1), 0)).r > 0.0f) return 1.0f;
 	const float3 Delta = WorldPosition - Origin;
 	const float3 L = float3(dot(Delta, X), dot(Delta, Y), dot(Delta, Z));
 	const float2 UV = float2(L.x / Extent.x, -L.y / Extent.y) * 0.5f + 0.5f;
