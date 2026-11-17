@@ -352,9 +352,9 @@ bool UVGSStaticSplatFactory::Build(UVGSStaticSplat* Asset, const FString& Filena
 	}
 
 	const double Read = FPlatformTime::Seconds();
-	// Normals: the file's (SMNForge's and the VGS editor's, from the capture's own cameras), or
-	// worked out with a rig's cameras (the one the file names, or the one asked for), or as
-	// PGSR takes them, from each splat's shortest axis, for a PLY from anywhere else.
+	// Normals: the file's (SMNForge's and the VGS editor's), or worked out as the VGS editor does,
+	// with cameras all around the splats (Normal or Fine), or as PGSR takes them, from each
+	// splat's shortest axis.
 	Task.EnterProgressFrame(2.0f, LOCTEXT("Normals", "Working out normals"));
 	std::vector<float> Estimated;
 	const float* Normals = Splats.normals.empty() ? nullptr : Splats.normals.data();
@@ -371,48 +371,23 @@ bool UVGSStaticSplatFactory::Build(UVGSStaticSplat* Asset, const FString& Filena
 	}
 	if (Options.bEstimateNormals && (!Normals || Options.bReplaceFileNormals))
 	{
-		bool bUseRig = false;
-		vgsstatic::NormalRig Rig = FileRig;
-		FString Why;
-		switch (Options.Method)
+		if (Options.Method != EVGSStaticNormalMethod::ShortestAxes)
 		{
-		case EVGSStaticNormalMethod::Auto: bUseRig = bFileRig; Why = bFileRig ? TEXT("named by the file") : TEXT(""); break;
-		case EVGSStaticNormalMethod::SmnV1: bUseRig = true; Rig = vgsstatic::NormalRig::SmnV1; Why = TEXT("as asked"); break;
-		case EVGSStaticNormalMethod::The4DScanner: bUseRig = true; Rig = vgsstatic::NormalRig::The4DScanner; Why = TEXT("as asked"); break;
-		default: break;
-		}
-		FString Fallback;
-		if (bUseRig)
-		{
-			const vgsstatic::RigNormalsResult Result = vgsstatic::rigNormals(Splats, Rig, Estimated);
-			if (Result.seenShare() >= 0.5)
-			{
-				Source = EVGSStaticNormals::Rig;
-				Note = FString::Printf(TEXT("%s rig (%s), whose cameras see %.1f %% of the opaque splats"), RigName(Rig), *Why, 100.0 * Result.seenShare());
-			}
-			else
-			{
-				// Not in that rig's frame: its cameras would decide the sides by guessing.
-				bUseRig = false;
-				Fallback = FString::Printf(TEXT(" (the %s rig's cameras saw only %.0f %% of the splats: not its frame)"), RigName(Rig), 100.0 * Result.seenShare());
-			}
-		}
-		if (!bUseRig && Options.Method != EVGSStaticNormalMethod::ShortestAxes)
-		{
-			const vgsstatic::RigNormalsResult Result = vgsstatic::surroundingNormals(Splats, Estimated);
+			const bool bFine = Options.Method == EVGSStaticNormalMethod::Fine;
+			const vgsstatic::RigNormalsResult Result = vgsstatic::surroundingNormals(Splats, Estimated, bFine);
 			Source = EVGSStaticNormals::Surrounding;
-			Note = FString::Printf(TEXT("cameras all around, which see %.1f %% of the opaque splats%s"), 100.0 * Result.seenShare(), *Fallback);
+			Note = FString::Printf(TEXT("%s: cameras all around, which see %.1f %% of the opaque splats"), bFine ? TEXT("Fine") : TEXT("Normal"), 100.0 * Result.seenShare());
 		}
-		else if (!bUseRig)
+		else
 		{
 			vgsstatic::AxisNormalsSettings Settings;
 			Settings.neighbours = FMath::Clamp(Options.Neighbours, 4, 64);
 			Settings.radiusShare = FMath::Clamp(Options.RadiusPercent, 0.05f, 10.0f) / 100.0f;
 			const vgsstatic::AxisNormalsResult Result = vgsstatic::axisNormals(Splats, Estimated, Settings);
 			Source = EVGSStaticNormals::Axes;
-			Note = FString::Printf(TEXT("%.0f %% of the splats flat, %.0f %% took their neighbours' direction (%d nearest, within %.2g %% of the size), side facing the camera%s"),
+			Note = FString::Printf(TEXT("%.0f %% of the splats flat, %.0f %% took their neighbours' direction (%d nearest, within %.2g %% of the size), side facing the camera"),
 				100.0 * double(Result.flat) / double(FMath::Max<size_t>(Result.splats, 1)), 100.0 * double(Result.replaced) / double(FMath::Max<size_t>(Result.splats, 1)),
-				Settings.neighbours, double(Settings.radiusShare * 100.0f), *Fallback);
+				Settings.neighbours, double(Settings.radiusShare * 100.0f));
 		}
 		Normals = Estimated.data();
 	}

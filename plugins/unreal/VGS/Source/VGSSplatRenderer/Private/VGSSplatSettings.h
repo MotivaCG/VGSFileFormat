@@ -18,16 +18,16 @@ enum class EVGSSplatShadowMethod : uint8
 	 * Recommended. The splats cast shadows from the main directional light only (the sun: the
 	 * one marked Atmosphere Sun Light, otherwise the brightest that casts shadows). They are
 	 * drawn from it into a shadow map of their own, as soft Gaussians with their real opacity,
-	 * and that light is taken off what lies behind them: solid, clean shadows with a penumbra,
-	 * and no blotches on the characters. Spot, point and rect lights get no shadow from the
-	 * splats. About 0.6 to 1 ms for 300,000 splats, whatever the screen resolution.
+	 * and cumulative transmittance is sampled at the receiver's depth by a Light Function
+	 * before UE evaluates the sun. Spot, point and rect lights use method Mixed for shadows.
+	 * Existing user light functions use native casters as fallback.
 	 */
 	SplatShadowMap = 0 UMETA(DisplayName = "Splat Shadow Map (sun only)"),
 
 	/**
 	 * The sun as Splat Shadow Map (clean shadows), and every other light that casts shadows
 	 * (spot, point, rect, other directional lights) as Unreal Shadow Maps (grainy shadows). The
-	 * cost of both: about 0.6 to 1 ms for 300,000 splats, plus about 0.4 ms per other light.
+	 * cost of both representations depends on the grid, splat count and other lights.
 	 */
 	Mixed = 1 UMETA(DisplayName = "Splat Shadow Map (sun) + Unreal Shadow Maps (other lights)"),
 
@@ -55,8 +55,9 @@ public:
 
 	/**
 	 * In the sun's shadow from the splats' own shadow map, Shaded actors also shadow themselves:
-	 * an arm on the body, one person on another. Off, only what lies behind them is shadowed,
-	 * and each keeps the shading its normals give it. Self-illuminated actors are never darkened.
+	 * an arm on the body, one person on another. Off excludes visible Shaded pixels of this
+	 * renderer; ordinary UE receivers still get depth-resolved shadows. Self-illuminated actors
+	 * are composited later and do not receive this lighting.
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Shadows",
 		meta = (DisplayName = "Self Shadowing", EditCondition = "ShadowMethod == EVGSSplatShadowMethod::SplatShadowMap || ShadowMethod == EVGSSplatShadowMethod::Mixed"))
@@ -64,8 +65,8 @@ public:
 
 	/**
 	 * The size of a texel of the splats' shadow map, which covers every casting actor (up to
-	 * 2048 texels a side, coarser beyond). Smaller is sharper and costs more: for 300,000 splats
-	 * about 1 ms at 0.5 cm, 0.6 ms at 1 cm.
+	 * 1024 texels per spatial side, coarser beyond). The grid has 64 depth bins. Smaller spatial
+	 * texels cost more memory and fill; at 512 spatial texels its main resources use about 101 MiB.
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Shadows",
 		meta = (DisplayName = "Shadow Texel Size", Units = "cm", ClampMin = "0.05", UIMin = "0.25", UIMax = "2.0",

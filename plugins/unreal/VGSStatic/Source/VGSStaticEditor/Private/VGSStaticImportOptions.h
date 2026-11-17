@@ -30,21 +30,19 @@ public:
 	bool bReplaceFileNormals = false;
 
 	/**
-	 * How. A studio rig's cameras decide each splat's outward side, but only for a PLY from that
-	 * rig in its own frame (SMNForge names its rig in the file: Auto uses it); if they see less
-	 * than half of the splats the import uses cameras all around instead, and says so. Cameras
-	 * all around (the default without a rig) suit a PLY from anywhere; shortest axes (as PGSR)
-	 * are rougher and leave the side to the renderer.
+	 * How, as the VGS editor's Normals: cameras all around the splats decide each one's outward
+	 * side, for a PLY from any rig or none (Normal, or Fine: finer and about 2.3 times slower);
+	 * shortest axes (as PGSR) are rougher and leave the side to the renderer.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, config, Category = "Normals", meta = (EditCondition = "bEstimateNormals"))
-	EVGSStaticNormalMethod Method = EVGSStaticNormalMethod::Auto;
+	EVGSStaticNormalMethod Method = EVGSStaticNormalMethod::Fine;
 
 	/** Shortest axes: the nearest splats a round or stray splat takes its neighbours' direction from. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, config, Category = "Normals", meta = (ClampMin = "4", ClampMax = "64", EditCondition = "bEstimateNormals"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, config, Category = "Normals", meta = (ClampMin = "4", ClampMax = "64", EditCondition = "bEstimateNormals && Method == EVGSStaticNormalMethod::ShortestAxes"))
 	int32 Neighbours = 16;
 
 	/** Shortest axes: ... no farther than this share of the splats' size (their bounds' diagonal). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, config, Category = "Normals", meta = (ClampMin = "0.05", ClampMax = "10", Units = "Percent", EditCondition = "bEstimateNormals"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, config, Category = "Normals", meta = (ClampMin = "0.05", ClampMax = "10", Units = "Percent", EditCondition = "bEstimateNormals && Method == EVGSStaticNormalMethod::ShortestAxes"))
 	float RadiusPercent = 1.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, config, Category = "Splats", meta = (DisplayName = "GPU Layout"))

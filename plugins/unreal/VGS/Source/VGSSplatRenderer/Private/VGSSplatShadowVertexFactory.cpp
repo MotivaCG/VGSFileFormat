@@ -15,6 +15,8 @@
 #include "SceneInterface.h"
 #include "SceneView.h"
 #include "VGSSplatLightShadow.h"
+#include "LightSceneInfo.h"
+#include "LightSceneProxy.h"
 
 IMPLEMENT_GLOBAL_SHADER_PARAMETER_STRUCT(FVGSSplatShadowParameters, "VGSSplatShadow");
 
@@ -22,7 +24,7 @@ static TAutoConsoleVariable<int32> CVarVGSSplatShadowMethod(
 	TEXT("r.VGSSplat.Shadow.Method"),
 	0,
 	TEXT("How splats cast shadows (the project's settings set it).\n")
-	TEXT("0: the splat renderer's own shadow map of the main directional light, composited onto the lit scene (default).\n")
+	TEXT("0: depth-resolved splat shadow map applied by the main light's Light Function (default). Native fallback if unavailable.\n")
 	TEXT("1: that for the main directional light, and Unreal's shadow maps (as 2) for every other light.\n")
 	TEXT("2: in Unreal's shadow maps, for every light: each splat an opaque octahedron where its opacity reaches a cutoff of its own, drawn at random.\n")
 	TEXT("3: none."),
@@ -208,20 +210,26 @@ void FVGSSplatShadowVertexFactory::ClearSplats()
 void FVGSSplatShadowVertexFactory::AddShadowMeshes(const FPrimitiveSceneProxy& Proxy, const FSceneView& View, int32 ViewIndex, FMeshElementCollector& Collector, bool bReverseCulling) const
 {
 	const VGSSplat::EShadowMethod Method = VGSSplat::GetShadowMethod();
-	if (!HasParameters() || (Method != VGSSplat::EShadowMethod::UnrealShadowMaps && Method != VGSSplat::EShadowMethod::Mixed))
+	const IConsoleVariable* Enabled = IConsoleManager::Get().FindConsoleVariable(TEXT("r.VGSSplat"));
+	if ((Enabled && Enabled->GetInt() == 0) || !HasParameters() || Method == VGSSplat::EShadowMethod::None)
 	{
 		return;
 	}
-	if (Method == VGSSplat::EShadowMethod::Mixed && View.Family && View.Family->Scene && View.Family->Scene->GetRenderScene())
+	if (Method != VGSSplat::EShadowMethod::UnrealShadowMaps && View.Family && View.Family->Scene && View.Family->Scene->GetRenderScene())
 	{
 		// A shadow depth view looks along its light (FProjectedShadowInfo::ModifyViewForShadow
 		// turns it so, for billboards): the main directional light's views are the ones looking
 		// along its direction, which the splats' own shadow map covers.
 		const FLightSceneInfo* MainLight = VGSSplat::FindMainLight(*View.Family->Scene->GetRenderScene());
-		if (MainLight && FMath::Abs(FVector::DotProduct(View.GetViewDirection(), VGSSplat::GetMainLightDirection(*MainLight))) > 0.99999)
+		const FMaterialRenderProxy* Function = MainLight ? MainLight->Proxy->GetLightFunctionMaterial() : nullptr;
+		const bool bOwnFunction = Function && Function->GetMaterialName().StartsWith(TEXT("VGSShadowLightVisibility"));
+		if (bOwnFunction && (Method == VGSSplat::EShadowMethod::SplatShadowMap ||
+			FMath::Abs(FVector::DotProduct(View.GetViewDirection(), VGSSplat::GetMainLightDirection(*MainLight))) > 0.99999))
 		{
 			return;
 		}
+		// A user light function, disabled light functions, or a missing resource uses native
+		// casters instead. Never overwrite the user's material or silently lose the shadow.
 	}
 	const FMaterialRenderProxy* Material = UMaterial::GetDefaultMaterial(MD_Surface)->GetRenderProxy();
 	for (uint32 First = 0; First < NumSplats; First += SplatsPerDraw)

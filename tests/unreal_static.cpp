@@ -418,7 +418,7 @@ void checkProxy() {
   }
   s.count = s.positions.size() / 3;
 
-  for (float inset : {0.0f, 0.02f}) {
+  for (float inset : {0.0f, 0.02f, 0.04f}) {
     vgsstatic::ProxySettings settings;
     settings.inset = inset;
     vgsstatic::ProxyMesh m;
@@ -511,6 +511,69 @@ void checkProxyThin() {
   }
 }
 
+void checkProxyMetricAndInset() {
+  using namespace vgsstatic::proxydetail;
+  auto metric = [](const float *m, double *a) {
+    const auto at = [m](int i, int j) {
+      return double(m[i]) * m[j] + double(m[3 + i]) * m[3 + j] + double(m[6 + i]) * m[6 + j];
+    };
+    a[0] = at(0, 0); a[1] = at(1, 1); a[2] = at(2, 2);
+    a[3] = at(0, 1); a[4] = at(0, 2); a[5] = at(1, 2);
+  };
+  // Regression from the review: three sweeps gave d^2=28.05 and discarded a voxel
+  // whose true distance is 0.3974, enough for this splat alone to make it solid.
+  const float m[9] = {-13.8851671f, -10.4722595f, -9.8759270f,
+                     282.5125122f, -829.2838745f, 482.1564941f,
+                     -6619.6074219f, 1952.3751221f, 7236.6450195f};
+  const float lo[3] = {-0.0140659977f, -0.0110847699f, -0.00270295865f};
+  double a[6]; metric(m, a);
+  const double d2 = boxMetricDistanceSquared(m, a, lo, 0.01f);
+  EXPECT(std::fabs(d2 - 0.3974152633) < 1e-5, "oblique voxel distance %.9f", d2);
+  EXPECT(std::exp(-0.5 * d2) > -std::log(0.7), "the missed voxel is solid");
+
+  // Construct known optima from the KKT conditions, independently of the active-set
+  // solver: A*p=g, with zero gradient on free axes and the appropriate box bound
+  // on the other axes. Check rotations, anisotropy, phases and all constraint counts.
+  std::mt19937 rng(91);
+  std::normal_distribution<double> normal;
+  double worst = 0.0;
+  for (int trial = 0; trial < 1000; ++trial) {
+    Eigen::Quaterniond q(normal(rng), normal(rng), normal(rng), normal(rng));
+    q.normalize();
+    const Eigen::Matrix3d M = Eigen::Vector3d(20.0, 100.0, trial % 2 ? 1000.0 : 10000.0).asDiagonal() * q.toRotationMatrix();
+    float mf[9];
+    Eigen::Matrix3d Mf;
+    for (int r = 0; r < 3; ++r)
+      for (int c = 0; c < 3; ++c) Mf(r, c) = mf[r * 3 + c] = float(M(r, c));
+    Eigen::Vector3d gradient = Eigen::Vector3d::Zero();
+    for (int k = 0; k <= trial % 3; ++k) gradient[k] = (trial & (1 << k)) ? -3.0 : 3.0;
+    const Eigen::Vector3d p = (Mf.transpose() * Mf).ldlt().solve(gradient);
+    float lower[3];
+    const float width = 0.01f;
+    for (int k = 0; k < 3; ++k)
+      lower[k] = float(p[k] - (gradient[k] < 0.0 ? width : gradient[k] == 0.0 ? 0.5 * width : 0.0));
+    double af[6]; metric(mf, af);
+    const double actual = boxMetricDistanceSquared(mf, af, lower, width);
+    const double expected = (Mf * p).squaredNorm();
+    const double error = std::fabs(actual - expected) / std::max(1.0, expected);
+    worst = std::max(worst, error);
+    EXPECT(error < 2e-5, "KKT box %d: %.9g vs %.9g", trial, actual, expected);
+  }
+  std::printf("proxy metric: review regression %.9f, 1000 known KKT optima worst error %.3g\n", d2, worst);
+
+  Grid grid; grid.n[0] = 20; grid.n[1] = grid.n[2] = 1;
+  std::vector<uint8_t> occupied(grid.size(), 0);
+  const float origin[3] = {0, 0, 0}, vertex[3] = {0, 0.005f, 0.005f}, inward[3] = {-1, 0, 0};
+  EXPECT(insetAtVertex(grid, occupied, origin, vertex, inward, 0.01f, 0.04f) == 0.0f,
+         "no inset without any solid");
+  occupied[3] = 1; // a 1 cm slab after 3 cm of empty space
+  const float withGap = insetAtVertex(grid, occupied, origin, vertex, inward, 0.01f, 0.04f);
+  EXPECT(withGap > 0.002f && withGap <= 0.0045f, "initial gap is not thickness: %.6f", withGap);
+  occupied[3] = 0; occupied[0] = 1;
+  const float noGap = insetAtVertex(grid, occupied, origin, vertex, inward, 0.01f, 0.04f);
+  EXPECT(std::fabs(withGap - noGap) <= 0.0012f, "equal slabs, gap %.6f vs no gap %.6f", withGap, noGap);
+}
+
 // A real PLY's shadow proxy, with the import's settings (a PLY in metres): how long, how big.
 void checkFileProxy(const char *path, const char *obj) {
   std::ifstream in(path, std::ios::binary);
@@ -547,6 +610,7 @@ int main(int argc, char **argv) {
   checkAxisNormals();
   checkProxy();
   checkProxyThin();
+  checkProxyMetricAndInset();
   for (int i = 1; i < argc; ++i)
     if (std::strstr(argv[i], ".obj") == nullptr) {
       checkFile(argv[i]);

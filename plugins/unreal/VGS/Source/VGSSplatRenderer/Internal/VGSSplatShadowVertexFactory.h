@@ -35,8 +35,7 @@ namespace VGSSplat
 	/**
 	 * How splats cast shadows (r.VGSSplat.Shadow.Method, which the project's settings set,
 	 * UVGSSplatSettings), in the order the settings list them:
-	 * 0 the splat renderer's own shadow map of the main directional light, composited onto the
-	 *   lit scene (VGSSplatLightShadow.h), the default;
+	 * 0 depth-resolved splat shadows through the main light's Light Function, the default;
 	 * 1 that for the main directional light, and Unreal's shadow maps for every other light;
 	 * 2 Unreal's shadow maps for every light, as octahedra at a random cutoff each (this vertex
 	 *   factory);

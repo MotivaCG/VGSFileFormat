@@ -99,8 +99,8 @@ static TAutoConsoleVariable<int32> CVarVGSSplatStochasticDepthFormat(
 static TAutoConsoleVariable<int32> CVarVGSSplatVelocity(
 	TEXT("r.VGSSplat.Velocity"),
 	0,
-	TEXT("Write into the scene velocity buffer (default = 0)\n")
-	TEXT("Velocity writes require depth writes to also be enabled"),
+	TEXT("Self-illuminated captures: write camera-motion-only velocity with depth (default = 0).\n")
+	TEXT("Shaded captures always write computed camera and object motion with their GBuffer surface."),
 	ECVF_RenderThreadSafe);
 
 static TAutoConsoleVariable<float> CVarVGSSplatHardwareRasterizationOpacityThreshold(
@@ -704,6 +704,10 @@ class FShadeVGSSplatCS : public FGlobalShader
 		SHADER_PARAMETER(uint32, HasNormals)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, NormalBuffer)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, RWShadedNormalBuffer)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(ByteAddressBuffer, PreviousSplats)
+		SHADER_PARAMETER(FMatrix44f, PreviousLocalToWorld)
+		SHADER_PARAMETER(uint32, MotionHistoryValid)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float2>, RWShadedMotionBuffer)
 
 		// Per-component overrides
 		SHADER_PARAMETER(float, PointScaleFactor)
@@ -1060,6 +1064,7 @@ class FHardwareRasterizeVGSSplatVS : public FGlobalShader
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FShadedVGSSplatData>, ShadedVGSSplatBuffer)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(Buffer<uint>, SortedIndexBuffer)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, ShadedNormalBuffer) // VGS CHANGE
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float2>, ShadedMotionBuffer)
 	END_SHADER_PARAMETER_STRUCT()
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
@@ -1239,6 +1244,7 @@ class FVGSSplatGBufferPS : public FGlobalShader
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, SplatColorTexture)
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, DepthMomentsTexture)
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, NormalZTexture)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float>, SurfaceDepthTexture)
 		SHADER_PARAMETER(float, ExpectedDepthScale)
 		SHADER_PARAMETER(uint32, SmoothingMode)
 		SHADER_PARAMETER(float, SmoothingTolerance)
@@ -1255,6 +1261,7 @@ class FVGSSplatGBufferPS : public FGlobalShader
 		SHADER_PARAMETER(FVector3f, Tint)
 		SHADER_PARAMETER(uint32, GradeActive)
 		// Substrate's material buffer, when it has its own (not the blendable GBuffer).
+		SHADER_PARAMETER(uint32, Deforming)
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<uint>, MaterialTextureArrayUAV)
 		SHADER_PARAMETER(uint32, MaxBytesPerPixel)
 		SHADER_PARAMETER(uint32, bRoughDiffuse)
@@ -1392,8 +1399,10 @@ void RasterizeHardware(
 	// VGS CHANGE: for a lit proxy, its normals by record; the depth moments come back in
 	// OutDepthMoments for VGSSplatGBuffer.usf instead of being resolved into scene depth.
 	FRDGBufferRef ShadedNormalBuffer = nullptr,
+	FRDGBufferRef ShadedMotionBuffer = nullptr,
 	FRDGTextureRef* OutDepthMoments = nullptr,
-	FRDGTextureRef* OutNormalZ = nullptr // VGS CHANGE: and the normals' z, blended alike
+	FRDGTextureRef* OutNormalZ = nullptr, // VGS CHANGE: and the normals' z, blended alike
+	FRDGTextureRef* OutSurfaceDepth = nullptr
 )
 {
 	const bool bGpuDrivenPipeline = (SplatCountBuffer != nullptr);
@@ -1579,6 +1588,7 @@ void RasterizeHardware(
 		DepthMomentsTexture = GraphBuilder.CreateTexture(MomentsDesc, TEXT("VGSSplat.DepthMoments"));
 	}
 	FRDGTextureRef NormalZTexture = nullptr; // VGS CHANGE
+	FRDGTextureRef SurfaceDepthTexture = nullptr;
 	if (bLit)
 	{
 		const FRDGTextureDesc NormalZDesc = FRDGTextureDesc::Create2D(
@@ -1587,6 +1597,8 @@ void RasterizeHardware(
 			FClearValueBinding::Black,
 			TexCreate_ShaderResource | TexCreate_RenderTargetable);
 		NormalZTexture = GraphBuilder.CreateTexture(NormalZDesc, TEXT("VGSSplat.NormalZ"));
+		SurfaceDepthTexture = GraphBuilder.CreateTexture(FRDGTextureDesc::Create2D(Output.Texture->Desc.Extent,
+			PF_R32_FLOAT, FClearValueBinding(FLinearColor(1e20f, 0, 0, 0)), TexCreate_ShaderResource | TexCreate_RenderTargetable), TEXT("VGSSplat.SurfaceDepth"));
 	}
 
 	// Rasterization
@@ -1617,6 +1629,7 @@ void RasterizeHardware(
 				: GraphBuilder.CreateSRV(GPUSortValuesBuffer[SortedBufferIndex], PF_R32_UINT);
 			PassParameters->GatheredSplatVertexBuffer = bVertexAttributeFetch ? ShadedVGSSplatBuffer : nullptr;
 			PassParameters->VS.ShadedNormalBuffer = bLit ? GraphBuilder.CreateSRV(ShadedNormalBuffer) : nullptr; // VGS CHANGE
+			PassParameters->VS.ShadedMotionBuffer = bLit ? GraphBuilder.CreateSRV(ShadedMotionBuffer) : nullptr;
 			PassParameters->PS.View = ViewUniformBuffer;
 			PassParameters->PS.BlueNoise = CreateUniformBufferImmediate(GetBlueNoiseGlobalParameters(), EUniformBufferUsage::UniformBuffer_SingleDraw);
 			PassParameters->PS.OpacityThreshold = GetHardwareRasterizationOpacityThreshold();
@@ -1639,6 +1652,7 @@ void RasterizeHardware(
 			if (NormalZTexture)
 			{
 				PassParameters->RenderTargets[2] = FRenderTargetBinding(NormalZTexture, ERenderTargetLoadAction::EClear); // VGS CHANGE
+				PassParameters->RenderTargets[3] = FRenderTargetBinding(SurfaceDepthTexture, ERenderTargetLoadAction::EClear);
 			}
 			const FExclusiveDepthStencil::Type DepthStencilAccess = bHardwareDepth
 				? FExclusiveDepthStencil::DepthWrite_StencilNop
@@ -1673,7 +1687,8 @@ void RasterizeHardware(
 					GraphicsPSOInit.BlendState = TStaticBlendState<
 						CW_RGBA, BO_Add, BF_DestAlpha, BF_One, BO_Add, BF_Zero, BF_InverseSourceAlpha,
 						CW_RGBA, BO_Add, BF_DestAlpha, BF_One, BO_Add, BF_Zero, BF_InverseSourceAlpha,
-						CW_RGBA, BO_Add, BF_DestAlpha, BF_One, BO_Add, BF_Zero, BF_InverseSourceAlpha
+						CW_RGBA, BO_Add, BF_DestAlpha, BF_One, BO_Add, BF_Zero, BF_InverseSourceAlpha,
+						CW_RED, BO_Min, BF_One, BF_One, BO_Min, BF_One, BF_One
 					>::GetRHI();
 				}
 				else if (bExpectedDepth)
@@ -1758,9 +1773,10 @@ void RasterizeHardware(
 	else if (bLit)
 	{
 		// VGS CHANGE: resolved by VGSSplatGBuffer.usf, which writes scene depth itself.
-		check(OutDepthMoments != nullptr && OutNormalZ != nullptr);
+		check(OutDepthMoments != nullptr && OutNormalZ != nullptr && OutSurfaceDepth != nullptr);
 		*OutDepthMoments = DepthMomentsTexture;
 		*OutNormalZ = NormalZTexture;
+		*OutSurfaceDepth = SurfaceDepthTexture;
 	}
 	else if (bExpectedDepth)
 	{
@@ -2132,6 +2148,8 @@ static void RenderProxyInternal(
 	FRDGBufferRef ShadedNormalBuffer = bLit
 		? GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), NumSplats), TEXT("VGSSplat.ShadedNormals"))
 		: nullptr;
+	FRDGBufferRef ShadedMotionBuffer = GraphBuilder.CreateBuffer(
+		FRDGBufferDesc::CreateStructuredDesc(sizeof(FVector2f), bLit ? NumSplats : 1), TEXT("VGSSplat.ShadedMotion"));
 
 	// Debug pipeline configurations
 	const bool bDebug = IsDebug();
@@ -2294,6 +2312,11 @@ static void RenderProxyInternal(
 			const bool bHasNormals = bLit && RenderProxy.NormalBuffer.IsValid();
 			PassParameters->Lit = bLit ? 1u : 0u;
 			PassParameters->HasNormals = bHasNormals ? (RenderProxy.bNormalsFaceCamera ? 2u : 1u) : 0u;
+			PassParameters->PreviousSplats = GraphBuilder.CreateSRV(RenderProxy.PreviousGpuBuffer.IsValid()
+				? GraphBuilder.RegisterExternalBuffer(RenderProxy.PreviousGpuBuffer) : VGSSplatBuffer);
+			PassParameters->PreviousLocalToWorld = RenderProxy.PreviousLocalToWorld;
+			PassParameters->MotionHistoryValid = RenderProxy.bMotionHistoryValid && !View.bCameraCut ? (RenderProxy.bSplatMotionHistoryValid ? 1u : 2u) : 0u;
+			PassParameters->RWShadedMotionBuffer = GraphBuilder.CreateUAV(ShadedMotionBuffer);
 			PassParameters->NormalBuffer = bHasNormals
 				? GraphBuilder.CreateSRV(GraphBuilder.RegisterExternalBuffer(RenderProxy.NormalBuffer))
 				: GraphBuilder.CreateSRV(GSystemTextures.GetDefaultStructuredBuffer(GraphBuilder, sizeof(uint32)));
@@ -2334,13 +2357,14 @@ static void RenderProxyInternal(
 	// Rasterization
 	FRDGTextureRef DepthMoments = nullptr; // VGS CHANGE: a lit proxy's, for the GBuffer pass
 	FRDGTextureRef NormalZ = nullptr;
+	FRDGTextureRef SurfaceDepth = nullptr;
 	if (bHWRaster)
 	{
 		const ERenderTargetLoadAction ColorLoadAction = bUsesScratch ? ERenderTargetLoadAction::EClear : ERenderTargetLoadAction::ELoad;
 		const uint32 NumClusters = bClusterDispatch ? RenderProxy.NumClusters : 0u;
 		RasterizeHardware(GraphBuilder, View, ViewUniformBuffer, DownsampleFactor, SceneDepthTexture, SceneVelocityTexture, NumSplats, ShadedVGSSplatBuffer, RasterTarget, SplatCountBuffer,
 			SortKeyBuffer, SplatIndexBuffer, NumClusters, ClusterCountBuffer, RenderStats, ColorLoadAction,
-			ShadedNormalBuffer, bLit ? &DepthMoments : nullptr, bLit ? &NormalZ : nullptr); // VGS CHANGE
+			ShadedNormalBuffer, bLit ? ShadedMotionBuffer : nullptr, bLit ? &DepthMoments : nullptr, bLit ? &NormalZ : nullptr, bLit ? &SurfaceDepth : nullptr); // VGS CHANGE
 	}
 	else
 	{
@@ -2360,6 +2384,16 @@ static void RenderProxyInternal(
 		Params->SplatColorTexture = ProxyScratchRT.Texture;
 		Params->DepthMomentsTexture = DepthMoments;
 		Params->NormalZTexture = NormalZ;
+		Params->SurfaceDepthTexture = SurfaceDepth;
+		Params->Deforming = RenderProxy.bDeforming ? 1u : 0u;
+		FRDGTextureRef ReceiverMask = LitTargets->CaptureReceiverMask;
+		if (!ReceiverMask)
+		{
+			ReceiverMask = GraphBuilder.CreateTexture(FRDGTextureDesc::Create2D(Output.Texture->Desc.Extent,
+				PF_R32_FLOAT, FClearValueBinding::Black, TexCreate_RenderTargetable | TexCreate_ShaderResource), TEXT("VGSSplat.UnusedReceiverMask"));
+		}
+		if (!HasBeenProduced(ReceiverMask)) AddClearRenderTargetPass(GraphBuilder, ReceiverMask, FLinearColor::Black);
+		Params->RenderTargets[LitTargets->bSubstrateMaterial ? 6 : 5] = FRenderTargetBinding(ReceiverMask, ERenderTargetLoadAction::ELoad);
 		Params->ExpectedDepthScale = GetExpectedDepthScale();
 		Params->SmoothingMode = uint32(FMath::Clamp(CVarVGSSplatLitSmoothingMode.GetValueOnRenderThread(), 0, 3));
 		Params->SmoothingTolerance = FMath::Max(CVarVGSSplatLitSmoothingTolerance.GetValueOnRenderThread(), 0.0f);
@@ -2395,6 +2429,14 @@ static void RenderProxyInternal(
 			Params->RenderTargets[2] = FRenderTargetBinding(LitTargets->GBufferB, ERenderTargetLoadAction::ELoad);
 			Params->RenderTargets[3] = FRenderTargetBinding(LitTargets->GBufferC, ERenderTargetLoadAction::ELoad);
 		}
+		FRDGTextureRef VelocityTarget = LitTargets->SceneVelocity;
+		if (!VelocityTarget)
+		{
+			VelocityTarget = GraphBuilder.CreateTexture(FRDGTextureDesc::Create2D(Output.Texture->Desc.Extent,
+				PF_G16R16, FClearValueBinding::Black, TexCreate_RenderTargetable | TexCreate_ShaderResource), TEXT("VGSSplat.UnusedVelocity"));
+		}
+		if (!HasBeenProduced(VelocityTarget)) AddClearRenderTargetPass(GraphBuilder, VelocityTarget, FLinearColor::Transparent);
+		Params->RenderTargets[LitTargets->bSubstrateMaterial ? 5 : 4] = FRenderTargetBinding(VelocityTarget, ERenderTargetLoadAction::ELoad);
 		Params->RenderTargets.DepthStencil = FDepthStencilBinding(LitTargets->SceneDepth, ERenderTargetLoadAction::ELoad, ERenderTargetLoadAction::ELoad, FExclusiveDepthStencil::DepthWrite_StencilNop);
 
 		TShaderMapRef<FVGSSplatGBufferPS> PixelShader(GetGlobalShaderMap(View.GetShaderPlatform()));

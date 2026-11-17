@@ -63,6 +63,9 @@ copy_renamed(${VGS}/Shaders/Private/SplatRenderer ${STAGE}/Shaders/Private/Splat
 copy_renamed(${VGS}/Shaders/Shared ${STAGE}/Shaders/Shared Shaders/Shared)
 file(COPY ${VGS}/Resources/InverseToneCurve DESTINATION ${STAGE}/Resources)
 file(COPY ${VGS}/Content/Icons DESTINATION ${STAGE}/Content)
+if(EXISTS ${STATIC}/Content/Materials)
+  file(COPY ${STATIC}/Content/Materials DESTINATION ${STAGE}/Content)
+endif()
 file(COPY ${VGS}/Source/VGSRuntime/Private/VGSSplatLayout.h DESTINATION ${STAGE}/Source/VGSStaticRuntime/Public)
 
 set(normals ${STAGE}/Source/VGSStaticEditor/Private/Normals)

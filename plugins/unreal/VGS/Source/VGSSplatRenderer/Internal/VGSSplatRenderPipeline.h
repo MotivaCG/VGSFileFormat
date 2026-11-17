@@ -47,6 +47,13 @@ public:
 
 	FMatrix44f LocalToWorld = FMatrix44f::Identity;
 	FMatrix44f WorldToLocal = FMatrix44f::Identity;
+	// Previous rendered frame, before compaction/sorting. Correspondence is only claimed
+	// when the source knows that record IDs survived (packed playback: within a chunk).
+	TRefCountPtr<FRDGPooledBuffer> PreviousGpuBuffer;
+	FMatrix44f PreviousLocalToWorld = FMatrix44f::Identity;
+	bool bMotionHistoryValid = false;
+	bool bSplatMotionHistoryValid = true;
+	bool bDeforming = false;
 
 	FBox3f LocalBounds = FBox3f(EForceInit::ForceInit);
 
@@ -125,6 +132,8 @@ namespace VGSSplat
 	{
 		FRDGTextureRef SceneColor = nullptr;
 		FRDGTextureRef SceneDepth = nullptr;
+		FRDGTextureRef SceneVelocity = nullptr;
+		FRDGTextureRef CaptureReceiverMask = nullptr;
 		FRDGTextureRef GBufferA = nullptr;
 		FRDGTextureRef GBufferB = nullptr;
 		FRDGTextureRef GBufferC = nullptr;

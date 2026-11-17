@@ -48,9 +48,10 @@ bool rigFromComment(const Splats &s, NormalRig &rig);
  * 0 where none could be found. */
 RigNormalsResult rigNormals(const Splats &s, NormalRig rig, std::vector<float> &normals);
 
-/* The same estimate with cameras spread all around the splats (gaussiannormals::
- * surroundingViews) instead of a rig's: for a PLY from anywhere else. Outward too. */
-RigNormalsResult surroundingNormals(const Splats &s, std::vector<float> &normals);
+/* The VGS editor's estimate with cameras spread all around the splats (gaussiannormals::
+ * surroundingViews), seeing as its Normal (kSurroundingVisibility) or Fine (kFineVisibility):
+ * for a PLY from any rig or none. Outward too. */
+RigNormalsResult surroundingNormals(const Splats &s, std::vector<float> &normals, bool fine = false);
 
 struct AxisNormalsSettings {
   int neighbours = 16;           // the nearest splats a consensus is taken over

@@ -1,0 +1,48 @@
+// VGS: used by the shipped Light Function material. The prefix atlas represents
+// transmittance up to each of 64 depth-bin boundaries, rather than a whole column.
+#pragma once
+float VGSSampleDeepLayer(Texture2D Atlas, SamplerState AtlasSampler, float2 UV, int Layer, float Resolution)
+{
+	if (Layer < 0) return 1.0f;
+	Layer = min(Layer, 63);
+	const float2 Tile = float2(Layer % 8, Layer / 8);
+	const float2 TexelUV = clamp(UV, 0.5f / Resolution, 1.0f - 0.5f / Resolution);
+	return Texture2DSampleLevel(Atlas, AtlasSampler, (Tile + TexelUV) / float2(8, 9), 0).r;
+}
+
+float VGSSampleDeepShadow(Texture2D Atlas, SamplerState AtlasSampler, Texture2D CaptureMask, SamplerState CaptureMaskSampler,
+	float3 WorldPosition, float3 Origin, float3 X, float3 Y, float3 Z,
+	float3 Extent, float Resolution, float Bias, float SelfShadow, float Penumbra)
+{
+	uint MaskWidth, MaskHeight;
+	CaptureMask.GetDimensions(MaskWidth, MaskHeight);
+	// LightFunctionCommon sets ScreenPosition, but not Parameters.SvPosition. Material
+	// GetViewportUV therefore cannot be used here; project the reconstructed receiver.
+	const float4 Clip = mul(float4(DFAddDemote(PrimaryView.PreViewTranslation, WorldPosition), 1), PrimaryView.TranslatedWorldToClip);
+	const float2 ScreenUV = Clip.xy / Clip.w * float2(0.5f, -0.5f) + 0.5f;
+	const float2 BufferUV = (ScreenUV * View.ViewSizeAndInvSize.xy + View.ViewRectMin.xy) / float2(MaskWidth, MaskHeight);
+	if (SelfShadow < 0.5f && Texture2DSampleLevel(CaptureMask, CaptureMaskSampler, BufferUV, 0).r > 0.5f) return 1.0f;
+	const float3 Delta = WorldPosition - Origin;
+	const float3 L = float3(dot(Delta, X), dot(Delta, Y), dot(Delta, Z));
+	const float2 UV = float2(L.x / Extent.x, -L.y / Extent.y) * 0.5f + 0.5f;
+	if (any(UV <= 0.0f) || any(UV >= 1.0f) || L.z - Bias <= -Extent.z) return 1.0f;
+	const float H = saturate(((L.z - Bias) / Extent.z + 1.0f) * 0.5f) * 64.0f;
+	const int Layer = min(int(H), 63);
+	const float F = H >= 64.0f ? 1.0f : frac(H);
+	const float Radius = max(Penumbra * max(L.z + Extent.z, 0.0f), 0.0f);
+	float Result = 0;
+	const float2 Offsets[4] = {float2(-0.5,-0.5),float2(0.5,-0.5),float2(-0.5,0.5),float2(0.5,0.5)};
+	for (int Tap = 0; Tap < 4; ++Tap)
+	{
+		const float2 P = UV + Offsets[Tap] * Radius / (2.0f * Extent.xy);
+		// Outside the fitted volume is unoccluded, rather than repeated edge texels.
+		if (any(P <= 0.0f) || any(P >= 1.0f)) { Result += 1.0f; continue; }
+		const float2 NearestUV = (float2(0, 8) + clamp(P, 0.5f / Resolution, 1.0f - 0.5f / Resolution)) / float2(8, 9);
+		const float Nearest = Texture2DSampleLevel(Atlas, AtlasSampler, NearestUV, 0).r;
+		if (((L.z - Bias) / Extent.z + 1.0f) * 0.5f <= Nearest) { Result += 1.0f; continue; }
+		const float A = VGSSampleDeepLayer(Atlas, AtlasSampler, P, Layer - 1, Resolution);
+		const float B = VGSSampleDeepLayer(Atlas, AtlasSampler, P, Layer, Resolution);
+		Result += exp(lerp(log(max(A, 1e-7f)), log(max(B, 1e-7f)), F));
+	}
+	return Result * 0.25f;
+}

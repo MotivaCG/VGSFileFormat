@@ -19,6 +19,7 @@ void UVGSSplatSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 
 void UVGSSplatSubsystem::Deinitialize()
 {
+	ReleaseShadowLightFunction();
 	// Due to a flaw in SVE APIs, it may be kept alive unless we explicitely deactivate it.
 	//SceneViewExtension->bIsActive = false;
 	SceneViewExtension.Reset();

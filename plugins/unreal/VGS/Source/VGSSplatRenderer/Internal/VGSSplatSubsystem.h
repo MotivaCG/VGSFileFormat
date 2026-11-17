@@ -6,6 +6,7 @@
 
 #include "Subsystems/WorldSubsystem.h"
 #include "Engine/EngineBaseTypes.h"
+#include "VGSSplatLightShadow.h"
 
 #if WITH_EDITOR
 #include "EditorUndoClient.h"
@@ -14,12 +15,17 @@
 #include "VGSSplatSubsystem.generated.h"
 
 class FVGSSplatViewExtension;
+class UMaterialInterface;
+class UMaterialInstanceDynamic;
+class UTextureRenderTarget2D;
+class UDirectionalLightComponent;
 
 UCLASS(MinimalAPI)
 class UVGSSplatSubsystem : public UWorldSubsystem
 {
 public:
 	GENERATED_BODY()
+	UVGSSplatSubsystem();
 
 public:
 
@@ -29,4 +35,13 @@ public:
 	virtual bool ShouldCreateSubsystem(UObject* Outer) const override;
 
 	TSharedPtr<FVGSSplatViewExtension> SceneViewExtension;
+	VGSSplat::FDeepShadowFrame UpdateShadowLightFunction(const FSceneViewFamily& Family);
+private:
+	UPROPERTY() TObjectPtr<UMaterialInterface> ShadowMaterial;
+	UPROPERTY() TObjectPtr<UMaterialInstanceDynamic> ShadowInstance;
+	UPROPERTY() TObjectPtr<UTextureRenderTarget2D> ShadowAtlas;
+	UPROPERTY() TObjectPtr<UTextureRenderTarget2D> ShadowReceivers;
+	UPROPERTY() TObjectPtr<UDirectionalLightComponent> ParameterSource;
+	TWeakObjectPtr<UDirectionalLightComponent> ShadowLight;
+	void ReleaseShadowLightFunction();
 };

@@ -91,6 +91,103 @@ struct Grid {
   size_t size() const { return size_t(n[0]) * size_t(n[1]) * size_t(n[2]); }
 };
 
+// Stable squared distance in the splat's metric. The expanded quadratic can lose
+// precision when a thin, oblique splat makes large terms almost cancel.
+inline double metricDistanceSquared(const float *m, const double *d) {
+  double value = 0.0;
+  for (int r = 0; r < 3; ++r) {
+    const double v = m[r * 3] * d[0] + m[r * 3 + 1] * d[1] + m[r * 3 + 2] * d[2];
+    value += v * v;
+  }
+  return value;
+}
+
+// Minimise ||m*d||^2 in a box. Three coordinate sweeps are a fast candidate, not a
+// convergence guarantee. The convex first-order gap bounds its error; difficult cases
+// fall back to all 27 interior/face/edge/corner active sets (only 3 variables).
+inline double boxMetricDistanceSquared(const float *m, const double *a, const float *lo, float voxel) {
+  const double A[3][3] = {{a[0], a[3], a[4]}, {a[3], a[1], a[5]}, {a[4], a[5], a[2]}};
+  double hi[3], d[3];
+  bool containsCentre = true;
+  for (int k = 0; k < 3; ++k) {
+    hi[k] = double(lo[k]) + voxel;
+    containsCentre = containsCentre && lo[k] <= 0.0 && hi[k] >= 0.0;
+    d[k] = std::min(std::max(0.0, double(lo[k])), hi[k]);
+  }
+  if (containsCentre) return 0.0;
+  for (int sweep = 0; sweep < 3; ++sweep)
+    for (int k = 0; k < 3; ++k) {
+      double off = 0.0;
+      for (int j = 0; j < 3; ++j)
+        if (j != k) off += A[k][j] * d[j];
+      d[k] = std::min(std::max(-off / A[k][k], double(lo[k])), hi[k]);
+    }
+  double best = metricDistanceSquared(m, d), gap = 0.0;
+  for (int k = 0; k < 3; ++k) {
+    double grad = 0.0;
+    for (int j = 0; j < 3; ++j) grad += 2.0 * A[k][j] * d[j];
+    gap += grad * (d[k] - (grad >= 0.0 ? double(lo[k]) : hi[k]));
+  }
+  if (gap <= 1e-7 * std::max(1.0, best)) return best;
+  for (int state = 0; state < 27; ++state) {
+    int code = state, free[3], count = 0;
+    for (int k = 0; k < 3; ++k, code /= 3) {
+      const int side = code % 3;
+      d[k] = side == 2 ? hi[k] : double(lo[k]);
+      if (side == 0) { free[count++] = k; d[k] = 0.0; }
+    }
+    double system[3][4] = {};
+    for (int r = 0; r < count; ++r) {
+      for (int c = 0; c < count; ++c) system[r][c] = A[free[r]][free[c]];
+      for (int j = 0; j < 3; ++j) system[r][count] -= A[free[r]][j] * d[j];
+    }
+    bool valid = true;
+    for (int c = 0; c < count; ++c) {
+      int pivot = c;
+      for (int r = c + 1; r < count; ++r)
+        if (std::fabs(system[r][c]) > std::fabs(system[pivot][c])) pivot = r;
+      if (!(std::fabs(system[pivot][c]) > 0.0)) { valid = false; break; }
+      for (int j = c; j <= count; ++j) std::swap(system[pivot][j], system[c][j]);
+      const double divisor = system[c][c];
+      for (int j = c; j <= count; ++j) system[c][j] /= divisor;
+      for (int r = 0; r < count; ++r)
+        if (r != c) {
+          const double factor = system[r][c];
+          for (int j = c; j <= count; ++j) system[r][j] -= factor * system[c][j];
+        }
+    }
+    for (int r = 0; valid && r < count; ++r) {
+      const int k = free[r];
+      d[k] = system[r][count];
+      valid = std::isfinite(d[k]) && d[k] >= lo[k] && d[k] <= hi[k];
+    }
+    if (valid) best = std::min(best, metricDistanceSquared(m, d));
+  }
+  return best;
+}
+
+// Distance in material only, excluding any initial gap after smoothing. Use the last
+// solid sample, rather than the first empty one, to keep a conservative sampled extent.
+inline float insetAtVertex(const Grid &grid, const std::vector<uint8_t> &v, const float *origin,
+                           const float *p, const float *n, float voxel, float inset) {
+  float entry = -1.0f, lastSolid = 0.0f;
+  const float step = 0.25f * voxel, limit = 2.5f * inset + 2.0f * voxel;
+  for (float t = 0.0f; t <= limit; t += step) {
+    int c[3];
+    bool inGrid = true;
+    for (int k = 0; k < 3; ++k) {
+      c[k] = int(std::floor((p[k] - t * n[k] - origin[k]) / voxel));
+      inGrid = inGrid && c[k] >= 0 && c[k] < grid.n[k];
+    }
+    const bool solid = inGrid && v[grid.at(c[0], c[1], c[2])] != 0;
+    if (solid) {
+      if (entry < 0.0f) entry = t;
+      lastSolid = t;
+    } else if (entry >= 0.0f) break;
+  }
+  return entry >= 0.0f ? std::min(inset, 0.45f * (lastSolid - entry)) : 0.0f;
+}
+
 // Occupancy flags (one byte a voxel).
 constexpr uint8_t Solid = 1, Seen = 2, Outside = 4;
 
@@ -134,7 +231,7 @@ inline bool buildProxy(const Splats &s, const ProxySettings &settings, ProxyMesh
   struct G {
     float c[3];
     float m[9]; // rows: the splat's axes divided by its scales (world offset -> scaled local)
-    float A[6]; // m^T m (xx, yy, zz, xy, xz, yz): d^2 = offset^T A offset
+    double A[6]; // m^T m, formed in double for thin oblique splats
     float e[3]; // half extents of the box beyond which it adds less than eps
     float opacity, reach2;
     bool elongated; // far from round: its nearest point in a voxel is not the nearest in metres
@@ -155,7 +252,7 @@ inline bool buildProxy(const Splats &s, const ProxySettings &settings, ProxyMesh
     for (int k = 0; k < 3; ++k) sc[k] = std::max(s.scales[i * 3 + k], 1e-7f);
     for (int r = 0; r < 3; ++r)
       for (int c = 0; c < 3; ++c) g.m[r * 3 + c] = R[c * 3 + r] / sc[r];
-    const auto mtm = [&](int i, int j) { return g.m[i] * g.m[j] + g.m[3 + i] * g.m[3 + j] + g.m[6 + i] * g.m[6 + j]; };
+    const auto mtm = [&](int i, int j) { return double(g.m[i]) * g.m[j] + double(g.m[3 + i]) * g.m[3 + j] + double(g.m[6 + i]) * g.m[6 + j]; };
     g.A[0] = mtm(0, 0), g.A[1] = mtm(1, 1), g.A[2] = mtm(2, 2), g.A[3] = mtm(0, 1), g.A[4] = mtm(0, 2), g.A[5] = mtm(1, 2);
     g.elongated = std::max(sc[0], std::max(sc[1], sc[2])) > 1.5f * std::min(sc[0], std::min(sc[1], sc[2]));
     g.opacity = a;
@@ -245,22 +342,17 @@ inline bool buildProxy(const Splats &s, const ProxySettings &settings, ProxyMesh
           float *row = &density[grid.at(0, y, z)];
           for (int x = r0[0]; x <= r1[0]; ++x) {
             const float vx = origin[0] + float(x) * voxel;
-            float d[3] = {std::min(std::max(g.c[0], vx), vx + voxel) - g.c[0], dy, dz};
+            const double d[3] = {std::min(std::max(g.c[0], vx), vx + voxel) - g.c[0], dy, dz};
+            double d2;
             if (g.elongated) {
               // The voxel's point of highest density is its nearest to the centre in the
               // splat's own metric, not in metres: for a thin splat across the voxel they
-              // differ, and the nearest in metres can miss it. Coordinate descent on the
-              // convex quadratic d^T A d within the voxel (each step exact, then clamped).
+              // differ, and the nearest in metres can miss it. Check convergence and use
+              // an active-set fallback for cases the three coordinate sweeps cannot solve.
               const float lo3[3] = {vx - g.c[0], origin[1] + float(y) * voxel - g.c[1], vz - g.c[2]};
-              for (int sweep = 0; sweep < 3; ++sweep) {
-                d[0] = std::min(std::max(-(g.A[3] * d[1] + g.A[4] * d[2]) / g.A[0], lo3[0]), lo3[0] + voxel);
-                d[1] = std::min(std::max(-(g.A[3] * d[0] + g.A[5] * d[2]) / g.A[1], lo3[1]), lo3[1] + voxel);
-                d[2] = std::min(std::max(-(g.A[4] * d[0] + g.A[5] * d[1]) / g.A[2], lo3[2]), lo3[2] + voxel);
-              }
-            }
-            const float d2 = g.A[0] * d[0] * d[0] + g.A[1] * d[1] * d[1] + g.A[2] * d[2] * d[2] +
-                             2.0f * (g.A[3] * d[0] * d[1] + g.A[4] * d[0] * d[2] + g.A[5] * d[1] * d[2]);
-            if (d2 < g.reach2) row[x] += g.opacity * std::exp(-0.5f * d2);
+              d2 = boxMetricDistanceSquared(g.m, g.A, lo3, voxel);
+            } else d2 = metricDistanceSquared(g.m, d);
+            if (d2 < g.reach2) row[x] += float(g.opacity * std::exp(-0.5 * d2));
           }
         }
       }
@@ -527,22 +619,7 @@ inline bool buildProxy(const Splats &s, const ProxySettings &settings, ProxyMesh
     parallelFor(nv, settings.threads, [&](size_t i) {
       const float *n = &N[i * 3];
       if (n[0] == 0.0f && n[1] == 0.0f && n[2] == 0.0f) return;
-      float thickness = 0.0f;
-      bool entered = false;
-      const float step = 0.25f * voxel, limit = 2.5f * settings.inset + 2.0f * voxel;
-      for (float t = 0.0f; t <= limit; t += step) {
-        int c[3];
-        bool inGrid = true;
-        for (int k = 0; k < 3; ++k) {
-          c[k] = int(std::floor((P[i * 3 + k] - t * n[k] - origin[k]) / voxel));
-          inGrid = inGrid && c[k] >= 0 && c[k] < grid.n[k];
-        }
-        const bool solid = inGrid && v[grid.at(c[0], c[1], c[2])] != 0;
-        if (solid) entered = true;
-        else if (entered) break;
-        thickness = t;
-      }
-      amount[i] = entered ? std::min(settings.inset, 0.45f * thickness) : 0.0f;
+      amount[i] = insetAtVertex(grid, v, origin, &P[i * 3], n, voxel, settings.inset);
     });
     // The amounts smoothed: the smallest among the neighbours, then their mean, never more
     // than the vertex's own (a thin part stays protected, and its edge eases into the rest).

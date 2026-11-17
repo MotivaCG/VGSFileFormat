@@ -47,7 +47,7 @@ enum class EVGSLighting : uint8
 	 * Lumen and fog all apply. Edges and hair are dithered, which temporal anti-aliasing
 	 * smooths. The capture already has its studio's light in its colours, so it shows lit
 	 * twice; Self-illumination Amount keeps part of it glowing. Needs the deferred renderer
-	 * without Substrate; elsewhere the capture stays self-illuminated.
+	 * (with or without Substrate); elsewhere the capture stays self-illuminated.
 	 */
 	Shaded UMETA(DisplayName = "Shaded"),
 };
@@ -174,8 +174,8 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Splats", AdvancedDisplay)
 	EVGSEvaluateOn EvaluateOn = EVGSEvaluateOn::GPU;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Splats", AdvancedDisplay,
-		meta = (EditCondition = "EvaluateOn == EVGSEvaluateOn::CPU", EditConditionHides))
+	/** Upload layout for CPU evaluation only; the vgs.EvaluateOn console override also applies. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Splats", AdvancedDisplay)
 	EVGSGpuLayout GpuLayout = EVGSGpuLayout::Float;
 
 	/** Scales every splat about its centre. */
@@ -190,8 +190,10 @@ public:
 	 * emissive of fixed brightness and do not respond to lights, so a scene exposed for
 	 * physical light units (a sun of 100,000 lux meters around EV100 14) shows them nearly
 	 * black. Set this near the scene's EV100 to see the capture as it looks at EV100 0.
+	 * In Shaded it scales only Self-illumination Amount, and has no effect when that is 0.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Rendering", meta = (DisplayName = "Intensity (EV)", UIMin = "-4.0", UIMax = "18.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Rendering", meta = (DisplayName = "Intensity (EV)", UIMin = "-4.0", UIMax = "18.0",
+		EditCondition = "Lighting == EVGSLighting::SelfIllumination || SelfIlluminationAmount > 0.0"))
 	float IntensityEV = 0.0f;
 
 	/** How splats blend over each other: as the capture was trained. Most are trained in sRGB. */
@@ -204,16 +206,16 @@ public:
 
 	/** How much of the colour still glows when Shaded: 0 is lit only by the scene, 1 as bright as self-illuminated plus the lights. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Lighting",
-		meta = (DisplayName = "Self-illumination Amount", ClampMin = "0.0", ClampMax = "1.0", EditCondition = "Lighting == EVGSLighting::Shaded", EditConditionHides))
+		meta = (DisplayName = "Self-illumination Amount", ClampMin = "0.0", ClampMax = "1.0", EditCondition = "Lighting == EVGSLighting::Shaded"))
 	float SelfIlluminationAmount = 0.1f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Lighting",
-		meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "Lighting == EVGSLighting::Shaded", EditConditionHides))
+		meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "Lighting == EVGSLighting::Shaded"))
 	float Roughness = 0.8f;
 
 	/** Unreal's Specular: 0.5 is the usual dielectric, 0 no highlights at all. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Lighting",
-		meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "Lighting == EVGSLighting::Shaded", EditConditionHides))
+		meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "Lighting == EVGSLighting::Shaded"))
 	float Specular = 0.02f;
 
 	/**
@@ -222,17 +224,20 @@ public:
 	 * 0 lights each pixel by its splats' normal alone.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Lighting",
-		meta = (ClampMin = "0.0", UIMax = "10.0", Units = "cm", EditCondition = "Lighting == EVGSLighting::Shaded", EditConditionHides))
+		meta = (ClampMin = "0.0", UIMax = "10.0", Units = "cm", EditCondition = "Lighting == EVGSLighting::Shaded"))
 	float NormalSmoothing = 2.0f;
 
 	/**
-	 * Only with the project's Shadow Method "Unreal Shadow Maps" (Project Settings > Plugins >
-	 * VGS): how far (cm) each splat's shadow caster is moved inwards, along its normal. The lit
+	 * For native Unreal shadow-map casters (Unreal Shadow Maps, Mixed's other lights, or the
+	 * native fallback of Splat Shadow Map): how far (cm) each caster moves inwards along its normal. The lit
 	 * surface lies among its own splats, and without this would shadow itself in blotches
 	 * when Shaded; more than needed thins the shadows of thin parts (fingers, hair). Without
 	 * normals, "inwards" is away from the capture's centre.
+	 * Requires dynamic shadow casting and a project Shadow Method other than No Shadows.
+	 * The splats' own map uses the project's Shadow Bias instead.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Lighting", meta = (ClampMin = "0.0", UIMax = "10.0", Units = "cm"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Lighting", meta = (ClampMin = "0.0", UIMax = "10.0", Units = "cm",
+		EditCondition = "CastShadow && bCastDynamicShadow"))
 	float ShadowInset = 3.0f;
 
 	// Grade of the capture's colours, as in an image editor: on its display (sRGB) values,
@@ -258,17 +263,18 @@ public:
 	 * Show the capture's colours as captured, as the VGS viewer does, by undoing Unreal's
 	 * filmic tone curve on the splats (Epic's inverse LUT, applied when they are composited).
 	 * Off, the tone curve applies to them as to the rest of the scene: more contrast, crushed
-	 * darks and warmer skin.
+	 * darks and warmer skin. Only applies to Self-illumination, not the Shaded material.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Rendering", meta = (DisplayName = "Invert UE Tone Curve"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Rendering", meta = (DisplayName = "Invert UE Tone Curve",
+		EditCondition = "Lighting == EVGSLighting::SelfIllumination"))
 	bool bInvertToneCurve = true;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Rendering", AdvancedDisplay,
-		meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bInvertToneCurve", EditConditionHides))
+		meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "Lighting == EVGSLighting::SelfIllumination && bInvertToneCurve"))
 	float InverseToneCurveStrength = 1.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS|Rendering", AdvancedDisplay,
-		meta = (DisplayName = "Invert Default Expand Gamut", EditCondition = "bInvertToneCurve", EditConditionHides))
+		meta = (DisplayName = "Invert Default Expand Gamut", EditCondition = "Lighting == EVGSLighting::SelfIllumination && bInvertToneCurve && InverseToneCurveStrength > 0.0"))
 	bool bInvertExpandGamut = true;
 
 	// ---- what the capture says about itself --------------------------------------------
@@ -343,6 +349,7 @@ public:
 	virtual FBoxSphereBounds CalcBounds(const FTransform& LocalToWorld) const override;
 	virtual FPrimitiveSceneProxy* CreateSceneProxy() override;
 #if WITH_EDITOR
+	virtual bool CanEditChange(const FProperty* InProperty) const override;
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 #endif
 	//~ End UActorComponent / USceneComponent / UPrimitiveComponent

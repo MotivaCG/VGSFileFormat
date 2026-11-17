@@ -54,6 +54,7 @@ Buffer<uint> SortedIndexBuffer;
 #endif // !GAUSSIAN_SPLAT_VERTEX_ATTRIBUTE_FETCH
 #if VGS_LIT
 StructuredBuffer<uint> ShadedNormalBuffer; // VGS CHANGE: by record, as ShadedVGSSplatBuffer
+StructuredBuffer<float2> ShadedMotionBuffer;
 #endif // VGS_LIT
 
 static const float2 QuadCorners[4] =
@@ -72,6 +73,7 @@ struct FVertexOutput
 	nointerpolation uint SplatIndex : TEXCOORD2;
 #if VGS_LIT
 	nointerpolation float3 ViewNormal : TEXCOORD3; // VGS CHANGE
+	nointerpolation float2 ObjectMotion : TEXCOORD4;
 #endif // VGS_LIT
 };
 
@@ -88,6 +90,7 @@ FVertexOutput CreateVGSSplatVertex(FShadedVGSSplatData SplatData, uint VertexID,
 		Output.SplatIndex = 0;
 #if VGS_LIT
 		Output.ViewNormal = 0;
+		Output.ObjectMotion = 0;
 #endif // VGS_LIT
 		return Output;
 	}
@@ -111,6 +114,7 @@ FVertexOutput CreateVGSSplatVertex(FShadedVGSSplatData SplatData, uint VertexID,
 	Output.SplatIndex = SplatIndex;
 #if VGS_LIT
 	Output.ViewNormal = 0; // set by MainVS
+	Output.ObjectMotion = 0;
 #endif // VGS_LIT
 
 	return Output;
@@ -147,6 +151,7 @@ FVertexOutput MainVS(
 	FVertexOutput Output = CreateVGSSplatVertex(UnpackShadedVGSSplat(PackedSplatData), VertexID, SplatIndex);
 #if VGS_LIT && !GAUSSIAN_SPLAT_VERTEX_ATTRIBUTE_FETCH && !GAUSSIAN_SPLAT_GATHER_SHADED_SPLATS
 	Output.ViewNormal = VGSSplatUnpackOctNormal(ShadedNormalBuffer[SplatIndex]); // VGS CHANGE
+	Output.ObjectMotion = ShadedMotionBuffer[SplatIndex];
 #endif
 	return Output;
 }
@@ -193,6 +198,7 @@ void MainPS(
 	, out float4 OutDepthMoments : SV_Target1
 #if VGS_LIT
 	, out float4 OutNormalZ : SV_Target2 // VGS CHANGE: the normal's z, blended as the moments
+	, out float OutSurfaceDepth : SV_Target3
 #endif // VGS_LIT
 #endif
 #if WRITE_VELOCITY
@@ -238,7 +244,10 @@ void MainPS(
 	float LinearZ = ConvertFromDeviceZ(Input.Position.z) / ExpectedDepthScale;
 #if VGS_LIT
 	OutDepthMoments = float4(LinearZ, Input.ViewNormal.xy, 1.0f) * SrcAlpha; // VGS CHANGE
-	OutNormalZ = float4(Input.ViewNormal.z, 0.0f, 0.0f, 1.0f) * SrcAlpha;
+	OutNormalZ = float4(Input.ViewNormal.z, Input.ObjectMotion, 1.0f) * SrcAlpha;
+	// An opaque receiver belongs to the front supported surface, not the average
+	// between it and a second surface. Very faint layers retain the moment fallback.
+	OutSurfaceDepth = SrcAlpha >= 0.5f ? LinearZ : 1e20f;
 #else
 	OutDepthMoments = float4(LinearZ * SrcAlpha, 0.0f, 0.0f, SrcAlpha);
 #endif // VGS_LIT

@@ -45,6 +45,26 @@ tools/                       the copy script, the patch of VGS's changes to the 
                              LUT packer, assemble_vgsstatic.cmake
 ```
 
+## Dependent controls
+
+Dependent controls stay visible but grey out when they do not apply, retaining their values:
+
+- Shaded material controls (self-illumination amount, roughness, specular and normal smoothing)
+  require Lighting **Shaded**. Intensity (EV) needs self-illumination, either as the lighting mode
+  or as a nonzero amount in Shaded.
+- Invert UE Tone Curve applies to **Self-illumination** only. Its strength needs the switch on;
+  Invert Default Expand Gamut also needs nonzero strength.
+- A capture's GPU Layout applies to **CPU** evaluation, including the `vgs.EvaluateOn` override.
+- Shadow Caster (static) and Shadow Inset require dynamic shadow casting. Shadow Inset is also
+  inactive for a mesh proxy or project **No Shadows**. It remains available for the native
+  fallback of Splat Shadow Map; the own map's bias is the project's Shadow Bias.
+- Proxy Collision needs an asset with a proxy mesh, independently of the chosen shadow caster
+  and whether shadows are enabled. Selecting Proxy Mesh without a mesh still falls back to splats.
+- Import/reimport normal neighbours and radius apply only to **Shortest axes (PGSR)** with
+  normal estimation enabled. The proxy-building controls require Make Shadow Proxy.
+
+These are editor dependencies; changing modes does not erase saved values or alter Blueprint access.
+
 ## Building and installing
 
 CMake does not build the plugin; Unreal does, inside a project. CMake assembles it:
@@ -133,7 +153,7 @@ only its own sources; Epic's plugin, where it is enabled, draws its assets untou
   the skylight, Lumen and fog reach it as they reach a mesh. The splats are drawn front to
   back into a scratch target that keeps, per pixel, their coverage, colour, expected depth
   and opacity-weighted view-space normal; `VGSSplatGBuffer.usf` turns that into base colour
-  (the graded colour made linear), normal, depth, *Roughness* and *Specular*, and writes
+  (the graded colour made linear), normal, surface depth, *Roughness* and *Specular*, and writes
   *Self-illumination Amount* of the colour as emissive. Pixels the splats only partly cover
   are written where they cover half or more; `r.VGSSplat.Lit.Dither 1` writes them at random
   in proportion instead, for TSR to smooth, but TSR leaves it speckled along edges (seen
@@ -158,25 +178,25 @@ only its own sources; Epic's plugin, where it is enabled, draws its assets untou
   Every light lights a Shaded actor whichever the method, and every mesh's shadow falls on
   it; the method is only about the shadows the splats cast. In the order the settings list
   them (`r.VGSSplat.Shadow.Method` 0 to 3):
-  - *Splat Shadow Map (sun only)*, the default (`VGSSplatLightShadow.cpp/.usf`): the casting
-    actors are drawn from the main directional light (`VGSSplat::FindMainLight`: of the
-    directional lights that cast shadows, the one marked *Atmosphere Sun Light* with index 0,
-    otherwise the brightest; not Unreal's own pick, which is whichever was added first) into
-    a shadow map of the splats' own, fitted to them, as
-    Gaussians with their real opacity: transmittance multiplied, and the nearest and farthest
-    depth along the light, so no sorting. Before post-processing, the light's direct
-    contribution (diffuse and GGX specular from the GBuffer, over the atmosphere's
-    transmittance) is taken off every pixel behind the splats, in proportion to what they
-    block, with a penumbra that widens with the distance behind them by the light's *Source
-    Angle* (*Shadow Softness*). A pixel within the splats' depth is the capture itself: left
-    alone unless *Self Shadowing* is on, so lit characters show no blotches. *Shadow Texel
-    Size* 0.5 cm (up to 2048 texels a side). Cost on the carrito playing (283k splats, 1280x720):
-    the map 0.98 ms at 0.5 cm (640x640), 0.60 ms at 1 cm, about 0.4 ms of it per splat
-    (vertex work) and the rest fill; the composite 0.03 ms, whatever the screen resolution.
-    Only that one light; spot, point and rect lights get no splat shadows. Where the splats'
-    shadow falls on another object's shadow the pixel ends darker than the skylight alone
-    leaves it (the direct light taken off was not there). With Substrate's own material
-    buffer, the colour is darkened by a fixed 60 % instead.
+  - *Splat Shadow Map (sun only)*, the default (`VGSSplatLightShadow.cpp/.usf`):
+    splats are rasterized once from the sun into 64 light-space depth bins. Optical depth
+    is added atomically, then scanned into cumulative transmittance. The sun's Light Function
+    samples only up to the receiver's depth, before UE evaluates that light; no SceneColor
+    subtraction, reconstructed BRDF or fixed Substrate darkening. Its indirect and emissive
+    contributions are preserved by that integration. One extra nearest-depth tile prevents
+    interpolation from shadowing a point ahead of the first actual caster.
+    *Self Shadowing* enables reception on Shaded captures, including self-shadow and shadows
+    between captures of that renderer. Off excludes their visible pixels, using a mask written
+    with the GBuffer's depth test; ordinary UE receivers between casters still receive shadows.
+    The grid is shared by the family's views; VGS and VGSStatic share one Light Function with
+    independent grids, without modifying the light component's saved material. A user Light
+    Function is kept and uses native shadow casters as fallback. The preferred light is still
+    the atmosphere sun at index 0, otherwise the brightest directional light casting shadows.
+    Texels target 0.5 cm, up to 1024 per spatial side. At 512 spatial texels the bins, atlas and
+    nearest buffer require about 101 MiB, plus the screen receiver mask; the old timing figures
+    for the single-column map do not apply. The 64 depth bins approximate positions within a
+    bin, and splats use their conditional centre along each light ray, not a full 3D volume.
+    Self-illuminated captures remain composited later and do not receive this lighting.
   - *Splat Shadow Map (sun) + Unreal Shadow Maps (other lights)*: both, the second for every
     light but the main one. A shadow depth view looks along its light
     (`FProjectedShadowInfo::ModifyViewForShadow` turns it so, for billboards), so the
@@ -226,26 +246,20 @@ many splats, the SH degree, and whether it has normals and where they come from.
 - **Normals**, worked out once, at import, never per frame:
   - the PLY's own when it has them (SMNForge's and the VGS editor's, from the capture's own
     cameras), as they are;
-  - without them, the VGS editor's estimate with a studio rig's cameras, when the PLY names
-    its rig (SMNForge writes `comment capture_rig SMNV1` or `THE4DSCANNER`, and `comment
-    normals SMNForge` beside the normals it writes) or the import is told one; if that rig's
-    cameras see less than half of the splats the PLY is not in its frame, and
-  - otherwise (a PLY from anywhere else): the same estimate with **cameras all around**
-    instead of a rig's (`gaussiannormals::surroundingViews`: 256 on a Fibonacci sphere about
-    the opaque splats, whichever way is up, seeing as `kSurroundingVisibility`), which decide
-    each splat's outward side as a rig's would. On andreavictor (221k splats) against the
-    file's normals (the SMNV1 rig's): mean |cos| 0.981 (96.6 % within 30 degrees), with the
-    side 0.917 (94.2 %), measured with 42 cameras in 0.35 s. Since 2026-11-14, 256 cameras
-    and a depth tolerance of 0.1 % (was 1 %): against gs2mesh's dense mesh of andreavictor
-    and of another capture, the side is wrong on 0.40 % of the splats (1.3 % before), in
-    about 1 s.
+  - without them, the VGS editor's estimate with **cameras all around** the splats
+    (`gaussiannormals::surroundingViews`: 256 on a Fibonacci sphere about the opaque splats,
+    whichever way is up), which decide each splat's outward side for a PLY from any rig or
+    none; *Method* Normal sees as the editor's Normal (`kSurroundingVisibility`, about 1.3 s for
+    300 000 splats), Fine as its Fine (`kFineVisibility`, about 3 s). Against gs2mesh's dense
+    mesh of two captures (2026-11-17) the side is wrong on 0.25 % / 0.15 % of the splats with
+    Normal and 0.19 % / 0.10 % with Fine; a studio rig's own cameras, which the import used to
+    take when the PLY named its rig (`comment capture_rig`), put it wrong on 0.9-3.8 %.
   - *Method* Shortest axes keeps the earlier way: as PGSR takes a splat's normal (Chen et
     al. 2024), replaced where the splat is round or disagrees with its neighbours by their
     consensus, then smoothed; its side is decided on screen, facing the camera
     (`FVGSSplatRenderProxy::bNormalsFaceCamera`). Rougher: on andreavictor |cos| 0.91 (84 %).
-  SMNForge and the VGS editor use the same estimate and the same cameras all around, for
-  captures none of our rigs recorded and when a rig's cameras see less than half of them
-  (`gaussiannormals::estimateNormals`; the editor's export settings have *Rig* None of ours).
+  The VGS and SGS editors use the same estimate and the same cameras all around (the VGS
+  editor's export settings: *Normals* Yes, made as Fine, or No).
 - **Shadow proxy** (the default *Shadow Caster*). The import makes a closed mesh of where the
   splats are opaque (`VGSStaticProxy.h`, plain C++, checked by `tests/unreal_static.cpp`) and
   keeps it in the asset as a static mesh (*Shadow Proxy* > *Mesh*, in the asset's package).
@@ -431,13 +445,16 @@ From Epic's renderer, which the copy keeps (`VGSSplatRenderPipeline.cpp`,
   studio's light is already in its colours, so it shows lit twice. Needs the deferred
   renderer (with or without Substrate), hardware rasterization and vertex shaders that read buffers
   (`r.VGSSplat.*` defaults on desktop GPUs); elsewhere a Shaded capture is drawn
-  self-illuminated. No velocity and no stencil are written, so a
-  moving performer can ghost under TSR. With *Evaluate On* CPU the capture's normals are
+  self-illuminated. Shaded writes camera and actor motion to UE's velocity buffer; GPU
+  playback also supplies splat-centre deformation within a chunk. A new chunk or unavailable
+  record correspondence uses actor motion only; CPU deformation has no stable record IDs.
+  New/disappearing layers and wide rotating splats remain approximations, and stencil is not
+  written. With *Evaluate On* CPU the capture's normals are
   not used (the shortest axis is). The VGS editor's normals of `maria_simbo_carrito`
   (THE4DSCANNER rig) have scattered splats tilted the wrong way, which show as dark specks
-  under a strong light; the shading pass turns those clearly facing away from the camera
-  (`VGSShadedNormal`), the editor now corrects the worst before writing them, and *Normal
-  Smoothing* takes care of most of the rest. Forward shading is not lit (it has no GBuffer):
+  under a strong light. Oriented normals keep their side as the camera moves. Correct incorrectly
+  oriented source normals in the editor; *Normal Smoothing* can reduce local noise.
+  Forward shading is not lit (it has no GBuffer):
   a Shaded capture stays self-illuminated there.
 - Within the capture splats blend in sRGB values (*Blend Space* sRGB, the default), but the
   capture is composited over the scene in linear light, as any translucent layer: its edges
@@ -462,11 +479,10 @@ From Epic's renderer, which the copy keeps (`VGSSplatRenderPipeline.cpp`,
   shadowing another shows dappled where the splats leave gaps.
 - A static character's shadow proxy cannot leave out its own splats: Shaded, it always
   shadows itself (Unreal has no per-receiver exclusion). Its sizes assume a PLY in metres.
-- The splats' own shadow map takes the sun's light off after Unreal has lit the scene. It
-  cannot tell whether Unreal had already shadowed a pixel (a wall's shadow over the
-  splats'), and takes the light off again there. With Substrate it only darkens the whole
-  pixel by 0.6, indirect and emissive light included. Both need the shadow inside Unreal's
-  lighting (a light function or the light's shadow mask), not after it.
+- The depth-resolved Light Function uses the conventional per-light path, as its material
+  needs world and screen position. Support for fog, translucency, Lumen surface cache and
+  ray-traced shadows is not established by the deferred receiver tests. Existing user Light
+  Functions use native casters instead; that fallback has the native approximation's grain.
 - Static characters lit by the scene: thin, faint splats where a shoe meets the floor (the
   scan's contact smear) are written opaque with sideways normals and show as a dark wedge at
   the toe (andreavictor), whichever normals; not addressed yet.

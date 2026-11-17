@@ -15,6 +15,11 @@
 #include "RenderingThread.h"
 #include "SceneInterface.h"
 
+#if WITH_EDITOR
+#include "UObject/UnrealType.h"
+#include "VGSStaticSplatShadowVertexFactory.h"
+#endif
+
 #include UE_INLINE_GENERATED_CPP_BY_NAME(VGSStaticSplatComponent)
 
 UVGSStaticSplatComponent::UVGSStaticSplatComponent()
@@ -397,6 +402,26 @@ FBoxSphereBounds UVGSStaticSplatComponent::CalcBounds(const FTransform& LocalToW
 }
 
 #if WITH_EDITOR
+bool UVGSStaticSplatComponent::CanEditChange(const FProperty* InProperty) const
+{
+	if (!Super::CanEditChange(InProperty))
+	{
+		return false;
+	}
+	const FName Name = InProperty ? InProperty->GetFName() : NAME_None;
+	if (Name == GET_MEMBER_NAME_CHECKED(UVGSStaticSplatComponent, bProxyCollision))
+	{
+		return Splat && Splat->ShadowProxy;
+	}
+	if (Name == GET_MEMBER_NAME_CHECKED(UVGSStaticSplatComponent, ShadowInset))
+	{
+		// ProxyMesh without a mesh falls back to splats, so its inset must remain editable.
+		return CastShadow && bCastDynamicShadow && !ProxyCastsShadows()
+			&& VGSStaticSplat::GetShadowMethod() != VGSStaticSplat::EShadowMethod::None;
+	}
+	return true;
+}
+
 void UVGSStaticSplatComponent::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {
 	Super::PostEditChangeProperty(PropertyChangedEvent);

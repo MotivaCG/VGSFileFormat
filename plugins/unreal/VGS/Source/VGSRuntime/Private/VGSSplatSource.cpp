@@ -125,6 +125,7 @@ void FVGSSplatSource::Evaluate_RenderThread(FRDGBuilder& GraphBuilder, const FVG
 	}
 	if (ChunkBuffers.Serial != C.serial)
 	{
+		Proxy.bSplatMotionHistoryValid = false;
 		UploadChunk_RenderThread(GraphBuilder, Frame->Chunk);
 	}
 
@@ -135,6 +136,10 @@ void FVGSSplatSource::Evaluate_RenderThread(FRDGBuilder& GraphBuilder, const FVG
 	// The records, written where they are drawn from: reused from frame to frame while
 	// chunks fit, and sized in whole mebibytes as the uploads are.
 	const uint64 Bytes = uint64(NumSplats) * Stride;
+	if (SplatBuffer == Proxy.PreviousGpuBuffer)
+	{
+		Swap(SplatBuffer, SpareSplatBuffer);
+	}
 	if (!SplatBuffer.IsValid() || SplatBuffer->GetSize() < Bytes)
 	{
 		const uint32 Capacity = uint32(Align(Bytes, uint64(BufferGranularity)));
@@ -222,6 +227,8 @@ void FVGSSplatSource::Evaluate_RenderThread(FRDGBuilder& GraphBuilder, const FVG
 
 void FVGSSplatSource::Upload_RenderThread(FRDGBuilder& GraphBuilder, const FVGSPackedFrameRef& Frame)
 {
+	// CPU frames are compacted independently and carry no stable record IDs.
+	Proxy.bSplatMotionHistoryValid = false;
 	SCOPE_CYCLE_COUNTER(STAT_VGS_Upload);
 	SET_MEMORY_STAT(STAT_VGS_UploadBytes, Frame->Bytes.Num());
 	if (Frame->NumSplats == 0 || Frame->Bytes.Num() == 0)
@@ -261,6 +268,17 @@ FVGSSplatSource::~FVGSSplatSource()
 
 bool FVGSSplatSource::Advance_RenderThread(FRDGBuilder& GraphBuilder)
 {
+	if (HistoryFrame != GFrameNumberRenderThread)
+	{
+		Proxy.PreviousGpuBuffer = State.bLit ? SplatBuffer : nullptr;
+		if (!State.bLit) SpareSplatBuffer.SafeRelease();
+		Proxy.PreviousLocalToWorld = LastRenderedTransform;
+		Proxy.bMotionHistoryValid = State.bLit && SplatBuffer.IsValid() && HistoryFrame != MAX_uint64 && HistoryFrame + 1 == GFrameNumberRenderThread;
+		Proxy.bSplatMotionHistoryValid = ChunkBuffers.Serial != 0;
+		HistoryFrame = GFrameNumberRenderThread;
+		LastRenderedTransform = State.LocalToWorld;
+		Proxy.bDeforming = true;
+	}
 	// Once per frame of the game, not per view family or view: the first uploads, the rest
 	// reuse it.
 	bool bAdvanced = false;

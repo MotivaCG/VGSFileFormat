@@ -49,5 +49,7 @@ public:
 private:
 	FVGSStaticSplatRenderProxy Proxy;
 	FVGSStaticLook Look = {};
+	uint64 HistoryFrame = MAX_uint64;
+	FMatrix44f LastRenderedTransform = FMatrix44f::Identity;
 	TSharedPtr<FVGSStaticSplatGpu, ESPMode::ThreadSafe> Gpu;
 };

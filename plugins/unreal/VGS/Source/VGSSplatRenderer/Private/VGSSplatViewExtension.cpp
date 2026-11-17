@@ -25,6 +25,9 @@
 #include "Substrate/Substrate.h" // VGS CHANGE: its material buffer, for the lit pass
 #include "VGSSplatLightShadow.h" // VGS CHANGE
 #include "VGSSplatShadowVertexFactory.h" // VGS CHANGE: VGSSplat::GetShadowMethod
+#if WITH_DEV_AUTOMATION_TESTS
+#include "RHIGPUReadback.h"
+#endif
 
 #define INVALID_ID 0xFFFFFFFF
 
@@ -54,6 +57,15 @@ FVGSSplatViewExtension::~FVGSSplatViewExtension()
 
 void FVGSSplatViewExtension::SetupViewFamily(FSceneViewFamily& InViewFamily)
 {
+	VGSSplat::FDeepShadowFrame Frame;
+	if (UVGSSplatSubsystem* Subsystem = GetWorld()->GetSubsystem<UVGSSplatSubsystem>())
+	{
+		Frame = Subsystem->UpdateShadowLightFunction(InViewFamily);
+	}
+	ENQUEUE_RENDER_COMMAND(FUpdateVGSDeepShadowFrame)([WeakThis = AsWeak(), Frame](FRHICommandList&)
+	{
+		if (TSharedPtr<FVGSSplatViewExtension> This = StaticCastWeakPtr<FVGSSplatViewExtension>(WeakThis).Pin()) This->DeepShadowFrame = Frame;
+	});
 	ENQUEUE_RENDER_COMMAND(FUpdateVGSSplatStatsRegistration)([](FRHICommandList&)
 	{
 		FModuleManager::GetModuleChecked<FVGSSplatRendererModule>("VGSSplatRenderer").GetRenderStats_RenderThread().UpdateRegistration();
@@ -180,6 +192,8 @@ void FVGSSplatViewExtension::PostRenderBasePassDeferred_RenderThread(FRDGBuilder
 	VGSSplat::FLitTargets Targets;
 	Targets.SceneColor = Textures.Color.Target;
 	Targets.SceneDepth = Textures.Depth.Target;
+	Targets.SceneVelocity = Textures.Velocity;
+	Targets.CaptureReceiverMask = VGSSplat::RegisterReceiverMask(GraphBuilder, DeepShadowFrame);
 	Targets.ViewRect = ViewInfo.ViewRect;
 	if (Substrate::IsSubstrateEnabled() && !Substrate::IsSubstrateBlendableGBufferEnabled(InView.GetShaderPlatform()))
 	{
@@ -212,6 +226,7 @@ void FVGSSplatViewExtension::PostRenderBasePassDeferred_RenderThread(FRDGBuilder
 		return;
 	}
 	Render(GraphBuilder, InView, FScreenPassRenderTarget(Targets.SceneColor, Targets.ViewRect, ERenderTargetLoadAction::ELoad), Targets.SceneDepth, nullptr, &Targets);
+	if (Targets.CaptureReceiverMask) GraphBuilder.UseExternalAccessMode(Targets.CaptureReceiverMask, ERHIAccess::SRVMask);
 }
 
 void FVGSSplatViewExtension::Render(FRDGBuilder& GraphBuilder, const FSceneView& View, const FScreenPassRenderTarget& Output, FRDGTexture* SceneDepthTexture, FRDGTexture* SceneVelocityTexture, const VGSSplat::FLitTargets* LitTargets)
@@ -311,20 +326,13 @@ void FVGSSplatViewExtension::PreRenderViewFamily_RenderThread(FRDGBuilder& Graph
 	if (VGSSplat::IsEnabled() && InViewFamily.Scene)
 	{
 		PrepareSources_RenderThread.Broadcast(GraphBuilder);
+		if (DeepShadowFrame.IsValid() && !InViewFamily.Views.IsEmpty())
+		{
+			TArray<const FVGSSplatRenderProxy*> Proxies;
+			ExternalProxySources_RenderThread.Broadcast(GraphBuilder, *InViewFamily.Views[0], Proxies);
+			VGSSplat::RenderDeepShadow(GraphBuilder, DeepShadowFrame, Proxies);
+		}
 	}
-}
-
-// VGS CHANGE: with r.VGSSplat.Shadow.Method 0 or 1, the casting proxies' own shadow map of the
-// directional light, taken off the lit scene before post-processing.
-void FVGSSplatViewExtension::PrePostProcessPass_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& View, const FPostProcessingInputs& Inputs)
-{
-	if (!VGSSplat::IsEnabled() || !VGSSplat::UsesSplatShadowMap() || View.Family == nullptr || View.Family->Scene == nullptr)
-	{
-		return;
-	}
-	TArray<const FVGSSplatRenderProxy*> Proxies;
-	ExternalProxySources_RenderThread.Broadcast(GraphBuilder, View, Proxies);
-	VGSSplat::RenderLightShadow(GraphBuilder, View, Inputs, Proxies);
 }
 
 FVGSSplatViewExtension* VGSSplat::FindViewExtension(UWorld* World)

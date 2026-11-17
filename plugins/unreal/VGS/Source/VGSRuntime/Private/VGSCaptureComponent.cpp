@@ -17,6 +17,11 @@
 #include "RenderingThread.h"
 #include "SceneInterface.h"
 
+#if WITH_EDITOR
+#include "UObject/UnrealType.h"
+#include "VGSSplatShadowVertexFactory.h"
+#endif
+
 #include UE_INLINE_GENERATED_CPP_BY_NAME(VGSCaptureComponent)
 
 // The bridge's own default, half the machine for each of a capture's two lanes, starves
@@ -882,6 +887,25 @@ FPrimitiveSceneProxy* UVGSCaptureComponent::CreateSceneProxy()
 }
 
 #if WITH_EDITOR
+bool UVGSCaptureComponent::CanEditChange(const FProperty* InProperty) const
+{
+	if (!Super::CanEditChange(InProperty))
+	{
+		return false;
+	}
+	const FName Name = InProperty ? InProperty->GetFName() : NAME_None;
+	if (Name == GET_MEMBER_NAME_CHECKED(UVGSCaptureComponent, GpuLayout))
+	{
+		return !WantsGpu();
+	}
+	if (Name == GET_MEMBER_NAME_CHECKED(UVGSCaptureComponent, ShadowInset))
+	{
+		// Even SplatShadowMap can fall back to native casters (e.g. a user Light Function).
+		return CastShadow && bCastDynamicShadow && VGSSplat::GetShadowMethod() != VGSSplat::EShadowMethod::None;
+	}
+	return true;
+}
+
 void UVGSCaptureComponent::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {
 	Super::PostEditChangeProperty(PropertyChangedEvent);

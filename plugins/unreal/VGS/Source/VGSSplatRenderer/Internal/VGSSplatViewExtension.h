@@ -3,6 +3,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #pragma once
+#include "VGSSplatLightShadow.h"
 
 #include "CoreMinimal.h"
 #include "SceneViewExtension.h"
@@ -10,6 +11,7 @@
 #include "Containers/SortedSet.h"
 
 class FVGSSplatRenderProxy;
+class FRHIGPUBufferReadback;
 class FVGSSplatViewExtension;
 struct FScreenPassRenderTarget;
 namespace VGSSplat { struct FLitTargets; } // VGS CHANGE
@@ -60,8 +62,9 @@ public:
 	virtual void PostRenderBasePassDeferred_RenderThread(FRDGBuilder& GraphBuilder, FSceneView& InView, const FRenderTargetBindingSlots& RenderTargets, TRDGUniformBufferRef<FSceneTextureUniformParameters> SceneTextures) override;
 	// VGS CHANGE: sources prepare their splats here, before shadow depths.
 	virtual void PreRenderViewFamily_RenderThread(FRDGBuilder& GraphBuilder, FSceneViewFamily& InViewFamily) override;
-	// VGS CHANGE: the splats' own shadow of the directional light, onto the lit scene (VGSSplatLightShadow.h).
+#if WITH_DEV_AUTOMATION_TESTS
 	virtual void PrePostProcessPass_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& View, const FPostProcessingInputs& Inputs) override;
+#endif
 
 	// VGS CHANGE: no RegisterComponent / UnregisterComponent; only external sources are drawn.
 	void AddExternalProxySource(FOnCollectVGSSplatProxies::FDelegate&& InSource, FOnPrepareVGSSplatSources::FDelegate&& InPrepare = FOnPrepareVGSSplatSources::FDelegate());
@@ -74,6 +77,11 @@ protected:
 	void Render(FRDGBuilder& GraphBuilder, const FSceneView& View, const FScreenPassRenderTarget& Output, FRDGTexture* SceneDepthTexture, FRDGTexture* SceneVelocityTexture, const VGSSplat::FLitTargets* LitTargets = nullptr);
 
 private:
+	VGSSplat::FDeepShadowFrame DeepShadowFrame;
+#if WITH_DEV_AUTOMATION_TESTS
+	TUniquePtr<FRHIGPUBufferReadback> MotionReadback;
+	int32 LastMotionReadbackRequest = 0;
+#endif
 	FOnCollectVGSSplatProxies ExternalProxySources_RenderThread;
 	FOnPrepareVGSSplatSources PrepareSources_RenderThread; // VGS CHANGE
 };

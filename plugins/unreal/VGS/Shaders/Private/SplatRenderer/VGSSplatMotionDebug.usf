@@ -1,0 +1,21 @@
+// Development-only readback: verifies the velocity UE consumes after opaque passes.
+#include "/Engine/Private/Common.ush"
+Texture2D<float4> VelocityTexture;
+Texture2D<float> ReceiverMask;
+RWStructuredBuffer<uint> MotionStats;
+int2 ViewMin;
+int2 ViewSize;
+[numthreads(8,8,1)]
+void MainCS(uint3 Id : SV_DispatchThreadID)
+{
+	if (any(Id.xy >= uint2(ViewSize))) return;
+	const int2 Pixel = int2(Id.xy) + ViewMin;
+	if (ReceiverMask.Load(int3(Pixel, 0)) < 0.5f) return;
+	InterlockedAdd(MotionStats[0], 1u);
+	const float4 Raw = VelocityTexture.Load(int3(Pixel, 0));
+	if (all(Raw.xy == 0.0f)) { InterlockedAdd(MotionStats[3], 1u); return; }
+	const float2 V = DecodeVelocityFromTexture((ENCODED_VELOCITY_TYPE)Raw).xy;
+	const float Pixels = length(V * float2(ViewSize) * 0.5f);
+	if (Pixels > 0.05f) InterlockedAdd(MotionStats[1], 1u);
+	InterlockedMax(MotionStats[2], uint(min(Pixels * 1000.0f, 100000000.0f)));
+}

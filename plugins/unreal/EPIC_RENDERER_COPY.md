@@ -163,14 +163,14 @@ All marked `VGS CHANGE`; `tools/vgs_renderer_changes.patch` is the exact diff.
     `RegisterExternalProxySource` that takes it besides the collect delegate. A capture
     uploads or evaluates its instant there, before shadow depth passes, so that its shadows
     cast the frame on screen; Epic's sources are collected only inside the view's pass.
-16. **The splats' own shadow map** (VGS's own files: `Internal/VGSSplatLightShadow.h`,
-    `Private/VGSSplatLightShadow.cpp`, `Shaders/Private/SplatRenderer/VGSSplatLightShadow.usf`;
-    `FVGSSplatRenderProxy::bCastShadow`; `PrePostProcessPass_RenderThread` in the view
-    extension). With `r.VGSSplat.Shadow.Method` 0 (the default) or 1: the casting proxies
-    drawn from the main directional light (`VGSSplat::FindMainLight`: the atmosphere's sun,
-    otherwise the brightest that casts shadows) as Gaussians into an order-independent map (transmittance,
-    nearest and farthest depth), and that light's direct contribution, recomputed from the
-    GBuffer, taken off the lit scene behind them, before post-processing.
+16. **Depth-resolved splat shadows** (`VGSSplatLightShadow.*`,
+    `VGSSplatShadowLightFunction.cpp`, `VGSSplatDeepShadow.ush`): a 64-bin optical-depth
+    grid built before lighting, shared by the family's views. A Light Function samples
+    cumulative transmittance at the receiver depth and UE combines it with native visibility.
+    The light component's saved material is kept; existing user functions use native casters.
+    VGS and VGSStatic share one MID with independent slots. The shipped material assets are
+    rebuilt by `tools/create_shadow_light_function.py`; keep them when refreshing the copy.
+    Development automation tests rasterize the faint-front/strong-back regression on the GPU.
 17. **Project settings** (`Private/VGSSplatSettings.h/.cpp`, a `UDeveloperSettings`; the
     `DeveloperSettings` module in the build rules): the shadow method, self-shadowing and the
     map's texel size, softness and bias, under Project Settings > Plugins > the plugin's
@@ -188,11 +188,14 @@ All marked `VGS CHANGE`; `tools/vgs_renderer_changes.patch` is the exact diff.
     smooths flat parts as the old filter did (0.51 against 0.50 degrees of residual noise)
     and changes folds and an arm over the torso half as much (8.4 against 15.3 degrees). The
     plane modes were noisier (1.1 to 1.6).
-19. **Faint splats in the shadow map** (`VGSSplatLightShadow.*`): the depth target is RGBA16F
-    with a second nearest/farthest pair over every splat, not only those at least
-    `DepthOpacity` opaque. A texel only faint splats reach (hair, fringes) now casts when they
-    block more than a tenth of the light together. Before, it cast nothing: twenty splats at
-    0.05 block 64 % of the light.
+19. **Receiver depth and velocity** (2026-11-17): lit rasterization keeps the nearest
+    splat reaching 50% per-pixel opacity, with expected depth as fallback. Oriented normals
+    keep their side. The normal-Z target's free channels carry opacity-weighted object motion;
+    the GBuffer pass combines it with camera motion and writes encoded scene velocity at the
+    surviving depth. GPU playback keeps a previous buffer only for Shaded captures, with
+    correspondence inside a chunk; CPU playback and chunk changes supply actor motion only.
+    `VGSSplatMotionDebug.*` supplies optional development readback before TSR, gated by
+    `r.VGSSplat.Debug.MotionReadback` and absent in Shipping builds.
 
 ### The LUTs
 

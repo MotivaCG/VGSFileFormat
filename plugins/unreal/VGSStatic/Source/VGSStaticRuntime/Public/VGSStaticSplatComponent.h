@@ -117,8 +117,10 @@ public:
 	 * emissive of fixed brightness, so a scene exposed for physical light units (a sun of
 	 * 100,000 lux meters around EV100 14) shows them nearly black. Set this near the scene's
 	 * EV100 to see them as they look at EV100 0.
+	 * In Shaded it scales only Self-illumination Amount, and has no effect when that is 0.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS Static|Rendering", meta = (DisplayName = "Intensity (EV)", UIMin = "-4.0", UIMax = "18.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS Static|Rendering", meta = (DisplayName = "Intensity (EV)", UIMin = "-4.0", UIMax = "18.0",
+		EditCondition = "Lighting == EVGSStaticLighting::SelfIllumination || SelfIlluminationAmount > 0.0"))
 	float IntensityEV = 0.0f;
 
 	/** How splats blend over each other: as they were trained. Most are trained in sRGB. */
@@ -131,16 +133,16 @@ public:
 
 	/** How much of the colour still glows when Shaded: 0 is lit only by the scene, 1 as bright as self-illuminated plus the lights. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS Static|Lighting",
-		meta = (DisplayName = "Self-illumination Amount", ClampMin = "0.0", ClampMax = "1.0", EditCondition = "Lighting == EVGSStaticLighting::Shaded", EditConditionHides))
+		meta = (DisplayName = "Self-illumination Amount", ClampMin = "0.0", ClampMax = "1.0", EditCondition = "Lighting == EVGSStaticLighting::Shaded"))
 	float SelfIlluminationAmount = 0.1f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS Static|Lighting",
-		meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "Lighting == EVGSStaticLighting::Shaded", EditConditionHides))
+		meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "Lighting == EVGSStaticLighting::Shaded"))
 	float Roughness = 0.8f;
 
 	/** Unreal's Specular: 0.5 is the usual dielectric, 0 no highlights at all. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS Static|Lighting",
-		meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "Lighting == EVGSStaticLighting::Shaded", EditConditionHides))
+		meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "Lighting == EVGSStaticLighting::Shaded"))
 	float Specular = 0.02f;
 
 	/**
@@ -149,30 +151,34 @@ public:
 	 * 0 lights each pixel by its splats' normal alone.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS Static|Lighting",
-		meta = (ClampMin = "0.0", UIMax = "10.0", Units = "cm", EditCondition = "Lighting == EVGSStaticLighting::Shaded", EditConditionHides))
+		meta = (ClampMin = "0.0", UIMax = "10.0", Units = "cm", EditCondition = "Lighting == EVGSStaticLighting::Shaded"))
 	float NormalSmoothing = 2.0f;
 
 	/**
 	 * What casts the actor's shadows: the asset's shadow proxy mesh (every light), or the splats
 	 * (as the project's Shadow Method says). Cast Shadow, under Lighting, turns them off.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS Static|Lighting")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS Static|Lighting", meta = (EditCondition = "CastShadow && bCastDynamicShadow"))
 	EVGSStaticShadowCaster ShadowCaster = EVGSStaticShadowCaster::ProxyMesh;
 
 	/**
-	 * Only when the splats cast with the project's Shadow Method "Unreal Shadow Maps" (Project
-	 * Settings > Plugins > VGSStatic): how far (cm) each splat's shadow caster is moved inwards,
+	 * Only when splats cast through native Unreal shadow maps (including Mixed and native
+	 * fallback), not the proxy mesh: how far (cm) each splat's shadow caster moves inwards,
 	 * along its normal. The lit
 	 * surface lies among its own splats, and without this would shadow itself in blotches
 	 * when Shaded; more than needed thins the shadows of thin parts (fingers, hair). Without
 	 * normals with a side, "inwards" is away from the asset's centre.
+	 * Requires dynamic shadow casting and a project Shadow Method other than No Shadows.
+	 * The splats' own map uses the project's Shadow Bias instead.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS Static|Lighting", meta = (ClampMin = "0.0", UIMax = "10.0", Units = "cm"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS Static|Lighting", meta = (ClampMin = "0.0", UIMax = "10.0", Units = "cm",
+		EditCondition = "CastShadow && bCastDynamicShadow"))
 	float ShadowInset = 3.0f;
 
 	/**
 	 * Blocks everything (BlockAll) with the asset's shadow proxy mesh, as a mesh with its own
 	 * triangles as collision: characters walk around it, traces hit it. Off, nothing collides.
+	 * Requires an asset with a shadow proxy, independently of Shadow Caster or Cast Shadow.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS Static|Collision", meta = (DisplayName = "Proxy Collision"))
 	bool bProxyCollision = false;
@@ -198,17 +204,19 @@ public:
 	/**
 	 * Show the colours as captured, as the VGS viewer does, by undoing Unreal's filmic tone
 	 * curve on the splats (Epic's inverse LUT, applied when they are composited). Off, the
-	 * tone curve applies to them as to the rest of the scene.
+	 * tone curve applies to them as to the rest of the scene. Only applies to Self-illumination,
+	 * not the Shaded material.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS Static|Rendering", meta = (DisplayName = "Invert UE Tone Curve"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS Static|Rendering", meta = (DisplayName = "Invert UE Tone Curve",
+		EditCondition = "Lighting == EVGSStaticLighting::SelfIllumination"))
 	bool bInvertToneCurve = true;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS Static|Rendering", AdvancedDisplay,
-		meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bInvertToneCurve", EditConditionHides))
+		meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "Lighting == EVGSStaticLighting::SelfIllumination && bInvertToneCurve"))
 	float InverseToneCurveStrength = 1.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VGS Static|Rendering", AdvancedDisplay,
-		meta = (DisplayName = "Invert Default Expand Gamut", EditCondition = "bInvertToneCurve", EditConditionHides))
+		meta = (DisplayName = "Invert Default Expand Gamut", EditCondition = "Lighting == EVGSStaticLighting::SelfIllumination && bInvertToneCurve && InverseToneCurveStrength > 0.0"))
 	bool bInvertExpandGamut = true;
 
 	// ---- what the asset says about itself ---------------------------------------------------
@@ -243,6 +251,7 @@ public:
 	virtual FBoxSphereBounds CalcBounds(const FTransform& LocalToWorld) const override;
 	virtual FPrimitiveSceneProxy* CreateSceneProxy() override;
 #if WITH_EDITOR
+	virtual bool CanEditChange(const FProperty* InProperty) const override;
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 #endif
 	//~ End UActorComponent / USceneComponent / UPrimitiveComponent

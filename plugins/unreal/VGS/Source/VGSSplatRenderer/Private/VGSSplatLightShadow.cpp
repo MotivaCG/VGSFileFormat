@@ -1,24 +1,15 @@
-// VGS: not Epic's. See VGSSplatLightShadow.h.
+// VGS: depth-resolved splat shadows, consumed by a Light Function before lighting.
 #include "VGSSplatLightShadow.h"
-
 #include "VGSSplatRenderPipeline.h"
-
 #include "CommonRenderResources.h"
-#include "DataDrivenShaderPlatformInfo.h"
 #include "GlobalShader.h"
 #include "LightSceneInfo.h"
 #include "LightSceneProxy.h"
-#include "PixelShaderUtils.h"
-#include "PostProcess/PostProcessInputs.h"
 #include "RenderGraphUtils.h"
-#include "RenderUtils.h"
 #include "RHIStaticStates.h"
 #include "ScenePrivate.h"
-#include "SceneRendering.h"
-#include "SceneTexturesConfig.h"
-#include "ShaderParameterStruct.h"
-#include "Substrate/Substrate.h"
-#include "SystemTextures.h"
+#include "TextureResource.h"
+#include "DataDrivenShaderPlatformInfo.h"
 
 static TAutoConsoleVariable<float> CVarVGSSplatShadowTexelSize(
 	TEXT("r.VGSSplat.Shadow.TexelSize"),
@@ -29,14 +20,14 @@ static TAutoConsoleVariable<float> CVarVGSSplatShadowTexelSize(
 
 static TAutoConsoleVariable<int32> CVarVGSSplatShadowMaxMapSize(
 	TEXT("r.VGSSplat.Shadow.MaxMapSize"),
-	2048,
-	TEXT("With r.VGSSplat.Shadow.Method 0 or 1: the largest side of the splats' own shadow map, in texels."),
+	1024,
+	TEXT("With r.VGSSplat.Shadow.Method 0 or 1: spatial resolution limit (64..1024) for the 64-layer shadow grid."),
 	ECVF_RenderThreadSafe);
 
 static TAutoConsoleVariable<int32> CVarVGSSplatShadowSelf(
 	TEXT("r.VGSSplat.Shadow.Self"),
 	0,
-	TEXT("With r.VGSSplat.Shadow.Method 0 or 1: 1 also shadows the lit captures themselves (self-shadowing); 0 only what is behind them."),
+	TEXT("With r.VGSSplat.Shadow.Method 0 or 1: 1 enables shadows on Shaded captures, including self-shadow; 0 excludes this renderer's visible capture pixels."),
 	ECVF_RenderThreadSafe);
 
 static TAutoConsoleVariable<float> CVarVGSSplatShadowBias(
@@ -50,113 +41,6 @@ static TAutoConsoleVariable<float> CVarVGSSplatShadowSoftness(
 	1.0f,
 	TEXT("With r.VGSSplat.Shadow.Method 0 or 1: the penumbra, as a multiple of what the light's source angle gives."),
 	ECVF_RenderThreadSafe);
-
-static TAutoConsoleVariable<float> CVarVGSSplatShadowDepthOpacity(
-	TEXT("r.VGSSplat.Shadow.DepthOpacity"),
-	0.1f,
-	TEXT("With r.VGSSplat.Shadow.Method 0 or 1: how opaque a splat must be over a texel to say where the capture is along the light."),
-	ECVF_RenderThreadSafe);
-
-BEGIN_SHADER_PARAMETER_STRUCT(FVGSSplatLightShadowMapParameters, )
-	SHADER_PARAMETER_RDG_BUFFER_SRV(ByteAddressBuffer, Splats)
-	SHADER_PARAMETER(FMatrix44f, LocalToLight)
-	SHADER_PARAMETER(FVector3f, PositionScale)
-	SHADER_PARAMETER(uint32, NumSplats)
-	SHADER_PARAMETER(FVector3f, PositionBias)
-	SHADER_PARAMETER(uint32, Stride)
-	SHADER_PARAMETER(FVector3f, ScaleScale)
-	SHADER_PARAMETER(uint32, BufferFormat)
-	SHADER_PARAMETER(FVector3f, ScaleBias)
-	SHADER_PARAMETER(float, PointScale)
-	SHADER_PARAMETER(FVector2f, OpacityQuantization)
-	SHADER_PARAMETER(float, OpacityScale)
-	SHADER_PARAMETER(float, DepthOpacity)
-	SHADER_PARAMETER(FVector4f, LightToClip)
-	SHADER_PARAMETER(float, Dilation)
-	RENDER_TARGET_BINDING_SLOTS()
-END_SHADER_PARAMETER_STRUCT()
-
-class FVGSSplatLightShadowMapVS : public FGlobalShader
-{
-public:
-	DECLARE_GLOBAL_SHADER(FVGSSplatLightShadowMapVS);
-	using FParameters = FVGSSplatLightShadowMapParameters;
-	SHADER_USE_PARAMETER_STRUCT(FVGSSplatLightShadowMapVS, FGlobalShader);
-
-	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
-	{
-		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
-	}
-	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
-	{
-		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
-		OutEnvironment.SetDefine(TEXT("VGS_LIGHT_SHADOW_MAP"), 1);
-	}
-};
-IMPLEMENT_GLOBAL_SHADER(FVGSSplatLightShadowMapVS, "/Plugin/VGS/Private/SplatRenderer/VGSSplatLightShadow.usf", "MainVS", SF_Vertex);
-
-class FVGSSplatLightShadowMapPS : public FGlobalShader
-{
-public:
-	DECLARE_GLOBAL_SHADER(FVGSSplatLightShadowMapPS);
-	using FParameters = FVGSSplatLightShadowMapParameters;
-	SHADER_USE_PARAMETER_STRUCT(FVGSSplatLightShadowMapPS, FGlobalShader);
-
-	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
-	{
-		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
-	}
-	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
-	{
-		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
-		OutEnvironment.SetDefine(TEXT("VGS_LIGHT_SHADOW_MAP"), 1);
-	}
-};
-IMPLEMENT_GLOBAL_SHADER(FVGSSplatLightShadowMapPS, "/Plugin/VGS/Private/SplatRenderer/VGSSplatLightShadow.usf", "MainPS", SF_Pixel);
-
-class FVGSSplatLightShadowCompositePS : public FGlobalShader
-{
-public:
-	DECLARE_GLOBAL_SHADER(FVGSSplatLightShadowCompositePS);
-	SHADER_USE_PARAMETER_STRUCT(FVGSSplatLightShadowCompositePS, FGlobalShader);
-
-	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
-		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
-		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SceneColorCopy)
-		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SceneDepth)
-		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, GBufferA)
-		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, GBufferB)
-		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, GBufferC)
-		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float>, TransmittanceMap)
-		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, DepthMap)
-		SHADER_PARAMETER_SAMPLER(SamplerState, BilinearSampler)
-		SHADER_PARAMETER(FVector3f, LightOrigin)
-		SHADER_PARAMETER(FVector3f, LightX)
-		SHADER_PARAMETER(FVector3f, LightY)
-		SHADER_PARAMETER(FVector3f, LightZ)
-		SHADER_PARAMETER(FVector3f, ToLight)
-		SHADER_PARAMETER(FVector3f, LightColor)
-		SHADER_PARAMETER(FVector4f, LightToUV)
-		SHADER_PARAMETER(float, MapSize)
-		SHADER_PARAMETER(float, Bias)
-		SHADER_PARAMETER(float, PenumbraPerDepth)
-		SHADER_PARAMETER(uint32, SelfShadow)
-		SHADER_PARAMETER(uint32, HasGBuffer)
-		SHADER_PARAMETER(float, FallbackStrength)
-		RENDER_TARGET_BINDING_SLOTS()
-	END_SHADER_PARAMETER_STRUCT()
-
-	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
-	{
-		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
-	}
-	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
-	{
-		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
-		OutEnvironment.SetDefine(TEXT("VGS_LIGHT_SHADOW_COMPOSITE"), 1);
-	}
-};
-IMPLEMENT_GLOBAL_SHADER(FVGSSplatLightShadowCompositePS, "/Plugin/VGS/Private/SplatRenderer/VGSSplatLightShadow.usf", "MainPS", SF_Pixel);
 
 const FLightSceneInfo* VGSSplat::FindMainLight(const FScene& Scene)
 {
@@ -187,182 +71,206 @@ FVector VGSSplat::GetMainLightDirection(const FLightSceneInfo& Light)
 	return Light.Proxy->GetDirection().GetSafeNormal();
 }
 
-void VGSSplat::RenderLightShadow(FRDGBuilder& GraphBuilder, const FSceneView& View, const FPostProcessingInputs& Inputs, TConstArrayView<const FVGSSplatRenderProxy*> Proxies)
-{
-	if (!View.bIsViewInfo || !Inputs.SceneTextures || View.Family == nullptr || View.Family->Scene == nullptr
-		|| View.GetFeatureLevel() < ERHIFeatureLevel::SM5)
-	{
-		return;
-	}
-	const FViewInfo& ViewInfo = static_cast<const FViewInfo&>(View);
-	if (!ViewInfo.CachedViewUniformShaderParameters.IsValid())
-	{
-		return;
-	}
-	const FScene* Scene = View.Family->Scene->GetRenderScene();
-	const FLightSceneInfo* MainLight = Scene ? VGSSplat::FindMainLight(*Scene) : nullptr;
-	if (MainLight == nullptr)
-	{
-		return;
-	}
-	// Its colour over pi, past the atmosphere, as the view's DirectionalLightColor has it
-	// (FViewInfo::SetupUniformBufferParameters), whichever light that one is.
-	const FLinearColor LightColor = MainLight->Proxy->GetAtmosphereTransmittanceTowardSun() * MainLight->Proxy->GetColor() / PI;
-	if (LightColor.GetMax() <= 0.0f)
-	{
-		return;
-	}
-	const FVector3f ToLight = FVector3f(-VGSSplat::GetMainLightDirection(*MainLight));
+BEGIN_SHADER_PARAMETER_STRUCT(FVGSDeepShadowMapParameters, )
+	SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, OpticalDepth)
+	SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, NearestDepth)
+	SHADER_PARAMETER_RDG_BUFFER_SRV(ByteAddressBuffer, Splats)
+	SHADER_PARAMETER(FMatrix44f, LocalToLight)
+	SHADER_PARAMETER(FVector3f, PositionScale)
+	SHADER_PARAMETER(uint32, NumSplats)
+	SHADER_PARAMETER(FVector3f, PositionBias)
+	SHADER_PARAMETER(uint32, Stride)
+	SHADER_PARAMETER(FVector3f, ScaleScale)
+	SHADER_PARAMETER(uint32, BufferFormat)
+	SHADER_PARAMETER(FVector3f, ScaleBias)
+	SHADER_PARAMETER(float, PointScale)
+	SHADER_PARAMETER(FVector2f, OpacityQuantization)
+	SHADER_PARAMETER(float, OpacityScale)
+	SHADER_PARAMETER(FVector3f, GridExtent)
+	SHADER_PARAMETER(float, GridResolution)
+	SHADER_PARAMETER(float, Dilation)
+	SHADER_PARAMETER(float, OpticalDepthScale)
+	RENDER_TARGET_BINDING_SLOTS()
+END_SHADER_PARAMETER_STRUCT()
 
-	TArray<const FVGSSplatRenderProxy*, TInlineAllocator<8>> Casters;
-	FBox Bounds(ForceInit);
+class FVGSSplatDeepShadowVS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FVGSSplatDeepShadowVS);
+	SHADER_USE_PARAMETER_STRUCT(FVGSSplatDeepShadowVS, FGlobalShader);
+	using FParameters = FVGSDeepShadowMapParameters;
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& P, FShaderCompilerEnvironment& E)
+	{ FGlobalShader::ModifyCompilationEnvironment(P, E); E.SetDefine(TEXT("VGS_DEEP_SHADOW_MAP"), 1); }
+};
+class FVGSSplatDeepShadowPS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FVGSSplatDeepShadowPS);
+	SHADER_USE_PARAMETER_STRUCT(FVGSSplatDeepShadowPS, FGlobalShader);
+	using FParameters = FVGSDeepShadowMapParameters;
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& P, FShaderCompilerEnvironment& E)
+	{ FGlobalShader::ModifyCompilationEnvironment(P, E); E.SetDefine(TEXT("VGS_DEEP_SHADOW_MAP"), 1); }
+};
+IMPLEMENT_GLOBAL_SHADER(FVGSSplatDeepShadowVS, "/Plugin/VGS/Private/SplatRenderer/VGSSplatLightShadow.usf", "MainVS", SF_Vertex);
+IMPLEMENT_GLOBAL_SHADER(FVGSSplatDeepShadowPS, "/Plugin/VGS/Private/SplatRenderer/VGSSplatLightShadow.usf", "MainPS", SF_Pixel);
+
+class FVGSSplatDeepShadowPrefixCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FVGSSplatDeepShadowPrefixCS);
+	SHADER_USE_PARAMETER_STRUCT(FVGSSplatDeepShadowPrefixCS, FGlobalShader);
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, OpticalDepth)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, NearestDepth)
+		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float>, ShadowAtlas)
+		SHADER_PARAMETER(uint32, Resolution)
+		SHADER_PARAMETER(float, InverseOpticalDepthScale)
+	END_SHADER_PARAMETER_STRUCT()
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& P, FShaderCompilerEnvironment& E)
+	{ FGlobalShader::ModifyCompilationEnvironment(P, E); E.SetDefine(TEXT("VGS_DEEP_SHADOW_PREFIX"), 1); }
+};
+IMPLEMENT_GLOBAL_SHADER(FVGSSplatDeepShadowPrefixCS, "/Plugin/VGS/Private/SplatRenderer/VGSSplatLightShadow.usf", "PrefixCS", SF_Compute);
+
+FRDGTextureRef VGSSplat::RegisterReceiverMask(FRDGBuilder& GraphBuilder, const FDeepShadowFrame& Frame)
+{
+	if (!Frame.IsValid()) return nullptr;
+	FRDGTextureRef Texture = GraphBuilder.RegisterExternalTexture(CreateRenderTarget(Frame.Receivers->GetRenderTargetTexture(), TEXT("VGSSplat.CaptureReceiverMask")));
+	GraphBuilder.UseInternalAccessMode(Texture);
+	return Texture;
+}
+
+void VGSSplat::RenderDeepShadow(FRDGBuilder& GraphBuilder, const FDeepShadowFrame& Frame, TConstArrayView<const FVGSSplatRenderProxy*> Proxies)
+{
+	if (!Frame.IsValid()) return;
+	RDG_EVENT_SCOPE(GraphBuilder, "VGSSplat.DeepShadow");
+	FRDGTextureRef Receivers = RegisterReceiverMask(GraphBuilder, Frame);
+	AddClearRenderTargetPass(GraphBuilder, Receivers, FLinearColor::Black);
+	GraphBuilder.UseExternalAccessMode(Receivers, ERHIAccess::SRVMask);
+	FRDGTextureRef Atlas = GraphBuilder.RegisterExternalTexture(CreateRenderTarget(Frame.Atlas->GetRenderTargetTexture(), TEXT("VGSSplat.DeepShadowAtlas")));
+	GraphBuilder.UseInternalAccessMode(Atlas);
+	FRDGBufferRef OpticalDepth = GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), Frame.Resolution * Frame.Resolution * 64), TEXT("VGSSplat.OpticalDepthBins"));
+	AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(OpticalDepth), 0u);
+	FRDGBufferRef NearestDepth = GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), Frame.Resolution * Frame.Resolution), TEXT("VGSSplat.NearestLightDepth"));
+	AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(NearestDepth), 0x7f800000u);
+	FRDGTextureRef Dummy = GraphBuilder.CreateTexture(FRDGTextureDesc::Create2D(FIntPoint(Frame.Resolution), PF_R8,
+		FClearValueBinding::Black, TexCreate_RenderTargetable), TEXT("VGSSplat.ShadowRasterAttachment"));
+	const FMatrix WorldToLight = FTranslationMatrix(-Frame.Origin) * FMatrix(
+		FPlane(Frame.X.X, Frame.Y.X, Frame.Z.X, 0), FPlane(Frame.X.Y, Frame.Y.Y, Frame.Z.Y, 0),
+		FPlane(Frame.X.Z, Frame.Y.Z, Frame.Z.Z, 0), FPlane(0, 0, 0, 1));
+	TShaderMapRef<FVGSSplatDeepShadowVS> VS(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+	TShaderMapRef<FVGSSplatDeepShadowPS> PS(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+	uint64 TotalSplats = 0;
+	for (const FVGSSplatRenderProxy* Proxy : Proxies)
+		if (Proxy && Proxy->bVisible && Proxy->bCastShadow && Proxy->GpuBuffer.IsValid()) TotalSplats += Proxy->NumSplats;
+	// Each splat contributes at most -log(1-0.995) < 6 once per pixel. This scale
+	// bounds the complete integer sum, avoiding overflow without a pixel-shader spin loop.
+	const float OpticalDepthScale = float(FMath::Min<uint64>(65536, FMath::Max<uint64>(1, (MAX_uint32 / FMath::Max<uint64>(1, TotalSplats) - 1) / 6)));
 	for (const FVGSSplatRenderProxy* Proxy : Proxies)
 	{
-		if (Proxy && Proxy->bVisible && Proxy->bCastShadow && Proxy->GpuBuffer.IsValid() && Proxy->NumSplats > 0 && Proxy->LocalBounds.IsValid)
+		if (!Proxy || !Proxy->bVisible || !Proxy->bCastShadow || !Proxy->GpuBuffer.IsValid() || Proxy->NumSplats == 0) continue;
+		auto* P = GraphBuilder.AllocParameters<FVGSDeepShadowMapParameters>();
+		P->OpticalDepth = GraphBuilder.CreateUAV(OpticalDepth);
+		P->NearestDepth = GraphBuilder.CreateUAV(NearestDepth);
+		P->Splats = GraphBuilder.CreateSRV(GraphBuilder.RegisterExternalBuffer(Proxy->GpuBuffer));
+		P->LocalToLight = FMatrix44f(FMatrix(Proxy->LocalToWorld) * WorldToLight);
+		P->PositionScale = Proxy->PositionScale; P->PositionBias = Proxy->PositionBias;
+		P->ScaleScale = Proxy->ScaleScale; P->ScaleBias = Proxy->ScaleBias;
+		P->NumSplats = Proxy->NumSplats; P->Stride = Proxy->GpuDataStride; P->BufferFormat = Proxy->BufferFormat;
+		P->PointScale = Proxy->PointScaleFactor; P->OpacityScale = Proxy->OpacityScale;
+		P->OpacityQuantization = FVector2f(Proxy->ColorScale.W, Proxy->ColorBias.W);
+		P->GridExtent = FVector3f(Frame.Extent); P->GridResolution = float(Frame.Resolution);
+		const double Texel = 2.0 * FMath::Max(Frame.Extent.X, Frame.Extent.Y) / Frame.Resolution;
+		P->Dilation = float(0.25 * Texel * Texel);
+		P->OpticalDepthScale = OpticalDepthScale;
+		P->RenderTargets[0] = FRenderTargetBinding(Dummy, ERenderTargetLoadAction::ENoAction);
+		GraphBuilder.AddPass(RDG_EVENT_NAME("VGSSplat.DeepShadow.Bins %u", Proxy->NumSplats), P, ERDGPassFlags::Raster,
+			[P, VS, PS, Resolution = Frame.Resolution](FRHICommandList& RHICmdList)
 		{
-			Casters.Add(Proxy);
-			Bounds += FBox(FVector(Proxy->LocalBounds.Min), FVector(Proxy->LocalBounds.Max)).TransformBy(FMatrix(Proxy->LocalToWorld));
-		}
+			FGraphicsPipelineStateInitializer State;
+			RHICmdList.ApplyCachedRenderTargets(State);
+			State.BlendState = TStaticBlendState<CW_NONE>::GetRHI();
+			State.RasterizerState = TStaticRasterizerState<FM_Solid, CM_None>::GetRHI();
+			State.DepthStencilState = TStaticDepthStencilState<false, CF_Always>::GetRHI();
+			State.BoundShaderState.VertexDeclarationRHI = GEmptyVertexDeclaration.VertexDeclarationRHI;
+			State.BoundShaderState.VertexShaderRHI = VS.GetVertexShader(); State.BoundShaderState.PixelShaderRHI = PS.GetPixelShader();
+			State.PrimitiveType = PT_TriangleList;
+			SetGraphicsPipelineState(RHICmdList, State, 0);
+			SetShaderParameters(RHICmdList, VS, VS.GetVertexShader(), *P);
+			SetShaderParameters(RHICmdList, PS, PS.GetPixelShader(), *P);
+			RHICmdList.SetViewport(0, 0, 0, float(Resolution), float(Resolution), 1);
+			RHICmdList.DrawPrimitive(0, P->NumSplats * 2, 1);
+		});
 	}
-	if (Casters.IsEmpty())
-	{
-		return;
-	}
-	RDG_EVENT_SCOPE(GraphBuilder, "VGSSplat.LightShadow");
-
-	// The light's frame: z the way it goes, from the casters' centre.
-	const FVector Z = -FVector(ToLight).GetSafeNormal();
-	FVector X, Y;
-	Z.FindBestAxisVectors(X, Y);
-	const FVector Origin = Bounds.GetCenter();
-	const FMatrix WorldToLight = FTranslationMatrix(-Origin) * FMatrix(
-		FPlane(X.X, Y.X, Z.X, 0.0),
-		FPlane(X.Y, Y.Y, Z.Y, 0.0),
-		FPlane(X.Z, Y.Z, Z.Z, 0.0),
-		FPlane(0.0, 0.0, 0.0, 1.0));
-	double Half = 0.0;
-	for (int32 Corner = 0; Corner < 8; ++Corner)
-	{
-		const FVector P((Corner & 1) ? Bounds.Max.X : Bounds.Min.X, (Corner & 2) ? Bounds.Max.Y : Bounds.Min.Y, (Corner & 4) ? Bounds.Max.Z : Bounds.Min.Z);
-		const FVector L = WorldToLight.TransformPosition(P);
-		Half = FMath::Max(Half, FMath::Max(FMath::Abs(L.X), FMath::Abs(L.Y)));
-	}
-	Half = Half * 1.05 + 10.0; // the splats reach past their centres' bounds
-	// Texels of a fixed size in the world, as long as the map stays within its largest side: the
-	// map's cost is its fill, the splats' footprints in texels.
-	const double WantedTexel = FMath::Max(double(CVarVGSSplatShadowTexelSize.GetValueOnRenderThread()), 0.05);
-	const int32 MaxSize = FMath::Clamp(CVarVGSSplatShadowMaxMapSize.GetValueOnRenderThread(), 256, 8192);
-	const int32 Size = FMath::Clamp(Align(FMath::CeilToInt(2.0 * Half / WantedTexel), 64), 256, MaxSize);
-	const double Texel = 2.0 * Half / Size;
-
-	FRDGTextureRef TransmittanceMap = GraphBuilder.CreateTexture(
-		FRDGTextureDesc::Create2D(FIntPoint(Size), PF_R16F, FClearValueBinding(FLinearColor::White), TexCreate_RenderTargetable | TexCreate_ShaderResource),
-		TEXT("VGSSplat.LightShadow.Transmittance"));
-	// Depths from the casters' centre, in half floats: a few hundred units, to a fraction of one.
-	const FLinearColor Far(60000.0f, 60000.0f, 60000.0f, 60000.0f);
-	FRDGTextureRef DepthMap = GraphBuilder.CreateTexture(
-		FRDGTextureDesc::Create2D(FIntPoint(Size), PF_FloatRGBA, FClearValueBinding(Far), TexCreate_RenderTargetable | TexCreate_ShaderResource),
-		TEXT("VGSSplat.LightShadow.Depths"));
-	AddClearRenderTargetPass(GraphBuilder, TransmittanceMap, FLinearColor::White);
-	AddClearRenderTargetPass(GraphBuilder, DepthMap, Far);
-
-	FGlobalShaderMap* ShaderMap = GetGlobalShaderMap(View.GetShaderPlatform());
-	TShaderMapRef<FVGSSplatLightShadowMapVS> MapVS(ShaderMap);
-	TShaderMapRef<FVGSSplatLightShadowMapPS> MapPS(ShaderMap);
-	const float DepthOpacity = FMath::Clamp(CVarVGSSplatShadowDepthOpacity.GetValueOnRenderThread(), 0.01f, 0.99f);
-	for (const FVGSSplatRenderProxy* Proxy : Casters)
-	{
-		FVGSSplatLightShadowMapParameters* Params = GraphBuilder.AllocParameters<FVGSSplatLightShadowMapParameters>();
-		Params->Splats = GraphBuilder.CreateSRV(GraphBuilder.RegisterExternalBuffer(Proxy->GpuBuffer));
-		Params->LocalToLight = FMatrix44f(FMatrix(Proxy->LocalToWorld) * WorldToLight);
-		Params->PositionScale = Proxy->PositionScale;
-		Params->NumSplats = Proxy->NumSplats;
-		Params->PositionBias = Proxy->PositionBias;
-		Params->Stride = Proxy->GpuDataStride;
-		Params->ScaleScale = Proxy->ScaleScale;
-		Params->BufferFormat = Proxy->BufferFormat;
-		Params->ScaleBias = Proxy->ScaleBias;
-		Params->PointScale = Proxy->PointScaleFactor;
-		Params->OpacityQuantization = FVector2f(Proxy->ColorScale.W, Proxy->ColorBias.W);
-		Params->OpacityScale = Proxy->OpacityScale;
-		Params->DepthOpacity = DepthOpacity;
-		Params->LightToClip = FVector4f(float(1.0 / Half), float(1.0 / Half), 0.0f, 0.0f);
-		Params->Dilation = float(0.25 * Texel * Texel);
-		Params->RenderTargets[0] = FRenderTargetBinding(TransmittanceMap, ERenderTargetLoadAction::ELoad);
-		Params->RenderTargets[1] = FRenderTargetBinding(DepthMap, ERenderTargetLoadAction::ELoad);
-
-		const uint32 NumSplats = Proxy->NumSplats;
-		GraphBuilder.AddPass(
-			RDG_EVENT_NAME("VGSSplat.LightShadow.Map %u splats %dx%d", NumSplats, Size, Size),
-			Params,
-			ERDGPassFlags::Raster,
-			[Params, MapVS, MapPS, Size, NumSplats](FRHICommandList& RHICmdList)
-			{
-				FGraphicsPipelineStateInitializer PSO;
-				RHICmdList.ApplyCachedRenderTargets(PSO);
-				// Transmittance multiplied; depths (d, -d) min blended: the nearest and farthest.
-				PSO.BlendState = TStaticBlendState<
-					CW_RED, BO_Add, BF_Zero, BF_SourceColor, BO_Add, BF_Zero, BF_One,
-					CW_RGBA, BO_Min, BF_One, BF_One, BO_Min, BF_One, BF_One>::GetRHI();
-				PSO.RasterizerState = TStaticRasterizerState<FM_Solid, CM_None>::GetRHI();
-				PSO.DepthStencilState = TStaticDepthStencilState<false, CF_Always>::GetRHI();
-				PSO.BoundShaderState.VertexDeclarationRHI = GEmptyVertexDeclaration.VertexDeclarationRHI;
-				PSO.BoundShaderState.VertexShaderRHI = MapVS.GetVertexShader();
-				PSO.BoundShaderState.PixelShaderRHI = MapPS.GetPixelShader();
-				PSO.PrimitiveType = PT_TriangleList;
-				SetGraphicsPipelineState(RHICmdList, PSO, 0);
-				SetShaderParameters(RHICmdList, MapVS, MapVS.GetVertexShader(), *Params);
-				SetShaderParameters(RHICmdList, MapPS, MapPS.GetPixelShader(), *Params);
-				RHICmdList.SetViewport(0.0f, 0.0f, 0.0f, float(Size), float(Size), 1.0f);
-				RHICmdList.DrawPrimitive(0, NumSplats * 2, 1);
-			});
-	}
-
-	// Composite onto the lit scene, from a copy of it.
-	const FSceneTextureUniformParameters& SceneTextures = *Inputs.SceneTextures->GetContents();
-	FRDGTextureRef SceneColor = SceneTextures.SceneColorTexture;
-	FRDGTextureRef SceneDepth = SceneTextures.SceneDepthTexture;
-	if (!SceneColor || !SceneDepth || SceneColor->Desc.NumSamples > 1)
-	{
-		return;
-	}
-	FRDGTextureRef SceneColorCopy = GraphBuilder.CreateTexture(
-		FRDGTextureDesc::Create2D(SceneColor->Desc.Extent, SceneColor->Desc.Format, FClearValueBinding::None, TexCreate_ShaderResource | TexCreate_RenderTargetable),
-		TEXT("VGSSplat.LightShadow.SceneColor"));
-	AddCopyTexturePass(GraphBuilder, SceneColor, SceneColorCopy);
-
-	const bool bSubstrateMaterial = Substrate::IsSubstrateEnabled() && !Substrate::IsSubstrateBlendableGBufferEnabled(View.GetShaderPlatform());
-	const bool bGBuffer = !bSubstrateMaterial && SceneTextures.GBufferATexture && SceneTextures.GBufferBTexture && SceneTextures.GBufferCTexture;
-	FRDGTextureRef Black = GSystemTextures.GetBlackDummy(GraphBuilder);
-
-	const float SourceAngle = MainLight->Proxy->GetLightSourceAngle(); // degrees
-	const double PenumbraRadius = 0.5 * FMath::Tan(FMath::DegreesToRadians(FMath::Clamp(double(SourceAngle), 0.0, 30.0)));
-
-	FVGSSplatLightShadowCompositePS::FParameters* Params = GraphBuilder.AllocParameters<FVGSSplatLightShadowCompositePS::FParameters>();
-	Params->View = View.ViewUniformBuffer;
-	Params->SceneColorCopy = SceneColorCopy;
-	Params->SceneDepth = SceneDepth;
-	Params->GBufferA = bGBuffer ? SceneTextures.GBufferATexture : Black;
-	Params->GBufferB = bGBuffer ? SceneTextures.GBufferBTexture : Black;
-	Params->GBufferC = bGBuffer ? SceneTextures.GBufferCTexture : Black;
-	Params->TransmittanceMap = TransmittanceMap;
-	Params->DepthMap = DepthMap;
-	Params->BilinearSampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
-	Params->LightOrigin = FVector3f(Origin + View.ViewMatrices.GetPreViewTranslation());
-	Params->LightX = FVector3f(X);
-	Params->LightY = FVector3f(Y);
-	Params->LightZ = FVector3f(Z);
-	Params->ToLight = ToLight;
-	Params->LightColor = FVector3f(LightColor.R, LightColor.G, LightColor.B);
-	Params->LightToUV = FVector4f(float(0.5 / Half), float(-0.5 / Half), 0.5f, 0.5f);
-	Params->MapSize = float(Size);
-	Params->Bias = float(FMath::Max(double(CVarVGSSplatShadowBias.GetValueOnRenderThread()), 2.0 * Texel));
-	Params->PenumbraPerDepth = float(PenumbraRadius * FMath::Max(CVarVGSSplatShadowSoftness.GetValueOnRenderThread(), 0.0f) / (2.0 * Half));
-	Params->SelfShadow = CVarVGSSplatShadowSelf.GetValueOnRenderThread() != 0 ? 1u : 0u;
-	Params->HasGBuffer = bGBuffer ? 1u : 0u;
-	Params->FallbackStrength = 0.6f;
-	Params->RenderTargets[0] = FRenderTargetBinding(SceneColor, ERenderTargetLoadAction::ELoad);
-
-	TShaderMapRef<FVGSSplatLightShadowCompositePS> CompositePS(ShaderMap);
-	FPixelShaderUtils::AddFullscreenPass(GraphBuilder, ShaderMap, RDG_EVENT_NAME("VGSSplat.LightShadow.Composite"), CompositePS, Params, ViewInfo.ViewRect);
+	auto* P = GraphBuilder.AllocParameters<FVGSSplatDeepShadowPrefixCS::FParameters>();
+	P->OpticalDepth = GraphBuilder.CreateSRV(OpticalDepth); P->ShadowAtlas = GraphBuilder.CreateUAV(Atlas); P->Resolution = Frame.Resolution;
+	P->InverseOpticalDepthScale = 1.0f / OpticalDepthScale;
+	P->NearestDepth = GraphBuilder.CreateSRV(NearestDepth);
+	TShaderMapRef<FVGSSplatDeepShadowPrefixCS> CS(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+	FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("VGSSplat.DeepShadow.Prefix"), ERDGPassFlags::Compute | ERDGPassFlags::NeverCull, CS, P,
+		FComputeShaderUtils::GetGroupCount(FIntPoint(Frame.Resolution), FIntPoint(8)));
+	GraphBuilder.UseExternalAccessMode(Atlas, ERHIAccess::SRVMask);
 }
+
+#if WITH_DEV_AUTOMATION_TESTS
+#include "Misc/AutomationTest.h"
+#include "Engine/TextureRenderTarget2D.h"
+#include "RHIGPUReadback.h"
+#include "UObject/StrongObjectPtr.h"
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVGSSplatDeepShadowDepthTest, VGSSPLAT_PLUGIN_NAME TEXT(".Lighting.DeepShadowDepth"), EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVGSSplatDeepShadowDepthTest::RunTest(const FString& Parameters)
+{
+	TStrongObjectPtr<UTextureRenderTarget2D> Atlas(NewObject<UTextureRenderTarget2D>());
+	TStrongObjectPtr<UTextureRenderTarget2D> Receivers(NewObject<UTextureRenderTarget2D>());
+	Atlas->bCanCreateUAV = true;
+	Atlas->InitCustomFormat(64, 72, PF_R16F, true); Atlas->UpdateResourceImmediate(true);
+	Receivers->InitCustomFormat(8, 8, PF_R32_FLOAT, true); Receivers->UpdateResourceImmediate(true);
+	VGSSplat::FDeepShadowFrame Frame;
+	Frame.Atlas = Atlas->GameThread_GetRenderTargetResource(); Frame.Receivers = Receivers->GameThread_GetRenderTargetResource();
+	Frame.Resolution = 8; Frame.Extent = FVector(1); Frame.Origin = FVector::ZeroVector;
+	Frame.X = FVector(1, 0, 0); Frame.Y = FVector(0, 1, 0); Frame.Z = FVector(0, 0, 1);
+	TArray<float> Values;
+	ENQUEUE_RENDER_COMMAND(FVGSDepthShadowRegression)([Frame, &Values](FRHICommandListImmediate& RHICmdList)
+	{
+		FRDGBuilder GraphBuilder(RHICmdList);
+		TArray<float> Records;
+		for (int32 I = 0; I < 21; ++I)
+		{
+			// 20 faint front splats, a receiver in the middle, and a strong back splat.
+			const float Record[14] = {0, 0, I < 20 ? -0.75f : 0.75f, 0.2f, 0.2f, 0.0001f, 0, 0, 0, 1, 0, 0, 0, I < 20 ? 0.05f : 0.2f};
+			Records.Append(Record, 14);
+		}
+		FVGSSplatRenderProxy Proxy;
+		Proxy.NumSplats = 21; Proxy.GpuDataStride = 56; Proxy.bCastShadow = true;
+		FRDGBufferRef Buffer = GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateByteAddressDesc(Records.Num() * sizeof(float)), TEXT("VGS.Test.Splats"));
+		GraphBuilder.QueueBufferUpload(Buffer, Records.GetData(), Records.Num() * sizeof(float));
+		Proxy.GpuBuffer = GraphBuilder.ConvertToExternalBuffer(Buffer);
+		const FVGSSplatRenderProxy* Proxies[] = {&Proxy};
+		VGSSplat::RenderDeepShadow(GraphBuilder, Frame, Proxies);
+		FRDGTextureRef Texture = GraphBuilder.RegisterExternalTexture(CreateRenderTarget(Frame.Atlas->GetRenderTargetTexture(), TEXT("VGS.Test.Atlas")));
+		GraphBuilder.UseInternalAccessMode(Texture);
+		FRHIGPUTextureReadback Readback(TEXT("VGS.Test.DeepShadow"));
+		AddEnqueueCopyPass(GraphBuilder, &Readback, Texture);
+		GraphBuilder.Execute();
+		RHICmdList.SubmitAndBlockUntilGPUIdle();
+		RHICmdList.ImmediateFlush(EImmediateFlushType::FlushRHIThread);
+		if (!Readback.IsReady()) return;
+		int32 Pitch = 0;
+		const FFloat16* Pixels = static_cast<const FFloat16*>(Readback.Lock(Pitch));
+		for (int32 Layer : {0, 31, 63}) Values.Add(Pixels[((Layer / 8) * 8 + 4) * Pitch + (Layer % 8) * 8 + 4].GetFloat());
+		Values.Add(Pixels[68 * Pitch + 4].GetFloat());
+		Readback.Unlock();
+	});
+	FlushRenderingCommands();
+	if (!TestEqual(TEXT("GPU samples available"), Values.Num(), 4)) return false;
+	const double Falloff = FMath::Exp(-0.5 * (0.125 * 0.125 * 2) / (0.2 * 0.2 + 0.015625));
+	const float Front = float(FMath::Pow(1.0 - 0.05 * Falloff, 20));
+	TestTrue(TEXT("Nothing before the first caster"), FMath::IsNearlyEqual(Values[0], 1.0f, 0.001f));
+	TestTrue(TEXT("Faint front layers shadow a receiver before the strong back layer"), FMath::IsNearlyEqual(Values[1], Front, 0.002f));
+	TestTrue(TEXT("Back layer only affects receivers behind it"), FMath::IsNearlyEqual(Values[2], Front * float(1.0 - 0.2 * Falloff), 0.002f));
+	TestTrue(TEXT("Nearest depth preserves the front surface"), FMath::IsNearlyEqual(Values[3], 0.125f, 0.001f));
+	AddInfo(FString::Printf(TEXT("Depth transmittance before/middle/after: %.6f %.6f %.6f (middle reference %.6f)"), Values[0], Values[1], Values[2], Front));
+	return true;
+}
+#endif

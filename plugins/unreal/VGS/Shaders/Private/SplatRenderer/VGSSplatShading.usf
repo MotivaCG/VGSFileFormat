@@ -83,7 +83,7 @@ float CovarianceScale;
 RWStructuredBuffer<FPackedShadedVGSSplatData> RWShadedVGSSplatBuffer;
 
 // VGS CHANGE: for a lit proxy (VGSSplatGBuffer.usf), each shaded splat's normal in view space,
-// x and y as two halves, at the same index as its record; z faces the camera. The normal is
+// full-sphere octahedral encoding, at the same index as its record. The normal is
 // the capture's own (NormalBuffer, octahedral in the capture's axes, 0 for none) or else the
 // splat's shortest axis turned towards the camera. HasNormals is 0 for no NormalBuffer, 1 for
 // outward normals, 2 for normals whose side is not known (directions only), which are turned
@@ -92,6 +92,35 @@ uint Lit;
 uint HasNormals;
 StructuredBuffer<uint> NormalBuffer;
 RWStructuredBuffer<uint> RWShadedNormalBuffer;
+ByteAddressBuffer PreviousSplats;
+float4x4 PreviousLocalToWorld;
+uint MotionHistoryValid;
+RWStructuredBuffer<float2> RWShadedMotionBuffer;
+
+float2 VGSSplatObjectMotion(uint Index, float3 Position)
+{
+	if (MotionHistoryValid == 0u) return 0;
+	const uint Offset = Index * BufferStride;
+	float3 PreviousPosition;
+	if (MotionHistoryValid == 2u) PreviousPosition = Position; // actor motion only, without record correspondence
+	else if (BufferFormat == 0)
+	{
+		// A record that has just been born has no previous visible position.
+		if (asfloat(PreviousSplats.Load(Offset + 52u)) < OpacityThreshold) return 0;
+		PreviousPosition = asfloat(PreviousSplats.Load3(Offset));
+	}
+	else
+	{
+		const uint2 P = PreviousSplats.Load2(Offset);
+		const uint Mask = (1u << 21) - 1u;
+		PreviousPosition = float3((P.y >> 10) & Mask, ((P.x >> 21) | (P.y << 11)) & Mask, P.x & Mask) * PositionScale + PositionBias;
+	}
+	const float3 CurrentWorld = mul(float4(Position, 1), LocalToWorld).xyz;
+	const float3 PreviousWorld = mul(float4(PreviousPosition, 1), PreviousLocalToWorld).xyz;
+	const float4 A = mul(float4(DFAddDemote(PrimaryView.PrevPreViewTranslation, CurrentWorld), 1), PrimaryView.PrevTranslatedWorldToClip);
+	const float4 B = mul(float4(DFAddDemote(PrimaryView.PrevPreViewTranslation, PreviousWorld), 1), PrimaryView.PrevTranslatedWorldToClip);
+	return A.w > 0.0f && B.w > 0.0f ? A.xy / A.w - B.xy / B.w : 0;
+}
 
 float3 VGSUnpackNormal(uint W)
 {
@@ -122,13 +151,8 @@ uint VGSShadedNormal(uint SplatIndex, FVGSSplatData SplatData)
 		WorldNormal = mul((float3x3)WorldToLocal, Axis);
 	}
 	float3 ViewNormal = normalize(mul(WorldNormal, (float3x3)PrimaryView.TranslatedWorldToView));
-	// Towards the camera is -z in view space. A normal the capture does not know the side of is
-	// turned whenever it faces away. The capture's own may face slightly away at a silhouette
-	// and is kept there; one clearly facing away (beyond about 17 degrees past edge-on) is a
-	// splat its estimation turned the wrong way, which would show as a dark speck, and is
-	// turned too. Tried on maria_simbo_carrito: 0 trades the specks for dark patches along
-	// silhouettes.
-	if (ViewNormal.z > (bFaceCamera ? 0.0f : 0.3f))
+	// Only unoriented directions face the camera. Oriented source normals keep their side.
+	if (bFaceCamera && ViewNormal.z > 0.0f)
 	{
 		ViewNormal = -ViewNormal;
 	}
@@ -436,6 +460,7 @@ void MainCS(
 
 		bool bVisible = false;
 		uint ShadedNormal = 0u; // VGS CHANGE
+		float2 ShadedMotion = 0;
 		if (bInBounds)
 		{
 			FVGSSplatData SplatData = UnpackVGSSplatData(SplatDataIndex);
@@ -456,6 +481,7 @@ void MainCS(
 					if (Lit != 0u)
 					{
 						ShadedNormal = VGSShadedNormal(SplatDataIndex, LocalSplatData); // VGS CHANGE
+						ShadedMotion = VGSSplatObjectMotion(SplatDataIndex, LocalSplatData.Position);
 					}
 				}
 			}
@@ -498,6 +524,7 @@ void MainCS(
 				if (Lit != 0u)
 				{
 					RWShadedNormalBuffer[WriteIndex] = ShadedNormal; // VGS CHANGE
+					RWShadedMotionBuffer[WriteIndex] = ShadedMotion;
 				}
 				if (GAUSSIAN_SPLAT_WRITE_SORT_KEYS)
 				{
@@ -513,6 +540,7 @@ void MainCS(
 			if (Lit != 0u)
 			{
 				RWShadedNormalBuffer[SplatDataIndex] = ShadedNormal; // VGS CHANGE
+				RWShadedMotionBuffer[SplatDataIndex] = ShadedMotion;
 			}
 			if (GAUSSIAN_SPLAT_WRITE_SORT_KEYS)
 			{

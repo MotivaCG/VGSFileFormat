@@ -45,7 +45,8 @@ bool rigFromComment(const Splats &s, NormalRig &rig) {
 
 namespace {
 // The splats as gaussiannormals takes them, and its estimate with `views`.
-RigNormalsResult estimate(const Splats &s, const std::vector<gaussiannormals::View> *views, std::vector<float> &normals) {
+RigNormalsResult estimate(const Splats &s, const std::vector<gaussiannormals::View> *views, std::vector<float> &normals,
+                          const gaussiannormals::Visibility &around = gaussiannormals::kSurroundingVisibility) {
   std::vector<float> rotations(s.count * 4); // xyzw, as gaussiannormals takes them
   std::vector<float> opacity(s.count);
   for (size_t i = 0; i < s.count; ++i) {
@@ -63,10 +64,10 @@ RigNormalsResult estimate(const Splats &s, const std::vector<gaussiannormals::Vi
   in.scale = s.scales.data();
   in.opacity = opacity.data();
   normals.assign(s.count * 3, 0.0f);
-  // A rig's cameras see as SMNForge's; those all around as the editors' (kSurroundingVisibility).
+  // A rig's cameras see as SMNForge's; those all around as the editors' Normal or Fine.
   const gaussiannormals::Result r = views
       ? gaussiannormals::computeNormals(in, *views, normals.data())
-      : gaussiannormals::computeNormals(in, gaussiannormals::surroundingViews(in), normals.data(), gaussiannormals::kSurroundingVisibility);
+      : gaussiannormals::computeNormals(in, gaussiannormals::surroundingViews(in, gaussiannormals::kSurroundingViews, around.resolution), normals.data(), around);
   RigNormalsResult result;
   result.opaque = r.opaque;
   result.seen = r.opaqueSeen;
@@ -79,8 +80,8 @@ RigNormalsResult rigNormals(const Splats &s, NormalRig rig, std::vector<float> &
   return estimate(s, &views, normals);
 }
 
-RigNormalsResult surroundingNormals(const Splats &s, std::vector<float> &normals) {
-  return estimate(s, nullptr, normals);
+RigNormalsResult surroundingNormals(const Splats &s, std::vector<float> &normals, bool fine) {
+  return estimate(s, nullptr, normals, fine ? gaussiannormals::kFineVisibility : gaussiannormals::kSurroundingVisibility);
 }
 
 AxisNormalsResult axisNormals(const Splats &s, std::vector<float> &normals, const AxisNormalsSettings &settings) {

@@ -14,6 +14,7 @@ void FVGSStaticSplatSource::SetLook_RenderThread(const FVGSStaticLook& InLook)
 void FVGSStaticSplatSource::SetGpu_RenderThread(TSharedPtr<FVGSStaticSplatGpu, ESPMode::ThreadSafe> InGpu)
 {
 	check(IsInRenderingThread());
+	HistoryFrame = MAX_uint64;
 	Gpu = MoveTemp(InGpu);
 }
 
@@ -35,6 +36,14 @@ void FVGSStaticSplatSource::Collect_RenderThread(FRDGBuilder& GraphBuilder, cons
 	Proxy.SHDegree = Look.bSphericalHarmonics ? Gpu->SHDegree : 0;
 	Proxy.SHCoordinateSpace = EVGSStaticSplatCoordinateSpace::LH_FRU; // the file's space is the local space
 	Proxy.GpuBuffer = Gpu->Splats;
+	if (HistoryFrame != GFrameNumberRenderThread)
+	{
+		Proxy.PreviousLocalToWorld = LastRenderedTransform;
+		Proxy.bMotionHistoryValid = HistoryFrame != MAX_uint64 && HistoryFrame + 1 == GFrameNumberRenderThread;
+		HistoryFrame = GFrameNumberRenderThread;
+		LastRenderedTransform = Look.LocalToWorld;
+	}
+	Proxy.PreviousGpuBuffer = Gpu->Splats;
 	Proxy.GpuDataStride = Gpu->Stride;
 	Proxy.BufferFormat = Gpu->bQuantized ? 1u : 0u;
 	if (Gpu->bQuantized)

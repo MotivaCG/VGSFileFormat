@@ -132,6 +132,9 @@ private:
 
 	/** The instant on the GPU, kept for the frames of the game where the capture does not move on. */
 	TRefCountPtr<FRDGPooledBuffer> SplatBuffer;
+	TRefCountPtr<FRDGPooledBuffer> SpareSplatBuffer;
+	uint64 HistoryFrame = MAX_uint64;
+	FMatrix44f LastRenderedTransform = FMatrix44f::Identity;
 	uint32 UploadedSplats = 0;
 	/** Each record's normal, beside SplatBuffer; null when the capture carries none. */
 	TRefCountPtr<FRDGPooledBuffer> NormalBuffer;

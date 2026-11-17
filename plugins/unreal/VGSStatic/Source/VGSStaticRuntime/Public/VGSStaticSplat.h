@@ -17,7 +17,7 @@ enum class EVGSStaticNormals : uint8
 	None,
 	/** The PLY's own nx, ny, nz (SMNForge's and the VGS editor's are outward, from the capture's cameras). */
 	File UMETA(DisplayName = "From the file"),
-	/** Worked out at import with a studio rig's cameras, which decide each splat's outward side. */
+	/** Worked out with a studio rig's cameras, by imports before cameras all around replaced them. */
 	Rig UMETA(DisplayName = "Estimated with the rig"),
 	/**
 	 * Worked out at import as PGSR takes them, each splat's shortest axis, corrected by its
@@ -26,8 +26,8 @@ enum class EVGSStaticNormals : uint8
 	 */
 	Axes UMETA(DisplayName = "Shortest axes (PGSR)"),
 	/**
-	 * Worked out at import as with a rig, but with cameras spread all around the splats: for a
-	 * PLY no studio rig of ours captured. Outward, as a rig's.
+	 * Worked out at import as the VGS editor does, with cameras spread all around the splats
+	 * deciding each one's outward side (Normal or Fine: the asset's Normal Method).
 	 */
 	Surrounding UMETA(DisplayName = "Estimated with cameras all around"),
 };
@@ -36,20 +36,15 @@ enum class EVGSStaticNormals : uint8
 UENUM(BlueprintType)
 enum class EVGSStaticNormalMethod : uint8
 {
-	/** With the rig the PLY names (SMNForge writes "comment capture_rig"), or else cameras all around. */
-	Auto UMETA(DisplayName = "Rig from the file, else cameras all around"),
-	/** The ScanMeNow rig's cameras: for its PLYs, in their own frame (Y up, metres). */
-	SmnV1 UMETA(DisplayName = "SMNV1 rig"),
-	/** The THE4DSCANNER rig's cameras, likewise. */
-	The4DScanner UMETA(DisplayName = "THE4DSCANNER rig"),
-	/** Each splat's shortest axis, as PGSR (for a PLY from anywhere): no rig needed. */
-	ShortestAxes UMETA(DisplayName = "Shortest axes (PGSR)"),
 	/**
-	 * The rig estimate with cameras spread evenly around the splats instead of a rig's: for a PLY
-	 * from anywhere, and the best of these without a rig (closer to the rig's own normals than
-	 * the shortest axes, and outward).
+	 * The VGS editor's Normal: 256 cameras all around the splats decide each one's outward side,
+	 * whichever rig captured it and wherever it stands. About 1.3 s for 300 000 splats.
 	 */
-	Surrounding UMETA(DisplayName = "Cameras all around"),
+	Normal UMETA(DisplayName = "Normal (cameras all around)"),
+	/** The VGS editor's Fine: the same, seeing finer; the side wrong on fewer splats. About 3 s. */
+	Fine UMETA(DisplayName = "Fine (cameras all around, finer)"),
+	/** Each splat's shortest axis, as PGSR: rougher, and the side is left to the renderer. */
+	ShortestAxes UMETA(DisplayName = "Shortest axes (PGSR)"),
 };
 
 /** How the splats are kept on the GPU. */
@@ -148,14 +143,14 @@ public:
 	bool bReplaceFileNormals = false;
 
 	UPROPERTY(EditAnywhere, Category = "Import Settings", meta = (EditCondition = "bEstimateNormals"))
-	EVGSStaticNormalMethod NormalMethod = EVGSStaticNormalMethod::Auto;
+	EVGSStaticNormalMethod NormalMethod = EVGSStaticNormalMethod::Fine;
 
 	/** Shortest axes: the nearest splats a round or stray splat takes its neighbours' direction from. */
-	UPROPERTY(EditAnywhere, Category = "Import Settings", meta = (ClampMin = "4", ClampMax = "64", EditCondition = "bEstimateNormals"))
+	UPROPERTY(EditAnywhere, Category = "Import Settings", meta = (ClampMin = "4", ClampMax = "64", EditCondition = "bEstimateNormals && NormalMethod == EVGSStaticNormalMethod::ShortestAxes"))
 	int32 NormalNeighbours = 16;
 
 	/** Shortest axes: ... no farther than this share of the splats' size (their bounds' diagonal). */
-	UPROPERTY(EditAnywhere, Category = "Import Settings", meta = (ClampMin = "0.05", ClampMax = "10", Units = "Percent", EditCondition = "bEstimateNormals"))
+	UPROPERTY(EditAnywhere, Category = "Import Settings", meta = (ClampMin = "0.05", ClampMax = "10", Units = "Percent", EditCondition = "bEstimateNormals && NormalMethod == EVGSStaticNormalMethod::ShortestAxes"))
 	float NormalRadiusPercent = 1.0f;
 
 	/** Make the shadow proxy mesh (reimport does the same). The sizes below are for a PLY in metres. */

@@ -35,6 +35,7 @@
 #include "/Engine/Private/ColorSpace.ush"
 #include "/Engine/Private/Random.ush"
 #include "/Engine/Private/DeferredShadingCommon.ush"
+#include "/Engine/Private/VelocityCommon.ush"
 
 #if VGS_SUBSTRATE_MATERIAL
 #if SUBSTRATE_BASE_PASS_MRT_OUTPUT_COUNT != 3
@@ -60,6 +61,7 @@ void FSubstratePixelHeader::UpdateAllBSDFWithBottomUpOperatorVisit_FullySimplifi
 Texture2D<float4> SplatColorTexture;
 Texture2D<float4> DepthMomentsTexture;
 Texture2D<float4> NormalZTexture; // the normals' z, weighted as the moments' x and y
+Texture2D<float> SurfaceDepthTexture;
 uint SmoothingMode;         // 0: neighbours near the pixel's depth; 1: near its local plane
 float SmoothingTolerance;   // how far off they may lie, a share of the distance ...
 float SmoothingBias;        // ... plus this, in Unreal units
@@ -73,6 +75,7 @@ float Specular;
 float MinCoverage;      // below this a pixel is never written
 uint Dither;            // 0: written where coverage reaches one half, no dithering
 float NormalSmoothing;  // the bilateral filter's radius, in Unreal units; 0 leaves each pixel's own normal
+uint Deforming;
 
 // The splats' mean view-space normal at a pixel, and how much they cover it.
 // The weighted mean of the splats' normals: x, y and z each averaged, then normalised. (Not x
@@ -178,10 +181,14 @@ void MainPS(
 	out uint OutSubstrateMat1 : SV_Target2,
 	out uint OutSubstrateMat2 : SV_Target3,
 	out SUBSTRATE_TOP_LAYER_TYPE OutSubstrateTopLayer : SV_Target4,
+	out float4 OutVelocity : SV_Target5,
+	out float OutCaptureMask : SV_Target6,
 #else
 	out float4 OutGBufferA : SV_Target1,
 	out float4 OutGBufferB : SV_Target2,
 	out float4 OutGBufferC : SV_Target3,
+	out float4 OutVelocity : SV_Target4,
+	out float OutCaptureMask : SV_Target5,
 #endif
 	out float OutDepth : SV_Depth)
 {
@@ -227,7 +234,8 @@ void MainPS(
 		}
 	}
 
-	const float Depth = Moments.r * InvCoverage * ExpectedDepthScale;
+	const float SurfaceDepth = SurfaceDepthTexture.Load(Pixel);
+	const float Depth = (SurfaceDepth < 1e19f ? SurfaceDepth : Moments.r * InvCoverage) * ExpectedDepthScale;
 	float3 ViewNormal = VGSPixelViewNormal(Pixel.xy, Moments);
 	if (NormalSmoothing > 0.0f)
 	{
@@ -236,6 +244,14 @@ void MainPS(
 	const float3 WorldNormal = normalize(mul(ViewNormal, (float3x3)View.ViewToTranslatedWorld));
 
 	OutDepth = ConvertToDeviceZ(Depth);
+	OutCaptureMask = 1.0f;
+	// Camera motion at the actual receiver depth, plus the opacity-weighted object
+	// displacement evaluated in the previous camera. The temporal jitter is removed once.
+	const float4 CurrentClip = float4(SvPositionToScreenPosition(SvPosition).xy, OutDepth, 1.0f);
+	const float4 PreviousClip = mul(CurrentClip, View.ClipToPrevClipWithAA);
+	float3 Velocity = PreviousClip.w > 1e-6f ? Calculate3DVelocityBase(CurrentClip, PreviousClip, View.TemporalAAJitter.xy, View.TemporalAAJitter.zw) : 0;
+	Velocity.xy += NormalZTexture.Load(Pixel).gb * InvCoverage;
+	OutVelocity = EncodeVelocityToTexture(Velocity, Deforming != 0u);
 
 #if VGS_SUBSTRATE_MATERIAL
 	const float3 BaseColor = saturate(Linear);
@@ -328,8 +344,8 @@ void MainPS(
 	// As a primitive that casts contact shadows (BasePassPixelShader.usf, PerObjectGBufferData).
 	GBuffer.PerObjectGBufferData = 1.0f / 3.0f;
 
-	float4 OutGBufferD, OutGBufferE, OutVelocity;
-	EncodeGBuffer(GBuffer, OutGBufferA, OutGBufferB, OutGBufferC, OutGBufferD, OutGBufferE, OutVelocity, 0.0f);
+	float4 OutGBufferD, OutGBufferE, UnusedVelocity;
+	EncodeGBuffer(GBuffer, OutGBufferA, OutGBufferB, OutGBufferC, OutGBufferD, OutGBufferE, UnusedVelocity, 0.0f);
 #endif
 
 	// The base pass writes emissive (and baked lighting) to scene colour; this is the capture's.
