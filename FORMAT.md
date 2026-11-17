@@ -554,8 +554,10 @@ full opacity.
 Attribute 48, `normals`, optional: every splat's outward surface normal, for renderers that
 light splats. A Gaussian has no normal of its own; renderers that light splats derive one
 from the shortest axis, which faces into the subject for about half of them and does not
-follow the surface at all on near-round ones. The editor computes normals at export from the
-capture's rig (see editor/README.md) and stores them here.
+follow the surface at all on near-round ones. The editor computes normals at export with
+cameras all around the splats (see editor/README.md) and stores them here; how, in its export
+metadata (`normals`: `mode` NORMAL or FINE and the method's `version`), so that a later export
+of the file can keep them where nothing that decides them changed.
 
 Two bytes per splat in its group, constant over the chunk, descriptor kind 1 (u8), family 3
 (channels), two channels: the normal is in the splat's own frame, so it turns with the

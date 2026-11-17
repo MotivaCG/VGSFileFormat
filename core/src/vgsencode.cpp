@@ -309,6 +309,10 @@ void parallelChunks(size_t count, const EncodeOptions &options, Prepare prepare,
     while (asked<count && preparing.size()<threads)
       preparing.push_back(std::async(std::launch::async,[&,next=asked++]{return prepare(next);}));
     auto ahead=std::move(preparing.front());preparing.pop_front();
+    // Waiting for a chunk that takes long to prepare, the caller still hears from us: a
+    // progress callback is how it cancels.
+    while (ahead.wait_for(std::chrono::milliseconds(100))!=std::future_status::ready)
+      report(completed);
     return ahead.get();
   };
   auto drain = [&] {

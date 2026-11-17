@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <deque>
 #include <exception>
 #include <map>
 #include <memory>
@@ -203,6 +204,136 @@ vgsdec::ParallelFor throughHost(vgsb_parallel_for run, void *host) {
     if (job.failure)
       std::rethrow_exception(job.failure);
   };
+}
+
+/**
+ * The decoder's parallel work for every player in the process, on one set of threads.
+ *
+ * Without it each lane's Capture started threads of its own for every batch of pages and
+ * every frame (half the cores each, two lanes a player): six captures on 24 cores made up
+ * to 72 threads at a time, several times a frame, all after the same cores. Here there are
+ * as many workers as cores, made once; a lane hands its pieces to the queue and works on
+ * them itself too, so it always advances, whatever else is queued, and nothing waits on
+ * work that waits on it. Unreal passes its own task system instead (vgsb_set_parallel_for).
+ *
+ * Players hold it: made with the first one opened, stopped with the last one closed, on
+ * the host's thread in vgsb_close - never while the library is being unloaded, where
+ * joining threads on Windows would wait on the loader for ever.
+ */
+class SharedPool {
+public:
+  explicit SharedPool(unsigned workers) {
+    for (unsigned i = 0; i < workers; ++i)
+      threads.emplace_back([this] { serve(); });
+  }
+  ~SharedPool() {
+    {
+      std::lock_guard<std::mutex> lock(guard);
+      quit = true;
+    }
+    wake.notify_all();
+    for (std::thread &thread : threads)
+      thread.join();
+  }
+
+  // body(i) for i in [0, count), and back once every one has run; the first exception
+  // any of them threw is rethrown here.
+  void run(size_t count, const std::function<void(size_t)> &body) {
+    if (count == 0)
+      return;
+    if (count == 1) {
+      body(0);
+      return;
+    }
+    Job job{&body, count};
+    {
+      std::lock_guard<std::mutex> lock(guard);
+      queue.push_back(&job);
+    }
+    wake.notify_all();
+    // This thread works on its own job: claimed under the lock, run outside it.
+    for (;;) {
+      size_t index;
+      {
+        std::lock_guard<std::mutex> lock(guard);
+        if (job.next >= job.count)
+          break;
+        index = claim(job);
+      }
+      runOne(job, index);
+    }
+    std::unique_lock<std::mutex> lock(guard);
+    finished.wait(lock, [&] { return job.done == job.count; });
+    if (job.failure)
+      std::rethrow_exception(job.failure);
+  }
+
+private:
+  struct Job {
+    const std::function<void(size_t)> *body;
+    size_t count, next = 0, done = 0;
+    std::exception_ptr failure;
+  };
+  // The next index of `job`, taken off the queue with its last one. Under `guard`.
+  size_t claim(Job &job) {
+    const size_t index = job.next++;
+    if (job.next >= job.count) {
+      auto it = std::find(queue.begin(), queue.end(), &job);
+      if (it != queue.end())
+        queue.erase(it);
+    }
+    return index;
+  }
+  void runOne(Job &job, size_t index) {
+    std::exception_ptr failure;
+    try {
+      (*job.body)(index);
+    } catch (...) {
+      failure = std::current_exception();
+    }
+    // Every touch of the job is under the lock: once `done` reaches `count` its owner may
+    // return, and the job, on its stack, is gone.
+    std::lock_guard<std::mutex> lock(guard);
+    if (failure && !job.failure)
+      job.failure = failure;
+    if (++job.done == job.count)
+      finished.notify_all();
+  }
+  void serve() {
+    for (;;) {
+      Job *job;
+      size_t index;
+      {
+        std::unique_lock<std::mutex> lock(guard);
+        wake.wait(lock, [&] { return quit || !queue.empty(); });
+        if (quit)
+          return;
+        job = queue.front();
+        index = claim(*job);
+      }
+      runOne(*job, index);
+    }
+  }
+
+  std::mutex guard;
+  std::condition_variable wake, finished;
+  std::deque<Job *> queue;
+  bool quit = false;
+  std::vector<std::thread> threads;
+};
+
+std::mutex sharedPoolGuard;
+std::weak_ptr<SharedPool> sharedPool;
+
+/** The process's pool, made when no player holds one. */
+std::shared_ptr<SharedPool> acquireSharedPool() {
+  std::lock_guard<std::mutex> lock(sharedPoolGuard);
+  std::shared_ptr<SharedPool> pool = sharedPool.lock();
+  if (!pool) {
+    pool = std::make_shared<SharedPool>(std::max(1u, std::thread::hardware_concurrency()));
+    sharedPool = pool;
+  }
+  return pool;
 }
 
 /** The least density accepted: below it a capture is a scattering of dots. */
@@ -685,12 +816,18 @@ vgsb_player *openPlayer(const char *path, int includeSh, int slots, int threads,
       parallelFor = hostRun;
       host = hostData;
     }
+    // Without the host's task system, the process's pool (SharedPool): the captures hold it.
+    const std::shared_ptr<SharedPool> pool = parallelFor ? nullptr : acquireSharedPool();
     for (Lane &lane : player->lanes) {
       lane.capture = std::make_unique<vgsdec::Capture>(
           vgsdec::Capture::openMemory(player->file.data(), player->file.size()));
       lane.capture->setThreadCount(threads > 0 ? unsigned(threads) : std::max(1u, cores / 2));
       if (parallelFor)
         lane.capture->setParallelFor(throughHost(parallelFor, host));
+      else
+        lane.capture->setParallelFor([pool](size_t count, const std::function<void(size_t)> &body) {
+          pool->run(count, body);
+        });
       if (packed)
         lane.capture->setOutput(vgsdec::Output::Packed);
       // The chunk the lane is on and nothing else: the other lane holds the neighbour.

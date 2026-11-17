@@ -4,6 +4,10 @@
 #include <cstring>
 namespace vgs {
 namespace {
+// Little-endian values. Every host this runs on (x86, ARM, WebAssembly) is little-endian,
+// where one load reads them: built byte by byte instead, MSVC made several loads and shifts
+// of each, read a few times per splat per frame. A big-endian host keeps the byte form.
+#if defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
 uint16_t readU16(const char *p);
 uint64_t readU64(const char *p) {
   uint64_t v = 0;
@@ -17,6 +21,23 @@ uint32_t readU32(const char *p) {
 uint16_t readU16(const char *p) {
   return uint8_t(p[0]) | (uint16_t(uint8_t(p[1])) << 8);
 }
+#else
+inline uint64_t readU64(const char *p) {
+  uint64_t v;
+  std::memcpy(&v, p, 8);
+  return v;
+}
+inline uint32_t readU32(const char *p) {
+  uint32_t v;
+  std::memcpy(&v, p, 4);
+  return v;
+}
+inline uint16_t readU16(const char *p) {
+  uint16_t v;
+  std::memcpy(&v, p, 2);
+  return v;
+}
+#endif
 
 double readF64(const char *p) {
   uint64_t bits = readU64(p);
@@ -32,7 +53,7 @@ float readF32(const char *p) {
   return v;
 }
 
-float halfToFloat(uint16_t h) {
+float halfToFloatBits(uint16_t h) {
   const uint32_t sign = uint32_t(h & 0x8000u) << 16;
   const uint32_t exponent = (h >> 10) & 0x1Fu;
   const uint32_t mantissa = h & 0x3FFu;
@@ -60,6 +81,21 @@ float halfToFloat(uint16_t h) {
   float v;
   std::memcpy(&v, &bits, 4);
   return v;
+}
+// Every half's float, made once by halfToFloatBits: a load instead of its branches, for the
+// conversions done a few times per splat per frame.
+const float *halfTable() {
+  static const std::vector<float> table = [] {
+    std::vector<float> t(65536);
+    for (uint32_t h = 0; h < 65536; ++h)
+      t[h] = halfToFloatBits(uint16_t(h));
+    return t;
+  }();
+  return table.data();
+}
+inline float halfToFloat(uint16_t h) {
+  static const float *const table = halfTable();
+  return table[h];
 }
 
 uint16_t floatToHalf(float f) {
@@ -210,6 +246,18 @@ public:
       ++below;
     *rank = uint32_t(below + 1);
     *offset = rankStart[below] + uint64_t(below + 1) * (id - starts[below]);
+  }
+
+  // body(id, rank, offset) for every splat in [begin, end), as find gives them, a run of
+  // splats of the same rank at a time instead of a search for each.
+  template <class Body> void forEach(uint64_t begin, uint64_t end, Body body) const {
+    for (int j = 0; j < count && begin < end; ++j) {
+      const uint64_t to = std::min<uint64_t>(end, boundaries[j]);
+      const uint32_t rank = uint32_t(j + 1);
+      for (uint64_t id = begin; id < to; ++id)
+        body(id, rank, rankStart[j] + uint64_t(rank) * (id - starts[j]));
+      begin = std::max(begin, to);
+    }
   }
 
 private:
@@ -611,13 +659,10 @@ void FrameDecoder::evaluatePositions(double normalized,
       const char *baseBytes = group.array("position_base");
       const RankLookup ranks(group.array("position_rank_boundaries"), 4, n);
       const char *terms = group.array("position_rq_coefficients");
-      for (uint64_t i = 0; i < n; ++i) {
+      ranks.forEach(0, n, [&](uint64_t i, uint32_t rank, uint64_t first) {
         float p[3];
         unpackPosition(readU64(baseBytes + i * 8), group.positionMin,
                        group.positionMax, p);
-        uint32_t rank = 0;
-        uint64_t first = 0;
-        ranks.find(i, &rank, &first);
         for (uint32_t k = 0; k < rank; ++k) {
           const uint32_t packed = readU32(terms + (first + k) * 4);
           const float weight = halfToFloat(uint16_t(packed >> 16));
@@ -627,7 +672,7 @@ void FrameDecoder::evaluatePositions(double normalized,
         }
         for (int c = 0; c < 3; ++c)
           (*out)[size_t((written + i) * 3 + uint64_t(c))] = p[c];
-      }
+      });
     }
     written += n;
   }
@@ -865,13 +910,10 @@ void FrameDecoder::evaluateInto(double normalized, bool includeSh, Frame *out,
               a[c] + (b[c] - a[c]) * r;
       }
     } else {
-      for (uint64_t i = begin; i < end; ++i) {
+      plan.positionRanks.forEach(begin, end, [&](uint64_t i, uint32_t rank, uint64_t first) {
         float p[3];
         unpackPosition(readU64(plan.positions + i * 8), group->positionMin,
                        group->positionMax, p);
-        uint32_t rank = 0;
-        uint64_t first = 0;
-        plan.positionRanks.find(i, &rank, &first);
         for (uint32_t k = 0; k < rank; ++k) {
           const uint32_t packed = readU32(plan.positionTerms + (first + k) * 4);
           const uint32_t index = packed & 0xFFFFu;
@@ -884,7 +926,7 @@ void FrameDecoder::evaluateInto(double normalized, bool includeSh, Frame *out,
         }
         for (int c = 0; c < 3; ++c)
           out->position[size_t((written + i) * 3 + uint64_t(c))] = p[c];
-      }
+      });
     }
 
     // --- rotations -------------------------------------------------------
@@ -908,14 +950,11 @@ void FrameDecoder::evaluateInto(double normalized, bool includeSh, Frame *out,
           out->rotation[size_t((written + i) * 4 + uint64_t(c))] = q[c] / norm;
       }
     } else {
-      for (uint64_t i = begin; i < end; ++i) {
+      plan.rotationRanks.forEach(begin, end, [&](uint64_t i, uint32_t rank, uint64_t first) {
         float base[4];
         unpackQuaternion(readU32(plan.rotations + i * 4), base);
 
         float residual[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-        uint32_t rank = 0;
-        uint64_t first = 0;
-        plan.rotationRanks.find(i, &rank, &first);
         for (uint32_t k = 0; k < rank; ++k) {
           const uint16_t index = readU16(plan.rotationTerms + (first + k) * 2);
           const float *row = basis.rotation.data() + uint64_t(index) * 4;
@@ -951,7 +990,7 @@ void FrameDecoder::evaluateInto(double normalized, bool includeSh, Frame *out,
         norm = std::max(std::sqrt(norm), 1e-20f);
         for (int c = 0; c < 4; ++c)
           out->rotation[size_t((written + i) * 4 + uint64_t(c))] = q[c] / norm;
-      }
+      });
     }
 
     // --- scale, opacity, lifetime ------------------------------------------
@@ -996,29 +1035,24 @@ void FrameDecoder::evaluateInto(double normalized, bool includeSh, Frame *out,
     // --- higher-order spherical harmonics --------------------------------
     if (evaluateSh) {
       static const int kShift[3] = {20, 10, 0};
-      for (uint64_t g = 0; g < shPlanes; ++g) {
-        // The index arrays are plane-major: all N words of group 0, then
-        // all N of group 1, and so on.
-        const char *sPlane = plan.shStaticIndices + g * n * 4;
-        const char *tPlane = plan.shTemporalIndices + g * n * 4;
-        for (uint64_t i = begin; i < end; ++i) {
-          const uint32_t sWord = readU32(sPlane + i * 4);
-          const uint32_t tWord = readU32(tPlane + i * 4);
+      // Splat by splat, its coefficients written in one run: the output is the frame's
+      // largest array, and writing it plane by plane went through it once per plane.
+      // The index arrays are plane-major: all N words of plane 0, then all N of plane 1...
+      for (uint64_t i = begin; i < end; ++i) {
+        float *coefficients = out->shRest.data() + size_t((written + i) * shCoefficients * 3);
+        for (uint64_t g = 0; g < shPlanes; ++g) {
+          const uint32_t sWord = readU32(plan.shStaticIndices + (g * n + i) * 4);
+          const uint32_t tWord = readU32(plan.shTemporalIndices + (g * n + i) * 4);
           for (int k = 0; k < 3; ++k) {
-            const uint32_t si = (sWord >> kShift[k]) & 0x3FFu;
-            const uint32_t ti = (tWord >> kShift[k]) & 0x3FFu;
-            const float *sEntry =
-                shStaticValues.data() + (((g * 3 + uint64_t(k)) * ns) + si) * 3;
-            const float *tEntry =
-                shTemporalValues.data() + (((g * 3 + uint64_t(k)) * nt) + ti) * 3;
             const uint64_t coefficient = g * 3 + uint64_t(k);
             if (coefficient >= shCoefficients)
               break;
-            for (int c = 0; c < 3; ++c) {
-              out->shRest[size_t((written + i) * shCoefficients * 3 +
-                                 coefficient * 3 + uint64_t(c))] =
-                  sEntry[c] + tEntry[c];
-            }
+            const uint32_t si = (sWord >> kShift[k]) & 0x3FFu;
+            const uint32_t ti = (tWord >> kShift[k]) & 0x3FFu;
+            const float *sEntry = shStaticValues.data() + ((coefficient * ns) + si) * 3;
+            const float *tEntry = shTemporalValues.data() + ((coefficient * nt) + ti) * 3;
+            for (int c = 0; c < 3; ++c)
+              coefficients[coefficient * 3 + uint64_t(c)] = sEntry[c] + tEntry[c];
           }
         }
       }

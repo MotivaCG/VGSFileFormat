@@ -58,20 +58,34 @@ const char *attributeName(uint32_t id) {
     return group[id - 32];
   return "unknown";
 }
+// The IEEE CRC-32 (zlib's), eight bytes a step through eight tables ("slicing by eight"):
+// the same value as a byte at a time, which every page's check spent more time on than
+// decompressing many of them (37 of 90 ms of a 290 000-splat chunk).
 uint32_t crc32(const uint8_t *p, size_t n) {
-  static const auto table = []() {
-    std::array<uint32_t, 256> t{};
+  static const auto tables = []() {
+    std::array<std::array<uint32_t, 256>, 8> t{};
     for (uint32_t i = 0; i < 256; ++i) {
       auto c = i;
       for (int k = 0; k < 8; ++k)
         c = (c >> 1) ^ (0xedb88320u & uint32_t(-int32_t(c & 1)));
-      t[i] = c;
+      t[0][i] = c;
     }
+    for (uint32_t i = 0; i < 256; ++i)
+      for (int k = 1; k < 8; ++k)
+        t[k][i] = (t[k - 1][i] >> 8) ^ t[0][t[k - 1][i] & 255];
     return t;
   }();
+  const auto &t = tables;
   uint32_t c = ~0u;
-  for (size_t i = 0; i < n; ++i)
-    c = table[(c ^ p[i]) & 255] ^ (c >> 8);
+  for (; n >= 8; p += 8, n -= 8) {
+    // Little-endian words, read a byte at a time so that any host gets the same.
+    const uint32_t lo = c ^ (uint32_t(p[0]) | uint32_t(p[1]) << 8 | uint32_t(p[2]) << 16 | uint32_t(p[3]) << 24);
+    const uint32_t hi = uint32_t(p[4]) | uint32_t(p[5]) << 8 | uint32_t(p[6]) << 16 | uint32_t(p[7]) << 24;
+    c = t[7][lo & 255] ^ t[6][(lo >> 8) & 255] ^ t[5][(lo >> 16) & 255] ^ t[4][lo >> 24] ^
+        t[3][hi & 255] ^ t[2][(hi >> 8) & 255] ^ t[1][(hi >> 16) & 255] ^ t[0][hi >> 24];
+  }
+  for (; n; ++p, --n)
+    c = t[0][(c ^ *p) & 255] ^ (c >> 8);
   return ~c;
 }
 namespace {
