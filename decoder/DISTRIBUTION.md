@@ -4,7 +4,7 @@
 
 ### VGS Decoder
 
-**Reads 4D Gaussian splat captures: `.vgs` and `.pgs`**
+**Reads Gaussian splat captures: `.vgs` (animated) and `.pgs` (static)**
 
 </div>
 
@@ -156,7 +156,7 @@ static library, that C interface is what it exports, and the only thing it expor
 
 ## Format support and compatibility
 
-The package accepts `.vgs` and `.pgs` captures. Their detailed differences and
+The package accepts `.vgs` (animated, compressed or not) and `.pgs` (static) captures. Their detailed differences and
 per-version compatibility guarantees are not specified in this distribution
 guide; refer to the decoder release notes or ask the Licensor before relying on
 a particular producer/decoder version combination.

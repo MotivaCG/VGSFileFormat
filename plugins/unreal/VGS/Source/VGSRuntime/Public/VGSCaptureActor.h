@@ -14,7 +14,7 @@ class UVGSCaptureComponent;
  * The splats are not a primitive, so they cannot be clicked in the viewport; the editor-only
  * sprite at the actor's origin is what selects it.
  */
-UCLASS(meta = (DisplayName = "VGS (Video Gaussian Static)"))
+UCLASS(meta = (DisplayName = "VGS (Video Gaussian Splatting)"))
 class VGSRUNTIME_API AVGSCaptureActor : public AActor
 {
 	GENERATED_BODY()

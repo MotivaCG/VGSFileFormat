@@ -287,7 +287,7 @@ enum Number {
   NumberSignatureAlgorithm,
   NumberSignedBytes,
   NumberVersion,
-  NumberIsPlain,
+  NumberIsUncompressed,
   NumberPlaybackMode,
   NumberMotionType,
   NumberMovingSpeed,
@@ -312,7 +312,7 @@ EMSCRIPTEN_KEEPALIVE double vgs_number(int which) {
   case NumberSignatureAlgorithm: return capture->signature().algorithm;
   case NumberSignedBytes: return double(capture->signature().signedBytes);
   case NumberVersion: return capture->version();
-  case NumberIsPlain: return capture->isUncompressed() ? 1 : 0;
+  case NumberIsUncompressed: return capture->isUncompressed() ? 1 : 0;
   case NumberPlaybackMode: return double(int(capture->playbackMode()));
   case NumberMotionType: return double(int(capture->motionType()));
   case NumberMovingSpeed: return double(capture->movingSpeed());

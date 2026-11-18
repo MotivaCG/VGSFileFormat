@@ -4,7 +4,7 @@
 
 ## VGSFileFormat
 
-**The VGS container: `.vgs` and `.pgs`**
+**The VGS container: `.vgs` (Video Gaussian Splatting) and `.pgs` (Plain Gaussian Splatting, static)**
 
 </div>
 
@@ -27,8 +27,8 @@ build them.
 Licensing is specific to each component; access to this repository does not
 grant a general right to use, modify or distribute its contents.
 
-- [VGS Encoder](encoder/LICENSE.md) and [VGS Editor](editor/LICENSE.md) (with the SGS
-  Editor in `sgseditor/`) are
+- [VGS Encoder](encoder/LICENSE.md) and [VGS Editor](editor/LICENSE.md) (with the PGS
+  Editor in `pgseditor/`) are
   proprietary commercial software owned by **Víctor M. Feliz**. **ScanMeNow**
   and **The4DScanner** have only the internal-use permission stated in those
   licences, with no ownership, sale, redistribution or sublicensing rights.
@@ -51,14 +51,14 @@ grant a general right to use, modify or distribute its contents.
     decoder/     libvgsdecoder  + vgsinfo, vgsplay, vgsdump, vgsexport, vgspagecost, WebAssembly
     editor/      Qt desktop editor, with its own build and installer
     viewer/      Qt desktop player, with its own build, deploy and installer (viewer/README.md)
-    sgseditor/   Qt editor for static captures (.ply to .sgs: normals, gs2mesh mesh, lights),
-                 with its own build, deploy and installer (sgseditor/README.md)
+    pgseditor/   Qt editor for static captures (.ply to .pgs: normals, gs2mesh mesh, lights),
+                 with its own build, deploy and installer (pgseditor/README.md)
     tests/       the conformance and separation tests
     cmake/       package files for find_package
     logo.svg     the mark as vector art, transparent, with a small margin: the source of
                  every icon and picture of it (rendered in a browser; other SVG renderers
                  draw its blends wrong)
-    logo_red.svg, logo_green.svg  the same in one colour each: the SGS editor's (red) and
+    logo_red.svg, logo_green.svg  the same in one colour each: the PGS editor's (red) and
                  the VGS editor's (green) icons
     logo.png     the mark, 1024 pixels, on white; docs/logo.png is a copy for documents
     logo_trans.png  the same on a transparent background

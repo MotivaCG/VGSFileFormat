@@ -109,7 +109,7 @@ typedef struct vgsb_frame {
                             * carries none */
 } vgsb_frame;
 
-/* Import a static (.sgs) capture once, without playback threads or a player. The frame
+/* Import a static (.pgs) capture once, without playback threads or a player. The frame
  * and optional authenticated GLB proxy belong to this handle until close. Rejects
  * captures with more than one frame. On failure returns NULL and clears the outputs.
  * Additive API: existing player structs and their ABI are unchanged. */

@@ -1,6 +1,6 @@
 # VGS Viewer
 
-Desktop player for `.vgs` and `.pgs` captures. The viewer lives beside `editor/`,
+Desktop player for `.vgs` captures and `.pgs` static captures. The viewer lives beside `editor/`,
 with its own CMake and qmake projects, deployment script and installer. It
 compiles shared display sources from `../editor` with `VGS_VIEWER` defined and
 links only the decoder; encoder, export and signing sources are excluded.

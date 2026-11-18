@@ -617,7 +617,7 @@ void CaptureWorker::open(const QString &path, quint64 generation, bool sh) {
             candidate.info_.antialiased = true;
             candidate.info_.audio = candidate.mint_->audio();
             if (!candidate.info_.audio.isEmpty()) candidate.info_.audioSuffix = QStringLiteral("mp3");
-        } else if (ext == "vgs" || ext == "pgs" || ext == "sgs") { // .sgs: a still in the same container
+        } else if (ext == "vgs" || ext == "pgs") { // .pgs: a still in the same container
             candidate.source_ = std::make_unique<FileSource>(path);
             candidate.vgs_ = std::make_unique<vgsdec::Capture>(vgsdec::Capture::openStream(*candidate.source_));
             candidate.vgs_->setCachePolicy(cachingEnabled_ ? vgsdec::CachePolicy{1,1,512ull*1024*1024} : vgsdec::CachePolicy{0,0,1});
@@ -641,9 +641,9 @@ void CaptureWorker::open(const QString &path, quint64 generation, bool sh) {
                 candidate.info_.audioSuffix = format == Format::Mp3 ? "mp3" : format == Format::Aac ? "m4a" : format == Format::Opus ? "opus" : format == Format::Wav ? "wav" : "";
             }
 #ifdef VGS_VIEWER
-        } else throw std::runtime_error("Unsupported format. Open a .vgs, .pgs, .sgs or .mint file.");
+        } else throw std::runtime_error("Unsupported format. Open a .vgs, .pgs or .mint file.");
 #else
-        } else throw std::runtime_error("Unsupported format. Open a .vgs, .pgs, .sgs, .mint or .ply file.");
+        } else throw std::runtime_error("Unsupported format. Open a .vgs, .pgs, .mint or .ply file.");
 #endif
         if (!std::isfinite(candidate.info_.duration) || candidate.info_.duration <= 0 ||
             !std::isfinite(candidate.info_.fps) || candidate.info_.fps <= 0 ||

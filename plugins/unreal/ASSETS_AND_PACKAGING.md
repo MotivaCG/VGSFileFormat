@@ -1,23 +1,23 @@
-# SGS, VGS, packaging and multiple machines
+# PGS, VGS, packaging and multiple machines
 
-## Static SGS and PLY
+## Static PGS and PLY
 
-Import converts the source into a `USGSSplat` asset. The asset serializes the actual
+Import converts the source into a `UPGSSplat` asset. The asset serializes the actual
 renderer records, spherical harmonics, normals and clusters. An optional collision mesh is an
-embedded `UStaticMesh` object referenced by the asset. An SGS-authored mesh is kept when present
+embedded `UStaticMesh` object referenced by the asset. A PGS-authored mesh is kept when present
 and Make Collision Proxy is enabled; otherwise the existing generated-proxy path applies.
 
-The actor's `Splat` property references that UE asset. The original `.sgs` or `.ply` is only
+The actor's `Splat` property references that UE asset. The original `.pgs` or `.ply` is only
 an editor reimport source; neither rendering nor loading the saved asset reads it. Source
-import metadata is editor-only. Import does not retain the compressed SGS as the runtime
-representation; asset disk size and runtime memory can therefore exceed the source SGS size.
+import metadata is editor-only. Import does not retain the compressed PGS as the runtime
+representation; asset disk size and runtime memory can therefore exceed the source PGS size.
 
 Reference the asset from a level or another cooked asset so UE includes it in the cook.
 An asset used only through a dynamically assembled path needs an explicit cook rule.
 The cooked content can be placed in `.pak`/IoStore in the normal UE content workflow.
-The static runtime reads UE data; SGS authentication/decoding is an editor import operation.
+The static runtime reads UE data; PGS authentication/decoding is an editor import operation.
 
-The SGS proxy's geometry is used for its hidden collision role. Embedded display
+The PGS proxy's geometry is used for its hidden collision role. Embedded display
 materials/textures are not imported by this implementation. It is not a textured-mesh
 substitute for displaying the capture.
 
@@ -34,7 +34,7 @@ IoStore. Its decoder DLL is already a runtime dependency of the VGS module.
 
 ## Multiple machines and future Pixotope integration
 
-Distribute the same build, plugin/shader version and content to every node. Static SGS/PLY
+Distribute the same build, plugin/shader version and content to every node. Static PGS/PLY
 assets then load from each node's UE content. Animated VGS additionally needs its loose
 capture at the same relative location on every node. A local copy per node avoids putting
 playback bandwidth and availability on a shared network path.

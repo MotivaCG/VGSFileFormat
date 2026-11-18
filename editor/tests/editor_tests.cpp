@@ -770,9 +770,6 @@ private slots:
         settings.uncompressed = true; settings.despill = true; settings.despillStrength = 0.75; settings.shDegree = 2; settings.shPrune = 0.06; settings.tags = {"scene","actor"};
         settings.extraJson = "{\"take\": 7}"; QString error; CaptureSettings restored;
         QVERIFY2(CaptureSettings::fromJson(settings.json(),&restored,&error),qPrintable(error)); QCOMPARE(restored.json(),settings.json());
-        // "plain", which editors set from a .pgs extension, is not read; "uncompressed" is optional.
-        auto legacy = settings.json(); legacy.remove("uncompressed"); legacy["plain"] = true;
-        QVERIFY2(CaptureSettings::fromJson(legacy,&restored,&error),qPrintable(error)); QVERIFY(!restored.uncompressed);
         auto older = settings.json(); older.remove("shPrune");
         QVERIFY2(CaptureSettings::fromJson(older,&restored,&error),qPrintable(error)); QCOMPARE(restored.shPrune,0.);
         // Normals: Fine by default, kept as NONE / NORMAL / FINE; the earlier on/off and rig

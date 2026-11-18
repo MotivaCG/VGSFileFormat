@@ -20,14 +20,14 @@ void UVGSSplatSettings::PostInitProperties()
 #if WITH_EDITOR
 FText UVGSSplatSettings::GetSectionText() const
 {
-	return FText::FromString(FCString::Strcmp(VGSSPLAT_PLUGIN_NAME, TEXT("VGS")) == 0 ? TEXT("VGS") : TEXT("SGS"));
+	return FText::FromString(FCString::Strcmp(VGSSPLAT_PLUGIN_NAME, TEXT("VGS")) == 0 ? TEXT("Gaussian Splatting VGS") : TEXT("Gaussian Splatting PGS"));
 }
 
 FText UVGSSplatSettings::GetSectionDescription() const
 {
 	return FText::FromString(FCString::Strcmp(VGSSPLAT_PLUGIN_NAME, TEXT("VGS")) == 0
-		? TEXT("VGS (Video Gaussian Static). Project-wide shadow controls.")
-		: TEXT("SGS (Static Gaussian Splatting). Actors follow this Shadow Method by default. No Shadows also disables mesh proxies."));
+		? TEXT("VGS (Video Gaussian Splatting). Project-wide shadow controls.")
+		: TEXT("PGS (Plain Gaussian Splatting). Actors follow this Shadow Method by default. No Shadows also disables mesh proxies."));
 }
 
 void UVGSSplatSettings::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)

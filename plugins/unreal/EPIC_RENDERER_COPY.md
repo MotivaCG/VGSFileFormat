@@ -14,9 +14,9 @@ What is copied:
 | from the GaussianSplat runtime module, `GaussianSplatCommon.h` (the coordinate space enum) and `GaussianSplatCluster.h` | `Source/VGSSplatRenderer/Internal/` |
 | the data of the LUT assets `/GaussianSplat/LUTs/UE_InverseFilmicTC` and `_Full` | `Resources/InverseToneCurve/` (by hand, see *The LUTs*) |
 
-The SGS plugin uses the same copy: `tools/assemble_sgs.cmake` copies it from
-here and renames it again (`VGSSplat` to `SGSSplat`, `/Plugin/VGS/` to
-`/Plugin/SGS/`), so a change made here reaches both.
+The PGS plugin uses the same copy: `tools/assemble_pgs.cmake` copies it from
+here and renames it again (`VGSSplat` to `PGSSplat`, `/Plugin/VGS/` to
+`/Plugin/PGS/`), so a change made here reaches both.
 
 Every copied file starts with a line saying so. Everything VGS changed is marked
 `VGS CHANGE` in the code, and the whole set of changes is
@@ -145,7 +145,7 @@ All marked `VGS CHANGE`; `tools/vgs_renderer_changes.patch` is the exact diff.
     vertex attribute fetch are off there (the classic path, and Win64 does not need vertex
     attribute fetch). Built against 5.8 and 5.9 on 2026-11-11.
 12. **Normals without a side** (`FVGSSplatRenderProxy::bNormalsFaceCamera`; `HasNormals` 2 in
-    `VGSSplatShading.usf`): a proxy's normals may be directions only (SGS's shortest
+    `VGSSplatShading.usf`): a proxy's normals may be directions only (PGS's shortest
     axes), turned towards the camera as the shortest axis is.
 13. **Dithering off by default** (`r.VGSSplat.Lit.Dither` 0): TSR left it speckled.
 14. **Shadow casters** (VGS's own files in the copy's folders:
@@ -153,7 +153,7 @@ All marked `VGS CHANGE`; `tools/vgs_renderer_changes.patch` is the exact diff.
     `Shaders/Private/SplatRenderer/VGSSplatShadowVertexFactory.ush`). A vertex factory that
     draws a splat buffer into Unreal's shadow depth passes, an octahedron per splat at a
     random opacity cutoff, for primitives whose scene proxy adds its meshes (the capture's and
-    SGS's), with `r.VGSSplat.Shadow.Method` 2, or 1 for every light but the main
+    PGS's), with `r.VGSSplat.Shadow.Method` 2, or 1 for every light but the main
     directional one (whose shadow views it recognises by their direction). In the renderer
     module because vertex
     factory types have to be registered before shaders are compiled (PostConfigInit). Its
@@ -168,7 +168,7 @@ All marked `VGS CHANGE`; `tools/vgs_renderer_changes.patch` is the exact diff.
     grid built before lighting, shared by the family's views. A Light Function samples
     cumulative transmittance at the receiver depth and UE combines it with native visibility.
     The light component's saved material is kept; existing user functions use native casters.
-    VGS and SGS share one MID with independent slots. The shipped material assets are
+    VGS and PGS share one MID with independent slots. The shipped material assets are
     rebuilt by `tools/create_shadow_light_function.py`; keep them when refreshing the copy.
     Development automation tests rasterize the faint-front/strong-back regression on the GPU.
 17. **Project settings** (`Private/VGSSplatSettings.h/.cpp`, a `UDeveloperSettings`; the

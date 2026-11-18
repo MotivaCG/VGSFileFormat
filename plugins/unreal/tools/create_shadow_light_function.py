@@ -1,6 +1,6 @@
 """Run with UnrealEditor-Cmd -run=pythonscript -AllowCommandletRendering -script=<this file>.
 
-Rebuilds the small Light Function assets shipped by VGS and SGS. It uses
+Rebuilds the small Light Function assets shipped by VGS and PGS. It uses
 the public material graph API; the runtime plugin never compiles material graphs.
 """
 import unreal
@@ -9,7 +9,7 @@ CODE = "if (Enabled < 0.5f) return 1.0f; return VGSSampleDeepShadow(ShadowAtlas,
 
 
 def include_path(plugin):
-    filename = "SGSSplatDeepShadow.ush" if plugin == "SGS" else "VGSSplatDeepShadow.ush"
+    filename = "PGSSplatDeepShadow.ush" if plugin == "PGS" else "VGSSplatDeepShadow.ush"
     return f"/Plugin/{plugin}/Private/SplatRenderer/{filename}"
 
 
@@ -86,5 +86,5 @@ def build_slot(material, plugin, slot):
     return custom
 
 
-for name in ("VGS", "SGS"):
+for name in ("VGS", "PGS"):
     build(name)

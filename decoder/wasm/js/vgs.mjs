@@ -50,7 +50,7 @@ const Field = {
 const Number_ = {
   duration: 0, frameCount: 1, frameRate: 2, startSeconds: 3, shDegree: 4,
   maxSplatsPerFrame: 5, fileSize: 6, createdMillis: 7, chunkCount: 8,
-  signatureKeyId: 9, signatureAlgorithm: 10, signedBytes: 11, version: 12, isPlain: 13,
+  signatureKeyId: 9, signatureAlgorithm: 10, signedBytes: 11, version: 12, isUncompressed: 13,
   playbackMode: 14, motionType: 15, movingSpeed: 16, hasMotion: 17, renderHints: 18,
 };
 const Chunk = { offset: 0, size: 1, startSeconds: 2, endSeconds: 3, splats: 4 };
@@ -263,9 +263,7 @@ export class VgsCapture {
   }
   get version() { return this.#module._vgs_number(Number_.version); }
   /** True when the pages are stored without entropy coding: the header says so per attribute. */
-  get isUncompressed() { return this.#module._vgs_number(Number_.isPlain) === 1; }
-  /** @deprecated The earlier name of isUncompressed. */
-  get isPlain() { return this.isUncompressed; }
+  get isUncompressed() { return this.#module._vgs_number(Number_.isUncompressed) === 1; }
 
   // ---- the timeline ----------------------------------------------------------------
 

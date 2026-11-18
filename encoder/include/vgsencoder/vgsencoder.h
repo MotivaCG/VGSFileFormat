@@ -47,10 +47,9 @@ namespace vgsenc {
 
 /**
  * How the attribute pages are stored: entropy coded, or as they are (quicker to read, more
- * bytes). Both are .vgs; readers learn which from the header. Plain is the earlier name of
- * Uncompressed.
+ * bytes). Both are .vgs; readers learn which from the header.
  */
-enum class Coding { Compressed, Uncompressed, Plain [[deprecated("use Uncompressed")]] = Uncompressed };
+enum class Coding { Compressed, Uncompressed };
 
 /** What an audio track is, since the container stores it as delivered. */
 enum class AudioFormat { Mp3 = 1, Aac = 2, Opus = 3, Wav = 4 };

@@ -807,7 +807,7 @@ vgsb_still *vgsb_open_still(const char *path, vgsb_frame *out,
     if (!file.open(path, lastError)) return nullptr;
     auto capture = vgsdec::Capture::openMemory(file.data(), file.size());
     if (capture.frameCount() != 1 || capture.chunkCount() != 1)
-      throw std::runtime_error("an SGS asset must contain exactly one frame and one chunk");
+      throw std::runtime_error("a PGS asset must contain exactly one frame and one chunk");
     auto still = std::make_unique<vgsb_still>();
     vgsbdetail::packFrame(capture.setTime(0, true), still->frame, true, 1.0f);
     if (capture.hasProxyMesh()) still->proxy = capture.proxyMesh();

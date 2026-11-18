@@ -76,7 +76,7 @@ inline constexpr Visibility kRigVisibility{};
 // together 2.5 %. A fit of the plane with the neighbours' own shape and a robust pass gained
 // 0.3 degrees on synthetic solids but smoothed faces in pictures: not used.
 inline constexpr Visibility kSurroundingVisibility{320, 1, 0.001f, false, true, {0.016f, 0.008f, 0.004f}};
-// Finer, for when the time is spent on purpose (the SGS editor's Estimate normals): 0.34 % /
+// Finer, for when the time is spent on purpose (the PGS editor's Estimate normals): 0.34 % /
 // 0.36 % in nine times as long. 1536 pixels: 0.34 % / 0.33 % in 30 times as long. With footprints
 // and probes (2026-11-16): 0.35 % -> 0.10 %, 0.49 % -> 0.20 % in about 12 s for 300 000 splats, 3 s
 // since 2026-11-17.

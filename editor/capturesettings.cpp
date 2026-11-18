@@ -16,7 +16,7 @@
 QJsonObject CaptureSettings::json() const {
     return {{"version",1},{"catalogueId",catalogueId},{"title",title},{"author",author},{"projectName",projectName},
         {"takeName",takeName},{"studio",studio},{"copyright",copyright},{"softwareName",softwareName},{"softwareVersion",softwareVersion},
-        {"tags",QJsonArray::fromStringList(tags)},{"extraJson",extraJson},{"plain",uncompressed},{"uncompressed",uncompressed},{"shDegree",shDegree},{"playbackMode",playbackMode},
+        {"tags",QJsonArray::fromStringList(tags)},{"extraJson",extraJson},{"uncompressed",uncompressed},{"shDegree",shDegree},{"playbackMode",playbackMode},
         {"despill",despill},{"despillStrength",despillStrength},{"greenGain",greenGain},{"viewChromaScale",viewChromaScale},{"recoverSkin",recoverSkin},
         {"normalsMode",normals==NormalsFine ? QStringLiteral("FINE") : normals==NormalsNormal ? QStringLiteral("NORMAL") : QStringLiteral("NONE")},
         {"shPrune",shPrune},{"plyFps",plyFps},{"plyRowOffset",plyRowOffset}};
@@ -48,9 +48,7 @@ bool CaptureSettings::fromJson(const QJsonObject &o,CaptureSettings *result,QStr
     s.takeName = string("takeName"); s.studio = string("studio"); s.copyright = string("copyright"); s.softwareName = string("softwareName");
     s.softwareVersion = string("softwareVersion"); s.extraJson = string("extraJson");
     valid &= o["tags"].isArray(); for (const auto &tag : o["tags"].toArray()) { valid &= tag.isString(); s.tags.append(tag.toString()); }
-    // "plain", what editors before .vgs could be uncompressed wrote, is not read: they set it from
-    // a .pgs extension, so it says nothing about the next export.
-    if (o.contains("uncompressed")) s.uncompressed = boolean("uncompressed");
+    s.uncompressed = boolean("uncompressed");
     s.despill = boolean("despill"); s.recoverSkin = boolean("recoverSkin");
     s.shDegree = integer("shDegree"); s.playbackMode = integer("playbackMode");
     s.despillStrength = number("despillStrength"); s.greenGain = number("greenGain"); s.viewChromaScale = number("viewChromaScale");

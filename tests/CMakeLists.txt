@@ -42,15 +42,15 @@ if(TARGET vgsbridge)
 endif()
 add_test(NAME plugin_unreal_layout COMMAND vgs_unreal_layout)
 
-# The SGS plugin's import without Unreal: reading Gaussian splat PLYs, the records,
+# The PGS plugin's import without Unreal: reading Gaussian splat PLYs, the records,
 # clusters and normal words its asset keeps, and the normals estimate for PLYs without them.
 # Given a .ply it also reads, builds and estimates that one: vgs_unreal_static some.ply
 add_executable(vgs_unreal_static unreal_static.cpp
     ${CMAKE_SOURCE_DIR}/editor/gaussiannormals.cpp ${CMAKE_SOURCE_DIR}/editor/normalrigs.cpp)
 target_include_directories(vgs_unreal_static PRIVATE
     ${CMAKE_SOURCE_DIR}/plugins/unreal/VGS/Source/VGSRuntime/Private
-    ${CMAKE_SOURCE_DIR}/plugins/unreal/SGS/Source/SGSRuntime/Public
-    ${CMAKE_SOURCE_DIR}/plugins/unreal/SGS/Source/SGSEditor/Private
+    ${CMAKE_SOURCE_DIR}/plugins/unreal/PGS/Source/PGSRuntime/Public
+    ${CMAKE_SOURCE_DIR}/plugins/unreal/PGS/Source/PGSEditor/Private
     ${CMAKE_SOURCE_DIR}/editor
     ${CMAKE_SOURCE_DIR}/editor/dependencies/eigen)
 vgs_apply_settings(vgs_unreal_static)

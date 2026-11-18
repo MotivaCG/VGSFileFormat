@@ -1,0 +1,32 @@
+// SPDX-License-Identifier: LicenseRef-VGS-Editor-Proprietary
+// Copyright (c) 2026 Víctor M. Feliz. All rights reserved.
+// PGS Editor is supplied under the VGS Editor licence (../editor/LICENSE.md).
+
+IDI_APP_ICON ICON DISCARDABLE "@VGS_EDITOR_DIR@/assets/gracia/logo_pgs.ico"
+
+// The version comes from pgsversion.h, read by CMakeLists.txt.
+1 VERSIONINFO
+FILEVERSION @PGS_EDITOR_VERSION_COMMAS@
+PRODUCTVERSION @PGS_EDITOR_VERSION_COMMAS@
+FILEFLAGSMASK 0x3fL
+FILEOS 0x40004L
+FILETYPE 0x1L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "Victor M. Feliz"
+            VALUE "FileDescription", "PGS Editor"
+            VALUE "FileVersion", "@PGS_EDITOR_VERSION@.0"
+            VALUE "LegalCopyright", "Copyright (c) 2026 Victor M. Feliz. All rights reserved."
+            VALUE "OriginalFilename", "PGSEditor.exe"
+            VALUE "ProductName", "PGS Editor"
+            VALUE "ProductVersion", "@PGS_EDITOR_VERSION@.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

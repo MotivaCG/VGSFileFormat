@@ -62,7 +62,7 @@ out vec4 rgba;
 // Splats an Erase modifier has picked, while its picks are edited: drawn hot pink.
 vec3 marked(vec3 c) { return usePurgeMask && abs(modifierVisibility-0.75)<0.1 ? mix(c,vec3(1.0,0.2,0.75),0.7) : c; }
 #ifdef VGS_LIGHTING
-// The SGS editor's lights (Viewport::setLights): the colour as captured, in linear light, is
+// The PGS editor's lights (Viewport::setLights): the colour as captured, in linear light, is
 // lit by each enabled light along the record's normal, plus selfIllumination of it glowing
 // on its own. With no light the colour stays as it is.
 uniform int lightCount;
@@ -256,7 +256,7 @@ void main() {
     rgba=vec4(displayedColor(removed),opacity*aaFactor);
 }
 )GLSL";
-// The SGS editor's generated mesh: its albedo lit as the splats are (recordShading's lit()),
+// The PGS editor's generated mesh: its albedo lit as the splats are (recordShading's lit()),
 // opaque, with the normals of its vertices.
 static const char *meshVertex = R"GLSL(
 #version 330 core
@@ -1241,7 +1241,7 @@ void Viewport::paintGL() {
         painter.setPen(lightBackground_ ? QColor("#333") : QColor("#ddd")); painter.setFont(QFont("Segoe UI", 18));
         painter.drawText(rect().adjusted(30,30,-30,-30), Qt::AlignCenter,
                          !emptyHint_.isEmpty() ? emptyHint_
-                         : viewerMode_ ? tr("Open or drop a .vgs, .pgs or .sgs capture\n\nCtrl+O")
+                         : viewerMode_ ? tr("Open or drop a .vgs or .pgs capture\n\nCtrl+O")
                                      : tr("Import a .vgs or .mint capture\n\nCtrl+I"));
     }
 }
@@ -2228,7 +2228,7 @@ bool Viewport::visibleExtent(QVector3D *minimum, QVector3D *maximum, float trim)
     return true;
 }
 
-// ---- Lighting: the SGS editor's lights, mesh and gizmo target (enableLighting).
+// ---- Lighting: the PGS editor's lights, mesh and gizmo target (enableLighting).
 void Viewport::enableLighting() {
     if (lighting_) return;
     lighting_=true;

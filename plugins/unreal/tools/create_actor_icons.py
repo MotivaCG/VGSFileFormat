@@ -7,7 +7,7 @@ from pathlib import Path
 import unreal
 
 art = Path(__file__).resolve().parent.parent / "art"
-for plugin, name in (("VGS", "S_VGSCapture"), ("SGS", "S_SGSCapture")):
+for plugin, name in (("VGS", "S_VGSCapture"), ("PGS", "S_PGSCapture")):
     task = unreal.AssetImportTask()
     task.filename = str(art / (name + ".png"))
     task.destination_path = f"/{plugin}/Icons"

@@ -856,7 +856,7 @@ void UVGSCaptureComponent::OnUnregister()
 	// The capture stays open: in the editor every edit unregisters and registers again, every
 	// step of a drag in the details panel too. Releasing the source there left a new one with
 	// no frame until the chunk was uploaded again, so the capture flickered transparent while a
-	// slider was dragged (SGS's data lives in its asset and never showed it). In an editor
+	// slider was dragged (PGS's data lives in its asset and never showed it). In an editor
 	// world the source is kept, hidden, for OnRegister to show again; anywhere else, and when
 	// the component goes for good (OnComponentDestroyed), it is released.
 	UWorld* World = GetWorld();

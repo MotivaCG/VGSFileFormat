@@ -35,7 +35,7 @@ enum class EVGSSplatShadowMethod : uint8
 	 * The splats go into Unreal's own shadow maps (virtual or cascaded) as small opaque shapes,
 	 * each at a random opacity: shadows from every light that casts them, the sun included, but
 	 * grainy and frayed, and Shaded characters shadow themselves in blotches (each actor's
-	 * Shadow Inset reduces them). SGS uses splats too; approximate meshes are used only for collision.
+	 * Shadow Inset reduces them). PGS uses splats too; approximate meshes are used only for collision.
 	 */
 	UnrealShadowMaps = 2 UMETA(DisplayName = "Unreal Shadow Maps (all lights)"),
 

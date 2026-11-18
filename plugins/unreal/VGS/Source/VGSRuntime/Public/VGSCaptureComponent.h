@@ -113,7 +113,7 @@ enum class EVGSGpuLayout : uint8
  * Time runs with the world's (so it pauses and dilates with it), snapped to the capture's
  * own frames, which is what lets the bridge have each frame decoded before it is due.
  */
-UCLASS(ClassGroup = Rendering, meta = (BlueprintSpawnableComponent, DisplayName = "VGS (Video Gaussian Static)"),
+UCLASS(ClassGroup = Rendering, meta = (BlueprintSpawnableComponent, DisplayName = "VGS (Video Gaussian Splatting)"),
 	HideCategories = (Mobility, Physics, Collision, LOD, Cooking, Navigation, HLOD, Mobile, RayTracing, VirtualTexture, TextureStreaming, MaterialParameters, PathTracing))
 class VGSRUNTIME_API UVGSCaptureComponent : public UPrimitiveComponent
 {

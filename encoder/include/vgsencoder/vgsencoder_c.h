@@ -63,8 +63,7 @@ enum vgs_encoder_status {
 
 enum vgs_coding {
   VGS_CODING_COMPRESSED = 0,   /* entropy coded */
-  VGS_CODING_UNCOMPRESSED = 1, /* pages as they are; still a .vgs */
-  VGS_CODING_PLAIN = VGS_CODING_UNCOMPRESSED /* earlier name */
+  VGS_CODING_UNCOMPRESSED = 1  /* pages as they are; still a .vgs */
 };
 
 enum vgs_audio_format { VGS_AUDIO_MP3 = 1, VGS_AUDIO_AAC = 2, VGS_AUDIO_OPUS = 3, VGS_AUDIO_WAV = 4 };

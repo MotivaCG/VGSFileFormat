@@ -126,8 +126,6 @@ VGS_DECODER_API uint64_t vgs_signed_bytes(const vgs_capture *);
 VGS_DECODER_API uint32_t vgs_version(const vgs_capture *);
 /** 1 when the pages are stored without entropy coding: the header says so per attribute. */
 VGS_DECODER_API int vgs_is_uncompressed(const vgs_capture *);
-/** The earlier name of vgs_is_uncompressed. */
-VGS_DECODER_API int vgs_is_plain(const vgs_capture *);
 
 /* ---- the timeline ---- */
 
@@ -203,7 +201,7 @@ VGS_DECODER_API int vgs_motion_at(const vgs_capture *, double seconds, vgs_motio
 /* ---- payloads carried alongside ----
  *
  * A capture can carry a sound track, a thumbnail and two independent blocks of JSON, and a
- * still (.sgs) a mesh of its subject.
+ * still (.pgs) a mesh of its subject.
  * Each has its own pair of calls, and each checks the bytes against the signed table
  * before handing them over. The bytes belong to the capture and stay valid until the
  * next call of the same kind on it.

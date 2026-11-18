@@ -459,7 +459,6 @@ public:
   uint32_t version() const;
   /** True when the pages are stored without entropy coding: the header says so per attribute. */
   bool isUncompressed() const;
-  [[deprecated("use isUncompressed")]] bool isPlain() const { return isUncompressed(); }
 
   // ---- the timeline --------------------------------------------------------------
 
@@ -715,7 +714,7 @@ public:
   std::string metadataJson2() const;
 
   /**
-   * A still (.sgs) may carry a mesh of its subject: one glTF 2.0 binary (.glb), in the
+   * A still (.pgs) may carry a mesh of its subject: one glTF 2.0 binary (.glb), in the
    * capture's own space and units, for what splats do poorly in an engine - casting shadows,
    * collision, picking - and, with its textures, a stand-in where splats are not wanted.
    * Empty when there is none.

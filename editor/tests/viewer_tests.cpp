@@ -26,7 +26,7 @@ struct ViewerFixture {
     Viewport *viewport = nullptr;
     RangeSlider *slider = nullptr;
     // A capture of `frames` frames, played the packed way unless `floats`, in a file named with
-    // `suffix` (an .sgs is a still in the same container).
+    // `suffix` (a .pgs is a still in the same container).
     bool open(int frames, bool floats, const QString &suffix = QStringLiteral("vgs")) {
         if (!dir.isValid()) return false;
         QSettings::setDefaultFormat(QSettings::IniFormat); QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, dir.path());
@@ -58,9 +58,9 @@ class ViewerTests : public QObject {
     Q_OBJECT
     static void modes() { QTest::addColumn<bool>("floats"); QTest::newRow("packed") << false; QTest::newRow("floats") << true; }
 private slots:
-    void opensAnSgs() {
-        // A still from the SGS editor opens like any capture: one frame, shown.
-        ViewerFixture f; QVERIFY(f.open(1, false, QStringLiteral("sgs")));
+    void opensAnPgs() {
+        // A still from the PGS editor opens like any capture: one frame, shown.
+        ViewerFixture f; QVERIFY(f.open(1, false, QStringLiteral("pgs")));
         QCOMPARE(f.shown(), 0);
     }
     void playsEachFrameOnTime_data() { modes(); }

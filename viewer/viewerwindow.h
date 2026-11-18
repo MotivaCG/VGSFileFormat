@@ -20,7 +20,7 @@ class QPushButton;
 class RangeSlider;
 class Viewport;
 
-// Opens a .vgs, .pgs or .sgs (a still) and plays it: the editor's viewport and timeline, nothing that edits.
+// Opens a .vgs, or a .pgs (a still), and plays it: the editor's viewport and timeline, nothing that edits.
 class ViewerWindow : public QMainWindow {
     Q_OBJECT
 public:

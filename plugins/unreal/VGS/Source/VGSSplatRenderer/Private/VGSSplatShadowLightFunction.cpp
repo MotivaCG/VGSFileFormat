@@ -60,7 +60,7 @@ VGSSplat::FDeepShadowFrame UVGSSplatSubsystem::UpdateShadowLightFunction(const F
 	if (Main != ShadowLight.Get()) ReleaseShadowLightFunction();
 	if (!Main || Main->LightFunctionMaterial) { ReleaseShadowLightFunction(); return Frame; }
 	FBox Bounds(ForceInit);
-	const FName ComponentClass(VGSSPLAT_PLUGIN_NAME == FString(TEXT("VGS")) ? TEXT("VGSCaptureComponent") : TEXT("SGSSplatComponent"));
+	const FName ComponentClass(VGSSPLAT_PLUGIN_NAME == FString(TEXT("VGS")) ? TEXT("VGSCaptureComponent") : TEXT("PGSSplatComponent"));
 	for (TObjectIterator<UPrimitiveComponent> It; It; ++It)
 	{
 		if (It->GetWorld() != GetWorld() || !It->IsRegistered() || !It->IsVisible() || !It->CastShadow) continue;

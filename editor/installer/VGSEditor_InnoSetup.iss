@@ -55,7 +55,7 @@
 #define MyAppPublisher "VGS"
 #define MyAppURL "https://www.the4dscanner.com"
 
-; Projects always open in the editor. Captures (.vgs, .pgs, .mint) always appear in Explorer's
+; Projects always open in the editor. Captures (.vgs, .mint) always appear in Explorer's
 ; "Open with"; whether the editor becomes what opens them is asked, one checkbox each.
 #define MyAppAssocName "VGS Editor Project"
 #define MyAppAssocExt ".vgsproj"
@@ -108,7 +108,6 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 Name: "assocvgs"; Description: "VGS captures (.vgs)"; GroupDescription: "Open these files with VGS Editor by default:"
-Name: "assocpgs"; Description: "PGS captures (.pgs)"; GroupDescription: "Open these files with VGS Editor by default:"
 Name: "assocmint"; Description: "MINT captures (.mint)"; GroupDescription: "Open these files with VGS Editor by default:"
 ; MCP: the adapter AI assistants launch to control the editor, with its own Python (~71 MB).
 Name: "mcp"; Description: "MCP server for AI assistants (includes its own Python, about 71 MB)"; GroupDescription: "Optional components:"
@@ -142,12 +141,6 @@ Root: HKA; Subkey: "Software\Classes\VGSEditor.vgs\DefaultIcon"; ValueType: stri
 Root: HKA; Subkey: "Software\Classes\VGSEditor.vgs\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
 Root: HKA; Subkey: "Software\Classes\.vgs\OpenWithProgids"; ValueType: string; ValueName: "VGSEditor.vgs"; ValueData: ""; Flags: uninsdeletevalue
 Root: HKA; Subkey: "Software\Classes\.vgs"; ValueType: string; ValueName: ""; ValueData: "VGSEditor.vgs"; Flags: uninsdeletevalue; Tasks: assocvgs
-
-Root: HKA; Subkey: "Software\Classes\VGSEditor.pgs"; ValueType: string; ValueName: ""; ValueData: "PGS Capture"; Flags: uninsdeletekey
-Root: HKA; Subkey: "Software\Classes\VGSEditor.pgs\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#MyAppExeName},0"
-Root: HKA; Subkey: "Software\Classes\VGSEditor.pgs\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
-Root: HKA; Subkey: "Software\Classes\.pgs\OpenWithProgids"; ValueType: string; ValueName: "VGSEditor.pgs"; ValueData: ""; Flags: uninsdeletevalue
-Root: HKA; Subkey: "Software\Classes\.pgs"; ValueType: string; ValueName: ""; ValueData: "VGSEditor.pgs"; Flags: uninsdeletevalue; Tasks: assocpgs
 
 Root: HKA; Subkey: "Software\Classes\VGSEditor.mint"; ValueType: string; ValueName: ""; ValueData: "MINT Capture"; Flags: uninsdeletekey
 Root: HKA; Subkey: "Software\Classes\VGSEditor.mint\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#MyAppExeName},0"

@@ -102,7 +102,7 @@ public:
     // brush of `radius` pixels or draws a lasso; on release the records of the visible splats
     // inside are sent with what the stroke does: replace the chunk's picks, add (Ctrl) or
     // subtract (Alt). The right button orbits and the middle one pans meanwhile.
-    // Paint (the SGS editor's mesh brushes, as T4DEditor's): on the mesh the left button paints
+    // Paint (the PGS editor's mesh brushes, as T4DEditor's): on the mesh the left button paints
     // and, for brushes with an opposite, so does the right one (paintStroke says which); anywhere
     // else the left button orbits and the right or middle one pans. The brush shows where the
     // mouse is over the mesh: its radius at the depth there, its hardness share dashed inside,
@@ -165,7 +165,7 @@ public:
     bool lastPaintPacked() const { return lastPaintPacked_; }
     bool packedFramePending() const { return frame_ && frame_->packed && drawnPacked_ && drawnPackedSerial_!=frameSerial_; }
 
-    // Lights for the splats, the SGS editor's: each splat is lit by its own normal
+    // Lights for the splats, the PGS editor's: each splat is lit by its own normal
     // (RenderFrame::normals), Lambert in linear light, plus selfIllumination of its colour as
     // it glows on its own, as Unreal's Shaded splats are. With no enabled light the colours are
     // drawn as captured. Only after enableLighting(), which must come before the widget is
@@ -187,11 +187,11 @@ public:
     float selfIllumination() const { return selfIllumination_; }
     // Whether any enabled light lights the splats now: otherwise they are drawn as captured.
     bool lit() const;
-    // The gizmo moves or rotates `target` instead of the capture (a light, for the SGS
+    // The gizmo moves or rotates `target` instead of the capture (a light, for the PGS
     // editor) and reports it by gizmoTargetEdited; none hands it back to the capture.
     void setGizmoTarget(const std::optional<Transform> &target);
     bool hasGizmoTarget() const { return gizmoTarget_.has_value(); }
-    // A textured triangle mesh drawn with the splats' lights (the SGS editor's generated mesh),
+    // A textured triangle mesh drawn with the splats' lights (the PGS editor's generated mesh),
     // in the capture's space: positions, normals and texture coordinates per vertex.
     struct ViewMesh {
         std::vector<float> vertices; // x y z, nx ny nz, u v

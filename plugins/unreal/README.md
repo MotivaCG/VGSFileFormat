@@ -2,9 +2,13 @@
 
 Two plugins sharing one renderer:
 
-- **VGS** plays VGS captures (4D, from `.vgs` files).
-- **SGS** shows static Gaussian splat characters, imported from PLY files as assets
-  ([SGS](#sgs-static-characters-from-ply) below).
+- **VGS** (Video Gaussian Splatting) plays VGS captures (4D, from `.vgs` files).
+- **PGS** (Plain Gaussian Splatting) shows static Gaussian splat characters, imported from
+  `.pgs` or PLY files as assets
+  ([PGS](#pgs-static-characters-from-ply) below).
+
+In the plugin browser and in Project Settings > Plugins they are **Gaussian Splatting VGS**
+and **Gaussian Splatting PGS**, under their own category, Gaussian Splatting.
 
 Both draw through a copy of Epic's Gaussian Splat renderer (`Engine/Plugins/GaussianSplat`,
 experimental in 5.9), changed to blend splats as they were trained, with exposure, a grade
@@ -33,16 +37,16 @@ VGS/                         the plugin as it goes into a project's Plugins fold
     Private/VGSSplatLayout.h       plain C++: a frame into the renderer's buffer layouts
     Private/VGSSplatSource.*       render thread: uploads, the evaluation pass, the proxy
     Private/VGSCaptureComponent.cpp time, scheduling, acquiring, packing (CPU)
-SGS/                   the static plugin's own files (the shared ones are added when assembled)
-  Source/SGSRuntime/   the asset, its GPU copy, the component and actor; SGSPly.h
+PGS/                   the static plugin's own files (the shared ones are added when assembled)
+  Source/PGSRuntime/   the asset, its GPU copy, the component and actor; PGSPly.h
                              (plain C++: reading a PLY, clusters, normal words)
-  Source/SGSEditor/    the PLY importer and its dialog, reimport, placing the asset;
-                             SGSNormals.h/.inl (normals for PLYs without them);
-                             SGSProxy.h (plain C++: the shadow proxy mesh)
+  Source/PGSEditor/    the PLY importer and its dialog, reimport, placing the asset;
+                             PGSNormals.h/.inl (normals for PLYs without them);
+                             PGSProxy.h (plain C++: the shadow proxy mesh)
 CMakeLists.txt               assembles both plugins (VGS with the bridge beside it) and their zips
 EPIC_RENDERER_COPY.md        what of Epic's is copied, what changed, how to update it
 tools/                       the copy script, the patch of VGS's changes to the copy, the
-                             LUT packer, assemble_sgs.cmake
+                             LUT packer, assemble_pgs.cmake
 ```
 
 ## Dependent controls
@@ -84,8 +88,8 @@ cmake --build build_win64 --config Release --target vgs_unreal_plugin
 which gives `build_win64/plugins/unreal/Release/VGS/` (sources, `vgsbridge.h`,
 `vgsbridge.dll` and its licence, icon) and `vgs-unreal-<version>.zip` of the same. Copy or
 link that `VGS` folder into `<Project>/Plugins/`, or unzip the zip there, and open the
-project: Unreal builds the module. Target `sgs_unreal_plugin` does the same for
-SGS (`SGS/`, `sgs-unreal-<version>.zip`). Both can be enabled in one
+project: Unreal builds the module. Target `pgs_unreal_plugin` does the same for
+PGS (`PGS/`, `pgs-unreal-<version>.zip`). Both can be enabled in one
 project, with Epic's GaussianSplat plugin or without it.
 Use the assembled folder, not `plugins/unreal/VGS` from the tree — the bridge's header and
 DLL are only in the assembled one. `cmake --install ... --component unreal` copies the zip
@@ -187,9 +191,9 @@ only its own sources; Epic's plugin, where it is enabled, draws its assets untou
   1920x1080 on an RTX 4070 (one paused capture of 535k splats: 5.65 ms self-illuminated, 6.20
   ms shaded).
 - **Shadows** (*Lighting* > *Cast Shadow* per actor, on by default, shaded or
-  self-illuminated). How, for the whole project: Project Settings > Plugins > **VGS**
-  (`UVGSSplatSettings`, written to the `r.VGSSplat.Shadow.*` console variables; SGS has
-  the same page, *SGS*, for its own actors):
+  self-illuminated). How, for the whole project: Project Settings > Plugins > **Gaussian Splatting VGS**
+  (`UVGSSplatSettings`, written to the `r.VGSSplat.Shadow.*` console variables; PGS has
+  the same page, *PGS*, for its own actors):
   Every light lights a Shaded actor whichever the method, and every mesh's shadow falls on
   it; the method is only about the shadows the splats cast. In the order the settings list
   them (`r.VGSSplat.Shadow.Method` 0 to 3):
@@ -203,7 +207,7 @@ only its own sources; Epic's plugin, where it is enabled, draws its assets untou
     *Self Shadowing* enables reception on Shaded captures, including self-shadow and shadows
     between captures of that renderer. Off excludes their visible pixels, using a mask written
     with the GBuffer's depth test; ordinary UE receivers between casters still receive shadows.
-    The grid is shared by the family's views; VGS and SGS share one Light Function with
+    The grid is shared by the family's views; VGS and PGS share one Light Function with
     independent grids, without modifying the light component's saved material. A user Light
     Function is kept and uses native shadow casters as fallback. The preferred light is still
     the atmosphere sun at index 0, otherwise the brightest directional light casting shadows.
@@ -219,7 +223,7 @@ only its own sources; Epic's plugin, where it is enabled, draws its assets untou
     the first method's (mean difference 0.24 of 255). Level `/Game/Stress/Lit` (a red point
     light beside the sun) shows the point light's shadow added.
   - *Unreal Shadow Maps (all lights)*: the component is a primitive whose only part in
-    Unreal's scene is its shadow casters, drawn as SGS's are (below, with the same
+    Unreal's scene is its shadow casters, drawn as PGS's are (below, with the same
     *Shadow Inset*), from the instant on the GPU. For the shadows to cast the frame on screen,
     the instant is uploaded or evaluated before the frame's shadow depths, when the renderer
     starts each view family (`FOnPrepareVGSSplatSources`, `FVGSSplatSource::Prepare_RenderThread`),
@@ -243,39 +247,39 @@ only its own sources; Epic's plugin, where it is enabled, draws its assets untou
 - **Normals in the details panel**: *Normals* (under *Capture*) says whether the capture has
   them (on the GPU path), or not, or that they are not used on the CPU path.
 
-## SGS: static characters from PLY or SGS
+## PGS: static characters from PLY or PGS
 
-SGS actors start in **Shaded** and respond to scene lights. Shadows always come from splats,
+PGS actors start in **Shaded** and respond to scene lights. Shadows always come from splats,
 using the project's Shadow Method. The approximate mesh is collision-only: it cannot cast
 self-shadows or shadows onto other objects. No Shadows disables splat casting while
 Proxy Collision remains independent. The Mesh Proxy / Shadow Caster override has been removed.
 
-SGS asset thumbnails render the actual capture through the SGS renderer in a reusable preview
+PGS asset thumbnails render the actual capture through the PGS renderer in a reusable preview
 scene, framed by its bounds, without scene lighting, shadow casting or the actor billboard.
 
-The plugin and reflected types are named SGS directly; no redirects from VGSStatic are
-provided. Reimport source SGS/PLY files and place new actors after updating older test projects.
+The plugin and reflected types are named PGS directly; no redirects from VGSStatic are
+provided. Reimport source PGS/PLY files and place new actors after updating older test projects.
 
 A Gaussian splat PLY (the 3DGS trainer's layout: x y z, f_dc, f_rest, opacity, scale, rot,
-optionally nx ny nz; binary or ASCII) dropped in the Content Browser becomes a **SGS
+optionally nx ny nz; binary or ASCII) dropped in the Content Browser becomes a **PGS
 Splat** asset; dropped in a level, an actor showing it, with the capture's controls
 (*Intensity (EV)*, *Blend Space*, the grade, *Invert UE Tone Curve*, *Lighting* and the
 lighting settings, *Up Axis*: Y up, Y down as COLMAP, Z up). Its details panel says how
 many splats, the SH degree, and whether it has normals and where they come from.
 
-An **SGS static capture (`.sgs`) imports the same way**: drag it into the Content Browser,
-then drag the resulting SGS asset into the level. Import authenticates and
+An **PGS static capture (`.pgs`) imports the same way**: drag it into the Content Browser,
+then drag the resulting PGS asset into the level. Import authenticates and
 decodes its one frame once, preserving SH and supplied normals. The closed decoder ships
-with SGS's editor module; importing SGS does not require enabling the animated VGS plugin.
+with PGS's editor module; importing PGS does not require enabling the animated VGS plugin.
 Its splats are saved as UE records, clusters and normal data, not as an external file reference.
-The original SGS is needed for reimport only. This can make the UE asset larger than the
-compressed source SGS.
+The original PGS is needed for reimport only. This can make the UE asset larger than the
+compressed source PGS.
 See [assets, packaging and multiple machines](ASSETS_AND_PACKAGING.md) for the difference
 between static assets and animated VGS files, and the current limits for future Pixotope integration.
 
-If the SGS carries its authored GLB proxy, Make Collision Proxy imports that mesh's geometry
+If the PGS carries its authored GLB proxy, Make Collision Proxy imports that mesh's geometry
 for shadows/collision, preserving its shape and triangle count instead of voxelizing it again.
-The generated-proxy settings grey out in this case. This supports the SGS Editor's single
+The generated-proxy settings grey out in this case. This supports the PGS Editor's single
 identity-node triangle mesh; other GLB layouts fail explicitly instead of silently using the
 wrong geometry. The embedded display textures/material are not imported: this collision proxy is hidden,
 and the visible image still comes from the splats. Without an embedded mesh, the existing
@@ -283,15 +287,15 @@ generated-proxy path remains available. Supplied normals are kept unless Replace
 is enabled.
 
 Both placement paths use the same updated renderer as before. Place Actors > VGS
-uses the new green project logo; SGS uses the red SGS logo, including its
+uses the new green project logo; PGS uses the red PGS logo, including its
 editor billboard and asset/class icons. The proposals from the Unity review are not included.
 
-- **Importer.** `USGSSplatFactory`, before Epic's `.ply` importer: Unreal picks the
+- **Importer.** `UPGSSplatFactory`, before Epic's `.ply` importer: Unreal picks the
   highest priority and shows no choice, so its dialog has *Import as Epic's Gaussian Splat*
-  where Epic's plugin is enabled (5.9), which hands the PLY file to Epic's importer. SGS is
-  handled by SGS, without offering Epic's PLY importer. Only PLYs
+  where Epic's plugin is enabled (5.9), which hands the PLY file to Epic's importer. PGS is
+  handled by PGS, without offering Epic's PLY importer. Only PLYs
   with f_dc_0 and rot_0 are taken; meshes and point clouds are left to others. A script
-  imports with an `AssetImportTask` whose `options` is a `SGSImportOptions`.
+  imports with an `AssetImportTask` whose `options` is a `PGSImportOptions`.
   Reimport repeats the import with the asset's *Import Settings*.
 - **Normals**, worked out once, at import, never per frame:
   - the PLY's own when it has them (SMNForge's and the VGS editor's, from the capture's own
@@ -308,7 +312,7 @@ editor billboard and asset/class icons. The proposals from the Unity review are 
     al. 2024), replaced where the splat is round or disagrees with its neighbours by their
     consensus, then smoothed; its side is decided on screen, facing the camera
     (`FVGSSplatRenderProxy::bNormalsFaceCamera`). Rougher: on andreavictor |cos| 0.91 (84 %).
-  The VGS and SGS editors use the same estimate and the same cameras all around (the VGS
+  The VGS and PGS editors use the same estimate and the same cameras all around (the VGS
   editor's export settings: *Normals* Yes, made as Fine, or No).
 - **Collision proxy**. The optional embedded mesh or generated occupancy mesh is retained
   for **Proxy Collision** (BlockAll). Its component is excluded from the main pass, depth
@@ -323,9 +327,9 @@ editor billboard and asset/class icons. The proposals from the Unity review are 
   noticing a setting changed from Blueprint; *GPU Layout* Quantized keeps a third of the
   memory (Epic's compressed layout, packed once).
 - **Shared code.** The renderer copy, its shaders, the shared headers, the LUTs and
-  `VGSSplatLayout.h` are the VGS plugin's, copied when SGS is assembled and renamed
-  (`VGSSplat` to `SGSSplat`, `/Plugin/VGS/` to `/Plugin/SGS/`, the shaders
-  module) by `tools/assemble_sgs.cmake`, which fails if a name that would collide is
+  `VGSSplatLayout.h` are the VGS plugin's, copied when PGS is assembled and renamed
+  (`VGSSplat` to `PGSSplat`, `/Plugin/VGS/` to `/Plugin/PGS/`, the shaders
+  module) by `tools/assemble_pgs.cmake`, which fails if a name that would collide is
   left: edit them in `VGS/`, never in the assembled copy. The normals estimate is the VGS
   editor's (`editor/gaussiannormals.cpp`, `normalrigs.cpp`, nanoflann), copied in as
   `.inl` files and built with the engine's Eigen; it ships as source with the plugin.

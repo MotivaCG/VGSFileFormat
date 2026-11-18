@@ -14,7 +14,7 @@
     <qresource prefix="/icons">
         <file alias="logo.png">assets/gracia/logo.png</file>
         <file alias="logo_vgs.png">assets/gracia/logo_vgs.png</file>
-        <file alias="logo_sgs.png">assets/gracia/logo_sgs.png</file>
+        <file alias="logo_pgs.png">assets/gracia/logo_pgs.png</file>
         <file alias="calib.png">assets/gracia/calib.png</file>
         <file alias="calibtotem.png">assets/gracia/calibtotem.png</file>
         <file alias="range.png">assets/gracia/range.png</file>

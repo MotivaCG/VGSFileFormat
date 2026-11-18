@@ -1,7 +1,7 @@
-// The SGS Unreal plugin's import, without Unreal: SGSPly.h reads a Gaussian splat
+// The PGS Unreal plugin's import, without Unreal: PGSPly.h reads a Gaussian splat
 // PLY and builds what the asset keeps (records in cluster order, normal words, clusters);
-// SGSNormals.h works out normals for a PLY that has none (a rig's cameras, or each
-// splat's shortest axis as PGSR, corrected by its neighbours); SGSProxy.h makes the
+// PGSNormals.h works out normals for a PLY that has none (a rig's cameras, or each
+// splat's shortest axis as PGSR, corrected by its neighbours); PGSProxy.h makes the
 // shadow proxy mesh of where the splats are opaque.
 //
 //   vgs_unreal_static                 synthetic PLYs, binary and ASCII: every value read and
@@ -12,10 +12,10 @@
 //                                     both ways (against the file's, if it has them) and its
 //                                     shadow proxy
 //   vgs_unreal_static some.ply x.obj  ... and writes that proxy to x.obj
-#include "SGSNormals.h"
-#include "SGSNormals.inl"
-#include "SGSPly.h"
-#include "SGSProxy.h"
+#include "PGSNormals.h"
+#include "PGSNormals.inl"
+#include "PGSPly.h"
+#include "PGSProxy.h"
 
 #include <chrono>
 #include <cmath>
@@ -124,17 +124,17 @@ void checkSynthetic(int restPerChannel, bool normals, bool ascii, bool doubles) 
   std::vector<Raw> raw = randomSplats(count, restPerChannel, 7u + unsigned(restPerChannel));
   raw[17].scale[1] = std::nanf(""); // dropped
   const std::vector<uint8_t> file = writePly(raw, restPerChannel, normals, ascii, doubles);
-  sgs::Splats s;
-  const std::string error = sgs::readPly(file.data(), file.size(), s);
+  pgs::Splats s;
+  const std::string error = pgs::readPly(file.data(), file.size(), s);
   const char *what = ascii ? "ascii" : "binary";
   EXPECT(error.empty(), "%s: %s", what, error.c_str());
   if (!error.empty()) return;
   EXPECT(s.count == count - 1 && s.dropped == 1, "%s: %zu splats, %zu dropped", what, s.count, s.dropped);
   EXPECT(s.shCoefficients == restPerChannel, "%s: %d coefficients", what, s.shCoefficients);
   EXPECT(normals == !s.normals.empty(), "%s: normals", what);
-  sgs::NormalRig rig = sgs::NormalRig::The4DScanner;
+  pgs::NormalRig rig = pgs::NormalRig::The4DScanner;
   EXPECT(s.comment("normals") == "SMNForge" && s.comment("capture_rig") == "SMNV1" && s.comment("synthetic").empty() &&
-             s.comment("capture").empty() && sgs::rigFromComment(s, rig) && rig == sgs::NormalRig::SmnV1,
+             s.comment("capture").empty() && pgs::rigFromComment(s, rig) && rig == pgs::NormalRig::SmnV1,
          "%s: header comments", what);
 
   // Every value, activated as the renderer wants it.
@@ -163,8 +163,8 @@ void checkSynthetic(int restPerChannel, bool normals, bool ascii, bool doubles) 
   EXPECT(worst <= std::max(tol * 4, 2e-7f), "%s SH %d: worst error %g", what, restPerChannel, worst);
 
   // Built: the records hold what was read, in Morton order; the clusters cover them.
-  sgs::Built b;
-  sgs::build(s, s.normals.empty() ? nullptr : s.normals.data(), b, 64);
+  pgs::Built b;
+  pgs::build(s, s.normals.empty() ? nullptr : s.normals.data(), b, 64);
   EXPECT(b.records.size() == size_t(b.count) * b.stride && b.stride == vgsunreal::floatStride(restPerChannel), "%s: records", what);
   size_t mismatches = 0;
   for (uint32_t i = 0; i < b.count; ++i) {
@@ -198,7 +198,7 @@ void checkSynthetic(int restPerChannel, bool normals, bool ascii, bool doubles) 
     float worstAngle = 0.0f;
     for (uint32_t i = 0; i < b.count; ++i) {
       float n[3];
-      sgs::unpackNormal(b.normals[i], n);
+      pgs::unpackNormal(b.normals[i], n);
       const float *e = &s.normals[size_t(b.order[i]) * 3];
       worstAngle = std::max(worstAngle, std::acos(std::min(1.0f, n[0] * e[0] + n[1] * e[1] + n[2] * e[2])));
     }
@@ -208,8 +208,8 @@ void checkSynthetic(int restPerChannel, bool normals, bool ascii, bool doubles) 
 
 void checkRejected() {
   const auto read = [](const std::string &text) {
-    sgs::Splats s;
-    return sgs::readPly(reinterpret_cast<const uint8_t *>(text.data()), text.size(), s);
+    pgs::Splats s;
+    return pgs::readPly(reinterpret_cast<const uint8_t *>(text.data()), text.size(), s);
   };
   EXPECT(!read("hello").empty(), "not a PLY");
   EXPECT(read("ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\nproperty float y\nproperty float z\n"
@@ -222,8 +222,8 @@ void checkRejected() {
   std::vector<Raw> raw = randomSplats(10, 0, 3);
   for (auto &r : raw) r.n[0] = r.n[1] = r.n[2] = 0.0f;
   const auto file = writePly(raw, 0, true, false, false);
-  sgs::Splats s;
-  EXPECT(sgs::readPly(file.data(), file.size(), s).empty() && s.normals.empty(), "nx ny nz all 0 means none");
+  pgs::Splats s;
+  EXPECT(pgs::readPly(file.data(), file.size(), s).empty() && s.normals.empty(), "nx ny nz all 0 means none");
 }
 
 void checkNormalWords() {
@@ -234,10 +234,10 @@ void checkNormalWords() {
     float n[3] = {g(rng), g(rng), g(rng)};
     const float l = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
     for (float &c : n) c /= l;
-    const uint32_t w = sgs::packNormal(n);
+    const uint32_t w = pgs::packNormal(n);
     EXPECT(w != 0u && (w & 0xFFFFu) != 0u && (w >> 16) != 0u, "a normal never packs to 0");
     float m[3];
-    sgs::unpackNormal(w, m);
+    pgs::unpackNormal(w, m);
     worst = std::max(worst, std::acos(std::min(1.0f, n[0] * m[0] + n[1] * m[1] + n[2] * m[2])));
   }
   EXPECT(worst < 1e-3f, "normal words round trip within %g rad (16 bits a component)", worst);
@@ -252,15 +252,15 @@ void checkFile(const char *path) {
   std::ifstream in(path, std::ios::binary);
   const std::vector<uint8_t> file((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
   auto t = std::chrono::steady_clock::now();
-  sgs::Splats s;
-  const std::string error = sgs::readPly(file.data(), file.size(), s);
+  pgs::Splats s;
+  const std::string error = pgs::readPly(file.data(), file.size(), s);
   EXPECT(error.empty(), "%s: %s", path, error.c_str());
   if (!error.empty()) return;
   std::printf("%s: %zu splats (%zu dropped), SH %d coefficients, %zu with normals; read in %.2f s\n", path, s.count, s.dropped,
               s.shCoefficients, s.splatsWithNormals, seconds(t));
   t = std::chrono::steady_clock::now();
-  sgs::Built b;
-  sgs::build(s, s.normals.empty() ? nullptr : s.normals.data(), b);
+  pgs::Built b;
+  pgs::build(s, s.normals.empty() ? nullptr : s.normals.data(), b);
   std::printf("  built %zu clusters, %.1f MB of records in %.2f s\n", b.clusters.size(), b.records.size() / 1048576.0, seconds(t));
 
   // Against the file's normals: signed for the rig's (outward), |cos| for shortest axes, whose
@@ -280,18 +280,18 @@ void checkFile(const char *path) {
       std::printf("; to the file's: mean %s %.3f, %.1f%% within 30 deg", sided ? "cos" : "|cos|", agree / double(compared), 100.0 * within30 / double(compared));
     std::printf("\n");
   };
-  for (auto rig : {sgs::NormalRig::SmnV1, sgs::NormalRig::The4DScanner}) {
+  for (auto rig : {pgs::NormalRig::SmnV1, pgs::NormalRig::The4DScanner}) {
     t = std::chrono::steady_clock::now();
     std::vector<float> normals;
-    const auto r = sgs::rigNormals(s, rig, normals);
-    std::printf("  normals, %-12s rig: cameras see %5.1f%% of %zu opaque splats; %.2f s", rig == sgs::NormalRig::SmnV1 ? "SMNV1" : "THE4DSCANNER",
+    const auto r = pgs::rigNormals(s, rig, normals);
+    std::printf("  normals, %-12s rig: cameras see %5.1f%% of %zu opaque splats; %.2f s", rig == pgs::NormalRig::SmnV1 ? "SMNV1" : "THE4DSCANNER",
                 100.0 * r.seenShare(), r.opaque, seconds(t));
     compare(normals, true);
   }
   {
     t = std::chrono::steady_clock::now();
     std::vector<float> normals;
-    const auto r = sgs::surroundingNormals(s, normals);
+    const auto r = pgs::surroundingNormals(s, normals);
     std::printf("  normals, surrounding cameras: they see %5.1f%% of %zu opaque splats; %.2f s", 100.0 * r.seenShare(), r.opaque, seconds(t));
     compare(normals, true);
     std::printf("  ... the same, either side");
@@ -302,12 +302,12 @@ void checkFile(const char *path) {
                           Variant{"+ smoothing, 32 / 2 %", 2, 2, 32, 0.02f}, Variant{"+ smoothing x4", 2, 4, 16, 0.01f}}) {
     t = std::chrono::steady_clock::now();
     std::vector<float> normals;
-    sgs::AxisNormalsSettings settings;
+    pgs::AxisNormalsSettings settings;
     settings.passes = v.passes;
     settings.smoothingPasses = v.smoothing;
     settings.neighbours = v.neighbours;
     settings.radiusShare = v.radius;
-    const auto r = sgs::axisNormals(s, normals, settings);
+    const auto r = pgs::axisNormals(s, normals, settings);
     std::printf("  normals, shortest axes, %-22s: %.0f%% flat, %.0f%% took the neighbours'; %.2f s", v.name,
                 100.0 * double(r.flat) / double(r.splats), 100.0 * double(r.replaced) / double(r.splats), seconds(t));
     compare(normals, false);
@@ -320,7 +320,7 @@ void checkAxisNormals() {
   std::mt19937 rng(5);
   std::normal_distribution<float> g;
   std::uniform_real_distribution<float> u(0.0f, 1.0f);
-  sgs::Splats s;
+  pgs::Splats s;
   const size_t count = 20000;
   s.count = count;
   std::vector<int> kind(count); // 0 a good disc, 1 round, 2 a disc turned 90 degrees
@@ -338,10 +338,10 @@ void checkAxisNormals() {
   }
   for (int passes : {0, 2}) {
     std::vector<float> normals;
-    sgs::AxisNormalsSettings settings;
+    pgs::AxisNormalsSettings settings;
     settings.passes = passes;
     settings.radiusShare = 0.05f;
-    const auto r = sgs::axisNormals(s, normals, settings);
+    const auto r = pgs::axisNormals(s, normals, settings);
     double off[3] = {0, 0, 0}, total[3] = {0, 0, 0};
     for (size_t i = 0; i < count; ++i) {
       const float c = std::fabs(normals[i * 3] * s.positions[i * 3] + normals[i * 3 + 1] * s.positions[i * 3 + 1] + normals[i * 3 + 2] * s.positions[i * 3 + 2]);
@@ -364,7 +364,7 @@ struct MeshCheck {
   double longestEdge = 0.0;
 };
 
-MeshCheck checkMesh(const sgs::ProxyMesh &m) {
+MeshCheck checkMesh(const pgs::ProxyMesh &m) {
   MeshCheck r;
   std::map<std::pair<uint32_t, uint32_t>, int> edges;
   const auto &P = m.positions;
@@ -385,7 +385,7 @@ MeshCheck checkMesh(const sgs::ProxyMesh &m) {
   return r;
 }
 
-void writeObj(const sgs::ProxyMesh &m, const char *path) {
+void writeObj(const pgs::ProxyMesh &m, const char *path) {
   std::ofstream out(path);
   for (size_t i = 0; i < m.positions.size(); i += 3) out << "v " << m.positions[i] << ' ' << m.positions[i + 1] << ' ' << m.positions[i + 2] << '\n';
   for (size_t t = 0; t < m.indices.size(); t += 3) out << "f " << m.indices[t] + 1 << ' ' << m.indices[t + 1] + 1 << ' ' << m.indices[t + 2] + 1 << '\n';
@@ -397,7 +397,7 @@ void writeObj(const sgs::ProxyMesh &m, const char *path) {
 void checkProxy() {
   std::mt19937 rng(9);
   std::normal_distribution<float> g;
-  sgs::Splats s;
+  pgs::Splats s;
   const float R = 0.3f;
   for (int i = 0; i < 30000; ++i) {
     Eigen::Vector3f d(g(rng), g(rng), g(rng));
@@ -419,11 +419,11 @@ void checkProxy() {
   s.count = s.positions.size() / 3;
 
   for (float inset : {0.0f, 0.02f, 0.04f}) {
-    sgs::ProxySettings settings;
+    pgs::ProxySettings settings;
     settings.inset = inset;
-    sgs::ProxyMesh m;
+    pgs::ProxyMesh m;
     const auto t = std::chrono::steady_clock::now();
-    const bool built = sgs::buildProxy(s, settings, m);
+    const bool built = pgs::buildProxy(s, settings, m);
     EXPECT(built, "a proxy for the sphere");
     if (!built) continue;
     const MeshCheck c = checkMesh(m);
@@ -458,7 +458,7 @@ void checkProxy() {
 // And a plate 1 cm thick with a 2 cm inset: the inset stops short of turning it inside out.
 void checkProxyThin() {
   {
-    sgs::Splats s;
+    pgs::Splats s;
     const float c = 0.7071068f, sn = 0.7071068f; // 45 degrees about z: (cos 22.5, 0, 0, sin 22.5)
     (void)c; (void)sn;
     s.positions = {0.0031f, -0.0023f, 0.0047f};
@@ -466,11 +466,11 @@ void checkProxyThin() {
     s.scales = {0.1f, 0.0015f, 0.0015f};
     s.radiance = {0.0f, 0.0f, 0.0f, 1.0f};
     s.count = 1;
-    sgs::ProxySettings settings;
+    pgs::ProxySettings settings;
     settings.inset = 0.0f;
     settings.opacity = 0.3f; // the span below is worked out for it
-    sgs::ProxyMesh m;
-    const bool built = sgs::buildProxy(s, settings, m);
+    pgs::ProxyMesh m;
+    const bool built = pgs::buildProxy(s, settings, m);
     EXPECT(built, "a proxy for a thin diagonal splat");
     double lo = 1e9, hi = -1e9;
     for (size_t i = 0; i < m.positions.size(); i += 3) {
@@ -485,7 +485,7 @@ void checkProxyThin() {
   {
     std::mt19937 rng(3);
     std::uniform_real_distribution<float> u(-0.2f, 0.2f), t(-0.003f, 0.003f);
-    sgs::Splats s;
+    pgs::Splats s;
     for (int i = 0; i < 20000; ++i) {
       s.positions.insert(s.positions.end(), {u(rng), u(rng), t(rng)});
       s.rotations.insert(s.rotations.end(), {1.0f, 0.0f, 0.0f, 0.0f});
@@ -493,10 +493,10 @@ void checkProxyThin() {
       s.radiance.insert(s.radiance.end(), {0.0f, 0.0f, 0.0f, 0.9f});
     }
     s.count = s.positions.size() / 3;
-    sgs::ProxySettings settings;
+    pgs::ProxySettings settings;
     settings.inset = 0.02f;
-    sgs::ProxyMesh m;
-    const bool built = sgs::buildProxy(s, settings, m);
+    pgs::ProxyMesh m;
+    const bool built = pgs::buildProxy(s, settings, m);
     EXPECT(built, "a proxy for a thin plate");
     if (!built) return;
     const MeshCheck c = checkMesh(m);
@@ -512,7 +512,7 @@ void checkProxyThin() {
 }
 
 void checkProxyMetricAndInset() {
-  using namespace sgs::proxydetail;
+  using namespace pgs::proxydetail;
   auto metric = [](const float *m, double *a) {
     const auto at = [m](int i, int j) {
       return double(m[i]) * m[j] + double(m[3 + i]) * m[3 + j] + double(m[6 + i]) * m[6 + j];
@@ -578,11 +578,11 @@ void checkProxyMetricAndInset() {
 void checkFileProxy(const char *path, const char *obj) {
   std::ifstream in(path, std::ios::binary);
   const std::vector<uint8_t> file((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-  sgs::Splats s;
-  if (!sgs::readPly(file.data(), file.size(), s).empty()) return;
-  sgs::ProxyMesh m;
+  pgs::Splats s;
+  if (!pgs::readPly(file.data(), file.size(), s).empty()) return;
+  pgs::ProxyMesh m;
   const auto t = std::chrono::steady_clock::now();
-  const bool built = sgs::buildProxy(s, sgs::ProxySettings(), m);
+  const bool built = pgs::buildProxy(s, pgs::ProxySettings(), m);
   EXPECT(built, "%s: a proxy", path);
   if (!built) return;
   const MeshCheck c = checkMesh(m);

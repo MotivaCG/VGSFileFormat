@@ -1,4 +1,4 @@
-# VFGS version 5: the `.vgs` container
+# VFGS version 5: the `.vgs` and `.pgs` container
 
 A capture is a 4D Gaussian splat recording: a timeline of frames, each a few hundred
 thousand splats, laid out so a player fetches and decodes one chunk of time at a time
@@ -13,11 +13,11 @@ VGS's per-attribute FSE, Pcodec, rANS16 or Raw selection; uncompressed, every pa
 as it is (Raw), for cases where CPU time matters more than bytes. Nothing else differs, and
 the extension is the same: the header declares the codec per attribute, so a reader learns
 which it has from there (`isUncompressed()` in the decoder) and reads both with the same
-code. Writers choose when saving. Files written as `.pgs` by earlier tools are uncompressed
-`.vgs` files under another name.
+code. Writers choose when saving.
 
-A third extension is **`.sgs`, a static capture** (a scanned character or prop rather than a
-performance), written by the SGS Editor (`sgseditor/`). See *Static captures* below.
+The same container with one frame is a **`.pgs`, PGS (Plain Gaussian Splatting): a static
+capture** (a scanned character or prop rather than a performance), written by the PGS Editor
+(`pgseditor/`). See *Static captures* below. VGS stands for Video Gaussian Splatting.
 
 The container holds named, independently paged attributes, not the source's bytes.
 The format-6 `.mint` importer preserves every value needed to render its source,
@@ -403,11 +403,11 @@ else belongs under a vendor-prefixed key. Each extra's bytes are checked against
 digest in its table entry when they are read: none is needed to reconstruct a frame, so
 none is fetched to open the capture, but none comes back unverified either.
 
-### Static captures: `.sgs`
+### Static captures: `.pgs`
 
-Written by the SGS Editor (`sgseditor/`), from a 3D Gaussian Splatting PLY.
+Written by the PGS Editor (`pgseditor/`), from a 3D Gaussian Splatting PLY.
 
-An `.sgs` is this same container holding **one frame**: `frameCount` 1, one chunk of one
+A `.pgs` is this same container holding **one frame**: `frameCount` 1, one chunk of one
 interval, every splat alive for it. Nothing else differs, and a reader of `.vgs` reads it as
 it is; the extension tells tools that it is a still (an asset to place, as a PLY is)
 rather than a clip, and so does the header (`frameCount` 1). Its pages may be compressed or
@@ -419,7 +419,7 @@ closed, simplified surface of the subject, in the capture's own space and units,
 splats do poorly in an engine: casting shadows into shadow maps, collision, occlusion and
 picking. Nothing needed to show the splats is in it, so a reader that has no use for it
 skips it. It may carry its material too, a matte dielectric with a base colour texture and
-a tangent-space normal map embedded in the `.glb` (the SGS Editor bakes them from the
+a tangent-space normal map embedded in the `.glb` (the PGS Editor bakes them from the
 splats, or from the photos they were trained from): a reader may then draw it where splats
 are not wanted, as a distant level of detail or a preview, but the splats remain the
 capture. Only one per file; the extra's digest is in

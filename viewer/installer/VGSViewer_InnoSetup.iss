@@ -47,7 +47,6 @@
 #define MyAppPublisher "VGS"
 #define MyAppURL "https://www.the4dscanner.com"
 
-
 #if !FileExists(MyAppPathToInclude + "\" + MyAppExeName)
   #error The deploy folder has no VGSViewer.exe: build Release and run deploy.ps1 first.
 #endif
@@ -92,8 +91,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 Name: "assocvgs"; Description: "VGS captures (.vgs)"; GroupDescription: "Open these files with VGS Viewer by default:"
-Name: "assocpgs"; Description: "PGS captures (.pgs)"; GroupDescription: "Open these files with VGS Viewer by default:"
-Name: "assocsgs"; Description: "Static captures (.sgs)"; GroupDescription: "Open these files with VGS Viewer by default:"
+Name: "assocpgs"; Description: "Static captures (.pgs)"; GroupDescription: "Open these files with VGS Viewer by default:"
 
 [Files]
 Source: "{#MyAppPathToInclude}\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
@@ -111,18 +109,11 @@ Root: HKA; Subkey: "Software\Classes\VGSViewer.vgs\shell\open\command"; ValueTyp
 Root: HKA; Subkey: "Software\Classes\.vgs\OpenWithProgids"; ValueType: string; ValueName: "VGSViewer.vgs"; ValueData: ""; Flags: uninsdeletevalue
 Root: HKA; Subkey: "Software\Classes\.vgs"; ValueType: string; ValueName: ""; ValueData: "VGSViewer.vgs"; Flags: uninsdeletevalue; Tasks: assocvgs
 
-Root: HKA; Subkey: "Software\Classes\VGSViewer.pgs"; ValueType: string; ValueName: ""; ValueData: "PGS Capture"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\VGSViewer.pgs"; ValueType: string; ValueName: ""; ValueData: "PGS Static Capture"; Flags: uninsdeletekey
 Root: HKA; Subkey: "Software\Classes\VGSViewer.pgs\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#MyAppExeName},0"
 Root: HKA; Subkey: "Software\Classes\VGSViewer.pgs\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
 Root: HKA; Subkey: "Software\Classes\.pgs\OpenWithProgids"; ValueType: string; ValueName: "VGSViewer.pgs"; ValueData: ""; Flags: uninsdeletevalue
 Root: HKA; Subkey: "Software\Classes\.pgs"; ValueType: string; ValueName: ""; ValueData: "VGSViewer.pgs"; Flags: uninsdeletevalue; Tasks: assocpgs
-
-Root: HKA; Subkey: "Software\Classes\VGSViewer.sgs"; ValueType: string; ValueName: ""; ValueData: "SGS Static Capture"; Flags: uninsdeletekey
-Root: HKA; Subkey: "Software\Classes\VGSViewer.sgs\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#MyAppExeName},0"
-Root: HKA; Subkey: "Software\Classes\VGSViewer.sgs\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
-Root: HKA; Subkey: "Software\Classes\.sgs\OpenWithProgids"; ValueType: string; ValueName: "VGSViewer.sgs"; ValueData: ""; Flags: uninsdeletevalue
-Root: HKA; Subkey: "Software\Classes\.sgs"; ValueType: string; ValueName: ""; ValueData: "VGSViewer.sgs"; Flags: uninsdeletevalue; Tasks: assocsgs
-
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
