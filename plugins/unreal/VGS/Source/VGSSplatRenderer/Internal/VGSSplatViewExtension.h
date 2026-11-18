@@ -8,7 +8,6 @@
 #include "CoreMinimal.h"
 #include "SceneViewExtension.h"
 #include "Containers/SortedMap.h"
-#include "Containers/SortedSet.h"
 
 class FVGSSplatRenderProxy;
 class FRHIGPUBufferReadback;

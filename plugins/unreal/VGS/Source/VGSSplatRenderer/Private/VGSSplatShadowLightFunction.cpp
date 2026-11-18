@@ -9,11 +9,31 @@
 #include "LightSceneProxy.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "SceneView.h"
+#include "UnrealClient.h"
 #include "UObject/ConstructorHelpers.h"
 #include "UObject/UObjectIterator.h"
+#include "MaterialDomain.h"
+#include "Materials/Material.h"
+#include "Misc/EngineVersionComparison.h"
+#include "RenderingThread.h"
 
 namespace
 {
+	// The light's proxy draws `Component`'s light function, or ours through ParameterSource. 5.7
+	// and later have FLightSceneProxy::SetLightFunctionMaterial_GameThread; on 5.6 the member it
+	// sets is protected, so the same render command reaches it through a derived type.
+	void SetLightFunction(FLightSceneProxy* Proxy, const ULightComponent* Component)
+	{
+#if UE_VERSION_OLDER_THAN(5, 7, 0)
+		struct FAccess : FLightSceneProxy { static auto Member() { return &FAccess::LightFunctionMaterial; } };
+		const FMaterialRenderProxy* Material = Component->LightFunctionMaterial &&
+			Component->LightFunctionMaterial->GetMaterial()->MaterialDomain == MD_LightFunction
+			? Component->LightFunctionMaterial->GetRenderProxy() : nullptr;
+		ENQUEUE_RENDER_COMMAND(VGSSplatSetLightFunction)([Proxy, Material](FRHICommandList&) { Proxy->*FAccess::Member() = Material; });
+#else
+		Proxy->SetLightFunctionMaterial_GameThread(Component);
+#endif
+	}
 	const TCHAR* ShadowSlot() { return FCString::Strcmp(VGSSPLAT_PLUGIN_NAME, TEXT("VGS")) == 0 ? TEXT("A") : TEXT("B"); }
 	FName ShadowParameter(const TCHAR* Base) { return FName(*(FString(Base) + ShadowSlot())); }
 }
@@ -32,7 +52,7 @@ void UVGSSplatSubsystem::ReleaseShadowLightFunction()
 	if (UDirectionalLightComponent* Light = ShadowLight.Get())
 	{
 		if (Light->SceneProxy && (!ShadowInstance || ShadowInstance->K2_GetScalarParameterValue(Other) < 0.5f))
-			Light->SceneProxy->SetLightFunctionMaterial_GameThread(Light);
+			SetLightFunction(Light->SceneProxy, Light);
 	}
 	ShadowLight.Reset();
 }
@@ -52,7 +72,7 @@ VGSSplat::FDeepShadowFrame UVGSSplatSubsystem::UpdateShadowLightFunction(const F
 	{
 		UDirectionalLightComponent* Light = *It;
 		if (Light->GetWorld() != GetWorld() || !Light->IsRegistered() || !Light->IsVisible() ||
-			!Light->CastsDynamicShadow() || !Light->SceneProxy) continue;
+			!(Light->CastShadows && Light->CastDynamicShadows) || !Light->SceneProxy) continue; // CastsDynamicShadow(), which 5.7 lacks
 		if (Light->bAtmosphereSunLight && Light->AtmosphereSunLightIndex == 0) { Main = Light; break; }
 		const float Value = Light->Intensity * Light->GetLightColor().GetLuminance();
 		if (Value > Brightest) { Main = Light; Brightest = Value; }
@@ -121,7 +141,7 @@ VGSSplat::FDeepShadowFrame UVGSSplatSubsystem::UpdateShadowLightFunction(const F
 	ShadowInstance->SetScalarParameterValue(ShadowParameter(TEXT("SelfShadow")), CVar(TEXT("r.VGSSplat.Shadow.Self"), 0));
 	ShadowInstance->SetScalarParameterValue(ShadowParameter(TEXT("Penumbra")), FMath::Tan(FMath::DegreesToRadians(Main->LightSourceAngle * 0.5f)) * CVar(TEXT("r.VGSSplat.Shadow.Softness"), 1));
 	ShadowInstance->SetScalarParameterValue(ShadowParameter(TEXT("Enabled")), 1.0f);
-	Main->SceneProxy->SetLightFunctionMaterial_GameThread(ParameterSource);
+	SetLightFunction(Main->SceneProxy, ParameterSource);
 	ShadowLight = Main;
 	Frame.Atlas = ShadowAtlas->GameThread_GetRenderTargetResource();
 	Frame.Receivers = ShadowReceivers->GameThread_GetRenderTargetResource();

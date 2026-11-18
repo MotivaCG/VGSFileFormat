@@ -15,6 +15,7 @@
 #include "VGSSplatSubsystem.generated.h"
 
 class FVGSSplatViewExtension;
+class FSceneViewFamily;
 class UMaterialInterface;
 class UMaterialInstanceDynamic;
 class UTextureRenderTarget2D;

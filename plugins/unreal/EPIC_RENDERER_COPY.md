@@ -143,7 +143,13 @@ All marked `VGS CHANGE`; `tools/vgs_renderer_changes.patch` is the exact diff.
 11. **Engine versions** (`VGSSplatRenderPipeline.cpp`, `VGSSPLAT_ENGINE_5_9`). Before 5.9
     there is no `SortGPUBuffersIndirect` and no `VET_UInt2`: the GPU-driven pipeline and
     vertex attribute fetch are off there (the classic path, and Win64 does not need vertex
-    attribute fetch). Built against 5.8 and 5.9 on 2026-11-11.
+    attribute fetch). Built against 5.8 and 5.9 on 2026-11-11. For 5.6 and 5.7 (2026-11-18):
+    `UE_LOG` where Epic's 5.9 code has `UE_LOGF`; `Containers/SortedSet.h` (unused) left out;
+    `GetGPUSortPassCount`, which Engine exports only from 5.8, counted in the copy before it;
+    and in `VGSSplatShadowLightFunction.cpp`, `CastShadows && CastDynamicShadows` for
+    `CastsDynamicShadow()` (5.8+) and, on 5.6, the render command that
+    `SetLightFunctionMaterial_GameThread` (5.7+) runs. All four engines are built and
+    load-checked by `tools/package_plugins.ps1`.
 12. **Normals without a side** (`FVGSSplatRenderProxy::bNormalsFaceCamera`; `HasNormals` 2 in
     `VGSSplatShading.usf`): a proxy's normals may be directions only (PGS's shortest
     axes), turned towards the camera as the shortest axis is.

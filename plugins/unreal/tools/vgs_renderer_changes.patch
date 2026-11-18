@@ -1,3 +1,1377 @@
+--- a/VGS/Shaders/Private/SplatRenderer/VGSSplatCommon.ush
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatCommon.ush
+@@ -36,6 +36,32 @@ float2 VGSSplatUnpackHalf2(uint Packed)
+ 	return float2(f16tof32(Packed & 0xFFFFu), f16tof32(Packed >> 16));
+ }
+ 
++// VGS: a unit vector in one word, octahedral, 16 bits a coordinate, over the whole sphere: a
++// lit splat's view-space normal keeps its z, sign included (VGSSplatGBuffer.usf averages x, y
++// and z, not x and y with z made up).
++uint VGSSplatPackOctNormal(float3 N)
++{
++	N /= max(abs(N.x) + abs(N.y) + abs(N.z), 1e-6f);
++	float2 P = N.xy;
++	if (N.z < 0.0f)
++	{
++		P = (1.0f - abs(N.yx)) * select(N.xy >= 0.0f, 1.0f, -1.0f);
++	}
++	const uint2 Q = uint2(round(saturate(P * 0.5f + 0.5f) * 65535.0f));
++	return Q.x | (Q.y << 16);
++}
++
++float3 VGSSplatUnpackOctNormal(uint W)
++{
++	float2 P = float2(W & 65535u, W >> 16) / 65535.0f * 2.0f - 1.0f;
++	const float Z = 1.0f - abs(P.x) - abs(P.y);
++	if (Z < 0.0f)
++	{
++		P = (1.0f - abs(P.yx)) * select(P.xy >= 0.0f, 1.0f, -1.0f);
++	}
++	return normalize(float3(P, Z)); // z < 0 (towards the camera) is the folded half
++}
++
+ struct FPackedShadedVGSSplatData
+ {
+ 	float ViewZ;
+--- /dev/null
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatDeepShadow.ush
+@@ -0,0 +1,48 @@
++// VGS: used by the shipped Light Function material. The prefix atlas represents
++// transmittance up to each of 64 depth-bin boundaries, rather than a whole column.
++#pragma once
++float VGSSampleDeepLayer(Texture2D Atlas, SamplerState AtlasSampler, float2 UV, int Layer, float Resolution)
++{
++	if (Layer < 0) return 1.0f;
++	Layer = min(Layer, 63);
++	const float2 Tile = float2(Layer % 8, Layer / 8);
++	const float2 TexelUV = clamp(UV, 0.5f / Resolution, 1.0f - 0.5f / Resolution);
++	return Texture2DSampleLevel(Atlas, AtlasSampler, (Tile + TexelUV) / float2(8, 9), 0).r;
++}
++
++float VGSSampleDeepShadow(Texture2D Atlas, SamplerState AtlasSampler, Texture2D CaptureMask, SamplerState CaptureMaskSampler,
++	float3 WorldPosition, float3 Origin, float3 X, float3 Y, float3 Z,
++	float3 Extent, float Resolution, float Bias, float SelfShadow, float Penumbra)
++{
++	uint MaskWidth, MaskHeight;
++	CaptureMask.GetDimensions(MaskWidth, MaskHeight);
++	// LightFunctionCommon sets ScreenPosition, but not Parameters.SvPosition. Material
++	// GetViewportUV therefore cannot be used here; project the reconstructed receiver.
++	const float4 Clip = mul(float4(DFAddDemote(PrimaryView.PreViewTranslation, WorldPosition), 1), PrimaryView.TranslatedWorldToClip);
++	const float2 ScreenUV = Clip.xy / Clip.w * float2(0.5f, -0.5f) + 0.5f;
++	const float2 BufferUV = (ScreenUV * View.ViewSizeAndInvSize.xy + View.ViewRectMin.xy) / float2(MaskWidth, MaskHeight);
++	if (SelfShadow < 0.5f && CaptureMask.Load(int3(clamp(int2(BufferUV * float2(MaskWidth, MaskHeight)), int2(0, 0), int2(MaskWidth, MaskHeight) - 1), 0)).r > 0.0f) return 1.0f;
++	const float3 Delta = WorldPosition - Origin;
++	const float3 L = float3(dot(Delta, X), dot(Delta, Y), dot(Delta, Z));
++	const float2 UV = float2(L.x / Extent.x, -L.y / Extent.y) * 0.5f + 0.5f;
++	if (any(UV <= 0.0f) || any(UV >= 1.0f) || L.z - Bias <= -Extent.z) return 1.0f;
++	const float H = saturate(((L.z - Bias) / Extent.z + 1.0f) * 0.5f) * 64.0f;
++	const int Layer = min(int(H), 63);
++	const float F = H >= 64.0f ? 1.0f : frac(H);
++	const float Radius = max(Penumbra * max(L.z + Extent.z, 0.0f), 0.0f);
++	float Result = 0;
++	const float2 Offsets[4] = {float2(-0.5,-0.5),float2(0.5,-0.5),float2(-0.5,0.5),float2(0.5,0.5)};
++	for (int Tap = 0; Tap < 4; ++Tap)
++	{
++		const float2 P = UV + Offsets[Tap] * Radius / (2.0f * Extent.xy);
++		// Outside the fitted volume is unoccluded, rather than repeated edge texels.
++		if (any(P <= 0.0f) || any(P >= 1.0f)) { Result += 1.0f; continue; }
++		const float2 NearestUV = (float2(0, 8) + clamp(P, 0.5f / Resolution, 1.0f - 0.5f / Resolution)) / float2(8, 9);
++		const float Nearest = Texture2DSampleLevel(Atlas, AtlasSampler, NearestUV, 0).r;
++		if (((L.z - Bias) / Extent.z + 1.0f) * 0.5f <= Nearest) { Result += 1.0f; continue; }
++		const float A = VGSSampleDeepLayer(Atlas, AtlasSampler, P, Layer - 1, Resolution);
++		const float B = VGSSampleDeepLayer(Atlas, AtlasSampler, P, Layer, Resolution);
++		Result += exp(lerp(log(max(A, 1e-7f)), log(max(B, 1e-7f)), F));
++	}
++	return Result * 0.25f;
++}
+--- /dev/null
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatGBuffer.usf
+@@ -0,0 +1,379 @@
++// VGS: not Epic's. Writes a lit capture into Unreal's GBuffer, after the base pass and before
++// lighting, as an opaque Default Lit surface: every light, the shadows other objects cast on
++// it, the skylight, Lumen, ambient occlusion and fog then reach it as they reach a mesh.
++//
++// The splats have been drawn front to back into two targets (VGSSplatHardwareRasterize.usf,
++// VGS_LIT): the colour, premultiplied, with transmittance in alpha; and the depth moments -
++// linear depth and the view-space normal's x and y, each weighted by what reaches the camera,
++// and transmittance again. A pixel gets the weighted means: one colour, one normal, one depth.
++// The GBuffer holds one opaque surface a pixel, so where the splats only partly cover it
++// (edges, hair) it is written or not at random, as much as they cover; temporal
++// anti-aliasing turns that back into a soft edge.
++//
++// With Substrate's own material buffer (SUBSTRATE_GBUFFER_FORMAT 1) the surface is one Default
++// Lit slab packed into it with PackSubstrateOut, as the engine's DebugProbes.usf stamps its
++// probes; with the legacy GBuffer, or Substrate's blendable one, EncodeGBuffer.
++
++#include "/Engine/Private/Common.ush"
++
++#define VGS_SUBSTRATE_MATERIAL (SUBSTRATE_ENABLED && SUBSTRATE_GBUFFER_FORMAT == 1)
++#if VGS_SUBSTRATE_MATERIAL
++// One slab, shaded inline, as DebugProbes.usf.
++#define SUBSTRATE_CLAMPED_CLOSURE_COUNT 1
++// And encoded as a simple material: the material translator sets this for a material that
++// qualifies; without it a global shader packs the complex encoding, its tiles are classified
++// complex, and with no complex material in the scene they are not lit at all.
++#define SUBSTRATE_FASTPATH 1
++#ifndef SUBSTRATE_INLINE_SHADING // also set by FVGSSplatGBufferPS, as for DebugProbes.usf
++#define SUBSTRATE_INLINE_SHADING 1
++#endif
++#include "/Engine/Private/Substrate/Substrate.ush"
++#define MATERIAL_SUBSTRATE_OPAQUE_PRECOMPUTED_LIGHTING 0
++#include "/Engine/Private/Substrate/SubstrateExport.ush"
++#endif
++
++#include "/Engine/Private/ColorSpace.ush"
++#include "/Engine/Private/Random.ush"
++#include "/Engine/Private/DeferredShadingCommon.ush"
++#include "/Engine/Private/VelocityCommon.ush"
++
++#if VGS_SUBSTRATE_MATERIAL
++#if SUBSTRATE_BASE_PASS_MRT_OUTPUT_COUNT != 3
++#error Substrate's base pass outputs changed: update the outputs below and FVGSSplatGBufferPS.
++#endif
++RWTexture2DArray<uint> MaterialTextureArrayUAV;
++uint MaxBytesPerPixel;
++uint bRoughDiffuse;
++
++// Nothing to do for a single slab; PackSubstrateOut needs them defined (as DebugProbes.usf).
++void FSubstratePixelHeader::PreUpdateAllBSDFWithBottomUpOperatorVisit(float3 V) {}
++void FSubstratePixelHeader::UpdateAllBSDFsOperatorCoverageTransmittance(FSubstrateIntegrationSettings Settings, float3 V) {}
++void FSubstratePixelHeader::UpdateAllOperatorsCoverageTransmittance() {}
++void FSubstratePixelHeader::UpdateAllBSDFWithBottomUpOperatorVisit() {}
++void FSubstratePixelHeader::PreUpdateAllBSDFWithBottomUpOperatorVisit_FullySimplified(float3 V) {}
++void FSubstratePixelHeader::UpdateAllBSDFsOperatorCoverageTransmittance_FullySimplified(FSubstrateIntegrationSettings Settings, float3 V) {}
++void FSubstratePixelHeader::UpdateAllOperatorsCoverageTransmittance_FullySimplified() {}
++void FSubstratePixelHeader::UpdateAllBSDFWithBottomUpOperatorVisit_FullySimplified() {}
++#endif
++
++#include "VGSSplatGrade.ush"
++
++Texture2D<float4> SplatColorTexture;
++Texture2D<float4> DepthMomentsTexture;
++Texture2D<float4> NormalZTexture; // the normals' z, weighted as the moments' x and y
++uint SmoothingMode;         // 0: neighbours near the pixel's depth; 1: near its local plane
++float SmoothingTolerance;   // how far off they may lie, a share of the distance ...
++float SmoothingBias;        // ... plus this, in Unreal units
++
++float ExpectedDepthScale;
++uint BlendInSRGB;       // the colour target holds sRGB values (VGSSplatShading.usf), else linear
++float SelfIllumination; // lerp weight, never additive emission
++float Intensity;        // on the emissive part, as on a self-illuminated capture
++float Roughness;
++float Specular;
++float MinCoverage;      // below this a pixel is never written
++uint Dither;            // 0: written where coverage reaches one half, no dithering
++float NormalSmoothing;  // the bilateral filter's radius, in Unreal units; 0 leaves each pixel's own normal
++uint Deforming;
++// The self-illuminated part is the capture's colour as a Self-illumination capture shows it,
++// inverse tone curve included (VGSSplatInverseToneCurvePostBlend.usf), so that an amount of 1
++// matches Self-illumination. Strength 0 leaves it out.
++Texture3D InverseToneCurveLUT;
++SamplerState InverseToneCurveLUTSampler;
++float InverseToneCurveStrength;
++float InverseToneCurveLUTEdge;
++
++// The splats' mean view-space normal at a pixel, and how much they cover it.
++// The weighted mean of the splats' normals: x, y and z each averaged, then normalised. (Not x
++// and y with z made up from them, which lost z's sign and pulled every average towards the
++// camera.) Normals that cancel out leave the one facing the camera.
++float3 VGSPixelViewNormal(int2 Pixel, float4 Moments)
++{
++	const float3 Sum = float3(Moments.gb, NormalZTexture.Load(int3(Pixel, 0)).r);
++	const float Length2 = dot(Sum, Sum);
++	return Length2 > 1e-12f ? Sum * rsqrt(Length2) : float3(0.0f, 0.0f, -1.0f);
++}
++
++// The normal averaged with the neighbours' on the same surface: one splat's normal is noisy
++// (a splat is a blob as often as a patch of surface), so lit directly the capture looks
++// crumpled and specked. Neighbours count by how much the splats cover them, by how close they
++// lie in depth (or to the local plane), so the average does not cross a silhouette, and by
++// default by how alike their normal is, so that a fold or an arm over the torso is not averaged
++// away (r.VGSSplat.Lit.NormalSmoothing.Mode).
++float3 VGSSmoothedViewNormal(int2 PixelXY, float3 Normal, float Depth)
++{
++	// The radius on screen at this depth, so the capture is smoothed alike near and far.
++	const float Radius = min(NormalSmoothing * View.ViewToClip[0][0] * 0.5f * View.ViewSizeAndInvSize.x / max(Depth, 1.0f), 24.0f);
++	if (Radius < 1.0f)
++	{
++		return Normal;
++	}
++	const float Step = Radius / 2.0f;
++	const float Tolerance = SmoothingTolerance * Depth + SmoothingBias;
++	// The local plane: the depth's slope across the pixel, from its neighbours on the side
++	// closer in depth (the other side may be past a silhouette).
++	// Modes: bit 0, the local plane instead of the pixel's depth; bit 1, neighbours also count by
++	// how alike their normal is (a joint bilateral: an arm and the torso behind it differ).
++	float2 Slope = 0.0f;
++	if ((SmoothingMode & 1u) != 0u)
++	{
++		// Over one tap's spacing, not one pixel: the depth jitters by millimetres from pixel to
++		// pixel, which a one-pixel slope turns into a wildly wrong plane.
++		const int Baseline = max(int(round(Step)), 1);
++		float Side[4];
++		const int2 Offsets[4] = { int2(-1, 0), int2(1, 0), int2(0, -1), int2(0, 1) };
++		for (int i = 0; i < 4; ++i)
++		{
++			const float4 M = DepthMomentsTexture.Load(int3(PixelXY + Offsets[i] * Baseline, 0));
++			const float C = 1.0f - M.a;
++			Side[i] = C >= 0.25f ? M.r / C * ExpectedDepthScale - Depth : 1e9f;
++		}
++		const float Dx = abs(Side[0]) < abs(Side[1]) ? -Side[0] : Side[1];
++		const float Dy = abs(Side[2]) < abs(Side[3]) ? -Side[2] : Side[3];
++		// A step larger than the tolerance is a silhouette, not a slope.
++		Slope = float2(abs(Dx) < 4.0f * Tolerance ? Dx : 0.0f, abs(Dy) < 4.0f * Tolerance ? Dy : 0.0f) / float(Baseline);
++	}
++	float3 Sum = Normal;
++	for (int y = -2; y <= 2; ++y)
++	{
++		for (int x = -2; x <= 2; ++x)
++		{
++			if (x == 0 && y == 0)
++			{
++				continue;
++			}
++			const int2 Tap = PixelXY + int2(round(float2(x, y) * Step));
++			const float4 Moments = DepthMomentsTexture.Load(int3(Tap, 0));
++			const float Coverage = 1.0f - Moments.a;
++			if (Coverage < 0.25f)
++			{
++				continue;
++			}
++			const float TapDepth = Moments.r / Coverage * ExpectedDepthScale;
++			const float Expected = Depth + dot(Slope, float2(Tap - PixelXY));
++			const float DepthWeight = saturate(1.0f - abs(TapDepth - Expected) / Tolerance);
++			const float Distance2 = float(x * x + y * y);
++			const float3 TapNormal = VGSPixelViewNormal(Tap, Moments);
++			float NormalWeight = 1.0f;
++			if ((SmoothingMode & 2u) != 0u)
++			{
++				// 1 alike, about a half at 30 degrees apart, nearly nothing past 60.
++				const float Alike = saturate(dot(TapNormal, Normal));
++				NormalWeight = Alike * Alike * Alike * Alike;
++			}
++			const float Weight = Coverage * DepthWeight * NormalWeight * exp(-0.5f * Distance2 / 2.0f);
++			Sum += TapNormal * Weight;
++		}
++	}
++	return normalize(Sum);
++}
++
++float3 VGSWorkingColorSpaceToSRGB(float3 Color)
++{
++#if WORKING_COLOR_SPACE_IS_SRGB
++	return Color;
++#else
++	return mul(XYZ_2_Linear_sRGB_MAT, LinearRGB_2_XYZ(Color));
++#endif
++}
++
++void MainPS(
++	float4 SvPosition : SV_Position,
++	out float4 OutSceneColor : SV_Target0,
++#if VGS_SUBSTRATE_MATERIAL
++	// The material buffer's first three slices, then the top layer, bound in this order by
++	// FVGSSplatGBufferPS's caller.
++	out uint OutSubstrateMat0 : SV_Target1,
++	out uint OutSubstrateMat1 : SV_Target2,
++	out uint OutSubstrateMat2 : SV_Target3,
++	out SUBSTRATE_TOP_LAYER_TYPE OutSubstrateTopLayer : SV_Target4,
++	out float4 OutVelocity : SV_Target5,
++	out float OutCaptureMask : SV_Target6,
++#if VGS_WRITE_MIX
++	out float4 OutMix : SV_Target7,
++#endif
++#else
++	out float4 OutGBufferA : SV_Target1,
++	out float4 OutGBufferB : SV_Target2,
++	out float4 OutGBufferC : SV_Target3,
++	out float4 OutVelocity : SV_Target4,
++	out float OutCaptureMask : SV_Target5,
++#if VGS_WRITE_MIX
++	out float4 OutMix : SV_Target6,
++#endif
++#endif
++	out float OutDepth : SV_Depth)
++{
++	const int3 Pixel = int3((int2)SvPosition.xy, 0);
++	const float4 Moments = DepthMomentsTexture.Load(Pixel);
++	const float Coverage = 1.0f - Moments.a;
++	if (Coverage < MinCoverage)
++	{
++		discard;
++	}
++	if (Dither != 0u)
++	{
++		if (Coverage < 0.999f && InterleavedGradientNoise(SvPosition.xy, View.StateFrameIndexMod8) >= Coverage)
++		{
++			discard;
++		}
++	}
++	else if (Coverage < 0.5f)
++	{
++		discard;
++	}
++
++	// The weighted means.
++	const float InvCoverage = 1.0f / Coverage;
++	const float4 Splat = SplatColorTexture.Load(Pixel);
++	float3 Linear;
++	if (BlendInSRGB != 0u)
++	{
++		float3 ColorSRGB = saturate(Splat.rgb * InvCoverage);
++		if (GradeActive != 0u)
++		{
++			ColorSRGB = VGSApplyGrade(ColorSRGB, 1.0f);
++		}
++		Linear = SRGBColorToWorkingColorSpace(VGSSRGBToLinear(ColorSRGB));
++	}
++	else
++	{
++		Linear = max(Splat.rgb * InvCoverage, 0.0f);
++		if (GradeActive != 0u)
++		{
++			const float3 ColorSRGB = VGSLinearToSRGB(saturate(VGSWorkingColorSpaceToSRGB(Linear)));
++			Linear = SRGBColorToWorkingColorSpace(VGSSRGBToLinear(VGSApplyGrade(ColorSRGB, 1.0f)));
++		}
++	}
++
++	// Match the visible front-to-back compositing weights. Selecting the nearest
++	// splat above an individual alpha threshold can select a hidden/back layer and
++	// creates discontinuous receiver depths (circular self-shadow acne).
++	const float Depth = Moments.r * InvCoverage * ExpectedDepthScale;
++	float3 ViewNormal = VGSPixelViewNormal(Pixel.xy, Moments);
++	if (NormalSmoothing > 0.0f)
++	{
++		ViewNormal = VGSSmoothedViewNormal(int2(SvPosition.xy), ViewNormal, Depth);
++	}
++	const float3 WorldNormal = normalize(mul(ViewNormal, (float3x3)View.ViewToTranslatedWorld));
++
++	OutDepth = ConvertToDeviceZ(Depth);
++	OutCaptureMask = OutDepth; // zero outside captures; also the mixed reference depth
++	// Camera motion at the actual receiver depth, plus the opacity-weighted object
++	// displacement evaluated in the previous camera. The temporal jitter is removed once.
++	const float4 CurrentClip = float4(SvPositionToScreenPosition(SvPosition).xy, OutDepth, 1.0f);
++	const float4 PreviousClip = mul(CurrentClip, View.ClipToPrevClipWithAA);
++	float3 Velocity = PreviousClip.w > 1e-6f ? Calculate3DVelocityBase(CurrentClip, PreviousClip, View.TemporalAAJitter.xy, View.TemporalAAJitter.zw) : 0;
++	Velocity.xy += NormalZTexture.Load(Pixel).gb * InvCoverage;
++	OutVelocity = EncodeVelocityToTexture(Velocity, Deforming != 0u);
++
++#if VGS_SUBSTRATE_MATERIAL
++	const float3 BaseColor = saturate(Linear);
++	FSubstratePixelHeader SubstratePixelHeader = InitialiseSubstratePixelHeader();
++	SubstratePixelHeader.SubstrateTree = GetInitialisedSubstrateTree();
++	SubstratePixelHeader.IrradianceAO = InitIrradianceAndOcclusion();
++	SubstratePixelHeader.IrradianceAO.MaterialAO = 1.0f;
++	SubstratePixelHeader.SetCastContactShadow(true);
++
++	const uint SharedLocalBasisIndex = 0;
++	SubstratePixelHeader.SharedLocalBases.Normals[SharedLocalBasisIndex] = WorldNormal;
++	SubstratePixelHeader.SharedLocalBases.Count = 1;
++
++	FSubstratePixelFootprint PixelFootprint = (FSubstratePixelFootprint)0;
++	FSubstrateData SlabData = GetSubstrateSlabBSDF(
++		PixelFootprint,
++		WorldNormal,
++		ComputeDiffuseAlbedo(BaseColor, 0.0f),	// DiffuseAlbedo, metallic 0
++		ComputeF0(Specular, BaseColor, 0.0f),	// F0
++		1.0f,									// F90
++		Roughness,
++		0.0f,									// Anisotropy
++		0,										// SSSProfileID
++		false,									// bSupportDefaultSSSProfile
++		0.0f,									// SSSMFP
++		0.0f,									// SSSMFPScale
++		0.0f,									// SSSPhaseAniso
++		SSS_TYPE_NONE,
++		0.0f,									// Emissive: scene colour holds it
++		0.0f,									// SecondRoughness
++		0.0f,									// SecondRoughnessWeight
++		0.0f,									// SecondRoughnessAsSimpleClearCoat
++		0.0f,									// ClearCoatUseSecondNormal
++		0.0f.xxx,								// ClearCoatBottomNormal
++		0.0f,									// FuzzAmount
++		0.0f,									// FuzzColor
++		0.0f,									// FuzzRoughness
++		1.0f,									// GlintValue
++		0.0f.xx,								// GlintUV
++		0.0f,									// SpecularProfile
++		1.0f,									// Thickness
++		false,									// bIsThinSurface
++		false,									// bIsAtTheBottomOfTopology
++		SharedLocalBasisIndex,
++		SubstratePixelHeader.SharedLocalBases.Types);
++
++	FSubstrateData SubstrateData = SubstratePixelHeader.SubstrateTree.PromoteParameterBlendedBSDFToOperator(SlabData, 0, 0, 0, 1);
++	SubstratePixelHeader.SubstrateTree.BSDFs[0].LuminanceWeightV = 1.0f;
++	SubstratePixelHeader.SubstrateTree.BSDFs[0].TransmittanceAboveAlongN = 1.0f;
++	SubstratePixelHeader.SubstrateTree.BSDFs[0].TopLayerDataWeight = 1.0f;
++
++	FSubstrateSubsurfaceData SSSData = (FSubstrateSubsurfaceData)0;
++	FSubstrateTopLayerData TopLayerData = (FSubstrateTopLayerData)0;
++	FSubstrateOpaqueRoughRefractionData OpaqueRoughRefractionData = (FSubstrateOpaqueRoughRefractionData)0;
++	const FSubstrateIntegrationSettings Settings = InitSubstrateIntegrationSettings(false, bRoughDiffuse != 0u, 0, false);
++
++	const uint2 PixelCoord = uint2(SvPosition.xy);
++	// Towards the camera, from where the surface is written.
++	const float3 TranslatedWorldPosition = SvPositionToTranslatedWorld(float4(SvPosition.xy, OutDepth, 1.0f));
++	const float3 V = normalize(View.TranslatedWorldCameraOrigin - TranslatedWorldPosition);
++	FSubstrateAddressing SubstrateAddressing = GetSubstratePixelDataByteOffset(PixelCoord, uint2(View.BufferSizeAndInvSize.xy), MaxBytesPerPixel);
++	FRWSubstrateMaterialContainer RWSubstrateMaterialContainer = InitialiseRWSubstrateMaterialContainer(MaterialTextureArrayUAV, 1, PixelCoord);
++	bool bSubstrateSubsurfaceEnable = false;
++	float3 EmissiveLuminance = 0.0f; // scene colour holds the emissive
++	PackSubstrateOut(
++		RWSubstrateMaterialContainer,
++		MaterialTextureArrayUAV,
++		0.0f,	// Dither
++		Settings,
++		SubstrateAddressing,
++		SubstratePixelHeader, SubstrateData, V, WorldNormal, bSubstrateSubsurfaceEnable, EmissiveLuminance,
++		SSSData, TopLayerData, OpaqueRoughRefractionData);
++
++	OutSubstrateMat0 = RWSubstrateMaterialContainer.MaterialRenderTargets[0];
++	OutSubstrateMat1 = RWSubstrateMaterialContainer.MaterialRenderTargets[1];
++	OutSubstrateMat2 = RWSubstrateMaterialContainer.MaterialRenderTargets[2];
++	OutSubstrateTopLayer = SubstratePackTopLayerData(TopLayerData);
++#else
++	FGBufferData GBuffer = (FGBufferData)0;
++	GBuffer.WorldNormal = WorldNormal;
++	GBuffer.BaseColor = saturate(Linear);
++	GBuffer.Metallic = 0.0f;
++	GBuffer.Specular = Specular;
++	GBuffer.Roughness = Roughness;
++	GBuffer.ShadingModelID = SHADINGMODELID_DEFAULT_LIT;
++	// No precomputed shadowing: GBufferE is not written, and the lighting reads it as 1.
++	GBuffer.SelectiveOutputMask = SKIP_PRECSHADOW_MASK;
++	GBuffer.GBufferAO = 1.0f;
++	GBuffer.IndirectIrradiance = 0.0f;
++	// As a primitive that casts contact shadows (BasePassPixelShader.usf, PerObjectGBufferData).
++	GBuffer.PerObjectGBufferData = 1.0f / 3.0f;
++
++	float4 OutGBufferD, OutGBufferE, UnusedVelocity;
++	EncodeGBuffer(GBuffer, OutGBufferA, OutGBufferB, OutGBufferC, OutGBufferD, OutGBufferE, UnusedVelocity, 0.0f);
++#endif
++
++	// UE evaluates the full lit material. Composite the unlit reference after opaque lighting.
++ OutSceneColor = 0.0f;
++#if VGS_WRITE_MIX
++	float3 Reference = Linear;
++	if (InverseToneCurveStrength > 0.0f)
++	{
++		// As the post-blend pass: the linear sRGB colour through Epic's inverse LUT.
++		const float3 LinearSRGB = saturate(VGSWorkingColorSpaceToSRGB(Linear));
++		const float3 UVW = LinearSRGB * ((InverseToneCurveLUTEdge - 1.0f) / InverseToneCurveLUTEdge) + 0.5f / InverseToneCurveLUTEdge;
++		const float3 Inversed = InverseToneCurveLUT.SampleLevel(InverseToneCurveLUTSampler, UVW, 0).rgb;
++		Reference = SRGBColorToWorkingColorSpace(lerp(LinearSRGB, Inversed, InverseToneCurveStrength));
++	}
++	OutMix = float4(Reference * (Intensity * View.PreExposure), SelfIllumination);
++#endif
++}
+--- /dev/null
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatGrade.ush
+@@ -0,0 +1,34 @@
++// VGS: not Epic's. The capture's colour grade, shared by the composite
++// (VGSSplatInverseToneCurvePostBlend.usf) and the lit pass (VGSSplatGBuffer.usf).
++
++#pragma once
++
++// VGS CHANGE: a grade on the capture's display colour, sRGB values in [0, 1]: x = gamma
++// (above 1 brightens the midtones), y = contrast about 0.5, z = saturation; then Tint
++// multiplies the values (the tint colour as sRGB values). GradeActive is 0 when both are
++// (1, 1, 1), and then the colour is not touched at all.
++float3 Grade;
++float3 Tint;
++uint GradeActive;
++
++float3 VGSSRGBToLinear(float3 C)
++{
++	return select(C > 0.04045f, pow(C * (1.0f / 1.055f) + 0.0521327f, 2.4f), C * (1.0f / 12.92f));
++}
++
++float3 VGSLinearToSRGB(float3 C)
++{
++	return select(C > 0.0031308f, 1.055f * pow(C, 1.0f / 2.4f) - 0.055f, C * 12.92f);
++}
++
++// The colour of a pixel the splats barely cover is the scratch divided by a tiny opacity,
++// so it is unreliable; the grade fades out below 5 % opacity to keep it off the capture's
++// outline. What such a pixel adds to the image is small either way.
++float3 VGSApplyGrade(float3 ColorSRGB, float Opacity)
++{
++	float3 C = (ColorSRGB - 0.5f) * Grade.y + 0.5f;
++	C = pow(saturate(C), 1.0f / max(Grade.x, 1e-3f));
++	const float Luma = dot(C, float3(0.2126f, 0.7152f, 0.0722f));
++	C = saturate(lerp(Luma.xxx, C, Grade.z) * Tint);
++	return lerp(ColorSRGB, C, smoothstep(0.0f, 0.05f, Opacity));
++}
+--- a/VGS/Shaders/Private/SplatRenderer/VGSSplatHardwareRasterize.usf
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatHardwareRasterize.usf
+@@ -35,6 +35,13 @@
+ #define GAUSSIAN_SPLAT_SUPERSAMPLE 0
+ #endif // GAUSSIAN_SPLAT_SUPERSAMPLE
+ 
++// VGS CHANGE: a lit proxy (VGSSplatGBuffer.usf). Drawn as expected depth is, front to back,
++// with each splat's view-space normal x and y accumulated in the moments target's two free
++// channels beside the depth.
++#ifndef VGS_LIT
++#define VGS_LIT 0
++#endif // VGS_LIT
++
+ float OpacityThreshold;
+ float ExpectedDepthScale;
+ float3 FalloffParameters;
+@@ -45,6 +52,10 @@ StructuredBuffer<FPackedShadedVGSSplatData> ShadedVGSSplatBuffer;
+ Buffer<uint> SortedIndexBuffer;
+ #endif // !GAUSSIAN_SPLAT_GATHER_SHADED_SPLATS
+ #endif // !GAUSSIAN_SPLAT_VERTEX_ATTRIBUTE_FETCH
++#if VGS_LIT
++StructuredBuffer<uint> ShadedNormalBuffer; // VGS CHANGE: by record, as ShadedVGSSplatBuffer
++StructuredBuffer<float2> ShadedMotionBuffer;
++#endif // VGS_LIT
+ 
+ static const float2 QuadCorners[4] =
+ {
+@@ -60,6 +71,10 @@ struct FVertexOutput
+ 	float2 LocalUV : TEXCOORD0;
+ 	float4 Color : TEXCOORD1;
+ 	nointerpolation uint SplatIndex : TEXCOORD2;
++#if VGS_LIT
++	nointerpolation float3 ViewNormal : TEXCOORD3; // VGS CHANGE
++	nointerpolation float2 ObjectMotion : TEXCOORD4;
++#endif // VGS_LIT
+ };
+ 
+ FVertexOutput CreateVGSSplatVertex(FShadedVGSSplatData SplatData, uint VertexID, uint SplatIndex)
+@@ -73,6 +88,10 @@ FVertexOutput CreateVGSSplatVertex(FShadedVGSSplatData SplatData, uint VertexID,
+ 		Output.LocalUV  = 0;
+ 		Output.Color = 0;
+ 		Output.SplatIndex = 0;
++#if VGS_LIT
++		Output.ViewNormal = 0;
++		Output.ObjectMotion = 0;
++#endif // VGS_LIT
+ 		return Output;
+ 	}
+ 
+@@ -93,6 +112,10 @@ FVertexOutput CreateVGSSplatVertex(FShadedVGSSplatData SplatData, uint VertexID,
+ 	Output.Position = float4(CornerNDC * W, SplatData.Position.z, W);
+ 	Output.Color = SplatData.Color;
+ 	Output.SplatIndex = SplatIndex;
++#if VGS_LIT
++	Output.ViewNormal = 0; // set by MainVS
++	Output.ObjectMotion = 0;
++#endif // VGS_LIT
+ 
+ 	return Output;
+ }
+@@ -125,7 +148,12 @@ FVertexOutput MainVS(
+ 	PackedSplatData = ShadedVGSSplatBuffer[SplatIndex];
+ #endif // GAUSSIAN_SPLAT_VERTEX_ATTRIBUTE_FETCH
+ 
+-	return CreateVGSSplatVertex(UnpackShadedVGSSplat(PackedSplatData), VertexID, SplatIndex);
++	FVertexOutput Output = CreateVGSSplatVertex(UnpackShadedVGSSplat(PackedSplatData), VertexID, SplatIndex);
++#if VGS_LIT && !GAUSSIAN_SPLAT_VERTEX_ATTRIBUTE_FETCH && !GAUSSIAN_SPLAT_GATHER_SHADED_SPLATS
++	Output.ViewNormal = VGSSplatUnpackOctNormal(ShadedNormalBuffer[SplatIndex]); // VGS CHANGE
++	Output.ObjectMotion = ShadedMotionBuffer[SplatIndex];
++#endif
++	return Output;
+ }
+ 
+ #if GAUSSIAN_SPLAT_SUPERSAMPLE
+@@ -168,6 +196,9 @@ void MainPS(
+ 	, out float OutDepth : SV_Target1
+ #elif WRITE_EXPECTED_DEPTH
+ 	, out float4 OutDepthMoments : SV_Target1
++#if VGS_LIT
++	, out float4 OutNormalZ : SV_Target2 // VGS CHANGE: the normal's z, blended as the moments
++#endif // VGS_LIT
+ #endif
+ #if WRITE_VELOCITY
+ 	, out float4 OutVelocity : SV_Target1
+@@ -196,7 +227,9 @@ void MainPS(
+ 	}
+ 
+ 	// Premultiplied alpha
+-	OutColor = float4(Input.Color.rgb * SrcAlpha * View.PreExposure, SrcAlpha);
++	// VGS CHANGE: no View.PreExposure here; the scratch holds sRGB values, and exposure is
++	// applied after they are made linear (VGSSplatInverseToneCurvePostBlend.usf).
++	OutColor = float4(Input.Color.rgb * SrcAlpha, SrcAlpha);
+ 
+ #if WRITE_STOCHASTIC_DEPTH
+ 	#if USE_BLUE_NOISE
+@@ -208,7 +241,12 @@ void MainPS(
+ 	
+ #elif WRITE_EXPECTED_DEPTH
+ 	float LinearZ = ConvertFromDeviceZ(Input.Position.z) / ExpectedDepthScale;
++#if VGS_LIT
++	OutDepthMoments = float4(LinearZ, Input.ViewNormal.xy, 1.0f) * SrcAlpha; // VGS CHANGE
++	OutNormalZ = float4(Input.ViewNormal.z, Input.ObjectMotion, 1.0f) * SrcAlpha;
++#else
+ 	OutDepthMoments = float4(LinearZ * SrcAlpha, 0.0f, 0.0f, SrcAlpha);
++#endif // VGS_LIT
+ #endif
+ 	
+ #if WRITE_VELOCITY
+--- a/VGS/Shaders/Private/SplatRenderer/VGSSplatInverseToneCurvePostBlend.usf
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatInverseToneCurvePostBlend.usf
+@@ -33,6 +33,13 @@ float Strength;
+ // Per-axis grid size of the (cubic) LUT.
+ float InverseToneCurveLUTEdge;
+ 
++// VGS CHANGE: the capture's intensity, a scale on its linear colour; and whether the
++// scratch holds sRGB values (VGSSplatShading.usf, BlendInSRGB) or Epic's linear ones.
++float Intensity;
++uint BlendInSRGB;
++
++#include "VGSSplatGrade.ush" // VGS CHANGE: Grade, Tint, GradeActive and the sRGB curves
++
+ // Working color space -> sRGB linear. The LUT is baked against sRGB primaries (D65),
+ // so non-sRGB projects must transform before sampling. The reverse transform ships
+ // as SRGBColorToWorkingColorSpace in ColorSpace.ush.
+@@ -147,23 +154,48 @@ void MainPS(
+ 		return;
+ 	}
+ 
+-	// Note: Unpremultiplying/premultiplying (now removed) introduced visible artifacts
+-	// in splat translucent gradients.
+-
+-	// Undo pre-exposure -> WCS->sRGB -> saturate (clip out-of-gamut) -> inverse LUT
+-	// -> sRGB->WCS -> lerp by strength -> reapply pre-exposure.
+-	const float3 Color        = Splat.rgb * View.OneOverPreExposure;
++	// VGS CHANGE: the scratch holds the splats blended in sRGB values, premultiplied, with
++	// no pre-exposure (VGSSplatShading.usf, VGSSplatHardwareRasterize.usf). Unpremultiply to
++	// the sRGB colour of the splat layer, make it linear, then as Epic: the inverse tone
++	// curve, the working colour space; then the capture's intensity, pre-exposure, and
++	// premultiply again for the composite. Epic avoids unpremultiplying because of artefacts
++	// in faint gradients; making the blend linear needs it, so faint pixels are guarded.
++	float3 Blended;
++	if (BlendInSRGB != 0u)
++	{
++		float3 ColorSRGB = saturate(Splat.rgb / max(Opacity, 1e-3f));
++		if (GradeActive != 0u)
++		{
++			ColorSRGB = VGSApplyGrade(ColorSRGB, Opacity);
++		}
++		const float3 LinearSRGB   = VGSSRGBToLinear(ColorSRGB);
+ #if APPLY_INVERSE_TONE_CURVE
+-	const float3 ColorSRGB    = WorkingColorSpaceColorToSRGB(Color);
+-	const float3 InversedSRGB = SampleInverseToneCurveLUT(saturate(ColorSRGB), InverseToneCurveLUTEdge);
+-	const float3 Inversed     = SRGBColorToWorkingColorSpace(InversedSRGB);
+-	const float3 Blended      = lerp(Color, Inversed, Strength);
++		const float3 InversedSRGB = SampleInverseToneCurveLUT(LinearSRGB, InverseToneCurveLUTEdge);
++		Blended = SRGBColorToWorkingColorSpace(lerp(LinearSRGB, InversedSRGB, Strength)) * Opacity;
+ #else
+-	// Fall-through implementation composites the original color
+-	const float3 Blended      = Color;
++		Blended = SRGBColorToWorkingColorSpace(LinearSRGB) * Opacity;
+ #endif
++	}
++	else
++	{
++		// Epic's, premultiplied as it comes (pre-exposure is no longer in the scratch).
++		float3 Color = Splat.rgb;
++		if (GradeActive != 0u)
++		{
++			// The grade works on display values: unpremultiply, to sRGB values, grade, back.
++			const float SafeOpacity = max(Opacity, 1e-3f);
++			const float3 ColorSRGB = VGSLinearToSRGB(saturate(WorkingColorSpaceColorToSRGB(Color / SafeOpacity)));
++			Color = SRGBColorToWorkingColorSpace(VGSSRGBToLinear(VGSApplyGrade(ColorSRGB, Opacity))) * SafeOpacity;
++		}
++#if APPLY_INVERSE_TONE_CURVE
++		const float3 InversedSRGB = SampleInverseToneCurveLUT(saturate(WorkingColorSpaceColorToSRGB(Color)), InverseToneCurveLUTEdge);
++		Blended = lerp(Color, SRGBColorToWorkingColorSpace(InversedSRGB), Strength);
++#else
++		Blended = Color;
++#endif
++	}
+ 
+ 	// Output alpha stays as transmittance for the ROP blend (One, SrcAlpha) /
+ 	// (Zero, SrcAlpha) so transmittances multiply correctly into SceneColor.
+-	OutColor = float4(Blended * View.PreExposure, Transmittance);
++	OutColor = float4(Blended * (Intensity * View.PreExposure), Transmittance);
+ }
+--- /dev/null
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatLightShadow.usf
+@@ -0,0 +1,142 @@
++// VGS: optical depth in 64 light-space bins, followed by a prefix scan. The
++// resulting transmittance is sampled at the receiver depth by a UE Light Function.
++#include "/Engine/Private/Common.ush"
++
++#if VGS_DEEP_SHADOW_MAP
++ByteAddressBuffer Splats;
++float4x4 LocalToLight;
++float3 PositionScale;
++uint NumSplats;
++float3 PositionBias;
++uint Stride;
++float3 ScaleScale;
++uint BufferFormat;
++float3 ScaleBias;
++float PointScale;
++float2 OpacityQuantization;
++float OpacityScale;
++float3 GridExtent;
++float GridResolution;
++float Dilation;
++float OpticalDepthScale;
++RWStructuredBuffer<uint> OpticalDepth;
++RWStructuredBuffer<uint> NearestDepth;
++// One row of the rotation matrix of a unit quaternion (x, y, z, w), as QuaternionToFloat3x3.
++float3 VGSLightAxis(float4 Q, uint Axis)
++{
++	const float x2 = Q.x + Q.x, y2 = Q.y + Q.y, z2 = Q.z + Q.z;
++	const float xx = Q.x * x2, xy = Q.x * y2, xz = Q.x * z2;
++	const float yy = Q.y * y2, yz = Q.y * z2, zz = Q.z * z2;
++	const float wx = Q.w * x2, wy = Q.w * y2, wz = Q.w * z2;
++	if (Axis == 0u)
++	{
++		return float3(1.0f - (yy + zz), xy + wz, xz - wy);
++	}
++	if (Axis == 1u)
++	{
++		return float3(xy - wz, 1.0f - (xx + zz), yz + wx);
++	}
++	return float3(xz + wy, yz - wx, 1.0f - (xx + yy));
++}
++
++// The renderer's records (VGSSplatShared.h): the float layout, or Epic's quantized one.
++void VGSLightLoadSplat(uint Splat, out float3 Position, out float3 Scale, out float4 Rotation, out float Opacity)
++{
++	const uint Offset = Splat * Stride;
++	if (BufferFormat == 0u)
++	{
++		Position = asfloat(Splats.Load3(Offset));
++		Scale = asfloat(Splats.Load3(Offset + 12u));
++		Rotation = asfloat(Splats.Load4(Offset + 24u));
++		Opacity = asfloat(Splats.Load(Offset + 52u));
++	}
++	else
++	{
++		const uint4 Packed = Splats.Load4(Offset);
++		const uint PackedColor = Splats.Load(Offset + 16u);
++		const uint Mask21 = (1u << 21) - 1u;
++		const uint Mask11 = (1u << 11) - 1u;
++		const uint Mask10 = (1u << 10) - 1u;
++		const float3 P = float3(float((Packed.y >> 10) & Mask21), float(((Packed.x >> 21) | (Packed.y << 11)) & Mask21), float(Packed.x & Mask21));
++		Position = P * PositionScale + PositionBias;
++		const float3 S = float3(float(Packed.z >> 21), float((Packed.z >> 10) & Mask11), float(Packed.z & Mask10));
++		Scale = exp(S * ScaleScale + ScaleBias);
++		Rotation.x = float(Packed.w >> 21) * (2.0f / 2047.0f) - 1.0f;
++		Rotation.y = float((Packed.w >> 10) & Mask11) * (2.0f / 2047.0f) - 1.0f;
++		Rotation.z = float(Packed.w & Mask10) * (2.0f / 1023.0f) - 1.0f;
++		Rotation.w = sqrt(max(1.0f - dot(Rotation.xyz, Rotation.xyz), 0.0f));
++		Opacity = float(PackedColor & 0xffu) * OpacityQuantization.x + OpacityQuantization.y;
++	}
++}
++
++void MainVS(uint VertexId : SV_VertexID, out float4 Position : SV_Position,
++	out float2 OutQ : TEXCOORD0, out float OutDepth : TEXCOORD1, out nointerpolation float OutOpacity : TEXCOORD2)
++{
++	Position = float4(2, 2, 0.5, 1); OutQ = 0; OutDepth = 0; OutOpacity = 0;
++	const uint Splat = VertexId / 6u;
++	if (Splat >= NumSplats) return;
++	float3 Centre, Scale; float4 Rotation; float Opacity;
++	VGSLightLoadSplat(Splat, Centre, Scale, Rotation, Opacity);
++	Opacity = saturate(Opacity * OpacityScale);
++	if (Opacity < 2.0f / 255.0f) return;
++	Centre = mul(float4(Centre, 1), LocalToLight).xyz;
++	const float4 Q = normalize(Rotation);
++	const float3 B0 = mul(VGSLightAxis(Q, 0u) * Scale.x * PointScale, (float3x3)LocalToLight);
++	const float3 B1 = mul(VGSLightAxis(Q, 1u) * Scale.y * PointScale, (float3x3)LocalToLight);
++	const float3 B2 = mul(VGSLightAxis(Q, 2u) * Scale.z * PointScale, (float3x3)LocalToLight);
++	const float A = B0.x * B0.x + B1.x * B1.x + B2.x * B2.x + Dilation;
++	const float B = B0.x * B0.y + B1.x * B1.y + B2.x * B2.y;
++	const float C = B0.y * B0.y + B1.y * B1.y + B2.y * B2.y + Dilation;
++	const float Mid = 0.5f * (A + C);
++	const float Radius = sqrt(max(0.25f * (A - C) * (A - C) + B * B, 0.0f));
++	const float L1 = Mid + Radius, L2 = max(Mid - Radius, 1e-12f);
++	const float2 E1 = abs(B) > 1e-12f ? normalize(float2(B, L1 - A)) : (A >= C ? float2(1, 0) : float2(0, 1));
++	const float2 E2 = float2(-E1.y, E1.x);
++	const float Reach = sqrt(2.0f * log(Opacity * 255.0f));
++	const float2 Corners[6] = {float2(-1,-1),float2(1,-1),float2(1,1),float2(-1,-1),float2(1,1),float2(-1,1)};
++	OutQ = Corners[VertexId % 6u] * Reach;
++	const float2 Offset = OutQ.x * sqrt(L1) * E1 + OutQ.y * sqrt(L2) * E2;
++	Position = float4((Centre.xy + Offset) / GridExtent.xy, 0.5, 1);
++	// Conditional centre along the ray: oblique flat splats change depth across their footprint.
++	const float2 CovZ = float2(B0.z * B0.x + B1.z * B1.x + B2.z * B2.x, B0.z * B0.y + B1.z * B1.y + B2.z * B2.y);
++	const float2 Slope = mul(CovZ, float2x2(C, -B, -B, A)) / max(A * C - B * B, 1e-12f);
++	OutDepth = Centre.z + dot(Slope, Offset);
++	OutOpacity = Opacity;
++}
++
++void MainPS(float4 Position : SV_Position, float2 Q : TEXCOORD0, float Depth : TEXCOORD1,
++	nointerpolation float Opacity : TEXCOORD2, out float Unused : SV_Target0)
++{
++	Unused = 0;
++	const float Alpha = min(Opacity * exp(-0.5f * dot(Q, Q)), 0.995f);
++	if (Alpha < 1.0f / 255.0f) discard;
++	const float NormalizedDepth = saturate((Depth / GridExtent.z + 1.0f) * 0.5f);
++	const uint Layer = min(uint(NormalizedDepth * 64.0f), 63u);
++	InterlockedMin(NearestDepth[uint(Position.y) * uint(GridResolution) + uint(Position.x)], asuint(NormalizedDepth));
++	const uint Index = (Layer * uint(GridResolution) + uint(Position.y)) * uint(GridResolution) + uint(Position.x);
++	const uint Tau = uint(round(-log(1.0f - Alpha) * OpticalDepthScale));
++	InterlockedAdd(OpticalDepth[Index], Tau);
++}
++#endif
++
++#if VGS_DEEP_SHADOW_PREFIX
++StructuredBuffer<uint> OpticalDepth;
++StructuredBuffer<uint> NearestDepth;
++RWTexture2D<float> ShadowAtlas;
++uint Resolution;
++float InverseOpticalDepthScale;
++[numthreads(8,8,1)]
++void PrefixCS(uint3 Id : SV_DispatchThreadID)
++{
++	if (any(Id.xy >= Resolution)) return;
++	// One extra tile protects front-facing receivers from interpolation in front of
++	// the first actual caster, without dropping valid faint layers or back receivers.
++	ShadowAtlas[uint2(0, 8) * Resolution + Id.xy] = min(asfloat(NearestDepth[Id.y * Resolution + Id.x]), 1.0f);
++	float Sum = 0;
++	for (uint Layer = 0; Layer < 64u; ++Layer)
++	{
++		Sum += float(OpticalDepth[(Layer * Resolution + Id.y) * Resolution + Id.x]) * InverseOpticalDepthScale;
++		ShadowAtlas[uint2(Layer % 8u, Layer / 8u) * Resolution + Id.xy] = exp(-min(Sum, 80.0f));
++	}
++}
++#endif
+--- /dev/null
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatMix.usf
+@@ -0,0 +1,12 @@
++// Exact HDR lerp using fixed-function blending; no SceneColor copy or second splat draw.
++#include "/Engine/Public/Platform.ush"
++Texture2D<float4> MixReference;
++Texture2D<float> MixDepth;
++Texture2D<float> SceneDepth;
++void MainPS(float4 Position : SV_Position, out float4 Color : SV_Target0)
++{
++ int3 Pixel = int3(int2(Position.xy), 0);
++ Color = MixReference.Load(Pixel);
++ // Another renderer or single-layer water may have replaced the surface since our base pass.
++ if (Color.a <= 0.0f || MixDepth.Load(Pixel) != SceneDepth.Load(Pixel)) discard;
++}
+--- /dev/null
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatMotionDebug.usf
+@@ -0,0 +1,21 @@
++// Development-only readback: verifies the velocity UE consumes after opaque passes.
++#include "/Engine/Private/Common.ush"
++Texture2D<float4> VelocityTexture;
++Texture2D<float> ReceiverMask;
++RWStructuredBuffer<uint> MotionStats;
++int2 ViewMin;
++int2 ViewSize;
++[numthreads(8,8,1)]
++void MainCS(uint3 Id : SV_DispatchThreadID)
++{
++	if (any(Id.xy >= uint2(ViewSize))) return;
++	const int2 Pixel = int2(Id.xy) + ViewMin;
++	if (ReceiverMask.Load(int3(Pixel, 0)) <= 0.0f) return;
++	InterlockedAdd(MotionStats[0], 1u);
++	const float4 Raw = VelocityTexture.Load(int3(Pixel, 0));
++	if (all(Raw.xy == 0.0f)) { InterlockedAdd(MotionStats[3], 1u); return; }
++	const float2 V = DecodeVelocityFromTexture((ENCODED_VELOCITY_TYPE)Raw).xy;
++	const float Pixels = length(V * float2(ViewSize) * 0.5f);
++	if (Pixels > 0.05f) InterlockedAdd(MotionStats[1], 1u);
++	InterlockedMax(MotionStats[2], uint(min(Pixels * 1000.0f, 100000000.0f)));
++}
+--- a/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf
+@@ -70,6 +70,8 @@ float4 ColorBias;
+ 
+ // Spherical harmonics
+ uint SHCoordinateSpace;
++uint BlendInSRGB; // VGS CHANGE: see CalculateColor
++uint Antialiased; // VGS CHANGE: trained with anti-aliasing; see ProjectVGSSplat
+ 
+ // Per-component overrides
+ float PointScaleFactor;
+@@ -80,6 +82,83 @@ float CovarianceScale;
+ 
+ // Output
+ RWStructuredBuffer<FPackedShadedVGSSplatData> RWShadedVGSSplatBuffer;
++
++// VGS CHANGE: for a lit proxy (VGSSplatGBuffer.usf), each shaded splat's normal in view space,
++// full-sphere octahedral encoding, at the same index as its record. The normal is
++// the capture's own (NormalBuffer, octahedral in the capture's axes, 0 for none) or else the
++// splat's shortest axis turned towards the camera. HasNormals is 0 for no NormalBuffer, 1 for
++// outward normals, 2 for normals whose side is not known (directions only), which are turned
++// towards the camera as the shortest axis is.
++uint Lit;
++uint HasNormals;
++StructuredBuffer<uint> NormalBuffer;
++RWStructuredBuffer<uint> RWShadedNormalBuffer;
++ByteAddressBuffer PreviousSplats;
++float4x4 PreviousLocalToWorld;
++uint MotionHistoryValid;
++RWStructuredBuffer<float2> RWShadedMotionBuffer;
++
++float2 VGSSplatObjectMotion(uint Index, float3 Position)
++{
++	if (MotionHistoryValid == 0u) return 0;
++	const uint Offset = Index * BufferStride;
++	float3 PreviousPosition;
++	if (MotionHistoryValid == 2u) PreviousPosition = Position; // actor motion only, without record correspondence
++	else if (BufferFormat == 0)
++	{
++		// A record that has just been born has no previous visible position.
++		if (asfloat(PreviousSplats.Load(Offset + 52u)) < OpacityThreshold) return 0;
++		PreviousPosition = asfloat(PreviousSplats.Load3(Offset));
++	}
++	else
++	{
++		const uint2 P = PreviousSplats.Load2(Offset);
++		const uint Mask = (1u << 21) - 1u;
++		PreviousPosition = float3((P.y >> 10) & Mask, ((P.x >> 21) | (P.y << 11)) & Mask, P.x & Mask) * PositionScale + PositionBias;
++	}
++	const float3 CurrentWorld = mul(float4(Position, 1), LocalToWorld).xyz;
++	const float3 PreviousWorld = mul(float4(PreviousPosition, 1), PreviousLocalToWorld).xyz;
++	const float4 A = mul(float4(DFAddDemote(PrimaryView.PrevPreViewTranslation, CurrentWorld), 1), PrimaryView.PrevTranslatedWorldToClip);
++	const float4 B = mul(float4(DFAddDemote(PrimaryView.PrevPreViewTranslation, PreviousWorld), 1), PrimaryView.PrevTranslatedWorldToClip);
++	return A.w > 0.0f && B.w > 0.0f ? A.xy / A.w - B.xy / B.w : 0;
++}
++
++float3 VGSUnpackNormal(uint W)
++{
++	float2 P = (float2(W & 65535u, W >> 16) - 1.0f) / 65534.0f * 2.0f - 1.0f;
++	const float Z = 1.0f - abs(P.x) - abs(P.y);
++	if (Z < 0.0f)
++	{
++		P = (1.0f - abs(P.yx)) * select(P.xy >= 0.0f, 1.0f, -1.0f);
++	}
++	return normalize(float3(P, Z));
++}
++
++uint VGSShadedNormal(uint SplatIndex, FVGSSplatData SplatData)
++{
++	float3 WorldNormal;
++	bool bFaceCamera = true;
++	const uint Word = HasNormals != 0u ? NormalBuffer[SplatIndex] : 0u;
++	if (Word != 0u)
++	{
++		WorldNormal = mul((float3x3)WorldToLocal, VGSUnpackNormal(Word));
++		bFaceCamera = HasNormals == 2u;
++	}
++	else
++	{
++		const float3x3 R = QuaternionToFloat3x3(SplatData.Rotation);
++		const float3 S = SplatData.Scale;
++		const float3 Axis = (S.x <= S.y && S.x <= S.z) ? R[0] : (S.y <= S.z ? R[1] : R[2]);
++		WorldNormal = mul((float3x3)WorldToLocal, Axis);
++	}
++	float3 ViewNormal = normalize(mul(WorldNormal, (float3x3)PrimaryView.TranslatedWorldToView));
++	// Only unoriented directions face the camera. Oriented source normals keep their side.
++	if (bFaceCamera && ViewNormal.z > 0.0f)
++	{
++		ViewNormal = -ViewNormal;
++	}
++	return VGSSplatPackOctNormal(ViewNormal);
++}
+ RWBuffer<uint> RWSplatCount;
+ 
+ // Sort keys
+@@ -179,7 +258,8 @@ bool ProjectVGSSplat(
+ 	FVGSSplatData SplatData,
+ 	inout float4 ClipPosition,
+ 	inout float2 Axis0,
+-	inout float2 Axis1
++	inout float2 Axis1,
++	inout float OpacityCompensation // VGS CHANGE
+ )
+ {
+ 	const FLWCVector3 LwcWorldPosition = MakeLWCVector3(PrimaryView.ViewTilePosition, SplatData.Position);
+@@ -190,6 +270,17 @@ bool ProjectVGSSplat(
+ 	{
+ 		const float3x3 Covariance3D = ComputeCovariance3D(SplatData.Rotation, SplatData.Scale);
+ 		const float3 Covariance2D = SG_CalcCovariance2D(TranslatedWorldPosition, Covariance3D, CovarianceScale);
++		// VGS CHANGE: a capture trained with anti-aliasing (Mip-Splatting) has needle splats far
++		// thinner than a pixel; the dilation widens them to one, so their opacity drops by the
++		// footprint's determinant before over after it (FORMAT.md, renderHints), or they show as
++		// solid coloured lines along silhouettes.
++		if (Antialiased != 0u)
++		{
++			const float Dilation = GAUSSIAN_SPLAT_COVARIANCE_DILATION * CovarianceScale;
++			const float After = Covariance2D.x * Covariance2D.z - Covariance2D.y * Covariance2D.y;
++			const float Before = (Covariance2D.x - Dilation) * (Covariance2D.z - Dilation) - Covariance2D.y * Covariance2D.y;
++			OpacityCompensation = After > 0.0f ? sqrt(max(Before, 0.0f) / After) : 0.0f;
++		}
+ 		if (!SG_DecomposeCovariance(Covariance2D, Axis0, Axis1, /* bClipAxis = */true, CovarianceScale))
+ 		{
+ 			ClipPosition = -FLOAT_MAX;
+@@ -309,12 +400,27 @@ float3 CalculateColor(uint Index, float3 Direction)
+ 	}
+ #endif // SH_DEGREE >= 1
+ 
+-	// Clamp to minimum positive denormal
+-	Color = max(Color + 0.5f, 6.10352e-5);
+-	// Convert sRGB -> Linear
+-	Color = select(Color > 0.04045f, pow(Color * (1.0f / 1.055f) + 0.0521327f, 2.4f), Color * (1.0f / 12.92f));
+-	// Ensure that imported colors are brought to the working color space gamut
+-	Color = SRGBColorToWorkingColorSpace(Color);
++	// VGS CHANGE: Epic makes each splat's colour linear here and blends in linear light,
++	// which BlendInSRGB 0 still does.
++	// Captures are trained blending sRGB values, and the VGS viewer draws them that way, so
++	// the colour stays sRGB, clamped to [0, 1] as the viewer clamps it, and the blended
++	// result is made linear in VGSSplatInverseToneCurvePostBlend.usf. Blending in linear
++	// light makes faint splats show far more than they were trained to (a 20 % splat over
++	// black gives 48 % of its colour instead of 20 %): coloured haze around hair and edges.
++	if (BlendInSRGB != 0u)
++	{
++		Color = saturate(Color + 0.5f);
++	}
++	else
++	{
++		// Epic's, for captures trained blending in linear light.
++		// Clamp to minimum positive denormal
++		Color = max(Color + 0.5f, 6.10352e-5);
++		// Convert sRGB -> Linear
++		Color = select(Color > 0.04045f, pow(Color * (1.0f / 1.055f) + 0.0521327f, 2.4f), Color * (1.0f / 12.92f));
++		// Ensure that imported colors are brought to the working color space gamut
++		Color = SRGBColorToWorkingColorSpace(Color);
++	}
+ 
+ 	return Color;
+ }
+@@ -366,9 +472,12 @@ void MainCS(
+ 		}
+ 
+ 		bool bVisible = false;
++		uint ShadedNormal = 0u; // VGS CHANGE
++		float2 ShadedMotion = 0;
+ 		if (bInBounds)
+ 		{
+ 			FVGSSplatData SplatData = UnpackVGSSplatData(SplatDataIndex);
++			const FVGSSplatData LocalSplatData = SplatData; // VGS CHANGE: for the normal, in the capture's axes
+ 			float Opacity = saturate(SplatData.Opacity * OpacityScale);
+ 			bVisible = Opacity >= OpacityThreshold;
+ 			if (bVisible)
+@@ -376,12 +485,20 @@ void MainCS(
+ 				SplatData.Scale *= PointScaleFactor;
+ 				SplatData.Position = mul(float4(SplatData.Position, 1.0f), LocalToWorld).xyz;
+ 
+-				bVisible = ProjectVGSSplat(SplatData, ShadedSplatData.Position, ShadedSplatData.Axes.xy, ShadedSplatData.Axes.zw);
++				float OpacityCompensation = 1.0f;
++				bVisible = ProjectVGSSplat(SplatData, ShadedSplatData.Position, ShadedSplatData.Axes.xy, ShadedSplatData.Axes.zw, OpacityCompensation);
++				Opacity *= OpacityCompensation; // VGS CHANGE
++				bVisible = bVisible && Opacity >= OpacityThreshold;
+ 				if (bVisible)
+ 				{
+ 					float3 WorldCameraDir = GetCameraVectorFromWorldPosition(SplatData.Position);
+ 					float3 LocalCameraDir = normalize(mul(float4(WorldCameraDir, 0.0), WorldToLocal).xyz);
+ 					ShadedSplatData.Color = float4(CalculateColor(SplatDataIndex, LocalCameraDir), Opacity);
++					if (Lit != 0u)
++					{
++						ShadedNormal = VGSShadedNormal(SplatDataIndex, LocalSplatData); // VGS CHANGE
++						ShadedMotion = VGSSplatObjectMotion(SplatDataIndex, LocalSplatData.Position);
++					}
+ 				}
+ 			}
+ 		}
+@@ -420,6 +537,11 @@ void MainCS(
+ 				const uint WriteIndex = Offset + SplatIndex;
+ 				const FPackedShadedVGSSplatData PackedShadedSplatData = PackShadedVGSSplat(ShadedSplatData);
+ 				RWShadedVGSSplatBuffer[WriteIndex] = PackedShadedSplatData;
++				if (Lit != 0u)
++				{
++					RWShadedNormalBuffer[WriteIndex] = ShadedNormal; // VGS CHANGE
++					RWShadedMotionBuffer[WriteIndex] = ShadedMotion;
++				}
+ 				if (GAUSSIAN_SPLAT_WRITE_SORT_KEYS)
+ 				{
+ 					RWSortKeys[WriteIndex] = ComputeSortKey(ShadedSplatData.Position, PackedShadedSplatData.ViewZ);
+@@ -431,6 +553,11 @@ void MainCS(
+ 		{
+ 			const FPackedShadedVGSSplatData PackedShadedSplatData = PackShadedVGSSplat(ShadedSplatData);
+ 			RWShadedVGSSplatBuffer[SplatDataIndex] = PackedShadedSplatData;
++			if (Lit != 0u)
++			{
++				RWShadedNormalBuffer[SplatDataIndex] = ShadedNormal; // VGS CHANGE
++				RWShadedMotionBuffer[SplatDataIndex] = ShadedMotion;
++			}
+ 			if (GAUSSIAN_SPLAT_WRITE_SORT_KEYS)
+ 			{
+ 				// Mark culled splats with sentinel value
+--- /dev/null
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatShadowVertexFactory.ush
+@@ -0,0 +1,268 @@
++// VGS: not Epic's. The vertex factory that puts splats into Unreal's shadow depth passes
++// (VGSSplatShadowVertexFactory.cpp), with r.VGSSplat.Shadow.Method 2: each splat is drawn as
++// an octahedron spanning the ellipse where its opacity reaches a cutoff of its own, drawn at
++// random, read straight from the renderer's own splat buffer, so casting shadows needs no
++// memory of its own.
++//
++// Each caster is moved Inset inwards along its splat's normal: the surface the lit splats
++// write to the GBuffer lies among their own casters, and would shadow itself in blotches
++// (acne) without it. The normal is the asset's own when it has one with a side; otherwise
++// (directions only, or the shortest axis) the side facing away from the asset's centre.
++//
++// Six vertices per splat (both ends of its three axes) and eight triangles, through an index
++// buffer of a batch of splats: VertexId / 6 is the splat within the batch, VGSShadowFirstSplat
++// where the batch starts. A splat fainter than its cutoff collapses to a point.
++
++#include "/Engine/Private/VertexFactoryCommon.ush"
++
++/** The first splat of this draw's batch. */
++uint VGSShadowFirstSplat;
++
++struct FVertexFactoryInput
++{
++	uint VertexId : SV_VertexID;
++
++	VF_GPUSCENE_DECLARE_INPUT_BLOCK(13)
++	VF_INSTANCED_STEREO_DECLARE_INPUT_BLOCK()
++	VF_MOBILE_MULTI_VIEW_DECLARE_INPUT_BLOCK()
++};
++
++struct FVertexFactoryInterpolantsVSToPS
++{
++	float2 DummyTexCoord : TEXCOORD0;
++};
++
++struct FVertexFactoryIntermediates
++{
++	float3 ComponentPosition; // in the component's space
++	float4 TranslatedWorldPosition;
++	FSceneDataIntermediates SceneData;
++};
++
++FPrimitiveSceneData GetPrimitiveData(FVertexFactoryIntermediates Intermediates)
++{
++	return Intermediates.SceneData.Primitive;
++}
++
++// One row of the rotation matrix of a unit quaternion (x, y, z, w): the direction of a splat's
++// axis, as the renderer's QuaternionToFloat3x3 has it (SphericalGaussianCommon.ush).
++float3 VGSShadowAxis(float4 Q, uint Axis)
++{
++	const float x2 = Q.x + Q.x, y2 = Q.y + Q.y, z2 = Q.z + Q.z;
++	const float xx = Q.x * x2, xy = Q.x * y2, xz = Q.x * z2;
++	const float yy = Q.y * y2, yz = Q.y * z2, zz = Q.z * z2;
++	const float wx = Q.w * x2, wy = Q.w * y2, wz = Q.w * z2;
++	if (Axis == 0u)
++	{
++		return float3(1.0f - (yy + zz), xy + wz, xz - wy);
++	}
++	if (Axis == 1u)
++	{
++		return float3(xy - wz, 1.0f - (xx + zz), yz + wx);
++	}
++	return float3(xz + wy, yz - wx, 1.0f - (xx + yy));
++}
++
++float3 VGSShadowUnpackNormal(uint W)
++{
++	float2 P = (float2(float(W & 65535u), float(W >> 16)) - 1.0f) / 65534.0f * 2.0f - 1.0f;
++	const float Z = 1.0f - abs(P.x) - abs(P.y);
++	if (Z < 0.0f)
++	{
++		P = (1.0f - abs(P.yx)) * float2(P.x >= 0.0f ? 1.0f : -1.0f, P.y >= 0.0f ? 1.0f : -1.0f);
++	}
++	return normalize(float3(P, Z));
++}
++
++// A corner of a splat's octahedron, in the asset's (file) space; Outward, the direction its
++// caster is moved against. The records are the
++// renderer's (VGSSplatShared.h): the float layout, or Epic's quantized one.
++float3 VGSShadowCorner(uint Splat, uint Corner, out float3 Outward)
++{
++	Outward = 0;
++	const uint Offset = Splat * VGSSplatShadow.Stride;
++	float3 Position;
++	float3 Scale;
++	float4 Rotation;
++	float Opacity;
++	if (VGSSplatShadow.BufferFormat == 0u)
++	{
++		Position = asfloat(VGSSplatShadow.Splats.Load3(Offset));
++		Scale = asfloat(VGSSplatShadow.Splats.Load3(Offset + 12u));
++		Rotation = asfloat(VGSSplatShadow.Splats.Load4(Offset + 24u));
++		Opacity = asfloat(VGSSplatShadow.Splats.Load(Offset + 52u));
++	}
++	else
++	{
++		const uint4 Packed = VGSSplatShadow.Splats.Load4(Offset);
++		const uint PackedColor = VGSSplatShadow.Splats.Load(Offset + 16u);
++		const uint Mask21 = (1u << 21) - 1u;
++		const uint Mask11 = (1u << 11) - 1u;
++		const uint Mask10 = (1u << 10) - 1u;
++		const float3 P = float3(float((Packed.y >> 10) & Mask21), float(((Packed.x >> 21) | (Packed.y << 11)) & Mask21), float(Packed.x & Mask21));
++		Position = P * VGSSplatShadow.PositionScale + VGSSplatShadow.PositionBias;
++		const float3 S = float3(float(Packed.z >> 21), float((Packed.z >> 10) & Mask11), float(Packed.z & Mask10));
++		Scale = exp(S * VGSSplatShadow.ScaleScale + VGSSplatShadow.ScaleBias);
++		Rotation.x = float(Packed.w >> 21) * (2.0f / 2047.0f) - 1.0f;
++		Rotation.y = float((Packed.w >> 10) & Mask11) * (2.0f / 2047.0f) - 1.0f;
++		Rotation.z = float(Packed.w & Mask10) * (2.0f / 1023.0f) - 1.0f;
++		Rotation.w = sqrt(max(1.0f - dot(Rotation.xyz, Rotation.xyz), 0.0f));
++		Opacity = float(PackedColor & 0xffu) * VGSSplatShadow.OpacityQuantization.x + VGSSplatShadow.OpacityQuantization.y;
++	}
++
++	Opacity = saturate(Opacity * VGSSplatShadow.OpacityScale);
++	// Each splat its own cutoff, uniform in (MinCutoff, 1) from a hash of its index. A point at
++	// r then lies inside with probability Opacity * exp(-r^2 / 2) (less the sliver below
++	// MinCutoff), the splat's own opacity there, and a ray crossing several splats passes all of
++	// them with the product of their transmittances: the shadow's density is the splats', on
++	// average over neighbouring splats, instead of all or nothing at one cutoff. MinCutoff
++	// bounds the octahedra at 2.8 standard deviations.
++	const float MinCutoff = 0.02f;
++	uint H = Splat * 747796405u + 2891336453u;
++	H = ((H >> ((H >> 28u) + 4u)) ^ H) * 277803737u;
++	H = (H >> 22u) ^ H;
++	const float Cutoff = lerp(MinCutoff, 1.0f, float(H >> 8) * (1.0f / 16777216.0f));
++	if (Splat >= VGSSplatShadow.NumSplats || Opacity <= Cutoff)
++	{
++		return Position; // collapsed: its eight triangles have no area
++	}
++
++	// The splat's opacity falls as Opacity * exp(-r^2 / 2), r in standard deviations: it is at
++	// the cutoff at r = sqrt(2 ln(Opacity / Cutoff)). An octahedron's outline seen along an
++	// axis is a rhombus, of 2/pi the area of the ellipse through its corners: the corners go
++	// sqrt(pi / 2) further out, so that the two cover the same area.
++	const float Reach = sqrt(2.0f * log(Opacity / Cutoff)) * 1.2533141f * VGSSplatShadow.PointScale;
++	const uint Axis = Corner >> 1;
++	const float Sign = (Corner & 1u) ? -1.0f : 1.0f;
++	const float3 Scales = Scale;
++	const float AxisScale = Axis == 0u ? Scales.x : (Axis == 1u ? Scales.y : Scales.z);
++	const float4 Q = Rotation * rsqrt(max(dot(Rotation, Rotation), 1e-12f));
++
++	const uint Word = VGSSplatShadow.HasNormals != 0u ? VGSSplatShadow.Normals[Splat] : 0u;
++	if (Word != 0u)
++	{
++		Outward = VGSShadowUnpackNormal(Word);
++	}
++	else
++	{
++		const uint Shortest = Scales.x <= Scales.y ? (Scales.x <= Scales.z ? 0u : 2u) : (Scales.y <= Scales.z ? 1u : 2u);
++		Outward = VGSShadowAxis(Q, Shortest);
++	}
++	if (Word == 0u || VGSSplatShadow.HasNormals == 2u)
++	{
++		Outward *= dot(Outward, Position - VGSSplatShadow.Center) < 0.0f ? -1.0f : 1.0f;
++	}
++	return Position + VGSShadowAxis(Q, Axis) * (AxisScale * Reach * Sign);
++}
++
++FVertexFactoryIntermediates GetVertexFactoryIntermediates(FVertexFactoryInput Input)
++{
++	FVertexFactoryIntermediates Intermediates;
++	Intermediates.SceneData = VF_GPUSCENE_GET_INTERMEDIATES(Input);
++
++	const uint Splat = VGSShadowFirstSplat + Input.VertexId / 6u;
++	float3 Outward;
++	const float3 FilePosition = VGSShadowCorner(Splat, Input.VertexId % 6u, Outward);
++	Intermediates.ComponentPosition = mul(float4(FilePosition, 1.0f), VGSSplatShadow.FileToComponent).xyz;
++	const float3 ComponentOutward = mul(Outward, (float3x3)VGSSplatShadow.FileToComponent);
++	const float OutwardLength = length(ComponentOutward);
++	if (OutwardLength > 0.0f)
++	{
++		Intermediates.ComponentPosition -= ComponentOutward * (VGSSplatShadow.Inset / OutwardLength);
++	}
++	Intermediates.TranslatedWorldPosition = TransformLocalToTranslatedWorld(Intermediates.ComponentPosition, Intermediates.SceneData.InstanceData.LocalToWorld);
++	return Intermediates;
++}
++
++FMaterialPixelParameters GetMaterialPixelParameters(FVertexFactoryInterpolantsVSToPS Interpolants, float4 SvPosition)
++{
++	FMaterialPixelParameters Result = MakeInitializedMaterialPixelParameters();
++#if NUM_MATERIAL_TEXCOORDS
++	UNROLL
++	for (int CoordinateIndex = 0; CoordinateIndex < NUM_MATERIAL_TEXCOORDS; CoordinateIndex++)
++	{
++		Result.TexCoords[CoordinateIndex] = Interpolants.DummyTexCoord;
++	}
++#endif
++	Result.VertexColor = 1;
++	Result.TwoSidedSign = 1;
++	return Result;
++}
++
++float3 VertexFactoryGetInstanceSpacePosition(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
++{
++	return Intermediates.ComponentPosition;
++}
++
++float3 VertexFactoryGetPreviousInstanceSpacePosition(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
++{
++	return Intermediates.ComponentPosition;
++}
++
++FMaterialVertexParameters GetMaterialVertexParameters(
++	FVertexFactoryInput Input,
++	FVertexFactoryIntermediates Intermediates,
++	float3 WorldPosition,
++	float3x3 TangentToLocal,
++	bool bIsPreviousFrame = false)
++{
++	FMaterialVertexParameters Result = MakeInitializedMaterialVertexParameters();
++	Result.SceneData = Intermediates.SceneData;
++	Result.WorldPosition = WorldPosition;
++	Result.PositionInstanceSpace = Intermediates.ComponentPosition;
++	Result.PositionPrimitiveSpace = Intermediates.ComponentPosition;
++	Result.VertexColor = float4(1, 1, 1, 1);
++	Result.TangentToWorld = mul(TangentToLocal, DFToFloat3x3(Intermediates.SceneData.InstanceData.LocalToWorld));
++	Result.PrevFrameLocalToWorld = Intermediates.SceneData.InstanceData.PrevLocalToWorld;
++	Result.LWCData = MakeMaterialLWCData(Result);
++	return Result;
++}
++
++float4 VertexFactoryGetWorldPosition(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
++{
++	return Intermediates.TranslatedWorldPosition;
++}
++
++float4 VertexFactoryGetPreviousWorldPosition(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
++{
++	return Intermediates.TranslatedWorldPosition;
++}
++
++float4 VertexFactoryGetRasterizedWorldPosition(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates, float4 TranslatedWorldPosition)
++{
++	return TranslatedWorldPosition;
++}
++
++float3 VertexFactoryGetPositionForVertexLighting(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates, float3 TranslatedWorldPosition)
++{
++	return TranslatedWorldPosition;
++}
++
++float3 VertexFactoryGetWorldNormal(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
++{
++	return float3(0, 0, 1);
++}
++
++FVertexFactoryInterpolantsVSToPS VertexFactoryGetInterpolantsVSToPS(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates, FMaterialVertexParameters VertexParameters)
++{
++	FVertexFactoryInterpolantsVSToPS Interpolants;
++	Interpolants.DummyTexCoord = float2(0, 0);
++	return Interpolants;
++}
++
++float3x3 VertexFactoryGetTangentToLocal(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
++{
++	return float3x3(float3(1, 0, 0), float3(0, 1, 0), float3(0, 0, 1));
++}
++
++float4 VertexFactoryGetTranslatedPrimitiveVolumeBounds(FVertexFactoryInterpolantsVSToPS Interpolants)
++{
++	return 0;
++}
++
++uint VertexFactoryGetPrimitiveId(FVertexFactoryInterpolantsVSToPS Interpolants)
++{
++	return 0;
++}
++
++#include "/Engine/Private/VertexFactoryDefaultInterface.ush"
+--- a/VGS/Shaders/Private/SplatRenderer/VGSSplatTileRasterize.usf
++++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatTileRasterize.usf
+@@ -83,6 +83,8 @@ void MainCS(
+ 		}
+ 	}
+ 
+-	RWColorTexture[Pixel].rgb = OutColor.rgb * PrimaryView.PreExposure + RWColorTexture[Pixel].rgb * OutColor.a;
++	// VGS CHANGE: no PreExposure; the target is always the scratch, holding sRGB values
++	// (VGSSplatInverseToneCurvePostBlend.usf applies exposure).
++	RWColorTexture[Pixel].rgb = OutColor.rgb + RWColorTexture[Pixel].rgb * OutColor.a;
+ 	RWColorTexture[Pixel].a = OutColor.a * RWColorTexture[Pixel].a;
+ }
 --- /dev/null
 +++ b/VGS/Source/VGSSplatRenderer/Internal/VGSSplatLightShadow.h
 @@ -0,0 +1,39 @@
@@ -42,7 +1416,7 @@
 +}
 --- a/VGS/Source/VGSSplatRenderer/Internal/VGSSplatRenderPipeline.h
 +++ b/VGS/Source/VGSSplatRenderer/Internal/VGSSplatRenderPipeline.h
-@@ -47,6 +47,13 @@
+@@ -47,6 +47,13 @@ public:
  
  	FMatrix44f LocalToWorld = FMatrix44f::Identity;
  	FMatrix44f WorldToLocal = FMatrix44f::Identity;
@@ -56,7 +1430,7 @@
  
  	FBox3f LocalBounds = FBox3f(EForceInit::ForceInit);
  
-@@ -54,8 +61,40 @@
+@@ -54,8 +61,44 @@ public:
  	float OpacityScale = 1.0f;
  
  	bool bVisible = true;
@@ -89,6 +1463,10 @@
 +	// VGS CHANGE: NormalBuffer holds directions whose side is not known (a splat's shortest
 +	// axis, as PGSR takes it): each is turned to face the camera, as the shortest axis is.
 +	bool bNormalsFaceCamera = false;
++	// VGS CHANGE: trained with anti-aliasing (Mip-Splatting's screen-space filter, the VGS
++	// AntialiasedSplats render hint): widening a splat to a pixel lowers its opacity by
++	// sqrt(det before / det after), as PlayCanvas' antiAlias and the VGS viewer do.
++	bool bAntialiased = false;
  	float InverseToneCurveStrength = 0.0f;
  	bool bInvertExpandGamutLUT = true;
 +	// VGS CHANGE: casts a shadow (its component's Cast Shadow), for the renderer's own shadow
@@ -97,7 +1475,7 @@
  
  	bool HasClusters() const { return NumClusters > 0 && ClusterBuffer.IsValid(); }
  	uint32 GetNumLOD0Splats() const { return NumLOD0Splats > 0 ? FMath::Min(NumLOD0Splats, NumSplats) : NumSplats; }
-@@ -84,4 +123,38 @@
+@@ -84,4 +127,38 @@ namespace VGSSplat
  		FRDGTextureRef SceneDepthTexture,
  		FRDGTextureRef SceneVelocityTexture
  	);
@@ -254,10 +1632,11 @@
  
  #if WITH_EDITOR
  #include "EditorUndoClient.h"
-@@ -14,12 +15,17 @@
+@@ -14,12 +15,18 @@
  #include "VGSSplatSubsystem.generated.h"
  
  class FVGSSplatViewExtension;
++class FSceneViewFamily;
 +class UMaterialInterface;
 +class UMaterialInstanceDynamic;
 +class UTextureRenderTarget2D;
@@ -272,7 +1651,7 @@
  
  public:
  
-@@ -29,4 +35,13 @@
+@@ -29,4 +36,13 @@ public:
  	virtual bool ShouldCreateSubsystem(UObject* Outer) const override;
  
  	TSharedPtr<FVGSSplatViewExtension> SceneViewExtension;
@@ -317,7 +1696,8 @@
  #include "CoreMinimal.h"
  #include "SceneViewExtension.h"
  #include "Containers/SortedMap.h"
- #include "Containers/SortedSet.h"
+-#include "Containers/SortedSet.h"
++// VGS CHANGE: Containers/SortedSet.h left out: nothing here uses it, and 5.6 has none.
  
 -class UGaussianSplatComponent;
  class FVGSSplatRenderProxy;
@@ -329,7 +1709,7 @@
  
  #define UE_API VGSSPLATRENDERER_API
  
-@@ -28,10 +31,21 @@
+@@ -28,11 +31,22 @@ struct FScreenPassRenderTarget;
   */
  DECLARE_MULTICAST_DELEGATE_ThreeParams(FOnCollectVGSSplatProxies, FRDGBuilder&, const FSceneView&, TArray<const FVGSSplatRenderProxy*>&);
  
@@ -345,13 +1725,14 @@
  {
  	/** Binds a source to the splat renderer of World. Callable from the game thread or a game thread task; no-op for worlds without one. */
  	UE_API void RegisterExternalProxySource(UWorld* World, FOnCollectVGSSplatProxies::FDelegate&& Source);
-+
+ 
 +	/** VGS CHANGE: as above, with what the source does before each view family is drawn. */
 +	UE_API void RegisterExternalProxySource(UWorld* World, FOnCollectVGSSplatProxies::FDelegate&& Source, FOnPrepareVGSSplatSources::FDelegate&& Prepare);
- 
++
  	/** The splat renderer of World, or null if it has none. Not exported; callers in other modules use the entry points above. */
  	FVGSSplatViewExtension* FindViewExtension(UWorld* World);
-@@ -45,22 +59,36 @@
+ }
+@@ -45,22 +59,36 @@ public:
  
  	virtual void SetupViewFamily(FSceneViewFamily& InViewFamily) override;
  	virtual void SubscribeToPostProcessingPass(EPostProcessingPass PassId, const FSceneView& View, FAfterPassCallbackDelegateArray& InOutPassCallbacks, bool bIsPassEnabled) override;
@@ -414,7 +1795,7 @@
  
  DEFINE_LOG_CATEGORY(LogVGSSplat);
  
-@@ -17,146 +18,92 @@
+@@ -17,146 +18,92 @@ namespace VGSSplat
  {
  	namespace
  	{
@@ -429,7 +1810,31 @@
 +			{ EInverseToneCurveLUTVariant::Filmic,            TEXT("UE_InverseFilmicTC.vgslut") },
 +			{ EInverseToneCurveLUTVariant::FilmicExpandGamut, TEXT("UE_InverseFilmicTC_Full.vgslut") },
  		};
-+
+-	}
+-
+-	/** One per-variant render-thread cache slot: the stable texture reference and one-shot load guard. */
+-	struct FInverseToneCurveLUTRenderThreadCacheSlot
+-	{
+-		/** Stable RHI texture reference. */
+-		FTextureReferenceRHIRef TextureReferenceRHI;
+-
+-		/** Render-thread only; gates the one-shot load dispatch. */
+-		bool bLoadRequested = false;
+-	};
+-
+-	/** Render-thread state may be weakly referenced by queued commands after the cache starts shutting down. */
+-	struct FInverseToneCurveLUTRenderThreadState
+-	{
+-		/** Per-variant render-thread cache slots. */
+-		TSortedMap<EInverseToneCurveLUTVariant, FInverseToneCurveLUTRenderThreadCacheSlot> CacheSlots;
+ 
+-		/** Set during module shutdown so queued render-thread work can early-out. */
+-		FThreadSafeBool bShuttingDown = false;
+-	};
+-
+-	FInverseToneCurveLUTCache::FInverseToneCurveLUTCache()
+-		: RenderThreadState(MakeShared<FInverseToneCurveLUTRenderThreadState, ESPMode::ThreadSafe>())
+-	{
 +		// "VLUT", edge, channels (3, half floats), unpacked bytes, then a zlib stream of the
 +		// texels, x fastest (pack_inverse_tone_curve_luts.py). Returns RGBA16F texels.
 +		bool ReadLUT(const FString& Path, uint32& OutEdge, TArray<uint16>& OutRGBA)
@@ -467,32 +1872,8 @@
 +		}
  	}
  
--	/** One per-variant render-thread cache slot: the stable texture reference and one-shot load guard. */
--	struct FInverseToneCurveLUTRenderThreadCacheSlot
--	{
--		/** Stable RHI texture reference. */
--		FTextureReferenceRHIRef TextureReferenceRHI;
--
--		/** Render-thread only; gates the one-shot load dispatch. */
--		bool bLoadRequested = false;
--	};
--
--	/** Render-thread state may be weakly referenced by queued commands after the cache starts shutting down. */
--	struct FInverseToneCurveLUTRenderThreadState
--	{
--		/** Per-variant render-thread cache slots. */
--		TSortedMap<EInverseToneCurveLUTVariant, FInverseToneCurveLUTRenderThreadCacheSlot> CacheSlots;
--
--		/** Set during module shutdown so queued render-thread work can early-out. */
--		FThreadSafeBool bShuttingDown = false;
--	};
--
--	FInverseToneCurveLUTCache::FInverseToneCurveLUTCache()
--		: RenderThreadState(MakeShared<FInverseToneCurveLUTRenderThreadState, ESPMode::ThreadSafe>())
--	{
--	}
 +	FInverseToneCurveLUTCache::FInverseToneCurveLUTCache() = default;
- 
++
  	FInverseToneCurveLUTCache::~FInverseToneCurveLUTCache()
  	{
 -		// Assets holds UObject strong pointers, so the cache must only ever be destroyed on the game thread.
@@ -523,30 +1904,18 @@
  		checkSlow(IsInRenderingThread());
 -		TSharedPtr<FInverseToneCurveLUTRenderThreadState, ESPMode::ThreadSafe> LocalRenderThreadState = RenderThreadState;
 -		if (!LocalRenderThreadState.IsValid() || LocalRenderThreadState->bShuttingDown)
-+		const EInverseToneCurveLUTVariant Variant = static_cast<EInverseToneCurveLUTVariant>(bInvertExpandGamut);
-+		FSlot& Slot = Slots.FindOrAdd(Variant);
-+		if (Slot.Texture.IsValid() || Slot.bTried)
- 		{
-+			return Slot.Texture.GetReference();
-+		}
-+		Slot.bTried = true;
-+
-+		const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(VGSSPLAT_PLUGIN_NAME);
-+		const FString Path = Plugin.IsValid() ? FPaths::Combine(Plugin->GetBaseDir(), TEXT("Resources"), TEXT("InverseToneCurve"), GLUTFiles[Variant]) : FString();
-+		uint32 Edge = 0;
-+		TArray<uint16> Texels;
-+		if (!ReadLUT(Path, Edge, Texels))
-+		{
-+			UE_LOG(LogVGSSplat, Warning, TEXT("Inverse tone curve LUT not found or unreadable at %s; splats are composited without it."), *Path);
- 			return nullptr;
- 		}
- 
+-		{
+-			return nullptr;
+-		}
+-
 -		// Derive the variant from the bool for now.
--		const EInverseToneCurveLUTVariant Variant = static_cast<EInverseToneCurveLUTVariant>(bInvertExpandGamut);
+ 		const EInverseToneCurveLUTVariant Variant = static_cast<EInverseToneCurveLUTVariant>(bInvertExpandGamut);
 -		FInverseToneCurveLUTRenderThreadCacheSlot& Slot = LocalRenderThreadState->CacheSlots.FindOrAdd(Variant);
 -
 -		if (Slot.TextureReferenceRHI)
--		{
++		FSlot& Slot = Slots.FindOrAdd(Variant);
++		if (Slot.Texture.IsValid() || Slot.bTried)
+ 		{
 -			if (FRHITexture* ReferencedTexture = Slot.TextureReferenceRHI->GetReferencedTexture())
 -			{
 -				if (FRHITexture* ReferencedTexture3D = ReferencedTexture->GetTexture3D())
@@ -558,10 +1927,17 @@
 -			// Keep the stable reference cached. The engine may update what it references after
 -			// load/streaming/resource recreation; resolve the actual texture again next frame.
 -			return nullptr;
--		}
--
++			return Slot.Texture.GetReference();
+ 		}
++		Slot.bTried = true;
+ 
 -		if (!Slot.bLoadRequested)
--		{
++		const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(VGSSPLAT_PLUGIN_NAME);
++		const FString Path = Plugin.IsValid() ? FPaths::Combine(Plugin->GetBaseDir(), TEXT("Resources"), TEXT("InverseToneCurve"), GLUTFiles[Variant]) : FString();
++		uint32 Edge = 0;
++		TArray<uint16> Texels;
++		if (!ReadLUT(Path, Edge, Texels))
+ 		{
 -			Slot.bLoadRequested = true;
 -
 -			// Pinning the cache itself proves `this` (and Assets) is alive and keeps it so for the whole task.
@@ -617,8 +1993,10 @@
 -						}
 -					});
 -			});
--		}
--
++			UE_LOG(LogVGSSplat, Warning, TEXT("Inverse tone curve LUT not found or unreadable at %s; splats are composited without it."), *Path);
++			return nullptr;
+ 		}
+ 
 -		return nullptr;
 +		FRHICommandListImmediate& RHICmdList = FRHICommandListExecutor::GetImmediateCommandList();
 +		const FRHITextureCreateDesc Desc = FRHITextureCreateDesc::Create3D(TEXT("VGSSplat.InverseToneCurveLUT"), Edge, Edge, Edge, PF_FloatRGBA)
@@ -633,7 +2011,7 @@
  }
 --- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUT.h
 +++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatInverseToneCurveLUT.h
-@@ -15,9 +15,9 @@
+@@ -15,9 +15,9 @@ namespace VGSSplat
  	// Selects which baked inverse-tone-curve LUT to sample; cast from bInvertExpandGamut for now.
  	enum class EInverseToneCurveLUTVariant : uint8
  	{
@@ -1036,7 +2414,29 @@
 +#endif
 --- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp
 +++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatRenderPipeline.cpp
-@@ -26,6 +26,15 @@
+@@ -11,6 +11,21 @@
+ #include "SceneView.h"
+ #include "ScreenPass.h"
+ #include "GPUSort.h"
++#include "Misc/EngineVersionComparison.h"
++// VGS CHANGE: Engine exports GetGPUSortPassCount only from 5.8; before, the same count here
++// (GPUSort.cpp: 32-bit keys sorted 4 bits a pass, a pass for each digit the mask touches).
++#if UE_VERSION_OLDER_THAN(5, 8, 0)
++static int32 VGSSplatGPUSortPassCount(uint32 KeyMask)
++{
++	int32 Passes = 0;
++	for (int32 Shift = 0; Shift < 32; Shift += 4)
++	{
++		Passes += ((KeyMask >> Shift) & 15u) != 0 ? 1 : 0;
++	}
++	return Passes;
++}
++#define GetGPUSortPassCount VGSSplatGPUSortPassCount
++#endif
+ #include "GlobalShader.h"
+ #include "ShaderParameterStruct.h"
+ #include "ShaderCompilerCore.h"
+@@ -26,6 +41,15 @@
  #include "BlueNoise.h"
  #include "SystemTextures.h"
  #include "SceneRendering.h"
@@ -1052,7 +2452,7 @@
  
  DECLARE_GPU_STAT(VGSSplat);
  
-@@ -90,8 +99,8 @@
+@@ -90,8 +114,8 @@ static TAutoConsoleVariable<int32> CVarVGSSplatStochasticDepthFormat(
  static TAutoConsoleVariable<int32> CVarVGSSplatVelocity(
  	TEXT("r.VGSSplat.Velocity"),
  	0,
@@ -1063,7 +2463,17 @@
  	ECVF_RenderThreadSafe);
  
  static TAutoConsoleVariable<float> CVarVGSSplatHardwareRasterizationOpacityThreshold(
-@@ -461,6 +470,9 @@
+@@ -412,7 +436,8 @@ namespace
+ 		static bool bWarnedUnsupportedScratch = false;
+ 		if (!bSupported && !bWarnedUnsupportedScratch)
+ 		{
+-			UE_LOGF(LogVGSSplat, Warning, "Gaussian Splat RGBA16F scratch capabilities are unavailable. Inverse tone curve and expected depth are unavailable on unsupported rasterization paths.");
++			// VGS CHANGE: UE_LOG, as UE_LOGF is new in 5.9 and the copy also builds on earlier engines.
++			UE_LOG(LogVGSSplat, Warning, TEXT("Gaussian Splat RGBA16F scratch capabilities are unavailable. Inverse tone curve and expected depth are unavailable on unsupported rasterization paths."));
+ 			bWarnedUnsupportedScratch = true;
+ 		}
+ 
+@@ -461,6 +486,9 @@ namespace
  	// Vertex attribute fetch is required if the platform does not support SRVs in Vertex Shading
  	bool IsVertexAttributeFetchEnabled(EShaderPlatform ShaderPlatform)
  	{
@@ -1073,7 +2483,7 @@
  		if (IsGLES31EmulationEnabled())
  		{
  			return true;
-@@ -478,6 +490,7 @@
+@@ -478,6 +506,7 @@ namespace
  		}
  
  		return false;
@@ -1081,7 +2491,7 @@
  	}
  }
  
-@@ -513,8 +526,12 @@
+@@ -513,8 +542,12 @@ bool VGSSplat::IsHardwareRasterization(EShaderPlatform ShaderPlatform)
  
  bool VGSSplat::IsGPUDrivenPipeline()
  {
@@ -1094,7 +2504,7 @@
  }
  
  struct FShadedVGSSplatData
-@@ -543,6 +560,7 @@
+@@ -543,6 +576,7 @@ public:
  
  	virtual void InitRHI(FRHICommandListBase& RHICmdList) override
  	{
@@ -1102,7 +2512,7 @@
  		// TODO: Consider VET_Half2 for implicit floating-point conversion if platform supports it
  		constexpr uint16 Stride = sizeof(FPackedShadedVGSSplatData);
  		FVertexDeclarationElementList Elements;
-@@ -550,6 +568,7 @@
+@@ -550,6 +584,7 @@ public:
  		Elements.Add(FVertexElement(0,  8, VET_UInt2, 1, Stride, /*bUseInstanceIndex*/ true)); // Axes
  		Elements.Add(FVertexElement(0, 16, VET_UInt2, 2, Stride, /*bUseInstanceIndex*/ true)); // Color
  		VertexDeclarationRHI = PipelineStateCache::GetOrCreateVertexDeclaration(Elements);
@@ -1110,11 +2520,12 @@
  	}
  
  	virtual void ReleaseRHI() override
-@@ -678,6 +697,17 @@
+@@ -678,6 +713,18 @@ class FShadeVGSSplatCS : public FGlobalShader
  
  		// Spherical harmonics
  		SHADER_PARAMETER(uint32, SHCoordinateSpace)
 +		SHADER_PARAMETER(uint32, BlendInSRGB) // VGS CHANGE
++		SHADER_PARAMETER(uint32, Antialiased) // VGS CHANGE: opacity compensation for the dilation
 +
 +		// VGS CHANGE: a lit proxy's normals (VGSSplatShading.usf, VGSShadedNormal)
 +		SHADER_PARAMETER(uint32, Lit)
@@ -1128,7 +2539,7 @@
  
  		// Per-component overrides
  		SHADER_PARAMETER(float, PointScaleFactor)
-@@ -733,6 +763,11 @@
+@@ -733,6 +780,11 @@ class FVGSSplatInverseToneCurvePostBlendPS : public FGlobalShader
  		SHADER_PARAMETER(FScreenTransform, SvPositionToInputTextureUV)
  		SHADER_PARAMETER(float, Strength)
  		SHADER_PARAMETER(float, InverseToneCurveLUTEdge)
@@ -1140,7 +2551,7 @@
  		RENDER_TARGET_BINDING_SLOTS()
  	END_SHADER_PARAMETER_STRUCT()
  };
-@@ -1021,17 +1056,26 @@
+@@ -1021,18 +1073,27 @@ class FHardwareRasterizeVGSSplatVS : public FGlobalShader
  
  	class FGatherShadedSplats : SHADER_PERMUTATION_BOOL("GAUSSIAN_SPLAT_GATHER_SHADED_SPLATS");
  	class FVertexAttributeFetch : SHADER_PERMUTATION_BOOL("GAUSSIAN_SPLAT_VERTEX_ATTRIBUTE_FETCH");
@@ -1159,16 +2570,17 @@
  	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
  	{
  		const FPermutationDomain PermutationVector(Parameters.PermutationId);
-+
+ 
 +		// VGS CHANGE: a lit proxy reads its normals by record, so its records stay in place.
 +		if (PermutationVector.Get<FLit>() && (PermutationVector.Get<FGatherShadedSplats>() || PermutationVector.Get<FVertexAttributeFetch>()))
 +		{
 +			return false;
 +		}
- 
++
  		if (PermutationVector.Get<FVertexAttributeFetch>() && !PermutationVector.Get<FGatherShadedSplats>())
  		{
-@@ -1058,7 +1102,8 @@
+ 			return false;
+@@ -1058,7 +1119,8 @@ class FHardwareRasterizeVGSSplatPS : public FGlobalShader
  	class FUseBlueNoise : SHADER_PERMUTATION_BOOL("USE_BLUE_NOISE");
  	class FWriteExpectedDepth : SHADER_PERMUTATION_BOOL("WRITE_EXPECTED_DEPTH");
  	class FSuperSample : SHADER_PERMUTATION_BOOL("GAUSSIAN_SPLAT_SUPERSAMPLE");
@@ -1178,7 +2590,7 @@
  
  	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
  		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
-@@ -1091,6 +1136,11 @@
+@@ -1091,6 +1153,11 @@ class FHardwareRasterizeVGSSplatPS : public FGlobalShader
  		{
  			return false;
  		}
@@ -1190,11 +2602,10 @@
  		return true;
  	}
  };
-@@ -1142,6 +1192,121 @@
- };
+@@ -1143,6 +1210,126 @@ class FVGSSplatExpectedDepthPS : public FGlobalShader
  
  IMPLEMENT_GLOBAL_SHADER(FVGSSplatExpectedDepthPS, "/Plugin/VGS/Private/SplatRenderer/VGSSplatHardwareRasterize.usf", "MainPS_ExpectedDepth", SF_Pixel);
-+
+ 
 +// VGS CHANGE: writes a lit proxy into the GBuffer (VGSSplatGBuffer.usf).
 +static TAutoConsoleVariable<int32> CVarVGSSplatLitDither(
 +	TEXT("r.VGSSplat.Lit.Dither"),
@@ -1289,6 +2700,11 @@
 +		SHADER_PARAMETER(FVector3f, Grade)
 +		SHADER_PARAMETER(FVector3f, Tint)
 +		SHADER_PARAMETER(uint32, GradeActive)
++		// The self-illuminated part's inverse tone curve, as a Self-illumination capture's.
++		SHADER_PARAMETER_TEXTURE(Texture3D, InverseToneCurveLUT)
++		SHADER_PARAMETER_SAMPLER(SamplerState, InverseToneCurveLUTSampler)
++		SHADER_PARAMETER(float, InverseToneCurveStrength)
++		SHADER_PARAMETER(float, InverseToneCurveLUTEdge)
 +		// Substrate's material buffer, when it has its own (not the blendable GBuffer).
 +		SHADER_PARAMETER(uint32, Deforming)
 +		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2DArray<uint>, MaterialTextureArrayUAV)
@@ -1309,10 +2725,11 @@
 +};
 +
 +IMPLEMENT_GLOBAL_SHADER(FVGSSplatGBufferPS, "/Plugin/VGS/Private/SplatRenderer/VGSSplatGBuffer.usf", "MainPS", SF_Pixel);
- 
++
  class FVGSSplatResolveVelocityPS : public FGlobalShader
  {
-@@ -1257,10 +1422,17 @@
+ 	DECLARE_GLOBAL_SHADER(FVGSSplatResolveVelocityPS);
+@@ -1257,10 +1444,17 @@ void RasterizeHardware(
  	uint32 NumClusters,
  	FRDGBufferRef ClusterCountBuffer,
  	VGSSplat::FRenderStats& RenderStats,
@@ -1331,7 +2748,7 @@
  
  	const EVGSSplatDepthMode DepthMode = GetDepthMode(View.GetShaderPlatform());
  	const uint32 SortElementCount = NumSplats;
-@@ -1353,16 +1525,22 @@
+@@ -1353,16 +1547,22 @@ void RasterizeHardware(
  				};
  				RHICmdList.Transition(MakeArrayView(SortBufferToUAV));
  
@@ -1355,7 +2772,7 @@
  	if (bGatherShadedSplats)
  	{
  		FRDGBufferRef GatheredShadedVGSSplatBuffer = GraphBuilder.CreateBuffer(
-@@ -1404,17 +1582,18 @@
+@@ -1404,17 +1604,18 @@ void RasterizeHardware(
  		ShadedVGSSplatBuffer = GatheredShadedVGSSplatBuffer;
  	}
  
@@ -1379,7 +2796,7 @@
  	{
  		const FRDGTextureDesc SplatDepthDesc = FRDGTextureDesc::Create2D(
  			Output.Texture->Desc.Extent,
-@@ -1434,12 +1613,23 @@
+@@ -1434,12 +1635,23 @@ void RasterizeHardware(
  			TexCreate_ShaderResource | TexCreate_RenderTargetable);
  		DepthMomentsTexture = GraphBuilder.CreateTexture(MomentsDesc, TEXT("VGSSplat.DepthMoments"));
  	}
@@ -1404,7 +2821,7 @@
  		TShaderMapRef<FHardwareRasterizeVGSSplatVS> VertexShader(GetGlobalShaderMap(View.GetShaderPlatform()), VSPermutationVector);
  
  		FHardwareRasterizeVGSSplatPS::FPermutationDomain PermutationVector;
-@@ -1448,6 +1638,7 @@
+@@ -1448,6 +1660,7 @@ void RasterizeHardware(
  		PermutationVector.Set<FHardwareRasterizeVGSSplatPS::FUseBlueNoise>(bStochasticDepth && IsBlueNoiseEnabled());
  		PermutationVector.Set<FHardwareRasterizeVGSSplatPS::FWriteExpectedDepth>(bExpectedDepth);
  		PermutationVector.Set<FHardwareRasterizeVGSSplatPS::FSuperSample>(DownsampleFactor > 1);
@@ -1412,7 +2829,7 @@
  		TShaderMapRef<FHardwareRasterizeVGSSplatPS> PixelShader(GetGlobalShaderMap(View.GetShaderPlatform()), PermutationVector);
  
  		FHardwareRasterizeVGSSplatPassParameters* PassParameters = GraphBuilder.AllocParameters<FHardwareRasterizeVGSSplatPassParameters>();
-@@ -1460,6 +1651,8 @@
+@@ -1460,6 +1673,8 @@ void RasterizeHardware(
  				? nullptr
  				: GraphBuilder.CreateSRV(GPUSortValuesBuffer[SortedBufferIndex], PF_R32_UINT);
  			PassParameters->GatheredSplatVertexBuffer = bVertexAttributeFetch ? ShadedVGSSplatBuffer : nullptr;
@@ -1421,7 +2838,7 @@
  			PassParameters->PS.View = ViewUniformBuffer;
  			PassParameters->PS.BlueNoise = CreateUniformBufferImmediate(GetBlueNoiseGlobalParameters(), EUniformBufferUsage::UniformBuffer_SingleDraw);
  			PassParameters->PS.OpacityThreshold = GetHardwareRasterizationOpacityThreshold();
-@@ -1479,6 +1672,10 @@
+@@ -1479,6 +1694,10 @@ void RasterizeHardware(
  			{
  				PassParameters->RenderTargets[1] = FRenderTargetBinding(DepthMomentsTexture, ERenderTargetLoadAction::EClear);
  			}
@@ -1432,7 +2849,7 @@
  			const FExclusiveDepthStencil::Type DepthStencilAccess = bHardwareDepth
  				? FExclusiveDepthStencil::DepthWrite_StencilNop
  				: FExclusiveDepthStencil::DepthRead_StencilNop;
-@@ -1492,7 +1689,7 @@
+@@ -1492,7 +1711,7 @@ void RasterizeHardware(
  			RDG_EVENT_NAME("VGSSplat.HardwareRasterize"),
  			PassParameters,
  			ERDGPassFlags::Raster,
@@ -1441,12 +2858,10 @@
  			{
  				FGraphicsPipelineStateInitializer GraphicsPSOInit;
  				RHICmdList.ApplyCachedRenderTargets(GraphicsPSOInit);
-@@ -1504,6 +1701,15 @@
- 					GraphicsPSOInit.BlendState = TStaticBlendState<
- 						CW_RGBA, BO_Add, BF_One, BF_InverseSourceAlpha, BO_Add, BF_Zero, BF_InverseSourceAlpha,
+@@ -1506,6 +1725,15 @@ void RasterizeHardware(
  						CW_RED,  BO_Max, BF_One, BF_One, BO_Max, BF_One, BF_One
-+					>::GetRHI();
-+				}
+ 					>::GetRHI();
+ 				}
 +				else if (bLit)
 +				{
 +					// VGS CHANGE: the UNDER operator below on three targets, the normals' z in the third.
@@ -1454,10 +2869,12 @@
 +						CW_RGBA, BO_Add, BF_DestAlpha, BF_One, BO_Add, BF_Zero, BF_InverseSourceAlpha,
 +						CW_RGBA, BO_Add, BF_DestAlpha, BF_One, BO_Add, BF_Zero, BF_InverseSourceAlpha,
 +						CW_RGBA, BO_Add, BF_DestAlpha, BF_One, BO_Add, BF_Zero, BF_InverseSourceAlpha
- 					>::GetRHI();
- 				}
++					>::GetRHI();
++				}
  				else if (bExpectedDepth)
-@@ -1585,6 +1791,13 @@
+ 				{
+ 					// UNDER operator:
+@@ -1585,6 +1813,13 @@ void RasterizeHardware(
  			RasterizerState,
  			TStaticDepthStencilState<true, CF_GreaterEqual>::GetRHI());
  	}
@@ -1471,7 +2888,7 @@
  	else if (bExpectedDepth)
  	{
  		FVGSSplatExpectedDepthPS::FParameters* PassParameters = GraphBuilder.AllocParameters<FVGSSplatExpectedDepthPS::FParameters>();
-@@ -1888,7 +2101,8 @@
+@@ -1888,7 +2123,8 @@ static void RenderProxyInternal(
  	VGSSplat::FRenderStats& RenderStats,
  	const FScreenPassRenderTarget& Output,
  	FRDGTextureRef SceneDepthTexture,
@@ -1481,7 +2898,7 @@
  {
  	if (RenderProxy.NumSplats == 0)
  	{
-@@ -1896,10 +2110,16 @@
+@@ -1896,10 +2132,16 @@ static void RenderProxyInternal(
  	}
  
  	const bool bHWRaster = VGSSplat::IsHardwareRasterization(View.GetShaderPlatform());
@@ -1501,25 +2918,26 @@
  
  	FScreenPassRenderTarget ProxyScratchRT;
  	if (bUsesScratch)
-@@ -1943,6 +2163,13 @@
- 		FRDGBufferDesc::CreateStructuredDesc(ShadedSplatStride, NumSplats),
+@@ -1944,6 +2186,13 @@ static void RenderProxyInternal(
  		TEXT("VGSSplat.ShadedBuffer")
  	);
-+
+ 
 +	// VGS CHANGE: a lit proxy's view-space normals, by record (VGSSplatShading.usf).
 +	FRDGBufferRef ShadedNormalBuffer = bLit
 +		? GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), NumSplats), TEXT("VGSSplat.ShadedNormals"))
 +		: nullptr;
 +	FRDGBufferRef ShadedMotionBuffer = GraphBuilder.CreateBuffer(
 +		FRDGBufferDesc::CreateStructuredDesc(sizeof(FVector2f), bLit ? NumSplats : 1), TEXT("VGSSplat.ShadedMotion"));
- 
++
  	// Debug pipeline configurations
  	const bool bDebug = IsDebug();
-@@ -2099,6 +2326,23 @@
+ 	const bool bShadeDebug = bDebug || !RenderProxy.HasClusters() || !bHWRaster;
+@@ -2099,6 +2348,24 @@ static void RenderProxyInternal(
  
  			// Spherical harmonics
  			PassParameters->SHCoordinateSpace = static_cast<uint32>(RenderProxy.SHCoordinateSpace);
 +			PassParameters->BlendInSRGB = RenderProxy.bBlendInSRGB ? 1u : 0u; // VGS CHANGE
++			PassParameters->Antialiased = RenderProxy.bAntialiased ? 1u : 0u; // VGS CHANGE
 +
 +			// VGS CHANGE: a lit proxy's normals
 +			const bool bHasNormals = bLit && RenderProxy.NormalBuffer.IsValid();
@@ -1539,7 +2957,7 @@
  
  			// Per-component overrides
  			PassParameters->PointScaleFactor = RenderProxy.PointScaleFactor;
-@@ -2131,17 +2375,103 @@
+@@ -2131,12 +2398,15 @@ static void RenderProxyInternal(
  	}
  
  	// Rasterization
@@ -1556,10 +2974,10 @@
  	}
  	else
  	{
- 		// TODO: Missing indirect dispatch and depth + velocity support
+@@ -2144,6 +2414,93 @@ static void RenderProxyInternal(
  		RasterizeTiledCompute(GraphBuilder, View, ViewUniformBuffer, NumSplats, ShadedVGSSplatBuffer, RasterTarget);
-+	}
-+
+ 	}
+ 
 +	// VGS CHANGE: a lit proxy goes into the GBuffer instead of being composited.
 +	if (bLit)
 +	{
@@ -1598,6 +3016,10 @@
 +		Params->Grade = RenderProxy.Grade;
 +		Params->Tint = RenderProxy.Tint;
 +		Params->GradeActive = (RenderProxy.Grade.Equals(FVector3f(1.0f, 1.0f, 1.0f), 1e-4f) && RenderProxy.Tint.Equals(FVector3f(1.0f, 1.0f, 1.0f), 1e-4f)) ? 0u : 1u;
++		Params->InverseToneCurveLUT = ProxyLUTRHI ? ProxyLUTRHI : GBlackVolumeTexture->TextureRHI.GetReference();
++		Params->InverseToneCurveLUTSampler = TStaticSamplerState<SF_Trilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
++		Params->InverseToneCurveStrength = ProxyLUTRHI ? RenderProxy.InverseToneCurveStrength : 0.0f;
++		Params->InverseToneCurveLUTEdge = ProxyLUTRHI ? float(ProxyLUTRHI->GetSizeX()) : 1.0f;
 +		Params->RenderTargets[0] = FRenderTargetBinding(LitTargets->SceneColor, ERenderTargetLoadAction::ELoad);
 +		if (LitTargets->bSubstrateMaterial)
 +		{
@@ -1641,10 +3063,12 @@
 +			nullptr,
 +			TStaticDepthStencilState<true, CF_GreaterEqual>::GetRHI());
 +		return;
- 	}
- 
++	}
++
  	// Post-processing
-@@ -2163,6 +2493,11 @@
+ 	if (bUsesScratch)
+ 	{
+@@ -2163,6 +2520,11 @@ static void RenderProxyInternal(
  			Params->Strength                   = RenderProxy.InverseToneCurveStrength;
  			Params->InverseToneCurveLUTEdge    = static_cast<float>(ProxyLUTRHI->GetSizeX());
  		}
@@ -1656,7 +3080,7 @@
  
  		FVGSSplatInverseToneCurvePostBlendPS::FPermutationDomain PermutationVector;
  		PermutationVector.Set<FVGSSplatInverseToneCurvePostBlendPS::FApplyInverseToneCurve>(bProxyUsesInverseTC);
-@@ -2182,6 +2517,41 @@
+@@ -2182,6 +2544,42 @@ static void RenderProxyInternal(
  	}
  }
  
@@ -1691,14 +3115,15 @@
 +	for (const FVGSSplatRenderItem& Item : RenderItems)
 +	{
 +		// Full resolution, the base pass's: no downsampling for a lit proxy.
-+		RenderProxyInternal(GraphBuilder, View, View.ViewUniformBuffer, 1, *Item.Proxy, nullptr, RenderStats, Output, Targets.SceneDepth, nullptr, &Targets);
++		// The LUT is for the self-illuminated part only (the mix reference); lit colour never takes it.
++		RenderProxyInternal(GraphBuilder, View, View.ViewUniformBuffer, 1, *Item.Proxy, Item.InverseToneCurveLUTRHI, RenderStats, Output, Targets.SceneDepth, nullptr, &Targets);
 +	}
 +}
 +
  void VGSSplat::Render(
  	FRDGBuilder& GraphBuilder,
  	const FSceneView& View,
-@@ -2282,3 +2652,59 @@
+@@ -2282,3 +2680,59 @@ void VGSSplat::Render(
  			TStaticDepthStencilState<true, CF_GreaterEqual>::GetRHI());
  	}
  }
@@ -1773,7 +3198,7 @@
  
  FVGSSplatRendererModule::~FVGSSplatRendererModule() = default;
  
-@@ -17,19 +15,10 @@
+@@ -17,19 +15,10 @@ void FVGSSplatRendererModule::StartupModule()
  {
  	InverseToneCurveLUTCache = MakeShared<VGSSplat::FInverseToneCurveLUTCache, ESPMode::ThreadSafe>();
  	RenderStats = MakeUnique<VGSSplat::FRenderStats>();
@@ -1948,7 +3373,7 @@
 +	 * How far behind the splats a surface must be to be shadowed. Raise it if the ground right
 +	 * under an actor shows dark specks; lower it if the shadow does not reach the feet.
 +	 */
-+	UPROPERTY(config, EditAnywhere, Category = "Shadows", AdvancedDisplay,
++	UPROPERTY(config, EditAnywhere, Category = "Shadows",
 +		meta = (DisplayName = "Shadow Bias", Units = "cm", ClampMin = "0.0", UIMax = "20.0",
 +			EditCondition = "ShadowMethod == EVGSSplatShadowMethod::SplatShadowMap || ShadowMethod == EVGSSplatShadowMethod::Mixed"))
 +	float ShadowBias = 3.0f;
@@ -1967,7 +3392,7 @@
 +};
 --- /dev/null
 +++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatShadowLightFunction.cpp
-@@ -0,0 +1,129 @@
+@@ -0,0 +1,149 @@
 +// VGS: binds a depth-aware visibility function to the sun's render proxy. The light
 +// component and its saved material are never changed. Existing user functions are kept.
 +#include "VGSSplatSubsystem.h"
@@ -1979,11 +3404,31 @@
 +#include "LightSceneProxy.h"
 +#include "Materials/MaterialInstanceDynamic.h"
 +#include "SceneView.h"
++#include "UnrealClient.h"
 +#include "UObject/ConstructorHelpers.h"
 +#include "UObject/UObjectIterator.h"
++#include "MaterialDomain.h"
++#include "Materials/Material.h"
++#include "Misc/EngineVersionComparison.h"
++#include "RenderingThread.h"
 +
 +namespace
 +{
++	// The light's proxy draws `Component`'s light function, or ours through ParameterSource. 5.7
++	// and later have FLightSceneProxy::SetLightFunctionMaterial_GameThread; on 5.6 the member it
++	// sets is protected, so the same render command reaches it through a derived type.
++	void SetLightFunction(FLightSceneProxy* Proxy, const ULightComponent* Component)
++	{
++#if UE_VERSION_OLDER_THAN(5, 7, 0)
++		struct FAccess : FLightSceneProxy { static auto Member() { return &FAccess::LightFunctionMaterial; } };
++		const FMaterialRenderProxy* Material = Component->LightFunctionMaterial &&
++			Component->LightFunctionMaterial->GetMaterial()->MaterialDomain == MD_LightFunction
++			? Component->LightFunctionMaterial->GetRenderProxy() : nullptr;
++		ENQUEUE_RENDER_COMMAND(VGSSplatSetLightFunction)([Proxy, Material](FRHICommandList&) { Proxy->*FAccess::Member() = Material; });
++#else
++		Proxy->SetLightFunctionMaterial_GameThread(Component);
++#endif
++	}
 +	const TCHAR* ShadowSlot() { return FCString::Strcmp(VGSSPLAT_PLUGIN_NAME, TEXT("VGS")) == 0 ? TEXT("A") : TEXT("B"); }
 +	FName ShadowParameter(const TCHAR* Base) { return FName(*(FString(Base) + ShadowSlot())); }
 +}
@@ -2002,7 +3447,7 @@
 +	if (UDirectionalLightComponent* Light = ShadowLight.Get())
 +	{
 +		if (Light->SceneProxy && (!ShadowInstance || ShadowInstance->K2_GetScalarParameterValue(Other) < 0.5f))
-+			Light->SceneProxy->SetLightFunctionMaterial_GameThread(Light);
++			SetLightFunction(Light->SceneProxy, Light);
 +	}
 +	ShadowLight.Reset();
 +}
@@ -2022,7 +3467,7 @@
 +	{
 +		UDirectionalLightComponent* Light = *It;
 +		if (Light->GetWorld() != GetWorld() || !Light->IsRegistered() || !Light->IsVisible() ||
-+			!Light->CastsDynamicShadow() || !Light->SceneProxy) continue;
++			!(Light->CastShadows && Light->CastDynamicShadows) || !Light->SceneProxy) continue; // CastsDynamicShadow(), which 5.7 lacks
 +		if (Light->bAtmosphereSunLight && Light->AtmosphereSunLightIndex == 0) { Main = Light; break; }
 +		const float Value = Light->Intensity * Light->GetLightColor().GetLuminance();
 +		if (Value > Brightest) { Main = Light; Brightest = Value; }
@@ -2091,7 +3536,7 @@
 +	ShadowInstance->SetScalarParameterValue(ShadowParameter(TEXT("SelfShadow")), CVar(TEXT("r.VGSSplat.Shadow.Self"), 0));
 +	ShadowInstance->SetScalarParameterValue(ShadowParameter(TEXT("Penumbra")), FMath::Tan(FMath::DegreesToRadians(Main->LightSourceAngle * 0.5f)) * CVar(TEXT("r.VGSSplat.Shadow.Softness"), 1));
 +	ShadowInstance->SetScalarParameterValue(ShadowParameter(TEXT("Enabled")), 1.0f);
-+	Main->SceneProxy->SetLightFunctionMaterial_GameThread(ParameterSource);
++	SetLightFunction(Main->SceneProxy, ParameterSource);
 +	ShadowLight = Main;
 +	Frame.Atlas = ShadowAtlas->GameThread_GetRenderTargetResource();
 +	Frame.Receivers = ShadowReceivers->GameThread_GetRenderTargetResource();
@@ -2376,7 +3821,7 @@
 +);
 --- a/VGS/Source/VGSSplatRenderer/Private/VGSSplatSubsystem.cpp
 +++ b/VGS/Source/VGSSplatRenderer/Private/VGSSplatSubsystem.cpp
-@@ -19,6 +19,7 @@
+@@ -19,6 +19,7 @@ void UVGSSplatSubsystem::Initialize(FSubsystemCollectionBase& Collection)
  
  void UVGSSplatSubsystem::Deinitialize()
  {
@@ -2436,32 +3881,42 @@
  	ECVF_RenderThreadSafe);
  
 -namespace
--{
--	static uint32 GetUniqueID(const UGaussianSplatComponent* Component)
--	{
--		return IsValid(Component->Asset) ? Component->GetUniqueID() : INVALID_ID;
 +namespace VGSSplat
-+{
+ {
+-	static uint32 GetUniqueID(const UGaussianSplatComponent* Component)
 +	static bool IsEnabled()
-+	{
+ 	{
+-		return IsValid(Component->Asset) ? Component->GetUniqueID() : INVALID_ID;
 +		return CVarVGSSplatEnable.GetValueOnAnyThread() != 0;
  	}
  }
  
-@@ -44,105 +56,40 @@
+@@ -44,105 +56,40 @@ FVGSSplatViewExtension::FVGSSplatViewExtension(const FAutoRegister& AutoRegister
  
  FVGSSplatViewExtension::~FVGSSplatViewExtension()
  {
 -	RenderProxy_RenderThread.Reset();
--}
--
++ if (PostOpaqueHandle.IsValid() && FModuleManager::Get().IsModuleLoaded("Renderer"))
++  GetRendererModule().RemovePostOpaqueRenderDelegate(PostOpaqueHandle);
+ }
+ 
 -FMatrix44f VGSSplat::GetComponentLocalToWorld(const UGaussianSplatComponent& Component)
--{
++void FVGSSplatViewExtension::BlendAfterOpaque(FPostOpaqueRenderParameters& Parameters)
+ {
 -	return FMatrix44f(Component.GetComponentTransform().ToMatrixWithScale());
--}
--
++ if (!Parameters.View || !Parameters.GraphBuilder || !Parameters.ColorTexture || !Parameters.DepthTexture) return;
++ FMixFrame Frame;
++ if (MixFrames.RemoveAndCopyValue(Parameters.View, Frame))
++ {
++  if (Frame.bExternalDepth) Parameters.GraphBuilder->UseInternalAccessMode(Frame.Depth);
++  VGSSplat::BlendSelfIllumination(*Parameters.GraphBuilder, *Parameters.View, Parameters.ColorTexture, Parameters.DepthTexture, Frame.Color, Frame.Depth);
++  if (Frame.bExternalDepth) Parameters.GraphBuilder->UseExternalAccessMode(Frame.Depth, ERHIAccess::SRVMask);
++ }
+ }
+ 
 -FVGSSplatRenderProxy* CreateRenderProxy(const UGaussianSplatComponent* Component)
--{
++void FVGSSplatViewExtension::SetupViewFamily(FSceneViewFamily& InViewFamily)
+ {
 -	FVGSSplatRenderProxy* Proxy = new FVGSSplatRenderProxy();
 -
 -	Proxy->SplatID = Component->GetUniqueID();
@@ -2476,7 +3931,11 @@
 -	const FGaussianSplatFormatQuantized* QuantizedFormat = RuntimeData.GetPtr<FGaussianSplatFormatQuantized>();
 -	Proxy->BufferFormat = QuantizedFormat != nullptr ? 1u : 0u;
 -	if (QuantizedFormat)
--	{
++ if (!PostOpaqueHandle.IsValid())
++  PostOpaqueHandle = GetRendererModule().RegisterPostOpaqueRenderDelegate(FPostOpaqueRenderDelegate::CreateSP(StaticCastSharedRef<FVGSSplatViewExtension>(AsShared()), &FVGSSplatViewExtension::BlendAfterOpaque));
++	VGSSplat::FDeepShadowFrame Frame;
++	if (UVGSSplatSubsystem* Subsystem = GetWorld()->GetSubsystem<UVGSSplatSubsystem>())
+ 	{
 -		Proxy->PositionScale = QuantizedFormat->PositionScaleBias[0];
 -		Proxy->PositionBias  = QuantizedFormat->PositionScaleBias[1];
 -		Proxy->ScaleScale    = QuantizedFormat->ScaleScaleBias[0];
@@ -2485,7 +3944,8 @@
 -		Proxy->ColorBias     = QuantizedFormat->ColorScaleBias[1];
 -		Proxy->SHScale       = QuantizedFormat->SHScaleBias[0];
 -		Proxy->SHBias        = QuantizedFormat->SHScaleBias[1];
--	}
++		Frame = Subsystem->UpdateShadowLightFunction(InViewFamily);
+ 	}
 -
 -	Proxy->LocalToWorld = VGSSplat::GetComponentLocalToWorld(*Component);
 -	Proxy->WorldToLocal = Proxy->LocalToWorld.Inverse();
@@ -2497,31 +3957,10 @@
 -	Proxy->bInvertExpandGamutLUT = Component->bInvertExpandGamut;
 -
 -	return Proxy;
-+ if (PostOpaqueHandle.IsValid() && FModuleManager::Get().IsModuleLoaded("Renderer"))
-+  GetRendererModule().RemovePostOpaqueRenderDelegate(PostOpaqueHandle);
-+}
-+
-+void FVGSSplatViewExtension::BlendAfterOpaque(FPostOpaqueRenderParameters& Parameters)
-+{
-+ if (!Parameters.View || !Parameters.GraphBuilder || !Parameters.ColorTexture || !Parameters.DepthTexture) return;
-+ FMixFrame Frame;
-+ if (MixFrames.RemoveAndCopyValue(Parameters.View, Frame))
-+ {
-+  if (Frame.bExternalDepth) Parameters.GraphBuilder->UseInternalAccessMode(Frame.Depth);
-+  VGSSplat::BlendSelfIllumination(*Parameters.GraphBuilder, *Parameters.View, Parameters.ColorTexture, Parameters.DepthTexture, Frame.Color, Frame.Depth);
-+  if (Frame.bExternalDepth) Parameters.GraphBuilder->UseExternalAccessMode(Frame.Depth, ERHIAccess::SRVMask);
-+ }
- }
- 
- void FVGSSplatViewExtension::SetupViewFamily(FSceneViewFamily& InViewFamily)
- {
-+ if (!PostOpaqueHandle.IsValid())
-+  PostOpaqueHandle = GetRendererModule().RegisterPostOpaqueRenderDelegate(FPostOpaqueRenderDelegate::CreateSP(StaticCastSharedRef<FVGSSplatViewExtension>(AsShared()), &FVGSSplatViewExtension::BlendAfterOpaque));
-+	VGSSplat::FDeepShadowFrame Frame;
-+	if (UVGSSplatSubsystem* Subsystem = GetWorld()->GetSubsystem<UVGSSplatSubsystem>())
-+	{
-+		Frame = Subsystem->UpdateShadowLightFunction(InViewFamily);
-+	}
+-}
+-
+-void FVGSSplatViewExtension::SetupViewFamily(FSceneViewFamily& InViewFamily)
+-{
 +	ENQUEUE_RENDER_COMMAND(FUpdateVGSDeepShadowFrame)([WeakThis = AsWeak(), Frame](FRHICommandList&)
 +	{
 +		if (TSharedPtr<FVGSSplatViewExtension> This = StaticCastWeakPtr<FVGSSplatViewExtension>(WeakThis).Pin()) This->DeepShadowFrame = Frame;
@@ -2580,7 +4019,7 @@
  }
  
  void FVGSSplatViewExtension::SubscribeToPostProcessingPass(EPostProcessingPass PassId, const FSceneView& View, FAfterPassCallbackDelegateArray& InOutPassCallbacks, bool bIsPassEnabled)
-@@ -150,7 +97,7 @@
+@@ -150,7 +97,7 @@ void FVGSSplatViewExtension::SubscribeToPostProcessingPass(EPostProcessingPass P
  	//if (PassId == EPostProcessingPass::VisualizeDepthOfField)
  	if (PassId == EPostProcessingPass::BeforeDOF)
  	{
@@ -2589,7 +4028,7 @@
  		{
  			InOutPassCallbacks.Add(FAfterPassCallbackDelegate::CreateRaw(this, &FVGSSplatViewExtension::PostProcessPass_RenderThread));
  		}
-@@ -250,17 +197,63 @@
+@@ -250,17 +197,63 @@ FScreenPassTexture FVGSSplatViewExtension::PostProcessPass_RenderThread(FRDGBuil
  	return MoveTemp(Output);
  }
  
@@ -2660,7 +4099,7 @@
  	ExternalProxySources_RenderThread.Broadcast(GraphBuilder, View, Proxies);
  
  	TSortedMap<VGSSplat::EInverseToneCurveLUTVariant, FRHITexture*> LUTRHI;
-@@ -272,9 +265,17 @@
+@@ -272,9 +265,20 @@ void FVGSSplatViewExtension::Render(FRDGBuilder& GraphBuilder, const FSceneView&
  		{
  			continue;
  		}
@@ -2673,18 +4112,27 @@
 +			continue;
 +		}
  
++		// The inverse tone curve goes on whatever shows the capture's own colour: a capture drawn
++		// self-illuminated (Self-illumination, or Shaded at an amount of 1 or unsupported) and the
++		// self-illuminated part of a Shaded one, so that both ends of the amount match.
  		FRHITexture* ProxyLUTRHI = nullptr;
 -		if (RenderProxy->InverseToneCurveStrength > 0.0f)
-+		if (!RenderProxy->bLit && RenderProxy->InverseToneCurveStrength > 0.0f)
++		if ((!bDrawnLit || RenderProxy->SelfIllumination > 0.0f) && RenderProxy->InverseToneCurveStrength > 0.0f)
  		{
  			const VGSSplat::EInverseToneCurveLUTVariant Variant = static_cast<VGSSplat::EInverseToneCurveLUTVariant>(RenderProxy->bInvertExpandGamutLUT);
  			FRHITexture*& CachedLUTRHI = LUTRHI.FindOrAdd(Variant);
-@@ -312,95 +313,67 @@
+@@ -312,95 +316,67 @@ void FVGSSplatViewExtension::Render(FRDGBuilder& GraphBuilder, const FSceneView&
  	});
  
  	VGSSplat::FRenderStats& RenderStats = Module.GetRenderStats_RenderThread();
+-	VGSSplat::Render(GraphBuilder, View, RenderItems, RenderStats, Output, SceneDepthTexture, SceneVelocityTexture);
+-}
+-
+-void FVGSSplatViewExtension::RegisterComponent(const UGaussianSplatComponent* Component)
+-{
+-	if (!Component->HasValidSplatData() || RegisteredComponents.Contains(Component))
 +	if (LitTargets != nullptr)
-+	{
+ 	{
 +		if (RenderItems.IsEmpty()) return;
 +  VGSSplat::FLitTargets Targets = *LitTargets;
 +  if (!Targets.CaptureReceiverMask)
@@ -2706,17 +4154,8 @@
 +   // The existing receiver mask stores the winning device depth. Reuse it without a depth copy.
 +   MixFrames.Add(&View, {Targets.MixReference, Targets.CaptureReceiverMask, LitTargets->CaptureReceiverMask != nullptr});
 +  }
-+		return;
-+	}
- 	VGSSplat::Render(GraphBuilder, View, RenderItems, RenderStats, Output, SceneDepthTexture, SceneVelocityTexture);
- }
- 
--void FVGSSplatViewExtension::RegisterComponent(const UGaussianSplatComponent* Component)
--{
--	if (!Component->HasValidSplatData() || RegisteredComponents.Contains(Component))
--	{
--		return;
--	}
+ 		return;
+ 	}
 -	RegisteredComponents.Add(Component);
 -
 -	// Create render proxy on render thread
@@ -2763,10 +4202,14 @@
 -			}
 -		);
 -	}
--}
--
++	VGSSplat::Render(GraphBuilder, View, RenderItems, RenderStats, Output, SceneDepthTexture, SceneVelocityTexture);
+ }
+ 
 -void FVGSSplatViewExtension::UnregisterComponent(const UGaussianSplatComponent* Component)
--{
++// VGS CHANGE: no RegisterComponent / UnregisterComponent (Epic's components are Epic's to draw).
++
++void FVGSSplatViewExtension::AddExternalProxySource(FOnCollectVGSSplatProxies::FDelegate&& InSource, FOnPrepareVGSSplatSources::FDelegate&& InPrepare)
+ {
 -	RegisteredComponents.Remove(Component);
 -
 -	// Remove render proxy on render thread
@@ -2776,28 +4219,15 @@
 -			WeakThis = AsWeak(),
 -			UniqueID
 -		](FRHICommandList& RHICmdList)
--		{
--			TSharedPtr<FVGSSplatViewExtension> This = StaticCastWeakPtr<FVGSSplatViewExtension>(WeakThis).Pin();
--			if (This.IsValid())
--			{
--				This->RenderProxy_RenderThread.Remove(UniqueID); // auto-deletes via TUniquePtr
--			}
--		}
--	);
--}
--
--void FVGSSplatViewExtension::AddExternalProxySource(FOnCollectVGSSplatProxies::FDelegate&& InSource)
-+// VGS CHANGE: no RegisterComponent / UnregisterComponent (Epic's components are Epic's to draw).
-+
-+void FVGSSplatViewExtension::AddExternalProxySource(FOnCollectVGSSplatProxies::FDelegate&& InSource, FOnPrepareVGSSplatSources::FDelegate&& InPrepare)
- {
- 	ENQUEUE_RENDER_COMMAND(FAddVGSSplatExternalProxySource)(
--		[WeakThis = AsWeak(), Source = MoveTemp(InSource)](FRHICommandList&) mutable
++	ENQUEUE_RENDER_COMMAND(FAddVGSSplatExternalProxySource)(
 +		[WeakThis = AsWeak(), Source = MoveTemp(InSource), Prepare = MoveTemp(InPrepare)](FRHICommandList&) mutable
  		{
- 			if (TSharedPtr<FVGSSplatViewExtension> This = StaticCastWeakPtr<FVGSSplatViewExtension>(WeakThis).Pin())
+-			TSharedPtr<FVGSSplatViewExtension> This = StaticCastWeakPtr<FVGSSplatViewExtension>(WeakThis).Pin();
+-			if (This.IsValid())
++			if (TSharedPtr<FVGSSplatViewExtension> This = StaticCastWeakPtr<FVGSSplatViewExtension>(WeakThis).Pin())
  			{
- 				This->ExternalProxySources_RenderThread.Add(MoveTemp(Source));
+-				This->RenderProxy_RenderThread.Remove(UniqueID); // auto-deletes via TUniquePtr
++				This->ExternalProxySources_RenderThread.Add(MoveTemp(Source));
 +				if (Prepare.IsBound()) // VGS CHANGE
 +				{
 +					This->PrepareSources_RenderThread.Add(MoveTemp(Prepare));
@@ -2805,26 +4235,34 @@
  			}
  		}
  	);
-+}
-+
+ }
+ 
+-void FVGSSplatViewExtension::AddExternalProxySource(FOnCollectVGSSplatProxies::FDelegate&& InSource)
 +// VGS CHANGE: before anything of the family is drawn, shadow depths included.
 +void FVGSSplatViewExtension::PreRenderViewFamily_RenderThread(FRDGBuilder& GraphBuilder, FSceneViewFamily& InViewFamily)
-+{
+ {
+-	ENQUEUE_RENDER_COMMAND(FAddVGSSplatExternalProxySource)(
+-		[WeakThis = AsWeak(), Source = MoveTemp(InSource)](FRHICommandList&) mutable
 +	MixFrames.Reset();
 +	if (VGSSplat::IsEnabled() && InViewFamily.Scene)
 +	{
 +		PrepareSources_RenderThread.Broadcast(GraphBuilder);
 +		if (DeepShadowFrame.IsValid() && !InViewFamily.Views.IsEmpty())
-+		{
+ 		{
+-			if (TSharedPtr<FVGSSplatViewExtension> This = StaticCastWeakPtr<FVGSSplatViewExtension>(WeakThis).Pin())
+-			{
+-				This->ExternalProxySources_RenderThread.Add(MoveTemp(Source));
+-			}
 +			TArray<const FVGSSplatRenderProxy*> Proxies;
 +			ExternalProxySources_RenderThread.Broadcast(GraphBuilder, *InViewFamily.Views[0], Proxies);
 +			VGSSplat::RenderDeepShadow(GraphBuilder, DeepShadowFrame, Proxies);
-+		}
+ 		}
+-	);
 +	}
  }
  
  FVGSSplatViewExtension* VGSSplat::FindViewExtension(UWorld* World)
-@@ -416,3 +389,12 @@
+@@ -416,3 +392,12 @@ void VGSSplat::RegisterExternalProxySource(UWorld* World, FOnCollectVGSSplatProx
  		Extension->AddExternalProxySource(MoveTemp(Source));
  	}
  }
@@ -2839,7 +4277,7 @@
 +}
 --- a/VGS/Source/VGSSplatRenderer/VGSSplatRenderer.Build.cs
 +++ b/VGS/Source/VGSSplatRenderer/VGSSplatRenderer.Build.cs
-@@ -10,6 +10,10 @@
+@@ -10,6 +10,10 @@ namespace UnrealBuildTool.Rules
  		{
  			PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
  
@@ -2850,7 +4288,7 @@
  			PublicDependencyModuleNames.AddRange(new[] { "Core" });
  
  			PrivateDependencyModuleNames.AddRange(
-@@ -21,10 +25,19 @@
+@@ -21,11 +25,20 @@ namespace UnrealBuildTool.Rules
  					"RenderCore",
  					"RHI",
  					"Projects",
@@ -2863,1334 +4301,13 @@
 +					"VGSShaders" // VGS CHANGE: maps /Plugin/VGS, where these shaders are
  				}
  			);
-+
+ 
 +			// VGS CHANGE: the shared shader headers, read by C++ too (as GaussianSplatShader adds
 +			// Epic's), and the plugin's name, for its Resources (the inverse tone curve LUTs).
 +			PublicIncludePaths.Add(System.IO.Path.Combine(PluginDirectory, "Shaders", "Shared"));
 +			PrivateDefinitions.Add("VGSSPLAT_PLUGIN_NAME=TEXT(\"" + System.IO.Path.GetFileNameWithoutExtension(System.IO.Directory.GetFiles(PluginDirectory, "*.uplugin")[0]) + "\")");
 +			RuntimeDependencies.Add("$(PluginDir)/Resources/InverseToneCurve/...");
- 
++
  			PrivateIncludePaths.Add(System.IO.Path.Combine(EngineDirectory, "Source/Runtime/Renderer/Private"));
  		}
---- a/VGS/Shaders/Private/SplatRenderer/VGSSplatCommon.ush
-+++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatCommon.ush
-@@ -34,6 +34,32 @@
- float2 VGSSplatUnpackHalf2(uint Packed)
- {
- 	return float2(f16tof32(Packed & 0xFFFFu), f16tof32(Packed >> 16));
-+}
-+
-+// VGS: a unit vector in one word, octahedral, 16 bits a coordinate, over the whole sphere: a
-+// lit splat's view-space normal keeps its z, sign included (VGSSplatGBuffer.usf averages x, y
-+// and z, not x and y with z made up).
-+uint VGSSplatPackOctNormal(float3 N)
-+{
-+	N /= max(abs(N.x) + abs(N.y) + abs(N.z), 1e-6f);
-+	float2 P = N.xy;
-+	if (N.z < 0.0f)
-+	{
-+		P = (1.0f - abs(N.yx)) * select(N.xy >= 0.0f, 1.0f, -1.0f);
-+	}
-+	const uint2 Q = uint2(round(saturate(P * 0.5f + 0.5f) * 65535.0f));
-+	return Q.x | (Q.y << 16);
-+}
-+
-+float3 VGSSplatUnpackOctNormal(uint W)
-+{
-+	float2 P = float2(W & 65535u, W >> 16) / 65535.0f * 2.0f - 1.0f;
-+	const float Z = 1.0f - abs(P.x) - abs(P.y);
-+	if (Z < 0.0f)
-+	{
-+		P = (1.0f - abs(P.yx)) * select(P.xy >= 0.0f, 1.0f, -1.0f);
-+	}
-+	return normalize(float3(P, Z)); // z < 0 (towards the camera) is the folded half
- }
- 
- struct FPackedShadedVGSSplatData
---- /dev/null
-+++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatDeepShadow.ush
-@@ -0,0 +1,48 @@
-+// VGS: used by the shipped Light Function material. The prefix atlas represents
-+// transmittance up to each of 64 depth-bin boundaries, rather than a whole column.
-+#pragma once
-+float VGSSampleDeepLayer(Texture2D Atlas, SamplerState AtlasSampler, float2 UV, int Layer, float Resolution)
-+{
-+	if (Layer < 0) return 1.0f;
-+	Layer = min(Layer, 63);
-+	const float2 Tile = float2(Layer % 8, Layer / 8);
-+	const float2 TexelUV = clamp(UV, 0.5f / Resolution, 1.0f - 0.5f / Resolution);
-+	return Texture2DSampleLevel(Atlas, AtlasSampler, (Tile + TexelUV) / float2(8, 9), 0).r;
-+}
-+
-+float VGSSampleDeepShadow(Texture2D Atlas, SamplerState AtlasSampler, Texture2D CaptureMask, SamplerState CaptureMaskSampler,
-+	float3 WorldPosition, float3 Origin, float3 X, float3 Y, float3 Z,
-+	float3 Extent, float Resolution, float Bias, float SelfShadow, float Penumbra)
-+{
-+	uint MaskWidth, MaskHeight;
-+	CaptureMask.GetDimensions(MaskWidth, MaskHeight);
-+	// LightFunctionCommon sets ScreenPosition, but not Parameters.SvPosition. Material
-+	// GetViewportUV therefore cannot be used here; project the reconstructed receiver.
-+	const float4 Clip = mul(float4(DFAddDemote(PrimaryView.PreViewTranslation, WorldPosition), 1), PrimaryView.TranslatedWorldToClip);
-+	const float2 ScreenUV = Clip.xy / Clip.w * float2(0.5f, -0.5f) + 0.5f;
-+	const float2 BufferUV = (ScreenUV * View.ViewSizeAndInvSize.xy + View.ViewRectMin.xy) / float2(MaskWidth, MaskHeight);
-+	if (SelfShadow < 0.5f && CaptureMask.Load(int3(clamp(int2(BufferUV * float2(MaskWidth, MaskHeight)), int2(0, 0), int2(MaskWidth, MaskHeight) - 1), 0)).r > 0.0f) return 1.0f;
-+	const float3 Delta = WorldPosition - Origin;
-+	const float3 L = float3(dot(Delta, X), dot(Delta, Y), dot(Delta, Z));
-+	const float2 UV = float2(L.x / Extent.x, -L.y / Extent.y) * 0.5f + 0.5f;
-+	if (any(UV <= 0.0f) || any(UV >= 1.0f) || L.z - Bias <= -Extent.z) return 1.0f;
-+	const float H = saturate(((L.z - Bias) / Extent.z + 1.0f) * 0.5f) * 64.0f;
-+	const int Layer = min(int(H), 63);
-+	const float F = H >= 64.0f ? 1.0f : frac(H);
-+	const float Radius = max(Penumbra * max(L.z + Extent.z, 0.0f), 0.0f);
-+	float Result = 0;
-+	const float2 Offsets[4] = {float2(-0.5,-0.5),float2(0.5,-0.5),float2(-0.5,0.5),float2(0.5,0.5)};
-+	for (int Tap = 0; Tap < 4; ++Tap)
-+	{
-+		const float2 P = UV + Offsets[Tap] * Radius / (2.0f * Extent.xy);
-+		// Outside the fitted volume is unoccluded, rather than repeated edge texels.
-+		if (any(P <= 0.0f) || any(P >= 1.0f)) { Result += 1.0f; continue; }
-+		const float2 NearestUV = (float2(0, 8) + clamp(P, 0.5f / Resolution, 1.0f - 0.5f / Resolution)) / float2(8, 9);
-+		const float Nearest = Texture2DSampleLevel(Atlas, AtlasSampler, NearestUV, 0).r;
-+		if (((L.z - Bias) / Extent.z + 1.0f) * 0.5f <= Nearest) { Result += 1.0f; continue; }
-+		const float A = VGSSampleDeepLayer(Atlas, AtlasSampler, P, Layer - 1, Resolution);
-+		const float B = VGSSampleDeepLayer(Atlas, AtlasSampler, P, Layer, Resolution);
-+		Result += exp(lerp(log(max(A, 1e-7f)), log(max(B, 1e-7f)), F));
-+	}
-+	return Result * 0.25f;
-+}
---- /dev/null
-+++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatGBuffer.usf
-@@ -0,0 +1,363 @@
-+// VGS: not Epic's. Writes a lit capture into Unreal's GBuffer, after the base pass and before
-+// lighting, as an opaque Default Lit surface: every light, the shadows other objects cast on
-+// it, the skylight, Lumen, ambient occlusion and fog then reach it as they reach a mesh.
-+//
-+// The splats have been drawn front to back into two targets (VGSSplatHardwareRasterize.usf,
-+// VGS_LIT): the colour, premultiplied, with transmittance in alpha; and the depth moments -
-+// linear depth and the view-space normal's x and y, each weighted by what reaches the camera,
-+// and transmittance again. A pixel gets the weighted means: one colour, one normal, one depth.
-+// The GBuffer holds one opaque surface a pixel, so where the splats only partly cover it
-+// (edges, hair) it is written or not at random, as much as they cover; temporal
-+// anti-aliasing turns that back into a soft edge.
-+//
-+// With Substrate's own material buffer (SUBSTRATE_GBUFFER_FORMAT 1) the surface is one Default
-+// Lit slab packed into it with PackSubstrateOut, as the engine's DebugProbes.usf stamps its
-+// probes; with the legacy GBuffer, or Substrate's blendable one, EncodeGBuffer.
-+
-+#include "/Engine/Private/Common.ush"
-+
-+#define VGS_SUBSTRATE_MATERIAL (SUBSTRATE_ENABLED && SUBSTRATE_GBUFFER_FORMAT == 1)
-+#if VGS_SUBSTRATE_MATERIAL
-+// One slab, shaded inline, as DebugProbes.usf.
-+#define SUBSTRATE_CLAMPED_CLOSURE_COUNT 1
-+// And encoded as a simple material: the material translator sets this for a material that
-+// qualifies; without it a global shader packs the complex encoding, its tiles are classified
-+// complex, and with no complex material in the scene they are not lit at all.
-+#define SUBSTRATE_FASTPATH 1
-+#ifndef SUBSTRATE_INLINE_SHADING // also set by FVGSSplatGBufferPS, as for DebugProbes.usf
-+#define SUBSTRATE_INLINE_SHADING 1
-+#endif
-+#include "/Engine/Private/Substrate/Substrate.ush"
-+#define MATERIAL_SUBSTRATE_OPAQUE_PRECOMPUTED_LIGHTING 0
-+#include "/Engine/Private/Substrate/SubstrateExport.ush"
-+#endif
-+
-+#include "/Engine/Private/ColorSpace.ush"
-+#include "/Engine/Private/Random.ush"
-+#include "/Engine/Private/DeferredShadingCommon.ush"
-+#include "/Engine/Private/VelocityCommon.ush"
-+
-+#if VGS_SUBSTRATE_MATERIAL
-+#if SUBSTRATE_BASE_PASS_MRT_OUTPUT_COUNT != 3
-+#error Substrate's base pass outputs changed: update the outputs below and FVGSSplatGBufferPS.
-+#endif
-+RWTexture2DArray<uint> MaterialTextureArrayUAV;
-+uint MaxBytesPerPixel;
-+uint bRoughDiffuse;
-+
-+// Nothing to do for a single slab; PackSubstrateOut needs them defined (as DebugProbes.usf).
-+void FSubstratePixelHeader::PreUpdateAllBSDFWithBottomUpOperatorVisit(float3 V) {}
-+void FSubstratePixelHeader::UpdateAllBSDFsOperatorCoverageTransmittance(FSubstrateIntegrationSettings Settings, float3 V) {}
-+void FSubstratePixelHeader::UpdateAllOperatorsCoverageTransmittance() {}
-+void FSubstratePixelHeader::UpdateAllBSDFWithBottomUpOperatorVisit() {}
-+void FSubstratePixelHeader::PreUpdateAllBSDFWithBottomUpOperatorVisit_FullySimplified(float3 V) {}
-+void FSubstratePixelHeader::UpdateAllBSDFsOperatorCoverageTransmittance_FullySimplified(FSubstrateIntegrationSettings Settings, float3 V) {}
-+void FSubstratePixelHeader::UpdateAllOperatorsCoverageTransmittance_FullySimplified() {}
-+void FSubstratePixelHeader::UpdateAllBSDFWithBottomUpOperatorVisit_FullySimplified() {}
-+#endif
-+
-+#include "VGSSplatGrade.ush"
-+
-+Texture2D<float4> SplatColorTexture;
-+Texture2D<float4> DepthMomentsTexture;
-+Texture2D<float4> NormalZTexture; // the normals' z, weighted as the moments' x and y
-+uint SmoothingMode;         // 0: neighbours near the pixel's depth; 1: near its local plane
-+float SmoothingTolerance;   // how far off they may lie, a share of the distance ...
-+float SmoothingBias;        // ... plus this, in Unreal units
-+
-+float ExpectedDepthScale;
-+uint BlendInSRGB;       // the colour target holds sRGB values (VGSSplatShading.usf), else linear
-+float SelfIllumination; // lerp weight, never additive emission
-+float Intensity;        // on the emissive part, as on a self-illuminated capture
-+float Roughness;
-+float Specular;
-+float MinCoverage;      // below this a pixel is never written
-+uint Dither;            // 0: written where coverage reaches one half, no dithering
-+float NormalSmoothing;  // the bilateral filter's radius, in Unreal units; 0 leaves each pixel's own normal
-+uint Deforming;
-+
-+// The splats' mean view-space normal at a pixel, and how much they cover it.
-+// The weighted mean of the splats' normals: x, y and z each averaged, then normalised. (Not x
-+// and y with z made up from them, which lost z's sign and pulled every average towards the
-+// camera.) Normals that cancel out leave the one facing the camera.
-+float3 VGSPixelViewNormal(int2 Pixel, float4 Moments)
-+{
-+	const float3 Sum = float3(Moments.gb, NormalZTexture.Load(int3(Pixel, 0)).r);
-+	const float Length2 = dot(Sum, Sum);
-+	return Length2 > 1e-12f ? Sum * rsqrt(Length2) : float3(0.0f, 0.0f, -1.0f);
-+}
-+
-+// The normal averaged with the neighbours' on the same surface: one splat's normal is noisy
-+// (a splat is a blob as often as a patch of surface), so lit directly the capture looks
-+// crumpled and specked. Neighbours count by how much the splats cover them, by how close they
-+// lie in depth (or to the local plane), so the average does not cross a silhouette, and by
-+// default by how alike their normal is, so that a fold or an arm over the torso is not averaged
-+// away (r.VGSSplat.Lit.NormalSmoothing.Mode).
-+float3 VGSSmoothedViewNormal(int2 PixelXY, float3 Normal, float Depth)
-+{
-+	// The radius on screen at this depth, so the capture is smoothed alike near and far.
-+	const float Radius = min(NormalSmoothing * View.ViewToClip[0][0] * 0.5f * View.ViewSizeAndInvSize.x / max(Depth, 1.0f), 24.0f);
-+	if (Radius < 1.0f)
-+	{
-+		return Normal;
-+	}
-+	const float Step = Radius / 2.0f;
-+	const float Tolerance = SmoothingTolerance * Depth + SmoothingBias;
-+	// The local plane: the depth's slope across the pixel, from its neighbours on the side
-+	// closer in depth (the other side may be past a silhouette).
-+	// Modes: bit 0, the local plane instead of the pixel's depth; bit 1, neighbours also count by
-+	// how alike their normal is (a joint bilateral: an arm and the torso behind it differ).
-+	float2 Slope = 0.0f;
-+	if ((SmoothingMode & 1u) != 0u)
-+	{
-+		// Over one tap's spacing, not one pixel: the depth jitters by millimetres from pixel to
-+		// pixel, which a one-pixel slope turns into a wildly wrong plane.
-+		const int Baseline = max(int(round(Step)), 1);
-+		float Side[4];
-+		const int2 Offsets[4] = { int2(-1, 0), int2(1, 0), int2(0, -1), int2(0, 1) };
-+		for (int i = 0; i < 4; ++i)
-+		{
-+			const float4 M = DepthMomentsTexture.Load(int3(PixelXY + Offsets[i] * Baseline, 0));
-+			const float C = 1.0f - M.a;
-+			Side[i] = C >= 0.25f ? M.r / C * ExpectedDepthScale - Depth : 1e9f;
-+		}
-+		const float Dx = abs(Side[0]) < abs(Side[1]) ? -Side[0] : Side[1];
-+		const float Dy = abs(Side[2]) < abs(Side[3]) ? -Side[2] : Side[3];
-+		// A step larger than the tolerance is a silhouette, not a slope.
-+		Slope = float2(abs(Dx) < 4.0f * Tolerance ? Dx : 0.0f, abs(Dy) < 4.0f * Tolerance ? Dy : 0.0f) / float(Baseline);
-+	}
-+	float3 Sum = Normal;
-+	for (int y = -2; y <= 2; ++y)
-+	{
-+		for (int x = -2; x <= 2; ++x)
-+		{
-+			if (x == 0 && y == 0)
-+			{
-+				continue;
-+			}
-+			const int2 Tap = PixelXY + int2(round(float2(x, y) * Step));
-+			const float4 Moments = DepthMomentsTexture.Load(int3(Tap, 0));
-+			const float Coverage = 1.0f - Moments.a;
-+			if (Coverage < 0.25f)
-+			{
-+				continue;
-+			}
-+			const float TapDepth = Moments.r / Coverage * ExpectedDepthScale;
-+			const float Expected = Depth + dot(Slope, float2(Tap - PixelXY));
-+			const float DepthWeight = saturate(1.0f - abs(TapDepth - Expected) / Tolerance);
-+			const float Distance2 = float(x * x + y * y);
-+			const float3 TapNormal = VGSPixelViewNormal(Tap, Moments);
-+			float NormalWeight = 1.0f;
-+			if ((SmoothingMode & 2u) != 0u)
-+			{
-+				// 1 alike, about a half at 30 degrees apart, nearly nothing past 60.
-+				const float Alike = saturate(dot(TapNormal, Normal));
-+				NormalWeight = Alike * Alike * Alike * Alike;
-+			}
-+			const float Weight = Coverage * DepthWeight * NormalWeight * exp(-0.5f * Distance2 / 2.0f);
-+			Sum += TapNormal * Weight;
-+		}
-+	}
-+	return normalize(Sum);
-+}
-+
-+float3 VGSWorkingColorSpaceToSRGB(float3 Color)
-+{
-+#if WORKING_COLOR_SPACE_IS_SRGB
-+	return Color;
-+#else
-+	return mul(XYZ_2_Linear_sRGB_MAT, LinearRGB_2_XYZ(Color));
-+#endif
-+}
-+
-+void MainPS(
-+	float4 SvPosition : SV_Position,
-+	out float4 OutSceneColor : SV_Target0,
-+#if VGS_SUBSTRATE_MATERIAL
-+	// The material buffer's first three slices, then the top layer, bound in this order by
-+	// FVGSSplatGBufferPS's caller.
-+	out uint OutSubstrateMat0 : SV_Target1,
-+	out uint OutSubstrateMat1 : SV_Target2,
-+	out uint OutSubstrateMat2 : SV_Target3,
-+	out SUBSTRATE_TOP_LAYER_TYPE OutSubstrateTopLayer : SV_Target4,
-+	out float4 OutVelocity : SV_Target5,
-+	out float OutCaptureMask : SV_Target6,
-+#if VGS_WRITE_MIX
-+	out float4 OutMix : SV_Target7,
-+#endif
-+#else
-+	out float4 OutGBufferA : SV_Target1,
-+	out float4 OutGBufferB : SV_Target2,
-+	out float4 OutGBufferC : SV_Target3,
-+	out float4 OutVelocity : SV_Target4,
-+	out float OutCaptureMask : SV_Target5,
-+#if VGS_WRITE_MIX
-+	out float4 OutMix : SV_Target6,
-+#endif
-+#endif
-+	out float OutDepth : SV_Depth)
-+{
-+	const int3 Pixel = int3((int2)SvPosition.xy, 0);
-+	const float4 Moments = DepthMomentsTexture.Load(Pixel);
-+	const float Coverage = 1.0f - Moments.a;
-+	if (Coverage < MinCoverage)
-+	{
-+		discard;
-+	}
-+	if (Dither != 0u)
-+	{
-+		if (Coverage < 0.999f && InterleavedGradientNoise(SvPosition.xy, View.StateFrameIndexMod8) >= Coverage)
-+		{
-+			discard;
-+		}
-+	}
-+	else if (Coverage < 0.5f)
-+	{
-+		discard;
-+	}
-+
-+	// The weighted means.
-+	const float InvCoverage = 1.0f / Coverage;
-+	const float4 Splat = SplatColorTexture.Load(Pixel);
-+	float3 Linear;
-+	if (BlendInSRGB != 0u)
-+	{
-+		float3 ColorSRGB = saturate(Splat.rgb * InvCoverage);
-+		if (GradeActive != 0u)
-+		{
-+			ColorSRGB = VGSApplyGrade(ColorSRGB, 1.0f);
-+		}
-+		Linear = SRGBColorToWorkingColorSpace(VGSSRGBToLinear(ColorSRGB));
-+	}
-+	else
-+	{
-+		Linear = max(Splat.rgb * InvCoverage, 0.0f);
-+		if (GradeActive != 0u)
-+		{
-+			const float3 ColorSRGB = VGSLinearToSRGB(saturate(VGSWorkingColorSpaceToSRGB(Linear)));
-+			Linear = SRGBColorToWorkingColorSpace(VGSSRGBToLinear(VGSApplyGrade(ColorSRGB, 1.0f)));
-+		}
-+	}
-+
-+	// Match the visible front-to-back compositing weights. Selecting the nearest
-+	// splat above an individual alpha threshold can select a hidden/back layer and
-+	// creates discontinuous receiver depths (circular self-shadow acne).
-+	const float Depth = Moments.r * InvCoverage * ExpectedDepthScale;
-+	float3 ViewNormal = VGSPixelViewNormal(Pixel.xy, Moments);
-+	if (NormalSmoothing > 0.0f)
-+	{
-+		ViewNormal = VGSSmoothedViewNormal(int2(SvPosition.xy), ViewNormal, Depth);
-+	}
-+	const float3 WorldNormal = normalize(mul(ViewNormal, (float3x3)View.ViewToTranslatedWorld));
-+
-+	OutDepth = ConvertToDeviceZ(Depth);
-+	OutCaptureMask = OutDepth; // zero outside captures; also the mixed reference depth
-+	// Camera motion at the actual receiver depth, plus the opacity-weighted object
-+	// displacement evaluated in the previous camera. The temporal jitter is removed once.
-+	const float4 CurrentClip = float4(SvPositionToScreenPosition(SvPosition).xy, OutDepth, 1.0f);
-+	const float4 PreviousClip = mul(CurrentClip, View.ClipToPrevClipWithAA);
-+	float3 Velocity = PreviousClip.w > 1e-6f ? Calculate3DVelocityBase(CurrentClip, PreviousClip, View.TemporalAAJitter.xy, View.TemporalAAJitter.zw) : 0;
-+	Velocity.xy += NormalZTexture.Load(Pixel).gb * InvCoverage;
-+	OutVelocity = EncodeVelocityToTexture(Velocity, Deforming != 0u);
-+
-+#if VGS_SUBSTRATE_MATERIAL
-+	const float3 BaseColor = saturate(Linear);
-+	FSubstratePixelHeader SubstratePixelHeader = InitialiseSubstratePixelHeader();
-+	SubstratePixelHeader.SubstrateTree = GetInitialisedSubstrateTree();
-+	SubstratePixelHeader.IrradianceAO = InitIrradianceAndOcclusion();
-+	SubstratePixelHeader.IrradianceAO.MaterialAO = 1.0f;
-+	SubstratePixelHeader.SetCastContactShadow(true);
-+
-+	const uint SharedLocalBasisIndex = 0;
-+	SubstratePixelHeader.SharedLocalBases.Normals[SharedLocalBasisIndex] = WorldNormal;
-+	SubstratePixelHeader.SharedLocalBases.Count = 1;
-+
-+	FSubstratePixelFootprint PixelFootprint = (FSubstratePixelFootprint)0;
-+	FSubstrateData SlabData = GetSubstrateSlabBSDF(
-+		PixelFootprint,
-+		WorldNormal,
-+		ComputeDiffuseAlbedo(BaseColor, 0.0f),	// DiffuseAlbedo, metallic 0
-+		ComputeF0(Specular, BaseColor, 0.0f),	// F0
-+		1.0f,									// F90
-+		Roughness,
-+		0.0f,									// Anisotropy
-+		0,										// SSSProfileID
-+		false,									// bSupportDefaultSSSProfile
-+		0.0f,									// SSSMFP
-+		0.0f,									// SSSMFPScale
-+		0.0f,									// SSSPhaseAniso
-+		SSS_TYPE_NONE,
-+		0.0f,									// Emissive: scene colour holds it
-+		0.0f,									// SecondRoughness
-+		0.0f,									// SecondRoughnessWeight
-+		0.0f,									// SecondRoughnessAsSimpleClearCoat
-+		0.0f,									// ClearCoatUseSecondNormal
-+		0.0f.xxx,								// ClearCoatBottomNormal
-+		0.0f,									// FuzzAmount
-+		0.0f,									// FuzzColor
-+		0.0f,									// FuzzRoughness
-+		1.0f,									// GlintValue
-+		0.0f.xx,								// GlintUV
-+		0.0f,									// SpecularProfile
-+		1.0f,									// Thickness
-+		false,									// bIsThinSurface
-+		false,									// bIsAtTheBottomOfTopology
-+		SharedLocalBasisIndex,
-+		SubstratePixelHeader.SharedLocalBases.Types);
-+
-+	FSubstrateData SubstrateData = SubstratePixelHeader.SubstrateTree.PromoteParameterBlendedBSDFToOperator(SlabData, 0, 0, 0, 1);
-+	SubstratePixelHeader.SubstrateTree.BSDFs[0].LuminanceWeightV = 1.0f;
-+	SubstratePixelHeader.SubstrateTree.BSDFs[0].TransmittanceAboveAlongN = 1.0f;
-+	SubstratePixelHeader.SubstrateTree.BSDFs[0].TopLayerDataWeight = 1.0f;
-+
-+	FSubstrateSubsurfaceData SSSData = (FSubstrateSubsurfaceData)0;
-+	FSubstrateTopLayerData TopLayerData = (FSubstrateTopLayerData)0;
-+	FSubstrateOpaqueRoughRefractionData OpaqueRoughRefractionData = (FSubstrateOpaqueRoughRefractionData)0;
-+	const FSubstrateIntegrationSettings Settings = InitSubstrateIntegrationSettings(false, bRoughDiffuse != 0u, 0, false);
-+
-+	const uint2 PixelCoord = uint2(SvPosition.xy);
-+	// Towards the camera, from where the surface is written.
-+	const float3 TranslatedWorldPosition = SvPositionToTranslatedWorld(float4(SvPosition.xy, OutDepth, 1.0f));
-+	const float3 V = normalize(View.TranslatedWorldCameraOrigin - TranslatedWorldPosition);
-+	FSubstrateAddressing SubstrateAddressing = GetSubstratePixelDataByteOffset(PixelCoord, uint2(View.BufferSizeAndInvSize.xy), MaxBytesPerPixel);
-+	FRWSubstrateMaterialContainer RWSubstrateMaterialContainer = InitialiseRWSubstrateMaterialContainer(MaterialTextureArrayUAV, 1, PixelCoord);
-+	bool bSubstrateSubsurfaceEnable = false;
-+	float3 EmissiveLuminance = 0.0f; // scene colour holds the emissive
-+	PackSubstrateOut(
-+		RWSubstrateMaterialContainer,
-+		MaterialTextureArrayUAV,
-+		0.0f,	// Dither
-+		Settings,
-+		SubstrateAddressing,
-+		SubstratePixelHeader, SubstrateData, V, WorldNormal, bSubstrateSubsurfaceEnable, EmissiveLuminance,
-+		SSSData, TopLayerData, OpaqueRoughRefractionData);
-+
-+	OutSubstrateMat0 = RWSubstrateMaterialContainer.MaterialRenderTargets[0];
-+	OutSubstrateMat1 = RWSubstrateMaterialContainer.MaterialRenderTargets[1];
-+	OutSubstrateMat2 = RWSubstrateMaterialContainer.MaterialRenderTargets[2];
-+	OutSubstrateTopLayer = SubstratePackTopLayerData(TopLayerData);
-+#else
-+	FGBufferData GBuffer = (FGBufferData)0;
-+	GBuffer.WorldNormal = WorldNormal;
-+	GBuffer.BaseColor = saturate(Linear);
-+	GBuffer.Metallic = 0.0f;
-+	GBuffer.Specular = Specular;
-+	GBuffer.Roughness = Roughness;
-+	GBuffer.ShadingModelID = SHADINGMODELID_DEFAULT_LIT;
-+	// No precomputed shadowing: GBufferE is not written, and the lighting reads it as 1.
-+	GBuffer.SelectiveOutputMask = SKIP_PRECSHADOW_MASK;
-+	GBuffer.GBufferAO = 1.0f;
-+	GBuffer.IndirectIrradiance = 0.0f;
-+	// As a primitive that casts contact shadows (BasePassPixelShader.usf, PerObjectGBufferData).
-+	GBuffer.PerObjectGBufferData = 1.0f / 3.0f;
-+
-+	float4 OutGBufferD, OutGBufferE, UnusedVelocity;
-+	EncodeGBuffer(GBuffer, OutGBufferA, OutGBufferB, OutGBufferC, OutGBufferD, OutGBufferE, UnusedVelocity, 0.0f);
-+#endif
-+
-+	// UE evaluates the full lit material. Composite the unlit reference after opaque lighting.
-+ OutSceneColor = 0.0f;
-+#if VGS_WRITE_MIX
-+ OutMix = float4(Linear * (Intensity * View.PreExposure), SelfIllumination);
-+#endif
-+}
---- /dev/null
-+++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatGrade.ush
-@@ -0,0 +1,34 @@
-+// VGS: not Epic's. The capture's colour grade, shared by the composite
-+// (VGSSplatInverseToneCurvePostBlend.usf) and the lit pass (VGSSplatGBuffer.usf).
-+
-+#pragma once
-+
-+// VGS CHANGE: a grade on the capture's display colour, sRGB values in [0, 1]: x = gamma
-+// (above 1 brightens the midtones), y = contrast about 0.5, z = saturation; then Tint
-+// multiplies the values (the tint colour as sRGB values). GradeActive is 0 when both are
-+// (1, 1, 1), and then the colour is not touched at all.
-+float3 Grade;
-+float3 Tint;
-+uint GradeActive;
-+
-+float3 VGSSRGBToLinear(float3 C)
-+{
-+	return select(C > 0.04045f, pow(C * (1.0f / 1.055f) + 0.0521327f, 2.4f), C * (1.0f / 12.92f));
-+}
-+
-+float3 VGSLinearToSRGB(float3 C)
-+{
-+	return select(C > 0.0031308f, 1.055f * pow(C, 1.0f / 2.4f) - 0.055f, C * 12.92f);
-+}
-+
-+// The colour of a pixel the splats barely cover is the scratch divided by a tiny opacity,
-+// so it is unreliable; the grade fades out below 5 % opacity to keep it off the capture's
-+// outline. What such a pixel adds to the image is small either way.
-+float3 VGSApplyGrade(float3 ColorSRGB, float Opacity)
-+{
-+	float3 C = (ColorSRGB - 0.5f) * Grade.y + 0.5f;
-+	C = pow(saturate(C), 1.0f / max(Grade.x, 1e-3f));
-+	const float Luma = dot(C, float3(0.2126f, 0.7152f, 0.0722f));
-+	C = saturate(lerp(Luma.xxx, C, Grade.z) * Tint);
-+	return lerp(ColorSRGB, C, smoothstep(0.0f, 0.05f, Opacity));
-+}
---- a/VGS/Shaders/Private/SplatRenderer/VGSSplatHardwareRasterize.usf
-+++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatHardwareRasterize.usf
-@@ -34,6 +34,13 @@
- #ifndef GAUSSIAN_SPLAT_SUPERSAMPLE
- #define GAUSSIAN_SPLAT_SUPERSAMPLE 0
- #endif // GAUSSIAN_SPLAT_SUPERSAMPLE
-+
-+// VGS CHANGE: a lit proxy (VGSSplatGBuffer.usf). Drawn as expected depth is, front to back,
-+// with each splat's view-space normal x and y accumulated in the moments target's two free
-+// channels beside the depth.
-+#ifndef VGS_LIT
-+#define VGS_LIT 0
-+#endif // VGS_LIT
- 
- float OpacityThreshold;
- float ExpectedDepthScale;
-@@ -45,6 +52,10 @@
- Buffer<uint> SortedIndexBuffer;
- #endif // !GAUSSIAN_SPLAT_GATHER_SHADED_SPLATS
- #endif // !GAUSSIAN_SPLAT_VERTEX_ATTRIBUTE_FETCH
-+#if VGS_LIT
-+StructuredBuffer<uint> ShadedNormalBuffer; // VGS CHANGE: by record, as ShadedVGSSplatBuffer
-+StructuredBuffer<float2> ShadedMotionBuffer;
-+#endif // VGS_LIT
- 
- static const float2 QuadCorners[4] =
- {
-@@ -60,6 +71,10 @@
- 	float2 LocalUV : TEXCOORD0;
- 	float4 Color : TEXCOORD1;
- 	nointerpolation uint SplatIndex : TEXCOORD2;
-+#if VGS_LIT
-+	nointerpolation float3 ViewNormal : TEXCOORD3; // VGS CHANGE
-+	nointerpolation float2 ObjectMotion : TEXCOORD4;
-+#endif // VGS_LIT
- };
- 
- FVertexOutput CreateVGSSplatVertex(FShadedVGSSplatData SplatData, uint VertexID, uint SplatIndex)
-@@ -73,6 +88,10 @@
- 		Output.LocalUV  = 0;
- 		Output.Color = 0;
- 		Output.SplatIndex = 0;
-+#if VGS_LIT
-+		Output.ViewNormal = 0;
-+		Output.ObjectMotion = 0;
-+#endif // VGS_LIT
- 		return Output;
  	}
- 
-@@ -93,6 +112,10 @@
- 	Output.Position = float4(CornerNDC * W, SplatData.Position.z, W);
- 	Output.Color = SplatData.Color;
- 	Output.SplatIndex = SplatIndex;
-+#if VGS_LIT
-+	Output.ViewNormal = 0; // set by MainVS
-+	Output.ObjectMotion = 0;
-+#endif // VGS_LIT
- 
- 	return Output;
- }
-@@ -125,7 +148,12 @@
- 	PackedSplatData = ShadedVGSSplatBuffer[SplatIndex];
- #endif // GAUSSIAN_SPLAT_VERTEX_ATTRIBUTE_FETCH
- 
--	return CreateVGSSplatVertex(UnpackShadedVGSSplat(PackedSplatData), VertexID, SplatIndex);
-+	FVertexOutput Output = CreateVGSSplatVertex(UnpackShadedVGSSplat(PackedSplatData), VertexID, SplatIndex);
-+#if VGS_LIT && !GAUSSIAN_SPLAT_VERTEX_ATTRIBUTE_FETCH && !GAUSSIAN_SPLAT_GATHER_SHADED_SPLATS
-+	Output.ViewNormal = VGSSplatUnpackOctNormal(ShadedNormalBuffer[SplatIndex]); // VGS CHANGE
-+	Output.ObjectMotion = ShadedMotionBuffer[SplatIndex];
-+#endif
-+	return Output;
- }
- 
- #if GAUSSIAN_SPLAT_SUPERSAMPLE
-@@ -168,6 +196,9 @@
- 	, out float OutDepth : SV_Target1
- #elif WRITE_EXPECTED_DEPTH
- 	, out float4 OutDepthMoments : SV_Target1
-+#if VGS_LIT
-+	, out float4 OutNormalZ : SV_Target2 // VGS CHANGE: the normal's z, blended as the moments
-+#endif // VGS_LIT
- #endif
- #if WRITE_VELOCITY
- 	, out float4 OutVelocity : SV_Target1
-@@ -196,7 +227,9 @@
- 	}
- 
- 	// Premultiplied alpha
--	OutColor = float4(Input.Color.rgb * SrcAlpha * View.PreExposure, SrcAlpha);
-+	// VGS CHANGE: no View.PreExposure here; the scratch holds sRGB values, and exposure is
-+	// applied after they are made linear (VGSSplatInverseToneCurvePostBlend.usf).
-+	OutColor = float4(Input.Color.rgb * SrcAlpha, SrcAlpha);
- 
- #if WRITE_STOCHASTIC_DEPTH
- 	#if USE_BLUE_NOISE
-@@ -208,7 +241,12 @@
- 	
- #elif WRITE_EXPECTED_DEPTH
- 	float LinearZ = ConvertFromDeviceZ(Input.Position.z) / ExpectedDepthScale;
-+#if VGS_LIT
-+	OutDepthMoments = float4(LinearZ, Input.ViewNormal.xy, 1.0f) * SrcAlpha; // VGS CHANGE
-+	OutNormalZ = float4(Input.ViewNormal.z, Input.ObjectMotion, 1.0f) * SrcAlpha;
-+#else
- 	OutDepthMoments = float4(LinearZ * SrcAlpha, 0.0f, 0.0f, SrcAlpha);
-+#endif // VGS_LIT
- #endif
- 	
- #if WRITE_VELOCITY
---- a/VGS/Shaders/Private/SplatRenderer/VGSSplatInverseToneCurvePostBlend.usf
-+++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatInverseToneCurvePostBlend.usf
-@@ -33,6 +33,13 @@
- // Per-axis grid size of the (cubic) LUT.
- float InverseToneCurveLUTEdge;
- 
-+// VGS CHANGE: the capture's intensity, a scale on its linear colour; and whether the
-+// scratch holds sRGB values (VGSSplatShading.usf, BlendInSRGB) or Epic's linear ones.
-+float Intensity;
-+uint BlendInSRGB;
-+
-+#include "VGSSplatGrade.ush" // VGS CHANGE: Grade, Tint, GradeActive and the sRGB curves
-+
- // Working color space -> sRGB linear. The LUT is baked against sRGB primaries (D65),
- // so non-sRGB projects must transform before sampling. The reverse transform ships
- // as SRGBColorToWorkingColorSpace in ColorSpace.ush.
-@@ -147,23 +154,48 @@
- 		return;
- 	}
- 
--	// Note: Unpremultiplying/premultiplying (now removed) introduced visible artifacts
--	// in splat translucent gradients.
--
--	// Undo pre-exposure -> WCS->sRGB -> saturate (clip out-of-gamut) -> inverse LUT
--	// -> sRGB->WCS -> lerp by strength -> reapply pre-exposure.
--	const float3 Color        = Splat.rgb * View.OneOverPreExposure;
-+	// VGS CHANGE: the scratch holds the splats blended in sRGB values, premultiplied, with
-+	// no pre-exposure (VGSSplatShading.usf, VGSSplatHardwareRasterize.usf). Unpremultiply to
-+	// the sRGB colour of the splat layer, make it linear, then as Epic: the inverse tone
-+	// curve, the working colour space; then the capture's intensity, pre-exposure, and
-+	// premultiply again for the composite. Epic avoids unpremultiplying because of artefacts
-+	// in faint gradients; making the blend linear needs it, so faint pixels are guarded.
-+	float3 Blended;
-+	if (BlendInSRGB != 0u)
-+	{
-+		float3 ColorSRGB = saturate(Splat.rgb / max(Opacity, 1e-3f));
-+		if (GradeActive != 0u)
-+		{
-+			ColorSRGB = VGSApplyGrade(ColorSRGB, Opacity);
-+		}
-+		const float3 LinearSRGB   = VGSSRGBToLinear(ColorSRGB);
- #if APPLY_INVERSE_TONE_CURVE
--	const float3 ColorSRGB    = WorkingColorSpaceColorToSRGB(Color);
--	const float3 InversedSRGB = SampleInverseToneCurveLUT(saturate(ColorSRGB), InverseToneCurveLUTEdge);
--	const float3 Inversed     = SRGBColorToWorkingColorSpace(InversedSRGB);
--	const float3 Blended      = lerp(Color, Inversed, Strength);
--#else
--	// Fall-through implementation composites the original color
--	const float3 Blended      = Color;
--#endif
-+		const float3 InversedSRGB = SampleInverseToneCurveLUT(LinearSRGB, InverseToneCurveLUTEdge);
-+		Blended = SRGBColorToWorkingColorSpace(lerp(LinearSRGB, InversedSRGB, Strength)) * Opacity;
-+#else
-+		Blended = SRGBColorToWorkingColorSpace(LinearSRGB) * Opacity;
-+#endif
-+	}
-+	else
-+	{
-+		// Epic's, premultiplied as it comes (pre-exposure is no longer in the scratch).
-+		float3 Color = Splat.rgb;
-+		if (GradeActive != 0u)
-+		{
-+			// The grade works on display values: unpremultiply, to sRGB values, grade, back.
-+			const float SafeOpacity = max(Opacity, 1e-3f);
-+			const float3 ColorSRGB = VGSLinearToSRGB(saturate(WorkingColorSpaceColorToSRGB(Color / SafeOpacity)));
-+			Color = SRGBColorToWorkingColorSpace(VGSSRGBToLinear(VGSApplyGrade(ColorSRGB, Opacity))) * SafeOpacity;
-+		}
-+#if APPLY_INVERSE_TONE_CURVE
-+		const float3 InversedSRGB = SampleInverseToneCurveLUT(saturate(WorkingColorSpaceColorToSRGB(Color)), InverseToneCurveLUTEdge);
-+		Blended = lerp(Color, SRGBColorToWorkingColorSpace(InversedSRGB), Strength);
-+#else
-+		Blended = Color;
-+#endif
-+	}
- 
- 	// Output alpha stays as transmittance for the ROP blend (One, SrcAlpha) /
- 	// (Zero, SrcAlpha) so transmittances multiply correctly into SceneColor.
--	OutColor = float4(Blended * View.PreExposure, Transmittance);
--}
-+	OutColor = float4(Blended * (Intensity * View.PreExposure), Transmittance);
-+}
---- /dev/null
-+++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatLightShadow.usf
-@@ -0,0 +1,142 @@
-+// VGS: optical depth in 64 light-space bins, followed by a prefix scan. The
-+// resulting transmittance is sampled at the receiver depth by a UE Light Function.
-+#include "/Engine/Private/Common.ush"
-+
-+#if VGS_DEEP_SHADOW_MAP
-+ByteAddressBuffer Splats;
-+float4x4 LocalToLight;
-+float3 PositionScale;
-+uint NumSplats;
-+float3 PositionBias;
-+uint Stride;
-+float3 ScaleScale;
-+uint BufferFormat;
-+float3 ScaleBias;
-+float PointScale;
-+float2 OpacityQuantization;
-+float OpacityScale;
-+float3 GridExtent;
-+float GridResolution;
-+float Dilation;
-+float OpticalDepthScale;
-+RWStructuredBuffer<uint> OpticalDepth;
-+RWStructuredBuffer<uint> NearestDepth;
-+// One row of the rotation matrix of a unit quaternion (x, y, z, w), as QuaternionToFloat3x3.
-+float3 VGSLightAxis(float4 Q, uint Axis)
-+{
-+	const float x2 = Q.x + Q.x, y2 = Q.y + Q.y, z2 = Q.z + Q.z;
-+	const float xx = Q.x * x2, xy = Q.x * y2, xz = Q.x * z2;
-+	const float yy = Q.y * y2, yz = Q.y * z2, zz = Q.z * z2;
-+	const float wx = Q.w * x2, wy = Q.w * y2, wz = Q.w * z2;
-+	if (Axis == 0u)
-+	{
-+		return float3(1.0f - (yy + zz), xy + wz, xz - wy);
-+	}
-+	if (Axis == 1u)
-+	{
-+		return float3(xy - wz, 1.0f - (xx + zz), yz + wx);
-+	}
-+	return float3(xz + wy, yz - wx, 1.0f - (xx + yy));
-+}
-+
-+// The renderer's records (VGSSplatShared.h): the float layout, or Epic's quantized one.
-+void VGSLightLoadSplat(uint Splat, out float3 Position, out float3 Scale, out float4 Rotation, out float Opacity)
-+{
-+	const uint Offset = Splat * Stride;
-+	if (BufferFormat == 0u)
-+	{
-+		Position = asfloat(Splats.Load3(Offset));
-+		Scale = asfloat(Splats.Load3(Offset + 12u));
-+		Rotation = asfloat(Splats.Load4(Offset + 24u));
-+		Opacity = asfloat(Splats.Load(Offset + 52u));
-+	}
-+	else
-+	{
-+		const uint4 Packed = Splats.Load4(Offset);
-+		const uint PackedColor = Splats.Load(Offset + 16u);
-+		const uint Mask21 = (1u << 21) - 1u;
-+		const uint Mask11 = (1u << 11) - 1u;
-+		const uint Mask10 = (1u << 10) - 1u;
-+		const float3 P = float3(float((Packed.y >> 10) & Mask21), float(((Packed.x >> 21) | (Packed.y << 11)) & Mask21), float(Packed.x & Mask21));
-+		Position = P * PositionScale + PositionBias;
-+		const float3 S = float3(float(Packed.z >> 21), float((Packed.z >> 10) & Mask11), float(Packed.z & Mask10));
-+		Scale = exp(S * ScaleScale + ScaleBias);
-+		Rotation.x = float(Packed.w >> 21) * (2.0f / 2047.0f) - 1.0f;
-+		Rotation.y = float((Packed.w >> 10) & Mask11) * (2.0f / 2047.0f) - 1.0f;
-+		Rotation.z = float(Packed.w & Mask10) * (2.0f / 1023.0f) - 1.0f;
-+		Rotation.w = sqrt(max(1.0f - dot(Rotation.xyz, Rotation.xyz), 0.0f));
-+		Opacity = float(PackedColor & 0xffu) * OpacityQuantization.x + OpacityQuantization.y;
-+	}
-+}
-+
-+void MainVS(uint VertexId : SV_VertexID, out float4 Position : SV_Position,
-+	out float2 OutQ : TEXCOORD0, out float OutDepth : TEXCOORD1, out nointerpolation float OutOpacity : TEXCOORD2)
-+{
-+	Position = float4(2, 2, 0.5, 1); OutQ = 0; OutDepth = 0; OutOpacity = 0;
-+	const uint Splat = VertexId / 6u;
-+	if (Splat >= NumSplats) return;
-+	float3 Centre, Scale; float4 Rotation; float Opacity;
-+	VGSLightLoadSplat(Splat, Centre, Scale, Rotation, Opacity);
-+	Opacity = saturate(Opacity * OpacityScale);
-+	if (Opacity < 2.0f / 255.0f) return;
-+	Centre = mul(float4(Centre, 1), LocalToLight).xyz;
-+	const float4 Q = normalize(Rotation);
-+	const float3 B0 = mul(VGSLightAxis(Q, 0u) * Scale.x * PointScale, (float3x3)LocalToLight);
-+	const float3 B1 = mul(VGSLightAxis(Q, 1u) * Scale.y * PointScale, (float3x3)LocalToLight);
-+	const float3 B2 = mul(VGSLightAxis(Q, 2u) * Scale.z * PointScale, (float3x3)LocalToLight);
-+	const float A = B0.x * B0.x + B1.x * B1.x + B2.x * B2.x + Dilation;
-+	const float B = B0.x * B0.y + B1.x * B1.y + B2.x * B2.y;
-+	const float C = B0.y * B0.y + B1.y * B1.y + B2.y * B2.y + Dilation;
-+	const float Mid = 0.5f * (A + C);
-+	const float Radius = sqrt(max(0.25f * (A - C) * (A - C) + B * B, 0.0f));
-+	const float L1 = Mid + Radius, L2 = max(Mid - Radius, 1e-12f);
-+	const float2 E1 = abs(B) > 1e-12f ? normalize(float2(B, L1 - A)) : (A >= C ? float2(1, 0) : float2(0, 1));
-+	const float2 E2 = float2(-E1.y, E1.x);
-+	const float Reach = sqrt(2.0f * log(Opacity * 255.0f));
-+	const float2 Corners[6] = {float2(-1,-1),float2(1,-1),float2(1,1),float2(-1,-1),float2(1,1),float2(-1,1)};
-+	OutQ = Corners[VertexId % 6u] * Reach;
-+	const float2 Offset = OutQ.x * sqrt(L1) * E1 + OutQ.y * sqrt(L2) * E2;
-+	Position = float4((Centre.xy + Offset) / GridExtent.xy, 0.5, 1);
-+	// Conditional centre along the ray: oblique flat splats change depth across their footprint.
-+	const float2 CovZ = float2(B0.z * B0.x + B1.z * B1.x + B2.z * B2.x, B0.z * B0.y + B1.z * B1.y + B2.z * B2.y);
-+	const float2 Slope = mul(CovZ, float2x2(C, -B, -B, A)) / max(A * C - B * B, 1e-12f);
-+	OutDepth = Centre.z + dot(Slope, Offset);
-+	OutOpacity = Opacity;
-+}
-+
-+void MainPS(float4 Position : SV_Position, float2 Q : TEXCOORD0, float Depth : TEXCOORD1,
-+	nointerpolation float Opacity : TEXCOORD2, out float Unused : SV_Target0)
-+{
-+	Unused = 0;
-+	const float Alpha = min(Opacity * exp(-0.5f * dot(Q, Q)), 0.995f);
-+	if (Alpha < 1.0f / 255.0f) discard;
-+	const float NormalizedDepth = saturate((Depth / GridExtent.z + 1.0f) * 0.5f);
-+	const uint Layer = min(uint(NormalizedDepth * 64.0f), 63u);
-+	InterlockedMin(NearestDepth[uint(Position.y) * uint(GridResolution) + uint(Position.x)], asuint(NormalizedDepth));
-+	const uint Index = (Layer * uint(GridResolution) + uint(Position.y)) * uint(GridResolution) + uint(Position.x);
-+	const uint Tau = uint(round(-log(1.0f - Alpha) * OpticalDepthScale));
-+	InterlockedAdd(OpticalDepth[Index], Tau);
-+}
-+#endif
-+
-+#if VGS_DEEP_SHADOW_PREFIX
-+StructuredBuffer<uint> OpticalDepth;
-+StructuredBuffer<uint> NearestDepth;
-+RWTexture2D<float> ShadowAtlas;
-+uint Resolution;
-+float InverseOpticalDepthScale;
-+[numthreads(8,8,1)]
-+void PrefixCS(uint3 Id : SV_DispatchThreadID)
-+{
-+	if (any(Id.xy >= Resolution)) return;
-+	// One extra tile protects front-facing receivers from interpolation in front of
-+	// the first actual caster, without dropping valid faint layers or back receivers.
-+	ShadowAtlas[uint2(0, 8) * Resolution + Id.xy] = min(asfloat(NearestDepth[Id.y * Resolution + Id.x]), 1.0f);
-+	float Sum = 0;
-+	for (uint Layer = 0; Layer < 64u; ++Layer)
-+	{
-+		Sum += float(OpticalDepth[(Layer * Resolution + Id.y) * Resolution + Id.x]) * InverseOpticalDepthScale;
-+		ShadowAtlas[uint2(Layer % 8u, Layer / 8u) * Resolution + Id.xy] = exp(-min(Sum, 80.0f));
-+	}
-+}
-+#endif
---- /dev/null
-+++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatMix.usf
-@@ -0,0 +1,12 @@
-+// Exact HDR lerp using fixed-function blending; no SceneColor copy or second splat draw.
-+#include "/Engine/Public/Platform.ush"
-+Texture2D<float4> MixReference;
-+Texture2D<float> MixDepth;
-+Texture2D<float> SceneDepth;
-+void MainPS(float4 Position : SV_Position, out float4 Color : SV_Target0)
-+{
-+ int3 Pixel = int3(int2(Position.xy), 0);
-+ Color = MixReference.Load(Pixel);
-+ // Another renderer or single-layer water may have replaced the surface since our base pass.
-+ if (Color.a <= 0.0f || MixDepth.Load(Pixel) != SceneDepth.Load(Pixel)) discard;
-+}
---- /dev/null
-+++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatMotionDebug.usf
-@@ -0,0 +1,21 @@
-+// Development-only readback: verifies the velocity UE consumes after opaque passes.
-+#include "/Engine/Private/Common.ush"
-+Texture2D<float4> VelocityTexture;
-+Texture2D<float> ReceiverMask;
-+RWStructuredBuffer<uint> MotionStats;
-+int2 ViewMin;
-+int2 ViewSize;
-+[numthreads(8,8,1)]
-+void MainCS(uint3 Id : SV_DispatchThreadID)
-+{
-+	if (any(Id.xy >= uint2(ViewSize))) return;
-+	const int2 Pixel = int2(Id.xy) + ViewMin;
-+	if (ReceiverMask.Load(int3(Pixel, 0)) <= 0.0f) return;
-+	InterlockedAdd(MotionStats[0], 1u);
-+	const float4 Raw = VelocityTexture.Load(int3(Pixel, 0));
-+	if (all(Raw.xy == 0.0f)) { InterlockedAdd(MotionStats[3], 1u); return; }
-+	const float2 V = DecodeVelocityFromTexture((ENCODED_VELOCITY_TYPE)Raw).xy;
-+	const float Pixels = length(V * float2(ViewSize) * 0.5f);
-+	if (Pixels > 0.05f) InterlockedAdd(MotionStats[1], 1u);
-+	InterlockedMax(MotionStats[2], uint(min(Pixels * 1000.0f, 100000000.0f)));
-+}
---- a/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf
-+++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatShading.usf
-@@ -70,6 +70,7 @@
- 
- // Spherical harmonics
- uint SHCoordinateSpace;
-+uint BlendInSRGB; // VGS CHANGE: see CalculateColor
- 
- // Per-component overrides
- float PointScaleFactor;
-@@ -80,6 +81,83 @@
- 
- // Output
- RWStructuredBuffer<FPackedShadedVGSSplatData> RWShadedVGSSplatBuffer;
-+
-+// VGS CHANGE: for a lit proxy (VGSSplatGBuffer.usf), each shaded splat's normal in view space,
-+// full-sphere octahedral encoding, at the same index as its record. The normal is
-+// the capture's own (NormalBuffer, octahedral in the capture's axes, 0 for none) or else the
-+// splat's shortest axis turned towards the camera. HasNormals is 0 for no NormalBuffer, 1 for
-+// outward normals, 2 for normals whose side is not known (directions only), which are turned
-+// towards the camera as the shortest axis is.
-+uint Lit;
-+uint HasNormals;
-+StructuredBuffer<uint> NormalBuffer;
-+RWStructuredBuffer<uint> RWShadedNormalBuffer;
-+ByteAddressBuffer PreviousSplats;
-+float4x4 PreviousLocalToWorld;
-+uint MotionHistoryValid;
-+RWStructuredBuffer<float2> RWShadedMotionBuffer;
-+
-+float2 VGSSplatObjectMotion(uint Index, float3 Position)
-+{
-+	if (MotionHistoryValid == 0u) return 0;
-+	const uint Offset = Index * BufferStride;
-+	float3 PreviousPosition;
-+	if (MotionHistoryValid == 2u) PreviousPosition = Position; // actor motion only, without record correspondence
-+	else if (BufferFormat == 0)
-+	{
-+		// A record that has just been born has no previous visible position.
-+		if (asfloat(PreviousSplats.Load(Offset + 52u)) < OpacityThreshold) return 0;
-+		PreviousPosition = asfloat(PreviousSplats.Load3(Offset));
-+	}
-+	else
-+	{
-+		const uint2 P = PreviousSplats.Load2(Offset);
-+		const uint Mask = (1u << 21) - 1u;
-+		PreviousPosition = float3((P.y >> 10) & Mask, ((P.x >> 21) | (P.y << 11)) & Mask, P.x & Mask) * PositionScale + PositionBias;
-+	}
-+	const float3 CurrentWorld = mul(float4(Position, 1), LocalToWorld).xyz;
-+	const float3 PreviousWorld = mul(float4(PreviousPosition, 1), PreviousLocalToWorld).xyz;
-+	const float4 A = mul(float4(DFAddDemote(PrimaryView.PrevPreViewTranslation, CurrentWorld), 1), PrimaryView.PrevTranslatedWorldToClip);
-+	const float4 B = mul(float4(DFAddDemote(PrimaryView.PrevPreViewTranslation, PreviousWorld), 1), PrimaryView.PrevTranslatedWorldToClip);
-+	return A.w > 0.0f && B.w > 0.0f ? A.xy / A.w - B.xy / B.w : 0;
-+}
-+
-+float3 VGSUnpackNormal(uint W)
-+{
-+	float2 P = (float2(W & 65535u, W >> 16) - 1.0f) / 65534.0f * 2.0f - 1.0f;
-+	const float Z = 1.0f - abs(P.x) - abs(P.y);
-+	if (Z < 0.0f)
-+	{
-+		P = (1.0f - abs(P.yx)) * select(P.xy >= 0.0f, 1.0f, -1.0f);
-+	}
-+	return normalize(float3(P, Z));
-+}
-+
-+uint VGSShadedNormal(uint SplatIndex, FVGSSplatData SplatData)
-+{
-+	float3 WorldNormal;
-+	bool bFaceCamera = true;
-+	const uint Word = HasNormals != 0u ? NormalBuffer[SplatIndex] : 0u;
-+	if (Word != 0u)
-+	{
-+		WorldNormal = mul((float3x3)WorldToLocal, VGSUnpackNormal(Word));
-+		bFaceCamera = HasNormals == 2u;
-+	}
-+	else
-+	{
-+		const float3x3 R = QuaternionToFloat3x3(SplatData.Rotation);
-+		const float3 S = SplatData.Scale;
-+		const float3 Axis = (S.x <= S.y && S.x <= S.z) ? R[0] : (S.y <= S.z ? R[1] : R[2]);
-+		WorldNormal = mul((float3x3)WorldToLocal, Axis);
-+	}
-+	float3 ViewNormal = normalize(mul(WorldNormal, (float3x3)PrimaryView.TranslatedWorldToView));
-+	// Only unoriented directions face the camera. Oriented source normals keep their side.
-+	if (bFaceCamera && ViewNormal.z > 0.0f)
-+	{
-+		ViewNormal = -ViewNormal;
-+	}
-+	return VGSSplatPackOctNormal(ViewNormal);
-+}
- RWBuffer<uint> RWSplatCount;
- 
- // Sort keys
-@@ -309,12 +387,27 @@
- 	}
- #endif // SH_DEGREE >= 1
- 
--	// Clamp to minimum positive denormal
--	Color = max(Color + 0.5f, 6.10352e-5);
--	// Convert sRGB -> Linear
--	Color = select(Color > 0.04045f, pow(Color * (1.0f / 1.055f) + 0.0521327f, 2.4f), Color * (1.0f / 12.92f));
--	// Ensure that imported colors are brought to the working color space gamut
--	Color = SRGBColorToWorkingColorSpace(Color);
-+	// VGS CHANGE: Epic makes each splat's colour linear here and blends in linear light,
-+	// which BlendInSRGB 0 still does.
-+	// Captures are trained blending sRGB values, and the VGS viewer draws them that way, so
-+	// the colour stays sRGB, clamped to [0, 1] as the viewer clamps it, and the blended
-+	// result is made linear in VGSSplatInverseToneCurvePostBlend.usf. Blending in linear
-+	// light makes faint splats show far more than they were trained to (a 20 % splat over
-+	// black gives 48 % of its colour instead of 20 %): coloured haze around hair and edges.
-+	if (BlendInSRGB != 0u)
-+	{
-+		Color = saturate(Color + 0.5f);
-+	}
-+	else
-+	{
-+		// Epic's, for captures trained blending in linear light.
-+		// Clamp to minimum positive denormal
-+		Color = max(Color + 0.5f, 6.10352e-5);
-+		// Convert sRGB -> Linear
-+		Color = select(Color > 0.04045f, pow(Color * (1.0f / 1.055f) + 0.0521327f, 2.4f), Color * (1.0f / 12.92f));
-+		// Ensure that imported colors are brought to the working color space gamut
-+		Color = SRGBColorToWorkingColorSpace(Color);
-+	}
- 
- 	return Color;
- }
-@@ -366,9 +459,12 @@
- 		}
- 
- 		bool bVisible = false;
-+		uint ShadedNormal = 0u; // VGS CHANGE
-+		float2 ShadedMotion = 0;
- 		if (bInBounds)
- 		{
- 			FVGSSplatData SplatData = UnpackVGSSplatData(SplatDataIndex);
-+			const FVGSSplatData LocalSplatData = SplatData; // VGS CHANGE: for the normal, in the capture's axes
- 			float Opacity = saturate(SplatData.Opacity * OpacityScale);
- 			bVisible = Opacity >= OpacityThreshold;
- 			if (bVisible)
-@@ -382,6 +478,11 @@
- 					float3 WorldCameraDir = GetCameraVectorFromWorldPosition(SplatData.Position);
- 					float3 LocalCameraDir = normalize(mul(float4(WorldCameraDir, 0.0), WorldToLocal).xyz);
- 					ShadedSplatData.Color = float4(CalculateColor(SplatDataIndex, LocalCameraDir), Opacity);
-+					if (Lit != 0u)
-+					{
-+						ShadedNormal = VGSShadedNormal(SplatDataIndex, LocalSplatData); // VGS CHANGE
-+						ShadedMotion = VGSSplatObjectMotion(SplatDataIndex, LocalSplatData.Position);
-+					}
- 				}
- 			}
- 		}
-@@ -420,6 +521,11 @@
- 				const uint WriteIndex = Offset + SplatIndex;
- 				const FPackedShadedVGSSplatData PackedShadedSplatData = PackShadedVGSSplat(ShadedSplatData);
- 				RWShadedVGSSplatBuffer[WriteIndex] = PackedShadedSplatData;
-+				if (Lit != 0u)
-+				{
-+					RWShadedNormalBuffer[WriteIndex] = ShadedNormal; // VGS CHANGE
-+					RWShadedMotionBuffer[WriteIndex] = ShadedMotion;
-+				}
- 				if (GAUSSIAN_SPLAT_WRITE_SORT_KEYS)
- 				{
- 					RWSortKeys[WriteIndex] = ComputeSortKey(ShadedSplatData.Position, PackedShadedSplatData.ViewZ);
-@@ -431,6 +537,11 @@
- 		{
- 			const FPackedShadedVGSSplatData PackedShadedSplatData = PackShadedVGSSplat(ShadedSplatData);
- 			RWShadedVGSSplatBuffer[SplatDataIndex] = PackedShadedSplatData;
-+			if (Lit != 0u)
-+			{
-+				RWShadedNormalBuffer[SplatDataIndex] = ShadedNormal; // VGS CHANGE
-+				RWShadedMotionBuffer[SplatDataIndex] = ShadedMotion;
-+			}
- 			if (GAUSSIAN_SPLAT_WRITE_SORT_KEYS)
- 			{
- 				// Mark culled splats with sentinel value
---- /dev/null
-+++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatShadowVertexFactory.ush
-@@ -0,0 +1,268 @@
-+// VGS: not Epic's. The vertex factory that puts splats into Unreal's shadow depth passes
-+// (VGSSplatShadowVertexFactory.cpp), with r.VGSSplat.Shadow.Method 2: each splat is drawn as
-+// an octahedron spanning the ellipse where its opacity reaches a cutoff of its own, drawn at
-+// random, read straight from the renderer's own splat buffer, so casting shadows needs no
-+// memory of its own.
-+//
-+// Each caster is moved Inset inwards along its splat's normal: the surface the lit splats
-+// write to the GBuffer lies among their own casters, and would shadow itself in blotches
-+// (acne) without it. The normal is the asset's own when it has one with a side; otherwise
-+// (directions only, or the shortest axis) the side facing away from the asset's centre.
-+//
-+// Six vertices per splat (both ends of its three axes) and eight triangles, through an index
-+// buffer of a batch of splats: VertexId / 6 is the splat within the batch, VGSShadowFirstSplat
-+// where the batch starts. A splat fainter than its cutoff collapses to a point.
-+
-+#include "/Engine/Private/VertexFactoryCommon.ush"
-+
-+/** The first splat of this draw's batch. */
-+uint VGSShadowFirstSplat;
-+
-+struct FVertexFactoryInput
-+{
-+	uint VertexId : SV_VertexID;
-+
-+	VF_GPUSCENE_DECLARE_INPUT_BLOCK(13)
-+	VF_INSTANCED_STEREO_DECLARE_INPUT_BLOCK()
-+	VF_MOBILE_MULTI_VIEW_DECLARE_INPUT_BLOCK()
-+};
-+
-+struct FVertexFactoryInterpolantsVSToPS
-+{
-+	float2 DummyTexCoord : TEXCOORD0;
-+};
-+
-+struct FVertexFactoryIntermediates
-+{
-+	float3 ComponentPosition; // in the component's space
-+	float4 TranslatedWorldPosition;
-+	FSceneDataIntermediates SceneData;
-+};
-+
-+FPrimitiveSceneData GetPrimitiveData(FVertexFactoryIntermediates Intermediates)
-+{
-+	return Intermediates.SceneData.Primitive;
-+}
-+
-+// One row of the rotation matrix of a unit quaternion (x, y, z, w): the direction of a splat's
-+// axis, as the renderer's QuaternionToFloat3x3 has it (SphericalGaussianCommon.ush).
-+float3 VGSShadowAxis(float4 Q, uint Axis)
-+{
-+	const float x2 = Q.x + Q.x, y2 = Q.y + Q.y, z2 = Q.z + Q.z;
-+	const float xx = Q.x * x2, xy = Q.x * y2, xz = Q.x * z2;
-+	const float yy = Q.y * y2, yz = Q.y * z2, zz = Q.z * z2;
-+	const float wx = Q.w * x2, wy = Q.w * y2, wz = Q.w * z2;
-+	if (Axis == 0u)
-+	{
-+		return float3(1.0f - (yy + zz), xy + wz, xz - wy);
-+	}
-+	if (Axis == 1u)
-+	{
-+		return float3(xy - wz, 1.0f - (xx + zz), yz + wx);
-+	}
-+	return float3(xz + wy, yz - wx, 1.0f - (xx + yy));
-+}
-+
-+float3 VGSShadowUnpackNormal(uint W)
-+{
-+	float2 P = (float2(float(W & 65535u), float(W >> 16)) - 1.0f) / 65534.0f * 2.0f - 1.0f;
-+	const float Z = 1.0f - abs(P.x) - abs(P.y);
-+	if (Z < 0.0f)
-+	{
-+		P = (1.0f - abs(P.yx)) * float2(P.x >= 0.0f ? 1.0f : -1.0f, P.y >= 0.0f ? 1.0f : -1.0f);
-+	}
-+	return normalize(float3(P, Z));
-+}
-+
-+// A corner of a splat's octahedron, in the asset's (file) space; Outward, the direction its
-+// caster is moved against. The records are the
-+// renderer's (VGSSplatShared.h): the float layout, or Epic's quantized one.
-+float3 VGSShadowCorner(uint Splat, uint Corner, out float3 Outward)
-+{
-+	Outward = 0;
-+	const uint Offset = Splat * VGSSplatShadow.Stride;
-+	float3 Position;
-+	float3 Scale;
-+	float4 Rotation;
-+	float Opacity;
-+	if (VGSSplatShadow.BufferFormat == 0u)
-+	{
-+		Position = asfloat(VGSSplatShadow.Splats.Load3(Offset));
-+		Scale = asfloat(VGSSplatShadow.Splats.Load3(Offset + 12u));
-+		Rotation = asfloat(VGSSplatShadow.Splats.Load4(Offset + 24u));
-+		Opacity = asfloat(VGSSplatShadow.Splats.Load(Offset + 52u));
-+	}
-+	else
-+	{
-+		const uint4 Packed = VGSSplatShadow.Splats.Load4(Offset);
-+		const uint PackedColor = VGSSplatShadow.Splats.Load(Offset + 16u);
-+		const uint Mask21 = (1u << 21) - 1u;
-+		const uint Mask11 = (1u << 11) - 1u;
-+		const uint Mask10 = (1u << 10) - 1u;
-+		const float3 P = float3(float((Packed.y >> 10) & Mask21), float(((Packed.x >> 21) | (Packed.y << 11)) & Mask21), float(Packed.x & Mask21));
-+		Position = P * VGSSplatShadow.PositionScale + VGSSplatShadow.PositionBias;
-+		const float3 S = float3(float(Packed.z >> 21), float((Packed.z >> 10) & Mask11), float(Packed.z & Mask10));
-+		Scale = exp(S * VGSSplatShadow.ScaleScale + VGSSplatShadow.ScaleBias);
-+		Rotation.x = float(Packed.w >> 21) * (2.0f / 2047.0f) - 1.0f;
-+		Rotation.y = float((Packed.w >> 10) & Mask11) * (2.0f / 2047.0f) - 1.0f;
-+		Rotation.z = float(Packed.w & Mask10) * (2.0f / 1023.0f) - 1.0f;
-+		Rotation.w = sqrt(max(1.0f - dot(Rotation.xyz, Rotation.xyz), 0.0f));
-+		Opacity = float(PackedColor & 0xffu) * VGSSplatShadow.OpacityQuantization.x + VGSSplatShadow.OpacityQuantization.y;
-+	}
-+
-+	Opacity = saturate(Opacity * VGSSplatShadow.OpacityScale);
-+	// Each splat its own cutoff, uniform in (MinCutoff, 1) from a hash of its index. A point at
-+	// r then lies inside with probability Opacity * exp(-r^2 / 2) (less the sliver below
-+	// MinCutoff), the splat's own opacity there, and a ray crossing several splats passes all of
-+	// them with the product of their transmittances: the shadow's density is the splats', on
-+	// average over neighbouring splats, instead of all or nothing at one cutoff. MinCutoff
-+	// bounds the octahedra at 2.8 standard deviations.
-+	const float MinCutoff = 0.02f;
-+	uint H = Splat * 747796405u + 2891336453u;
-+	H = ((H >> ((H >> 28u) + 4u)) ^ H) * 277803737u;
-+	H = (H >> 22u) ^ H;
-+	const float Cutoff = lerp(MinCutoff, 1.0f, float(H >> 8) * (1.0f / 16777216.0f));
-+	if (Splat >= VGSSplatShadow.NumSplats || Opacity <= Cutoff)
-+	{
-+		return Position; // collapsed: its eight triangles have no area
-+	}
-+
-+	// The splat's opacity falls as Opacity * exp(-r^2 / 2), r in standard deviations: it is at
-+	// the cutoff at r = sqrt(2 ln(Opacity / Cutoff)). An octahedron's outline seen along an
-+	// axis is a rhombus, of 2/pi the area of the ellipse through its corners: the corners go
-+	// sqrt(pi / 2) further out, so that the two cover the same area.
-+	const float Reach = sqrt(2.0f * log(Opacity / Cutoff)) * 1.2533141f * VGSSplatShadow.PointScale;
-+	const uint Axis = Corner >> 1;
-+	const float Sign = (Corner & 1u) ? -1.0f : 1.0f;
-+	const float3 Scales = Scale;
-+	const float AxisScale = Axis == 0u ? Scales.x : (Axis == 1u ? Scales.y : Scales.z);
-+	const float4 Q = Rotation * rsqrt(max(dot(Rotation, Rotation), 1e-12f));
-+
-+	const uint Word = VGSSplatShadow.HasNormals != 0u ? VGSSplatShadow.Normals[Splat] : 0u;
-+	if (Word != 0u)
-+	{
-+		Outward = VGSShadowUnpackNormal(Word);
-+	}
-+	else
-+	{
-+		const uint Shortest = Scales.x <= Scales.y ? (Scales.x <= Scales.z ? 0u : 2u) : (Scales.y <= Scales.z ? 1u : 2u);
-+		Outward = VGSShadowAxis(Q, Shortest);
-+	}
-+	if (Word == 0u || VGSSplatShadow.HasNormals == 2u)
-+	{
-+		Outward *= dot(Outward, Position - VGSSplatShadow.Center) < 0.0f ? -1.0f : 1.0f;
-+	}
-+	return Position + VGSShadowAxis(Q, Axis) * (AxisScale * Reach * Sign);
-+}
-+
-+FVertexFactoryIntermediates GetVertexFactoryIntermediates(FVertexFactoryInput Input)
-+{
-+	FVertexFactoryIntermediates Intermediates;
-+	Intermediates.SceneData = VF_GPUSCENE_GET_INTERMEDIATES(Input);
-+
-+	const uint Splat = VGSShadowFirstSplat + Input.VertexId / 6u;
-+	float3 Outward;
-+	const float3 FilePosition = VGSShadowCorner(Splat, Input.VertexId % 6u, Outward);
-+	Intermediates.ComponentPosition = mul(float4(FilePosition, 1.0f), VGSSplatShadow.FileToComponent).xyz;
-+	const float3 ComponentOutward = mul(Outward, (float3x3)VGSSplatShadow.FileToComponent);
-+	const float OutwardLength = length(ComponentOutward);
-+	if (OutwardLength > 0.0f)
-+	{
-+		Intermediates.ComponentPosition -= ComponentOutward * (VGSSplatShadow.Inset / OutwardLength);
-+	}
-+	Intermediates.TranslatedWorldPosition = TransformLocalToTranslatedWorld(Intermediates.ComponentPosition, Intermediates.SceneData.InstanceData.LocalToWorld);
-+	return Intermediates;
-+}
-+
-+FMaterialPixelParameters GetMaterialPixelParameters(FVertexFactoryInterpolantsVSToPS Interpolants, float4 SvPosition)
-+{
-+	FMaterialPixelParameters Result = MakeInitializedMaterialPixelParameters();
-+#if NUM_MATERIAL_TEXCOORDS
-+	UNROLL
-+	for (int CoordinateIndex = 0; CoordinateIndex < NUM_MATERIAL_TEXCOORDS; CoordinateIndex++)
-+	{
-+		Result.TexCoords[CoordinateIndex] = Interpolants.DummyTexCoord;
-+	}
-+#endif
-+	Result.VertexColor = 1;
-+	Result.TwoSidedSign = 1;
-+	return Result;
-+}
-+
-+float3 VertexFactoryGetInstanceSpacePosition(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
-+{
-+	return Intermediates.ComponentPosition;
-+}
-+
-+float3 VertexFactoryGetPreviousInstanceSpacePosition(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
-+{
-+	return Intermediates.ComponentPosition;
-+}
-+
-+FMaterialVertexParameters GetMaterialVertexParameters(
-+	FVertexFactoryInput Input,
-+	FVertexFactoryIntermediates Intermediates,
-+	float3 WorldPosition,
-+	float3x3 TangentToLocal,
-+	bool bIsPreviousFrame = false)
-+{
-+	FMaterialVertexParameters Result = MakeInitializedMaterialVertexParameters();
-+	Result.SceneData = Intermediates.SceneData;
-+	Result.WorldPosition = WorldPosition;
-+	Result.PositionInstanceSpace = Intermediates.ComponentPosition;
-+	Result.PositionPrimitiveSpace = Intermediates.ComponentPosition;
-+	Result.VertexColor = float4(1, 1, 1, 1);
-+	Result.TangentToWorld = mul(TangentToLocal, DFToFloat3x3(Intermediates.SceneData.InstanceData.LocalToWorld));
-+	Result.PrevFrameLocalToWorld = Intermediates.SceneData.InstanceData.PrevLocalToWorld;
-+	Result.LWCData = MakeMaterialLWCData(Result);
-+	return Result;
-+}
-+
-+float4 VertexFactoryGetWorldPosition(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
-+{
-+	return Intermediates.TranslatedWorldPosition;
-+}
-+
-+float4 VertexFactoryGetPreviousWorldPosition(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
-+{
-+	return Intermediates.TranslatedWorldPosition;
-+}
-+
-+float4 VertexFactoryGetRasterizedWorldPosition(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates, float4 TranslatedWorldPosition)
-+{
-+	return TranslatedWorldPosition;
-+}
-+
-+float3 VertexFactoryGetPositionForVertexLighting(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates, float3 TranslatedWorldPosition)
-+{
-+	return TranslatedWorldPosition;
-+}
-+
-+float3 VertexFactoryGetWorldNormal(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
-+{
-+	return float3(0, 0, 1);
-+}
-+
-+FVertexFactoryInterpolantsVSToPS VertexFactoryGetInterpolantsVSToPS(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates, FMaterialVertexParameters VertexParameters)
-+{
-+	FVertexFactoryInterpolantsVSToPS Interpolants;
-+	Interpolants.DummyTexCoord = float2(0, 0);
-+	return Interpolants;
-+}
-+
-+float3x3 VertexFactoryGetTangentToLocal(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
-+{
-+	return float3x3(float3(1, 0, 0), float3(0, 1, 0), float3(0, 0, 1));
-+}
-+
-+float4 VertexFactoryGetTranslatedPrimitiveVolumeBounds(FVertexFactoryInterpolantsVSToPS Interpolants)
-+{
-+	return 0;
-+}
-+
-+uint VertexFactoryGetPrimitiveId(FVertexFactoryInterpolantsVSToPS Interpolants)
-+{
-+	return 0;
-+}
-+
-+#include "/Engine/Private/VertexFactoryDefaultInterface.ush"
---- a/VGS/Shaders/Private/SplatRenderer/VGSSplatTileRasterize.usf
-+++ b/VGS/Shaders/Private/SplatRenderer/VGSSplatTileRasterize.usf
-@@ -83,6 +83,8 @@
- 		}
- 	}
- 
--	RWColorTexture[Pixel].rgb = OutColor.rgb * PrimaryView.PreExposure + RWColorTexture[Pixel].rgb * OutColor.a;
-+	// VGS CHANGE: no PreExposure; the target is always the scratch, holding sRGB values
-+	// (VGSSplatInverseToneCurvePostBlend.usf applies exposure).
-+	RWColorTexture[Pixel].rgb = OutColor.rgb + RWColorTexture[Pixel].rgb * OutColor.a;
- 	RWColorTexture[Pixel].a = OutColor.a * RWColorTexture[Pixel].a;
- }

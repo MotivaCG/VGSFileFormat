@@ -11,6 +11,21 @@
 #include "SceneView.h"
 #include "ScreenPass.h"
 #include "GPUSort.h"
+#include "Misc/EngineVersionComparison.h"
+// Engine exports GetGPUSortPassCount only from 5.8; before, the same count here
+// (GPUSort.cpp: 32-bit keys sorted 4 bits a pass, a pass for each digit the mask touches).
+#if UE_VERSION_OLDER_THAN(5, 8, 0)
+static int32 VGSSplatGPUSortPassCount(uint32 KeyMask)
+{
+	int32 Passes = 0;
+	for (int32 Shift = 0; Shift < 32; Shift += 4)
+	{
+		Passes += ((KeyMask >> Shift) & 15u) != 0 ? 1 : 0;
+	}
+	return Passes;
+}
+#define GetGPUSortPassCount VGSSplatGPUSortPassCount
+#endif
 #include "GlobalShader.h"
 #include "ShaderParameterStruct.h"
 #include "ShaderCompilerCore.h"
@@ -421,7 +436,8 @@ namespace
 		static bool bWarnedUnsupportedScratch = false;
 		if (!bSupported && !bWarnedUnsupportedScratch)
 		{
-			UE_LOGF(LogVGSSplat, Warning, "Gaussian Splat RGBA16F scratch capabilities are unavailable. Inverse tone curve and expected depth are unavailable on unsupported rasterization paths.");
+			// VGS CHANGE: UE_LOG, as UE_LOGF is new in 5.9 and the copy also builds on earlier engines.
+			UE_LOG(LogVGSSplat, Warning, TEXT("Gaussian Splat RGBA16F scratch capabilities are unavailable. Inverse tone curve and expected depth are unavailable on unsupported rasterization paths."));
 			bWarnedUnsupportedScratch = true;
 		}
 

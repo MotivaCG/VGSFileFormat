@@ -95,6 +95,21 @@ Use the assembled folder, not `plugins/unreal/VGS` from the tree — the bridge'
 DLL are only in the assembled one. `cmake --install ... --component unreal` copies the zip
 to `INSTALL/unreal`.
 
+Those zips are sources: Unreal compiles them, so whoever installs them needs Visual Studio.
+**Precompiled packages**, one per engine version, for people without a compiler (or Fab):
+
+```powershell
+.\tools\package_plugins.ps1                    # every UE 5.6+ under E:\UE_INSTALL
+.\tools\package_plugins.ps1 -Engines 5.8,5.9
+```
+
+For each engine it assembles both plugins, builds them with `RunUAT BuildPlugin` (Editor,
+Development and Shipping binaries; the `.uplugin` gets that `EngineVersion`), checks that each
+loads in a blank project without being rebuilt, and writes
+`build_win64/plugins/unreal/Release/packages/UE<engine>/<vgs|pgs>-unreal-<version>-UE<engine>-Win64.zip`
+(debug symbols left out). It builds in a short folder (`-WorkDir`, `D:\Temp\ubp`): Unreal's
+intermediate paths pass Windows' 260 characters under a long one.
+
 In a level: *Place Actors*, search *VGS*, drop it, pick the `.vgs` in *File*. A
 relative path is looked for under the project's `Content` folder, then the project folder.
 For a packaged game the file has to be staged loose, not inside a .pak (the bridge maps the
